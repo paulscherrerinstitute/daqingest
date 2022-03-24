@@ -1,0 +1,28 @@
+[package]
+name = "netfetch"
+version = "0.0.1-a.0"
+authors = ["Dominik Werder <dominik.werder@gmail.com>"]
+edition = "2021"
+
+[lib]
+path = "src/netfetch.rs"
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_cbor = "0.11"
+tokio = { version = "1.7", features = ["rt-multi-thread", "io-util", "net", "time", "sync", "fs"] }
+tokio-stream = { version = "0.1", features = ["fs"]}
+async-channel = "1.6"
+bytes = "1.0"
+arrayref = "0.3"
+byteorder = "1.4"
+futures-core = "0.3"
+futures-util = "0.3"
+scylla = "0.4"
+md-5 = "0.9"
+libc = "0.2"
+log = { path = "../log" }
+err = { path = "../../daqbuffer/err" }
+netpod = { path = "../../daqbuffer/netpod" }
+taskrun = { path = "../../daqbuffer/taskrun" }

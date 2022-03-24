@@ -1,0 +1,11 @@
+[package]
+name = "log"
+version = "0.0.1"
+authors = ["Dominik Werder <dominik.werder@gmail.com>"]
+edition = "2021"
+
+[lib]
+path = "src/log.rs"
+
+[dependencies]
+tracing = "0.1"
