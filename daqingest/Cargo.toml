@@ -19,3 +19,4 @@ scylla = "0.4"
 err = { path = "../../daqbuffer/err" }
 taskrun = { path = "../../daqbuffer/taskrun" }
 netfetch = { path = "../netfetch" }
+log = { path = "../log" }

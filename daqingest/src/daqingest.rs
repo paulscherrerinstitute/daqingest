@@ -1,3 +1,5 @@
+pub mod query;
+
 use clap::Parser;
 
 #[derive(Debug, Parser)]
@@ -13,6 +15,8 @@ pub struct DaqIngestOpts {
 #[derive(Debug, Parser)]
 pub enum SubCmd {
     Bsread(Bsread),
+    ListTsa,
+    ListPulses,
 }
 
 #[derive(Debug, Parser)]
