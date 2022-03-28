@@ -15,7 +15,7 @@ pub struct DaqIngestOpts {
 #[derive(Debug, Parser)]
 pub enum SubCmd {
     Bsread(Bsread),
-    ListTsa,
+    ListPkey,
     ListPulses,
 }
 

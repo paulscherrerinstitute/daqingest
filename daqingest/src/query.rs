@@ -23,7 +23,7 @@ impl From<QueryError> for Error {
     }
 }
 
-pub async fn list_tsa() -> Result<(), Error> {
+pub async fn list_pkey() -> Result<(), Error> {
     let scy = SessionBuilder::new()
         .known_node("127.0.0.1:19042")
         .default_consistency(Consistency::One)
@@ -31,11 +31,11 @@ pub async fn list_tsa() -> Result<(), Error> {
         .build()
         .await?;
     let query = scy
-        .prepare("select distinct token(tsa), tsa from pulse where token(tsa) >= ? and token(tsa) <= ?")
+        .prepare("select distinct token(pulse_a), pulse_a from pulse where token(pulse_a) >= ? and token(pulse_a) <= ?")
         .await?;
     let td = i64::MAX / 27;
     let mut t1 = i64::MIN;
-    let mut tsa_max = 0;
+    let mut pulse_a_max = 0;
     loop {
         let t2 = if t1 < i64::MAX - td { t1 + td } else { i64::MAX };
         let pct = (t1 - i64::MIN) as u64 / (u64::MAX / 100000);
@@ -46,10 +46,10 @@ pub async fn list_tsa() -> Result<(), Error> {
                 if r.columns.len() < 2 {
                     warn!("see {} columns", r.columns.len());
                 } else {
-                    let tsa_token = r.columns[0].as_ref().unwrap().as_bigint().unwrap();
-                    let tsa = r.columns[1].as_ref().unwrap().as_int().unwrap() as u32;
-                    info!("tsa_token {tsa_token:?}  tsa {tsa:?}");
-                    tsa_max = tsa_max.max(tsa);
+                    let pulse_a_token = r.columns[0].as_ref().unwrap().as_bigint().unwrap();
+                    let pulse_a = r.columns[1].as_ref().unwrap().as_bigint().unwrap();
+                    info!("pulse_a_token {pulse_a_token}  pulse_a {pulse_a}");
+                    pulse_a_max = pulse_a_max.max(pulse_a);
                 }
             }
         }
@@ -60,7 +60,7 @@ pub async fn list_tsa() -> Result<(), Error> {
             t1 = t2 + 1;
         }
     }
-    info!("tsa_max {tsa_max}");
+    info!("pulse_a_max {pulse_a_max}");
     Ok(())
 }
 

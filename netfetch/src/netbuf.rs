@@ -1,9 +1,6 @@
 use err::Error;
 use tokio::io::ReadBuf;
 
-pub const BUFCAP: usize = 1024 * 128;
-pub const RP_REW_PT: usize = 1024 * 64;
-
 pub struct NetBuf {
     buf: Vec<u8>,
     wp: usize,
@@ -11,9 +8,9 @@ pub struct NetBuf {
 }
 
 impl NetBuf {
-    pub fn new() -> Self {
+    pub fn new(cap: usize) -> Self {
         Self {
-            buf: vec![0; BUFCAP],
+            buf: vec![0; cap],
             wp: 0,
             rp: 0,
         }
@@ -97,7 +94,7 @@ impl NetBuf {
         if self.rp != 0 && self.rp == self.wp {
             self.rp = 0;
             self.wp = 0;
-        } else if self.rp > RP_REW_PT {
+        } else if self.rp > self.cap() / 2 {
             self.buf.copy_within(self.rp..self.wp, 0);
             self.wp -= self.rp;
             self.rp = 0;

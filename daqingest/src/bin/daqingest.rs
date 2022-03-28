@@ -11,7 +11,7 @@ pub fn main() -> Result<(), Error> {
         let opts = DaqIngestOpts::parse();
         match opts.subcmd {
             SubCmd::Bsread(k) => netfetch::zmtp::zmtp_client(&k.source, k.rcvbuf).await?,
-            SubCmd::ListTsa => daqingest::query::list_tsa().await?,
+            SubCmd::ListPkey => daqingest::query::list_pkey().await?,
             SubCmd::ListPulses => daqingest::query::list_pulses().await?,
         }
         Ok(())

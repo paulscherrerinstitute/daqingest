@@ -1,9 +1,7 @@
 use crate::bsread::parse_zmtp_message;
 use crate::bsread::{ChannelDesc, GlobalTimestamp, HeadA, HeadB};
 use crate::netbuf::NetBuf;
-use crate::netbuf::RP_REW_PT;
-use async_channel::Receiver;
-use async_channel::Sender;
+use async_channel::{Receiver, Sender};
 #[allow(unused)]
 use bytes::BufMut;
 use err::Error;
@@ -11,9 +9,7 @@ use futures_core::Stream;
 use futures_util::{pin_mut, StreamExt};
 use log::*;
 use netpod::timeunits::*;
-use scylla::batch::Batch;
-use scylla::batch::BatchType;
-use scylla::batch::Consistency;
+use scylla::batch::{Batch, BatchType, Consistency};
 use scylla::transport::errors::QueryError;
 use scylla::SessionBuilder;
 use serde_json::Value as JsVal;
@@ -292,8 +288,8 @@ impl Zmtp {
             socket_type,
             conn,
             conn_state: ConnState::InitSend,
-            buf: NetBuf::new(),
-            outbuf: NetBuf::new(),
+            buf: NetBuf::new(1024 * 128),
+            outbuf: NetBuf::new(1024 * 128),
             out_enable: false,
             msglen: 0,
             has_more: false,
@@ -321,7 +317,8 @@ impl Zmtp {
     fn loop_body(mut self: Pin<&mut Self>, cx: &mut Context) -> Option<Poll<Result<ZmtpEvent, Error>>> {
         use Poll::*;
         let mut item_count = 0;
-        let serialized: Int<Result<(), Error>> = if self.out_enable && self.outbuf.wcap() >= RP_REW_PT {
+        // TODO should I better keep one serialized item in Self so that I know how much space it needs?
+        let serialized: Int<Result<(), Error>> = if self.out_enable && self.outbuf.wcap() >= self.outbuf.cap() / 2 {
             match self.data_rx.poll_next_unpin(cx) {
                 Ready(Some(_item)) => {
                     // TODO item should be something that we can convert into a zmtp message.
