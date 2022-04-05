@@ -22,7 +22,11 @@ pub enum SubCmd {
 #[derive(Debug, Parser)]
 pub struct Bsread {
     #[clap(long)]
+    pub scylla: String,
+    #[clap(long)]
     pub source: String,
     #[clap(long)]
     pub rcvbuf: Option<u32>,
+    #[clap(long)]
+    pub do_pulse_id: bool,
 }

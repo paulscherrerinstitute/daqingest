@@ -22,6 +22,7 @@ futures-util = "0.3"
 #pin-project-lite = "0.2"
 scylla = "0.4"
 md-5 = "0.9"
+hex = "0.4"
 libc = "0.2"
 log = { path = "../log" }
 err = { path = "../../daqbuffer/err" }
