@@ -1,6 +1,6 @@
 use crate::bsread::{parse_zmtp_message, BsreadMessage};
 use crate::bsread::{ChannelDesc, GlobalTimestamp, HeadA, HeadB};
-use crate::channelwriter::{ChannelWriter, ChannelWriterF64};
+use crate::channelwriter::{ChannelWriter, ChannelWriterArrayF64, ChannelWriterScalarF64};
 use crate::netbuf::NetBuf;
 use async_channel::{Receiver, Sender};
 #[allow(unused)]
@@ -22,7 +22,7 @@ use std::mem;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::TcpStream;
 
@@ -83,14 +83,22 @@ pub struct CommonQueries {
     pub qu2: PreparedStatement,
     pub qu_insert_ts_msp: PreparedStatement,
     pub qu_insert_scalar_f64: PreparedStatement,
+    pub qu_insert_array_f64: PreparedStatement,
+}
+
+pub struct ZmtpClientOpts {
+    pub scylla: Vec<String>,
+    pub addr: String,
+    pub do_pulse_id: bool,
+    pub rcvbuf: Option<usize>,
+    pub array_truncate: Option<usize>,
 }
 
 struct BsreadClient {
-    #[allow(unused)]
-    scylla: String,
+    opts: ZmtpClientOpts,
     addr: String,
     do_pulse_id: bool,
-    rcvbuf: Option<u32>,
+    rcvbuf: Option<usize>,
     tmp_vals_pulse_map: Vec<(i64, i32, i64, i32)>,
     scy: Arc<ScySession>,
     channel_writers: BTreeMap<u32, Box<dyn ChannelWriter>>,
@@ -98,10 +106,13 @@ struct BsreadClient {
 }
 
 impl BsreadClient {
-    pub async fn new(scylla: String, addr: String, do_pulse_id: bool, rcvbuf: Option<u32>) -> Result<Self, Error> {
-        let scy = SessionBuilder::new()
-            .default_consistency(Consistency::Quorum)
-            .known_node(&scylla)
+    pub async fn new(opts: ZmtpClientOpts) -> Result<Self, Error> {
+        let scy = SessionBuilder::new().default_consistency(Consistency::Quorum);
+        let mut scy = scy;
+        for a in &opts.scylla {
+            scy = scy.known_node(a);
+        }
+        let scy = scy
             .use_keyspace("ks1", false)
             .build()
             .await
@@ -122,17 +133,22 @@ impl BsreadClient {
             .prepare("insert into events_scalar_f64 (series, ts_msp, ts_lsp, pulse, value) values (?, ?, ?, ?, ?)")
             .await
             .map_err(|e| Error::with_msg_no_trace(format!("{e:?}")))?;
+        let qu_insert_array_f64 = scy
+            .prepare("insert into events_array_f64 (series, ts_msp, ts_lsp, pulse, value) values (?, ?, ?, ?, ?)")
+            .await
+            .map_err(|e| Error::with_msg_no_trace(format!("{e:?}")))?;
         let common_queries = CommonQueries {
             qu1,
             qu2,
             qu_insert_ts_msp,
             qu_insert_scalar_f64,
+            qu_insert_array_f64,
         };
         let ret = Self {
-            scylla,
-            addr,
-            do_pulse_id,
-            rcvbuf,
+            addr: opts.addr.clone(),
+            do_pulse_id: opts.do_pulse_id,
+            rcvbuf: opts.rcvbuf,
+            opts,
             tmp_vals_pulse_map: vec![],
             scy: Arc::new(scy),
             channel_writers: Default::default(),
@@ -144,7 +160,7 @@ impl BsreadClient {
     pub async fn run(&mut self) -> Result<(), Error> {
         let mut conn = tokio::net::TcpStream::connect(&self.addr).await?;
         if let Some(v) = self.rcvbuf {
-            set_rcv_sock_opts(&mut conn, v)?;
+            set_rcv_sock_opts(&mut conn, v as u32)?;
         }
         let mut zmtp = Zmtp::new(conn, SocketType::PULL);
         let mut i1 = 0u64;
@@ -153,6 +169,8 @@ impl BsreadClient {
         let mut frame_diff_count = 0u64;
         let mut hash_mismatch_count = 0u64;
         let mut head_b = HeadB::empty();
+        let mut status_last = Instant::now();
+        let mut bytes_payload = 0u64;
         while let Some(item) = zmtp.next().await {
             match item {
                 Ok(ev) => match ev {
@@ -231,6 +249,7 @@ impl BsreadClient {
                                     if !self.channel_writers.contains_key(&series) {}
                                     if let Some(cw) = self.channel_writers.get_mut(&series) {
                                         cw.write_msg(ts, pulse, fr)?.await?;
+                                        bytes_payload += fr.data().len() as u64;
                                     } else {
                                         // TODO check for missing writers.
                                         //warn!("no writer for {}", chn.name);
@@ -260,6 +279,14 @@ impl BsreadClient {
             if false && msgc > 10000 {
                 break;
             }
+            let tsnow = Instant::now();
+            let dt = tsnow.duration_since(status_last);
+            if dt >= Duration::from_millis(2000) {
+                let r = bytes_payload as f32 / dt.as_secs_f32() * 1e-3;
+                info!("rate: {r:8.3} kB/s");
+                status_last = tsnow;
+                bytes_payload = 0;
+            }
         }
         Ok(())
     }
@@ -273,26 +300,39 @@ impl BsreadClient {
                         if let Some(n) = a[0].as_u64() {
                             if n == 1 {
                                 if chn.encoding == "big" {
-                                    let cw =
-                                        ChannelWriterF64::new(series, self.common_queries.clone(), self.scy.clone());
+                                    let cw = ChannelWriterScalarF64::new(
+                                        series,
+                                        self.common_queries.clone(),
+                                        self.scy.clone(),
+                                    );
                                     self.channel_writers.insert(series, Box::new(cw));
                                 } else {
-                                    warn!("No LE avail");
+                                    warn!("TODO scalar f64 LE");
                                 }
                             } else {
-                                warn!("array f64 writer not yet available.")
+                                if chn.encoding == "big" {
+                                    let cw = ChannelWriterArrayF64::new(
+                                        series,
+                                        self.common_queries.clone(),
+                                        self.scy.clone(),
+                                        self.opts.array_truncate.unwrap_or(64),
+                                    );
+                                    self.channel_writers.insert(series, Box::new(cw));
+                                } else {
+                                    warn!("TODO array f64 LE");
+                                }
                             }
                         }
                     } else {
-                        warn!("f64 writer not yet available for shape {:?}", a)
+                        warn!("TODO writer f64  shape {:?}", a);
                     }
                 }
                 s => {
-                    warn!("setup_channel_writers  shape not supported {:?}", s);
+                    warn!("TODO writer f64  shape {:?}", s);
                 }
             },
             k => {
-                warn!("setup_channel_writers  data type not supported {:?}", k);
+                warn!("TODO writer  dtype {:?}", k);
             }
         }
         Ok(())
@@ -342,8 +382,8 @@ impl BsreadClient {
     }
 }
 
-pub async fn zmtp_client(scylla: &str, addr: &str, rcvbuf: Option<u32>, do_pulse_id: bool) -> Result<(), Error> {
-    let mut client = BsreadClient::new(scylla.into(), addr.into(), do_pulse_id, rcvbuf).await?;
+pub async fn zmtp_client(opts: ZmtpClientOpts) -> Result<(), Error> {
+    let mut client = BsreadClient::new(opts).await?;
     client.run().await
 }
 

@@ -1,6 +1,7 @@
 pub mod query;
 
 use clap::Parser;
+use netfetch::zmtp::ZmtpClientOpts;
 
 #[derive(Debug, Parser)]
 //#[clap(name = "daqingest", version)]
@@ -22,11 +23,25 @@ pub enum SubCmd {
 #[derive(Debug, Parser)]
 pub struct Bsread {
     #[clap(long)]
-    pub scylla: String,
+    pub scylla: Vec<String>,
     #[clap(long)]
     pub source: String,
     #[clap(long)]
-    pub rcvbuf: Option<u32>,
+    pub rcvbuf: Option<usize>,
+    #[clap(long)]
+    pub array_truncate: Option<usize>,
     #[clap(long)]
     pub do_pulse_id: bool,
+}
+
+impl From<Bsread> for ZmtpClientOpts {
+    fn from(k: Bsread) -> Self {
+        Self {
+            scylla: k.scylla,
+            addr: k.source,
+            rcvbuf: k.rcvbuf,
+            array_truncate: k.array_truncate,
+            do_pulse_id: k.do_pulse_id,
+        }
+    }
 }

@@ -9,8 +9,9 @@ pub fn main() -> Result<(), Error> {
         } else {
         }
         let opts = DaqIngestOpts::parse();
+        log::info!("opts: {opts:?}");
         match opts.subcmd {
-            SubCmd::Bsread(k) => netfetch::zmtp::zmtp_client(&k.scylla, &k.source, k.rcvbuf, k.do_pulse_id).await?,
+            SubCmd::Bsread(k) => netfetch::zmtp::zmtp_client(k.into()).await?,
             SubCmd::ListPkey => daqingest::query::list_pkey().await?,
             SubCmd::ListPulses => daqingest::query::list_pulses().await?,
         }
