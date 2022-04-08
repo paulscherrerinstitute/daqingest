@@ -25,7 +25,7 @@ pub struct Bsread {
     #[clap(long)]
     pub scylla: Vec<String>,
     #[clap(long)]
-    pub source: String,
+    pub source: Vec<String>,
     #[clap(long)]
     pub rcvbuf: Option<usize>,
     #[clap(long)]
@@ -38,7 +38,7 @@ impl From<Bsread> for ZmtpClientOpts {
     fn from(k: Bsread) -> Self {
         Self {
             scylla: k.scylla,
-            addr: k.source,
+            sources: k.source,
             rcvbuf: k.rcvbuf,
             array_truncate: k.array_truncate,
             do_pulse_id: k.do_pulse_id,
