@@ -1,6 +1,6 @@
 use crate::bsread::{parse_zmtp_message, BsreadMessage};
 use crate::bsread::{ChannelDesc, GlobalTimestamp, HeadA, HeadB};
-use crate::channelwriter::{ChannelWriter, ChannelWriterArrayF64, ChannelWriterScalarF64};
+use crate::channelwriter::{ChannelWriter, ChannelWriterAll};
 use crate::netbuf::NetBuf;
 use async_channel::{Receiver, Sender};
 #[allow(unused)]
@@ -10,11 +10,13 @@ use futures_core::{Future, Stream};
 use futures_util::{pin_mut, FutureExt, StreamExt};
 use log::*;
 use netpod::timeunits::*;
+use netpod::{ByteOrder, ScalarType, Shape};
 use scylla::batch::{Batch, BatchType, Consistency};
 use scylla::prepared_statement::PreparedStatement;
 use scylla::transport::errors::QueryError;
 use scylla::{Session as ScySession, SessionBuilder};
 use serde_json::Value as JsVal;
+use stats::CheckEvery;
 use std::collections::BTreeMap;
 use std::ffi::CStr;
 use std::fmt;
@@ -82,7 +84,15 @@ pub struct CommonQueries {
     pub qu1: PreparedStatement,
     pub qu2: PreparedStatement,
     pub qu_insert_ts_msp: PreparedStatement,
+    pub qu_insert_scalar_u16: PreparedStatement,
+    pub qu_insert_scalar_u32: PreparedStatement,
+    pub qu_insert_scalar_i16: PreparedStatement,
+    pub qu_insert_scalar_i32: PreparedStatement,
+    pub qu_insert_scalar_f32: PreparedStatement,
     pub qu_insert_scalar_f64: PreparedStatement,
+    pub qu_insert_array_u16: PreparedStatement,
+    pub qu_insert_array_i16: PreparedStatement,
+    pub qu_insert_array_f32: PreparedStatement,
     pub qu_insert_array_f64: PreparedStatement,
 }
 
@@ -128,6 +138,7 @@ struct BsreadClient {
     scy: Arc<ScySession>,
     channel_writers: BTreeMap<u32, Box<dyn ChannelWriter>>,
     common_queries: Arc<CommonQueries>,
+    print_stats: CheckEvery,
 }
 
 impl BsreadClient {
@@ -146,6 +157,7 @@ impl BsreadClient {
             scy,
             channel_writers: Default::default(),
             common_queries,
+            print_stats: CheckEvery::new(Duration::from_millis(2000)),
         };
         Ok(ret)
     }
@@ -162,8 +174,9 @@ impl BsreadClient {
         let mut frame_diff_count = 0u64;
         let mut hash_mismatch_count = 0u64;
         let mut head_b = HeadB::empty();
-        let mut status_last = Instant::now();
         let mut bytes_payload = 0u64;
+        let mut rows_inserted = 0u32;
+        let mut time_spent_inserting = Duration::from_millis(0);
         while let Some(item) = zmtp.next().await {
             match item {
                 Ok(ev) => match ev {
@@ -200,7 +213,12 @@ impl BsreadClient {
                                             dh_md5_last = bm.head_b_md5.clone();
                                             for chn in &head_b.channels {
                                                 info!("Setup writer for {}", chn.name);
-                                                self.setup_channel_writers(chn)?;
+                                                match self.setup_channel_writers(chn).await {
+                                                    Ok(_) => {}
+                                                    Err(e) => {
+                                                        warn!("can not set up writer for {}  {e:?}", chn.name);
+                                                    }
+                                                }
                                             }
                                         } else {
                                             error!("changed data header hash {}  mh {}", bm.head_b_md5, bm.head_a.hash);
@@ -241,11 +259,13 @@ impl BsreadClient {
                                     let series = get_series_id(chn);
                                     if !self.channel_writers.contains_key(&series) {}
                                     if let Some(cw) = self.channel_writers.get_mut(&series) {
-                                        cw.write_msg(ts, pulse, fr)?.await?;
+                                        let res = cw.write_msg(ts, pulse, fr)?.await?;
+                                        rows_inserted += res.nrows;
+                                        time_spent_inserting = time_spent_inserting + res.dt;
                                         bytes_payload += fr.data().len() as u64;
                                     } else {
                                         // TODO check for missing writers.
-                                        //warn!("no writer for {}", chn.name);
+                                        warn!("no writer for {}", chn.name);
                                     }
                                 }
                             }
@@ -272,19 +292,21 @@ impl BsreadClient {
             if false && msgc > 10000 {
                 break;
             }
-            let tsnow = Instant::now();
-            let dt = tsnow.duration_since(status_last);
-            if dt >= Duration::from_millis(2000) {
-                let r = bytes_payload as f32 / dt.as_secs_f32() * 1e-3;
-                info!("rate: {r:8.3} kB/s");
-                status_last = tsnow;
+            let dt = self.print_stats.is_elapsed_now();
+            if dt > 0. {
+                let nrs = rows_inserted as f32 / dt;
+                let dt_ins = time_spent_inserting.as_secs_f32() * 1e3;
+                let r = bytes_payload as f32 / dt * 1e-3;
+                info!("insert {nrs:.0} 1/s  dt-ins {dt_ins:4.0} ms  payload {r:8.3} kB/s");
+                rows_inserted = 0;
+                time_spent_inserting = Duration::from_millis(0);
                 bytes_payload = 0;
             }
         }
         Ok(())
     }
 
-    fn setup_channel_writers(&mut self, chn: &ChannelDesc) -> Result<(), Error> {
+    async fn setup_channel_writers(&mut self, chn: &ChannelDesc) -> Result<(), Error> {
         let series = get_series_id(chn);
         let has_comp = match &chn.compression {
             Some(s) => s != "none",
@@ -294,48 +316,29 @@ impl BsreadClient {
             warn!("Compression not yet supported  [{}]", chn.name);
             return Ok(());
         }
-        match chn.ty.as_str() {
-            "float64" => match &chn.shape {
-                JsVal::Array(a) => {
-                    if a.len() == 1 {
-                        if let Some(n) = a[0].as_u64() {
-                            if n == 1 {
-                                if chn.encoding == "big" {
-                                    let cw = ChannelWriterScalarF64::new(
-                                        series,
-                                        self.common_queries.clone(),
-                                        self.scy.clone(),
-                                    );
-                                    self.channel_writers.insert(series, Box::new(cw));
-                                } else {
-                                    warn!("TODO scalar f64 LE");
-                                }
-                            } else {
-                                if chn.encoding == "big" {
-                                    let cw = ChannelWriterArrayF64::new(
-                                        series,
-                                        self.common_queries.clone(),
-                                        self.scy.clone(),
-                                        self.opts.array_truncate.unwrap_or(64),
-                                    );
-                                    self.channel_writers.insert(series, Box::new(cw));
-                                } else {
-                                    warn!("TODO array f64 LE");
-                                }
-                            }
-                        }
-                    } else {
-                        warn!("TODO writer f64  shape {:?}", a);
-                    }
-                }
-                s => {
-                    warn!("TODO writer f64  shape {:?}", s);
-                }
-            },
-            k => {
-                warn!("TODO writer  dtype {:?}", k);
-            }
-        }
+        let scalar_type = ScalarType::from_bsread_str(&chn.ty)?;
+        let shape = Shape::from_bsread_jsval(&chn.shape)?;
+        let byte_order = ByteOrder::from_bsread_str(&chn.encoding)?;
+        let trunc = self.opts.array_truncate.unwrap_or(64);
+        let cw = ChannelWriterAll::new(
+            series,
+            self.common_queries.clone(),
+            self.scy.clone(),
+            scalar_type.clone(),
+            shape.clone(),
+            byte_order.clone(),
+            trunc,
+        )?;
+        let dtype_mark = cw.dtype_mark();
+        self.channel_writers.insert(series, Box::new(cw));
+        // TODO insert correct facility name
+        self.scy
+            .query(
+                "insert into series_by_channel (facility, channel_name, dtype, series) values (?, ?, ?, ?)",
+                ("scylla", &chn.name, dtype_mark as i32, series as i32),
+            )
+            .await
+            .err_conv()?;
         Ok(())
     }
 
@@ -404,11 +407,43 @@ pub async fn zmtp_client(opts: ZmtpClientOpts) -> Result<(), Error> {
         .await
         .map_err(|e| Error::with_msg_no_trace(format!("{e:?}")))?;
     let qu_insert_ts_msp = scy
-        .prepare("insert into ts_msp (series, ts_msp) values (?, ?)")
+        .prepare("insert into ts_msp (series, ts_msp, dtype) values (?, ?, ?)")
+        .await
+        .map_err(|e| Error::with_msg_no_trace(format!("{e:?}")))?;
+    let qu_insert_scalar_u16 = scy
+        .prepare("insert into events_scalar_u16 (series, ts_msp, ts_lsp, pulse, value) values (?, ?, ?, ?, ?)")
+        .await
+        .map_err(|e| Error::with_msg_no_trace(format!("{e:?}")))?;
+    let qu_insert_scalar_u32 = scy
+        .prepare("insert into events_scalar_u32 (series, ts_msp, ts_lsp, pulse, value) values (?, ?, ?, ?, ?)")
+        .await
+        .map_err(|e| Error::with_msg_no_trace(format!("{e:?}")))?;
+    let qu_insert_scalar_i16 = scy
+        .prepare("insert into events_scalar_i16 (series, ts_msp, ts_lsp, pulse, value) values (?, ?, ?, ?, ?)")
+        .await
+        .map_err(|e| Error::with_msg_no_trace(format!("{e:?}")))?;
+    let qu_insert_scalar_i32 = scy
+        .prepare("insert into events_scalar_i32 (series, ts_msp, ts_lsp, pulse, value) values (?, ?, ?, ?, ?)")
+        .await
+        .map_err(|e| Error::with_msg_no_trace(format!("{e:?}")))?;
+    let qu_insert_scalar_f32 = scy
+        .prepare("insert into events_scalar_f32 (series, ts_msp, ts_lsp, pulse, value) values (?, ?, ?, ?, ?)")
         .await
         .map_err(|e| Error::with_msg_no_trace(format!("{e:?}")))?;
     let qu_insert_scalar_f64 = scy
         .prepare("insert into events_scalar_f64 (series, ts_msp, ts_lsp, pulse, value) values (?, ?, ?, ?, ?)")
+        .await
+        .map_err(|e| Error::with_msg_no_trace(format!("{e:?}")))?;
+    let qu_insert_array_u16 = scy
+        .prepare("insert into events_array_u16 (series, ts_msp, ts_lsp, pulse, value) values (?, ?, ?, ?, ?)")
+        .await
+        .map_err(|e| Error::with_msg_no_trace(format!("{e:?}")))?;
+    let qu_insert_array_i16 = scy
+        .prepare("insert into events_array_i16 (series, ts_msp, ts_lsp, pulse, value) values (?, ?, ?, ?, ?)")
+        .await
+        .map_err(|e| Error::with_msg_no_trace(format!("{e:?}")))?;
+    let qu_insert_array_f32 = scy
+        .prepare("insert into events_array_f32 (series, ts_msp, ts_lsp, pulse, value) values (?, ?, ?, ?, ?)")
         .await
         .map_err(|e| Error::with_msg_no_trace(format!("{e:?}")))?;
     let qu_insert_array_f64 = scy
@@ -419,7 +454,15 @@ pub async fn zmtp_client(opts: ZmtpClientOpts) -> Result<(), Error> {
         qu1,
         qu2,
         qu_insert_ts_msp,
+        qu_insert_scalar_u16,
+        qu_insert_scalar_u32,
+        qu_insert_scalar_i16,
+        qu_insert_scalar_i32,
+        qu_insert_scalar_f32,
         qu_insert_scalar_f64,
+        qu_insert_array_u16,
+        qu_insert_array_i16,
+        qu_insert_array_f32,
         qu_insert_array_f64,
     };
     let common_queries = Arc::new(common_queries);
@@ -427,7 +470,6 @@ pub async fn zmtp_client(opts: ZmtpClientOpts) -> Result<(), Error> {
     for source_addr in &opts.sources {
         let client = BsreadClient::new(opts.clone(), source_addr.into(), scy.clone(), common_queries.clone()).await?;
         let fut = ClientRun::new(client);
-        //let client = Box::pin(client) as Pin<Box<dyn Future<Output = Result<(), Error>>>>;
         clients.push(fut);
     }
     futures_util::future::join_all(clients).await;

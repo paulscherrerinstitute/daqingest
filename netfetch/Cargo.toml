@@ -25,6 +25,7 @@ md-5 = "0.9"
 hex = "0.4"
 libc = "0.2"
 log = { path = "../log" }
+stats = { path = "../stats" }
 err = { path = "../../daqbuffer/err" }
 netpod = { path = "../../daqbuffer/netpod" }
 taskrun = { path = "../../daqbuffer/taskrun" }

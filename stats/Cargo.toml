@@ -1,0 +1,12 @@
+[package]
+name = "stats"
+version = "0.0.1-a.0"
+authors = ["Dominik Werder <dominik.werder@gmail.com>"]
+edition = "2021"
+
+[lib]
+path = "src/stats.rs"
+
+[dependencies]
+log = { path = "../log" }
+err = { path = "../../daqbuffer/err" }
