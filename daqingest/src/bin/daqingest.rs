@@ -14,6 +14,11 @@ pub fn main() -> Result<(), Error> {
             SubCmd::Bsread(k) => netfetch::zmtp::zmtp_client(k.into()).await?,
             SubCmd::ListPkey => daqingest::query::list_pkey().await?,
             SubCmd::ListPulses => daqingest::query::list_pulses().await?,
+            SubCmd::FetchEvents(k) => daqingest::query::fetch_events(k).await?,
+            SubCmd::BsreadDump(k) => {
+                let mut f = netfetch::zmtp::BsreadDumper::new(k.source);
+                f.run().await?
+            }
         }
         Ok(())
     })

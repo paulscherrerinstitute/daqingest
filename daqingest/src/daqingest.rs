@@ -5,10 +5,12 @@ use netfetch::zmtp::ZmtpClientOpts;
 
 #[derive(Debug, Parser)]
 //#[clap(name = "daqingest", version)]
-//#[clap(version)]
+#[clap(version)]
 pub struct DaqIngestOpts {
     #[clap(long, parse(from_occurrences))]
     pub verbose: u32,
+    #[clap(long)]
+    pub tag: String,
     #[clap(subcommand)]
     pub subcmd: SubCmd,
 }
@@ -18,6 +20,8 @@ pub enum SubCmd {
     Bsread(Bsread),
     ListPkey,
     ListPulses,
+    FetchEvents(FetchEvents),
+    BsreadDump(BsreadDump),
 }
 
 #[derive(Debug, Parser)]
@@ -44,4 +48,17 @@ impl From<Bsread> for ZmtpClientOpts {
             do_pulse_id: k.do_pulse_id,
         }
     }
+}
+
+#[derive(Debug, Parser)]
+pub struct FetchEvents {
+    #[clap(long, min_values(1))]
+    pub scylla: Vec<String>,
+    #[clap(long)]
+    pub channel: String,
+}
+
+#[derive(Debug, Parser)]
+pub struct BsreadDump {
+    pub source: String,
 }

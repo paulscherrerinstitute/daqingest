@@ -156,7 +156,13 @@ impl NetBuf {
         }
     }
 
-    fn check_invariant(&self) {
+    #[allow(unused)]
+    #[inline(always)]
+    fn check_invariant(&self) {}
+
+    #[allow(unused)]
+    #[inline(always)]
+    fn check_invariant2(&self) {
         if self.wp > self.buf.len() {
             eprintln!("ERROR  netbuf  wp {}  rp {}", self.wp, self.rp);
             std::process::exit(87);

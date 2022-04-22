@@ -1,4 +1,4 @@
-use crate::bsread::{parse_zmtp_message, BsreadMessage};
+use crate::bsread::{BsreadMessage, Parser};
 use crate::bsread::{ChannelDesc, GlobalTimestamp, HeadA, HeadB};
 use crate::channelwriter::{ChannelWriter, ChannelWriterAll};
 use crate::netbuf::NetBuf;
@@ -72,12 +72,16 @@ fn test_service() -> Result<(), Error> {
     taskrun::run(fut)
 }
 
-pub fn get_series_id(chn: &ChannelDesc) -> u32 {
+pub fn get_series_id(chn: &ChannelDesc) -> u64 {
+    // TODO use a more stable format (with ScalarType, Shape) as hash input.
+    // TODO do not depend at all on the mapping, instead look it up on demand and cache.
     use md5::Digest;
     let mut h = md5::Md5::new();
     h.update(chn.name.as_bytes());
+    h.update(chn.ty.as_bytes());
+    h.update(format!("{:?}", chn.shape).as_bytes());
     let f = h.finalize();
-    u32::from_le_bytes(f.as_slice()[0..4].try_into().unwrap())
+    u64::from_le_bytes(f.as_slice()[0..8].try_into().unwrap())
 }
 
 pub struct CommonQueries {
@@ -92,8 +96,10 @@ pub struct CommonQueries {
     pub qu_insert_scalar_f64: PreparedStatement,
     pub qu_insert_array_u16: PreparedStatement,
     pub qu_insert_array_i16: PreparedStatement,
+    pub qu_insert_array_i32: PreparedStatement,
     pub qu_insert_array_f32: PreparedStatement,
     pub qu_insert_array_f64: PreparedStatement,
+    pub qu_insert_array_bool: PreparedStatement,
 }
 
 #[derive(Clone)]
@@ -136,9 +142,10 @@ struct BsreadClient {
     rcvbuf: Option<usize>,
     tmp_vals_pulse_map: Vec<(i64, i32, i64, i32)>,
     scy: Arc<ScySession>,
-    channel_writers: BTreeMap<u32, Box<dyn ChannelWriter>>,
+    channel_writers: BTreeMap<u64, Box<dyn ChannelWriter>>,
     common_queries: Arc<CommonQueries>,
     print_stats: CheckEvery,
+    parser: Parser,
 }
 
 impl BsreadClient {
@@ -158,6 +165,7 @@ impl BsreadClient {
             channel_writers: Default::default(),
             common_queries,
             print_stats: CheckEvery::new(Duration::from_millis(2000)),
+            parser: Parser::new(),
         };
         Ok(ret)
     }
@@ -177,13 +185,14 @@ impl BsreadClient {
         let mut bytes_payload = 0u64;
         let mut rows_inserted = 0u32;
         let mut time_spent_inserting = Duration::from_millis(0);
+        let mut series_ids = Vec::new();
         while let Some(item) = zmtp.next().await {
             match item {
                 Ok(ev) => match ev {
                     ZmtpEvent::ZmtpCommand(_) => (),
                     ZmtpEvent::ZmtpMessage(msg) => {
                         msgc += 1;
-                        match parse_zmtp_message(&msg) {
+                        match self.parser.parse_zmtp_message(&msg) {
                             Ok(bm) => {
                                 if msg.frames().len() - 2 * bm.head_b.channels.len() != 2 {
                                     frame_diff_count += 1;
@@ -207,9 +216,10 @@ impl BsreadClient {
                                 }
                                 {
                                     if bm.head_b_md5 != dh_md5_last {
+                                        series_ids.clear();
                                         head_b = bm.head_b.clone();
                                         if dh_md5_last.is_empty() {
-                                            info!("data header hash {}  mh {}", bm.head_b_md5, bm.head_a.hash);
+                                            info!("data header hash {}", bm.head_b_md5);
                                             dh_md5_last = bm.head_b_md5.clone();
                                             for chn in &head_b.channels {
                                                 info!("Setup writer for {}", chn.name);
@@ -221,7 +231,7 @@ impl BsreadClient {
                                                 }
                                             }
                                         } else {
-                                            error!("changed data header hash {}  mh {}", bm.head_b_md5, bm.head_a.hash);
+                                            error!("TODO  changed data header hash {}", bm.head_b_md5);
                                             dh_md5_last = bm.head_b_md5.clone();
                                             // TODO
                                             // Update only the changed channel writers.
@@ -253,11 +263,23 @@ impl BsreadClient {
                                 let gts = bm.head_a.global_timestamp;
                                 let ts = (gts.sec as u64) * SEC + gts.ns as u64;
                                 let pulse = bm.head_a.pulse_id.as_u64().unwrap_or(0);
+                                // TODO limit warn rate
+                                if pulse != 0 && (pulse < 14781000000 || pulse > 16000000000) {
+                                    // TODO limit log rate
+                                    warn!("Bad pulse {}  for {}", pulse, self.source_addr);
+                                }
                                 for i1 in 0..head_b.channels.len() {
                                     let chn = &head_b.channels[i1];
                                     let fr = &msg.frames[2 + 2 * i1];
-                                    let series = get_series_id(chn);
-                                    if !self.channel_writers.contains_key(&series) {}
+                                    if i1 >= series_ids.len() {
+                                        series_ids.resize(head_b.channels.len(), (0u8, 0u64));
+                                    }
+                                    if series_ids[i1].0 == 0 {
+                                        let series = get_series_id(chn);
+                                        series_ids[i1].0 = 1;
+                                        series_ids[i1].1 = series;
+                                    }
+                                    let series = series_ids[i1].1;
                                     if let Some(cw) = self.channel_writers.get_mut(&series) {
                                         let res = cw.write_msg(ts, pulse, fr)?.await?;
                                         rows_inserted += res.nrows;
@@ -329,13 +351,13 @@ impl BsreadClient {
             byte_order.clone(),
             trunc,
         )?;
-        let dtype_mark = cw.dtype_mark();
+        let shape_dims = shape.to_scylla_vec();
         self.channel_writers.insert(series, Box::new(cw));
         // TODO insert correct facility name
         self.scy
             .query(
-                "insert into series_by_channel (facility, channel_name, dtype, series) values (?, ?, ?, ?)",
-                ("scylla", &chn.name, dtype_mark as i32, series as i32),
+                "insert into series_by_channel (facility, channel_name, series, scalar_type, shape_dims) values (?, ?, ?, ?, ?)",
+                ("scylla", &chn.name, series as i64, scalar_type.to_scylla_i32(), &shape_dims),
             )
             .await
             .err_conv()?;
@@ -407,7 +429,7 @@ pub async fn zmtp_client(opts: ZmtpClientOpts) -> Result<(), Error> {
         .await
         .map_err(|e| Error::with_msg_no_trace(format!("{e:?}")))?;
     let qu_insert_ts_msp = scy
-        .prepare("insert into ts_msp (series, ts_msp, dtype) values (?, ?, ?)")
+        .prepare("insert into ts_msp (series, ts_msp) values (?, ?)")
         .await
         .map_err(|e| Error::with_msg_no_trace(format!("{e:?}")))?;
     let qu_insert_scalar_u16 = scy
@@ -442,12 +464,20 @@ pub async fn zmtp_client(opts: ZmtpClientOpts) -> Result<(), Error> {
         .prepare("insert into events_array_i16 (series, ts_msp, ts_lsp, pulse, value) values (?, ?, ?, ?, ?)")
         .await
         .map_err(|e| Error::with_msg_no_trace(format!("{e:?}")))?;
+    let qu_insert_array_i32 = scy
+        .prepare("insert into events_array_i32 (series, ts_msp, ts_lsp, pulse, value) values (?, ?, ?, ?, ?)")
+        .await
+        .map_err(|e| Error::with_msg_no_trace(format!("{e:?}")))?;
     let qu_insert_array_f32 = scy
         .prepare("insert into events_array_f32 (series, ts_msp, ts_lsp, pulse, value) values (?, ?, ?, ?, ?)")
         .await
         .map_err(|e| Error::with_msg_no_trace(format!("{e:?}")))?;
     let qu_insert_array_f64 = scy
         .prepare("insert into events_array_f64 (series, ts_msp, ts_lsp, pulse, value) values (?, ?, ?, ?, ?)")
+        .await
+        .map_err(|e| Error::with_msg_no_trace(format!("{e:?}")))?;
+    let qu_insert_array_bool = scy
+        .prepare("insert into events_array_bool (series, ts_msp, ts_lsp, pulse, value) values (?, ?, ?, ?, ?)")
         .await
         .map_err(|e| Error::with_msg_no_trace(format!("{e:?}")))?;
     let common_queries = CommonQueries {
@@ -462,8 +492,10 @@ pub async fn zmtp_client(opts: ZmtpClientOpts) -> Result<(), Error> {
         qu_insert_scalar_f64,
         qu_insert_array_u16,
         qu_insert_array_i16,
+        qu_insert_array_i32,
         qu_insert_array_f32,
         qu_insert_array_f64,
+        qu_insert_array_bool,
     };
     let common_queries = Arc::new(common_queries);
     let mut clients = vec![];
@@ -518,6 +550,135 @@ fn set_rcv_sock_opts(conn: &mut TcpStream, rcvbuf: u32) -> Result<(), Error> {
         }
     }
     Ok(())
+}
+
+pub struct BsreadDumper {
+    source_addr: String,
+    parser: Parser,
+}
+
+impl BsreadDumper {
+    pub fn new(source_addr: String) -> Self {
+        Self {
+            source_addr,
+            parser: Parser::new(),
+        }
+    }
+
+    pub async fn run(&mut self) -> Result<(), Error> {
+        let src = if self.source_addr.starts_with("tcp://") {
+            self.source_addr[6..].into()
+        } else {
+            self.source_addr.clone()
+        };
+        let conn = tokio::net::TcpStream::connect(&src).await?;
+        let mut zmtp = Zmtp::new(conn, SocketType::PULL);
+        let mut i1 = 0u64;
+        let mut msgc = 0u64;
+        let mut dh_md5_last = String::new();
+        let mut frame_diff_count = 0u64;
+        let mut hash_mismatch_count = 0u64;
+        let mut head_b = HeadB::empty();
+        while let Some(item) = zmtp.next().await {
+            match item {
+                Ok(ev) => match ev {
+                    ZmtpEvent::ZmtpCommand(_) => (),
+                    ZmtpEvent::ZmtpMessage(msg) => {
+                        msgc += 1;
+                        match self.parser.parse_zmtp_message(&msg) {
+                            Ok(bm) => {
+                                if msg.frames().len() - 2 * bm.head_b.channels.len() != 2 {
+                                    frame_diff_count += 1;
+                                    if frame_diff_count < 1000 {
+                                        warn!(
+                                            "chn len {}  frame diff {}",
+                                            bm.head_b.channels.len(),
+                                            msg.frames().len() - 2 * bm.head_b.channels.len()
+                                        );
+                                    }
+                                }
+                                if bm.head_b_md5 != bm.head_a.hash {
+                                    hash_mismatch_count += 1;
+                                    // TODO keep logging data header changes, just suppress too frequent messages.
+                                    if hash_mismatch_count < 200 {
+                                        error!(
+                                            "Invalid bsread message: hash mismatch.  dhcompr {:?}",
+                                            bm.head_a.dh_compression
+                                        );
+                                    }
+                                }
+                                if bm.head_b_md5 != dh_md5_last {
+                                    head_b = bm.head_b.clone();
+                                    if dh_md5_last.is_empty() {
+                                        info!("data header hash {}", bm.head_b_md5);
+                                    } else {
+                                        error!("changed data header hash {}  mh {}", bm.head_b_md5, bm.head_a.hash);
+                                    }
+                                    dh_md5_last = bm.head_b_md5.clone();
+                                }
+                                if msg.frames.len() < 2 + 2 * head_b.channels.len() {
+                                    // TODO count always, throttle log.
+                                    error!("not enough frames for data header");
+                                }
+                                let gts = bm.head_a.global_timestamp;
+                                let ts = (gts.sec as u64) * SEC + gts.ns as u64;
+                                let pulse = bm.head_a.pulse_id.as_u64().unwrap_or(0);
+                                let mut bytes_payload = 0u64;
+                                for i1 in 0..head_b.channels.len() {
+                                    let chn = &head_b.channels[i1];
+                                    let fr = &msg.frames[2 + 2 * i1];
+                                    let _series = get_series_id(chn);
+                                    if chn.ty == "string" {
+                                        info!("string channel: {}  {:?}", chn.name, chn.shape);
+                                        if let Ok(shape) = Shape::from_bsread_jsval(&chn.shape) {
+                                            if let Ok(_bo) = ByteOrder::from_bsread_str(&chn.encoding) {
+                                                match &shape {
+                                                    Shape::Scalar => {
+                                                        info!("scalar string...");
+                                                        let s = String::from_utf8_lossy(fr.data());
+                                                        info!("STRING: {s:?}");
+                                                    }
+                                                    _ => {
+                                                        warn!(
+                                                            "non-scalar string channels not yet implemented  {}",
+                                                            chn.name
+                                                        );
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    bytes_payload += fr.data().len() as u64;
+                                }
+                                info!("zmtp message  ts {ts}  pulse {pulse}  bytes_payload {bytes_payload}");
+                            }
+                            Err(e) => {
+                                for frame in &msg.frames {
+                                    info!("Frame: {:?}", frame);
+                                }
+                                zmtp.dump_input_state();
+                                zmtp.dump_conn_state();
+                                error!("bsread parse error: {e:?}");
+                                break;
+                            }
+                        }
+                    }
+                },
+                Err(e) => {
+                    error!("zmtp item error: {e:?}");
+                    return Err(e);
+                }
+            }
+            i1 += 1;
+            if true && i1 > 20 {
+                break;
+            }
+            if true && msgc > 20 {
+                break;
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug)]

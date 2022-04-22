@@ -1,3 +1,4 @@
+use crate::FetchEvents;
 use log::*;
 use scylla::batch::Consistency;
 use scylla::transport::errors::{NewSessionError, QueryError};
@@ -27,7 +28,7 @@ pub async fn list_pkey() -> Result<(), Error> {
     let scy = SessionBuilder::new()
         .known_node("127.0.0.1:19042")
         .default_consistency(Consistency::One)
-        .use_keyspace("ks1", false)
+        .use_keyspace("ks1", true)
         .build()
         .await?;
     let query = scy
@@ -68,7 +69,7 @@ pub async fn list_pulses() -> Result<(), Error> {
     let scy = SessionBuilder::new()
         .known_node("127.0.0.1:19042")
         .default_consistency(Consistency::One)
-        .use_keyspace("ks1", false)
+        .use_keyspace("ks1", true)
         .build()
         .await?;
     let query = scy
@@ -100,6 +101,42 @@ pub async fn list_pulses() -> Result<(), Error> {
         } else {
             t1 = t2 + 1;
         }
+    }
+    Ok(())
+}
+
+pub async fn fetch_events(opts: FetchEvents) -> Result<(), Error> {
+    let scy = SessionBuilder::new()
+        .known_nodes(&opts.scylla)
+        .default_consistency(Consistency::One)
+        .use_keyspace("ks1", true)
+        .build()
+        .await?;
+    let qu_series = scy
+        .prepare(
+            "select series, scalar_type, shape_dims from series_by_channel where facility = ? and channel_name = ?",
+        )
+        .await?;
+    let qres = scy.execute(&qu_series, ("scylla", &opts.channel)).await?;
+    if let Some(rows) = qres.rows {
+        info!("Found {} matching series", rows.len());
+        for r in &rows {
+            info!("Got row: {r:?}");
+            if false {
+                if r.columns.len() < 2 {
+                    warn!("see {} columns", r.columns.len());
+                } else {
+                    let tsa_token = r.columns[0].as_ref().unwrap().as_bigint().unwrap();
+                    let tsa = r.columns[1].as_ref().unwrap().as_int().unwrap() as u32;
+                    let tsb = r.columns[2].as_ref().unwrap().as_int().unwrap() as u32;
+                    let pulse = r.columns[3].as_ref().unwrap().as_bigint().unwrap() as u64;
+                    info!("tsa_token {tsa_token:21}  tsa {tsa:12}  tsb {tsb:12}  pulse {pulse:21}");
+                }
+            }
+        }
+        let _row = rows.into_iter().next().unwrap();
+    } else {
+        warn!("No result from series lookup");
     }
     Ok(())
 }
