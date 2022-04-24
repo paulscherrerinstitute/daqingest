@@ -2,11 +2,11 @@
 members = ["log", "netfetch", "daqingest"]
 
 [profile.release]
-opt-level = 1
-debug = 0
+opt-level = 2
+debug = 1
 overflow-checks = false
 debug-assertions = false
-lto = false
+lto = "thin"
 codegen-units = 32
 incremental = true
 

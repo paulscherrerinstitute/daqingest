@@ -4,6 +4,7 @@ use err::Error;
 
 pub fn main() -> Result<(), Error> {
     taskrun::run(async {
+        log::info!("daqingest  version {}", clap::crate_version!());
         if false {
             return Err(Error::with_msg_no_trace(format!("unknown command")));
         } else {

@@ -109,12 +109,14 @@ pub struct ZmtpClientOpts {
     pub do_pulse_id: bool,
     pub rcvbuf: Option<usize>,
     pub array_truncate: Option<usize>,
+    pub process_channel_count_limit: Option<usize>,
+    pub skip_insert: bool,
 }
 
 struct ClientRun {
     #[allow(unused)]
     client: Pin<Box<BsreadClient>>,
-    fut: Pin<Box<dyn Future<Output = Result<(), Error>>>>,
+    fut: Pin<Box<dyn Future<Output = Result<(), Error>> + Send>>,
 }
 
 impl ClientRun {
@@ -142,7 +144,7 @@ struct BsreadClient {
     rcvbuf: Option<usize>,
     tmp_vals_pulse_map: Vec<(i64, i32, i64, i32)>,
     scy: Arc<ScySession>,
-    channel_writers: BTreeMap<u64, Box<dyn ChannelWriter>>,
+    channel_writers: BTreeMap<u64, Box<dyn ChannelWriter + Send>>,
     common_queries: Arc<CommonQueries>,
     print_stats: CheckEvery,
     parser: Parser,
@@ -186,12 +188,20 @@ impl BsreadClient {
         let mut rows_inserted = 0u32;
         let mut time_spent_inserting = Duration::from_millis(0);
         let mut series_ids = Vec::new();
+        let mut msg_dt_ema = stats::EMA::with_k(0.01);
+        let mut msg_ts_last = Instant::now();
         while let Some(item) = zmtp.next().await {
+            let tsnow = Instant::now();
             match item {
                 Ok(ev) => match ev {
                     ZmtpEvent::ZmtpCommand(_) => (),
                     ZmtpEvent::ZmtpMessage(msg) => {
                         msgc += 1;
+                        {
+                            let dt = tsnow.duration_since(msg_ts_last);
+                            msg_dt_ema.update(dt.as_secs_f32());
+                            msg_ts_last = tsnow;
+                        }
                         match self.parser.parse_zmtp_message(&msg) {
                             Ok(bm) => {
                                 if msg.frames().len() - 2 * bm.head_b.channels.len() != 2 {
@@ -268,7 +278,11 @@ impl BsreadClient {
                                     // TODO limit log rate
                                     warn!("Bad pulse {}  for {}", pulse, self.source_addr);
                                 }
-                                for i1 in 0..head_b.channels.len() {
+                                for i1 in 0..head_b
+                                    .channels
+                                    .len()
+                                    .min(self.opts.process_channel_count_limit.unwrap_or(4000))
+                                {
                                     let chn = &head_b.channels[i1];
                                     let fr = &msg.frames[2 + 2 * i1];
                                     if i1 >= series_ids.len() {
@@ -323,6 +337,13 @@ impl BsreadClient {
                 rows_inserted = 0;
                 time_spent_inserting = Duration::from_millis(0);
                 bytes_payload = 0;
+                if msg_dt_ema.update_count() > 100 {
+                    let ema = msg_dt_ema.ema();
+                    if ema < 0.005 {
+                        let emv = msg_dt_ema.emv().sqrt();
+                        warn!("MSG FREQ  {}  {:9.5}  {:9.5}", self.source_addr, ema, emv);
+                    }
+                }
             }
         }
         Ok(())
@@ -350,17 +371,20 @@ impl BsreadClient {
             shape.clone(),
             byte_order.clone(),
             trunc,
+            self.opts.skip_insert,
         )?;
         let shape_dims = shape.to_scylla_vec();
         self.channel_writers.insert(series, Box::new(cw));
-        // TODO insert correct facility name
-        self.scy
+        if !self.opts.skip_insert {
+            // TODO insert correct facility name
+            self.scy
             .query(
                 "insert into series_by_channel (facility, channel_name, series, scalar_type, shape_dims) values (?, ?, ?, ?, ?)",
                 ("scylla", &chn.name, series as i64, scalar_type.to_scylla_i32(), &shape_dims),
             )
             .await
             .err_conv()?;
+        }
         Ok(())
     }
 
@@ -498,13 +522,15 @@ pub async fn zmtp_client(opts: ZmtpClientOpts) -> Result<(), Error> {
         qu_insert_array_bool,
     };
     let common_queries = Arc::new(common_queries);
-    let mut clients = vec![];
+    let mut jhs = vec![];
     for source_addr in &opts.sources {
         let client = BsreadClient::new(opts.clone(), source_addr.into(), scy.clone(), common_queries.clone()).await?;
         let fut = ClientRun::new(client);
-        clients.push(fut);
+        //clients.push(fut);
+        let jh = tokio::spawn(fut);
+        jhs.push(jh);
     }
-    futures_util::future::join_all(clients).await;
+    futures_util::future::join_all(jhs).await;
     Ok(())
 }
 
@@ -543,10 +569,13 @@ fn set_rcv_sock_opts(conn: &mut TcpStream, rcvbuf: u32) -> Result<(), Error> {
         if ec != 0 {
             let errno = *libc::__errno_location();
             let es = CStr::from_ptr(libc::strerror(errno));
-            warn!("can not query socket option  ec {ec}  errno {errno}  es {es:?}");
-            error!("can not query socket option");
+            error!("can not query socket option  ec {ec}  errno {errno}  es {es:?}");
         } else {
-            info!("SO_RCVBUF {n}");
+            if (n as u32) < rcvbuf * 5 / 6 {
+                warn!("SO_RCVBUF {n}  smaller than requested {rcvbuf}");
+            } else {
+                info!("SO_RCVBUF {n}");
+            }
         }
     }
     Ok(())
@@ -792,13 +821,23 @@ impl Zmtp {
         (&mut self.conn, self.outbuf.data())
     }
 
-    fn record_input_state(&mut self) {
+    #[allow(unused)]
+    #[inline(always)]
+    fn record_input_state(&mut self) {}
+
+    #[allow(unused)]
+    fn record_input_state_2(&mut self) {
         let st = self.buf.state();
         self.input_state[self.input_state_ix] = InpState::Netbuf(st.0, st.1, self.buf.cap() - st.1);
         self.input_state_ix = (1 + self.input_state_ix) % self.input_state.len();
     }
 
-    fn record_conn_state(&mut self) {
+    #[allow(unused)]
+    #[inline(always)]
+    fn record_conn_state(&mut self) {}
+
+    #[allow(unused)]
+    fn record_conn_state_2(&mut self) {
         self.conn_state_log[self.conn_state_log_ix] = self.conn_state.clone();
         self.conn_state_log_ix = (1 + self.conn_state_log_ix) % self.conn_state_log.len();
     }

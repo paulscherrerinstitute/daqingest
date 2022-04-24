@@ -1,0 +1,11 @@
+[build]
+rustflags = [
+    "-C", "target-cpu=sandybridge",
+    "-C", "force-frame-pointers=yes",
+    "-C", "force-unwind-tables=yes",
+    #"-C", "relocation-model=static",
+    #"-C", "embed-bitcode=no",
+    #"-C", "inline-threshold=1000",
+    #"-Z", "time-passes=yes",
+    #"-Z", "time-llvm-passes=yes",
+]

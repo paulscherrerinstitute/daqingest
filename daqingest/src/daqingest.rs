@@ -36,6 +36,10 @@ pub struct Bsread {
     pub array_truncate: Option<usize>,
     #[clap(long)]
     pub do_pulse_id: bool,
+    #[clap(long)]
+    pub skip_insert: bool,
+    #[clap(long)]
+    pub process_channel_count_limit: Option<usize>,
 }
 
 impl From<Bsread> for ZmtpClientOpts {
@@ -46,6 +50,8 @@ impl From<Bsread> for ZmtpClientOpts {
             rcvbuf: k.rcvbuf,
             array_truncate: k.array_truncate,
             do_pulse_id: k.do_pulse_id,
+            process_channel_count_limit: k.process_channel_count_limit,
+            skip_insert: k.skip_insert,
         }
     }
 }

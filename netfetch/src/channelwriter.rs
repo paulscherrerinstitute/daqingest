@@ -24,13 +24,13 @@ pub struct ScyQueryFut<V> {
     query: Box<PreparedStatement>,
     #[allow(unused)]
     values: Box<V>,
-    fut: Pin<Box<dyn Future<Output = Result<QueryResult, QueryError>>>>,
+    fut: Pin<Box<dyn Future<Output = Result<QueryResult, QueryError>> + Send>>,
 }
 
 impl<V> ScyQueryFut<V> {
     pub fn new(scy: Arc<ScySession>, query: PreparedStatement, values: V) -> Self
     where
-        V: ValueList + 'static,
+        V: ValueList + Sync + 'static,
     {
         let query = Box::new(query);
         let values = Box::new(values);
@@ -139,7 +139,7 @@ pub struct ScyBatchFutGen {
     scy: Arc<ScySession>,
     #[allow(unused)]
     batch: Box<Batch>,
-    fut: Pin<Box<dyn Future<Output = Result<BatchResult, QueryError>>>>,
+    fut: Pin<Box<dyn Future<Output = Result<BatchResult, QueryError>> + Send>>,
     polled: usize,
     ts_create: Instant,
     ts_poll_start: Instant,
@@ -148,7 +148,7 @@ pub struct ScyBatchFutGen {
 impl ScyBatchFutGen {
     pub fn new<V>(scy: Arc<ScySession>, batch: Batch, values: V) -> Self
     where
-        V: BatchValues + 'static,
+        V: BatchValues + Sync + Send + 'static,
     {
         let batch = Box::new(batch);
         let scy_ref = unsafe { &*(&scy as &_ as *const _) } as &ScySession;
@@ -203,7 +203,7 @@ pub struct InsertLoopFut {
     scy: Arc<ScySession>,
     #[allow(unused)]
     query: Arc<PreparedStatement>,
-    futs: Vec<Pin<Box<dyn Future<Output = Result<QueryResult, QueryError>>>>>,
+    futs: Vec<Pin<Box<dyn Future<Output = Result<QueryResult, QueryError>> + Send>>>,
     fut_ix: usize,
     polled: usize,
     ts_create: Instant,
@@ -211,11 +211,14 @@ pub struct InsertLoopFut {
 }
 
 impl InsertLoopFut {
-    pub fn new<V>(scy: Arc<ScySession>, query: PreparedStatement, values: Vec<V>) -> Self
+    pub fn new<V>(scy: Arc<ScySession>, query: PreparedStatement, values: Vec<V>, skip_insert: bool) -> Self
     where
-        V: ValueList + 'static,
+        V: ValueList + Send + 'static,
     {
-        //values.clear();
+        let mut values = values;
+        if skip_insert {
+            values.clear();
+        }
         let query = Arc::new(query);
         let scy_ref = unsafe { &*(&scy as &_ as *const _) } as &ScySession;
         let query_ref = unsafe { &*(&query as &_ as *const _) } as &PreparedStatement;
@@ -225,7 +228,6 @@ impl InsertLoopFut {
         let futs: Vec<_> = values
             .into_iter()
             .map(|vs| {
-                //
                 let fut = scy_ref.execute(query_ref, vs);
                 Box::pin(fut) as _
             })
@@ -301,8 +303,8 @@ pub struct ChannelWriteRes {
 
 pub struct ChannelWriteFut {
     nn: usize,
-    fut1: Option<Pin<Box<dyn Future<Output = Result<(), Error>>>>>,
-    fut2: Option<Pin<Box<dyn Future<Output = Result<(), Error>>>>>,
+    fut1: Option<Pin<Box<dyn Future<Output = Result<(), Error>> + Send>>>,
+    fut2: Option<Pin<Box<dyn Future<Output = Result<(), Error>> + Send>>>,
     ts1: Option<Instant>,
     mask: u8,
 }
@@ -374,6 +376,12 @@ pub trait ChannelWriter {
     fn write_msg(&mut self, ts: u64, pulse: u64, fr: &ZmtpFrame) -> Result<ChannelWriteFut, Error>;
 }
 
+struct MsgAcceptorOptions {
+    cq: Arc<CommonQueries>,
+    skip_insert: bool,
+    array_truncate: usize,
+}
+
 trait MsgAcceptor {
     fn len(&self) -> usize;
     fn accept(&mut self, ts_msp: i64, ts_lsp: i64, pulse: i64, fr: &ZmtpFrame) -> Result<(), Error>;
@@ -388,14 +396,16 @@ macro_rules! impl_msg_acceptor_scalar {
             query: PreparedStatement,
             values: Vec<(i64, i64, i64, i64, $st)>,
             series: i64,
+            opts: MsgAcceptorOptions,
         }
 
         impl $sname {
-            pub fn new(series: i64, cq: &CommonQueries) -> Self {
+            pub fn new(series: i64, opts: MsgAcceptorOptions) -> Self {
                 Self {
-                    query: cq.$qu_id.clone(),
+                    query: opts.cq.$qu_id.clone(),
                     values: vec![],
                     series,
+                    opts,
                 }
             }
         }
@@ -439,7 +449,7 @@ macro_rules! impl_msg_acceptor_scalar {
 
             fn flush_loop(&mut self, scy: Arc<ScySession>) -> Result<InsertLoopFut, Error> {
                 let vt = mem::replace(&mut self.values, vec![]);
-                let ret = InsertLoopFut::new(scy, self.query.clone(), vt);
+                let ret = InsertLoopFut::new(scy, self.query.clone(), vt, self.opts.skip_insert);
                 Ok(ret)
             }
         }
@@ -454,16 +464,18 @@ macro_rules! impl_msg_acceptor_array {
             series: i64,
             array_truncate: usize,
             truncated: usize,
+            opts: MsgAcceptorOptions,
         }
 
         impl $sname {
-            pub fn new(series: i64, array_truncate: usize, cq: &CommonQueries) -> Self {
+            pub fn new(series: i64, opts: MsgAcceptorOptions) -> Self {
                 Self {
-                    query: cq.$qu_id.clone(),
+                    query: opts.cq.$qu_id.clone(),
                     values: vec![],
                     series,
-                    array_truncate,
+                    array_truncate: opts.array_truncate,
                     truncated: 0,
+                    opts,
                 }
             }
         }
@@ -478,10 +490,26 @@ macro_rules! impl_msg_acceptor_array {
                 const STL: usize = std::mem::size_of::<ST>();
                 let vc = fr.data().len() / STL;
                 let mut values = Vec::with_capacity(vc);
-                for i in 0..vc {
-                    let h = i * STL;
-                    let value = ST::$from_bytes(fr.data()[h..h + STL].try_into()?);
-                    values.push(value);
+                if false {
+                    for i in 0..vc {
+                        let h = i * STL;
+                        let value = ST::$from_bytes(fr.data()[h..h + STL].try_into()?);
+                        values.push(value);
+                    }
+                } else {
+                    let mut ptr: *const u8 = fr.data().as_ptr();
+                    let mut ptr2: *mut ST = values.as_mut_ptr();
+                    for _ in 0..vc {
+                        unsafe {
+                            let a: &[u8; STL] = &*(ptr as *const [u8; STL]);
+                            *ptr2 = ST::$from_bytes(*a);
+                        }
+                        ptr = ptr.wrapping_offset(STL as isize);
+                        ptr2 = ptr2.wrapping_offset(1);
+                    }
+                    unsafe {
+                        values.set_len(vc);
+                    }
                 }
                 if values.len() > self.array_truncate {
                     if self.truncated < 10 {
@@ -516,7 +544,7 @@ macro_rules! impl_msg_acceptor_array {
 
             fn flush_loop(&mut self, scy: Arc<ScySession>) -> Result<InsertLoopFut, Error> {
                 let vt = mem::replace(&mut self.values, vec![]);
-                let ret = InsertLoopFut::new(scy, self.query.clone(), vt);
+                let ret = InsertLoopFut::new(scy, self.query.clone(), vt, self.opts.skip_insert);
                 Ok(ret)
             }
         }
@@ -553,16 +581,18 @@ struct MsgAcceptorArrayBool {
     series: i64,
     array_truncate: usize,
     truncated: usize,
+    opts: MsgAcceptorOptions,
 }
 
 impl MsgAcceptorArrayBool {
-    pub fn new(series: i64, array_truncate: usize, cq: &CommonQueries) -> Self {
+    pub fn new(series: i64, opts: MsgAcceptorOptions) -> Self {
         Self {
-            query: cq.qu_insert_array_bool.clone(),
+            query: opts.cq.qu_insert_array_bool.clone(),
             values: vec![],
             series,
-            array_truncate,
+            array_truncate: opts.array_truncate,
             truncated: 0,
+            opts,
         }
     }
 }
@@ -616,7 +646,7 @@ impl MsgAcceptor for MsgAcceptorArrayBool {
 
     fn flush_loop(&mut self, scy: Arc<ScySession>) -> Result<InsertLoopFut, Error> {
         let vt = mem::replace(&mut self.values, vec![]);
-        let ret = InsertLoopFut::new(scy, self.query.clone(), vt);
+        let ret = InsertLoopFut::new(scy, self.query.clone(), vt, self.opts.skip_insert);
         Ok(ret)
     }
 }
@@ -627,12 +657,14 @@ pub struct ChannelWriterAll {
     common_queries: Arc<CommonQueries>,
     ts_msp_lsp: fn(u64, u64) -> (u64, u64),
     ts_msp_last: u64,
-    acceptor: Box<dyn MsgAcceptor>,
+    acceptor: Box<dyn MsgAcceptor + Send>,
     #[allow(unused)]
     scalar_type: ScalarType,
     #[allow(unused)]
     shape: Shape,
     pulse_last: u64,
+    #[allow(unused)]
+    skip_insert: bool,
 }
 
 impl ChannelWriterAll {
@@ -644,66 +676,72 @@ impl ChannelWriterAll {
         shape: Shape,
         byte_order: ByteOrder,
         array_truncate: usize,
+        skip_insert: bool,
     ) -> Result<Self, Error> {
-        let (ts_msp_lsp, acc): (fn(u64, u64) -> (u64, u64), Box<dyn MsgAcceptor>) = match &shape {
+        let opts = MsgAcceptorOptions {
+            cq: common_queries.clone(),
+            skip_insert,
+            array_truncate,
+        };
+        let (ts_msp_lsp, acc): (fn(u64, u64) -> (u64, u64), Box<dyn MsgAcceptor + Send>) = match &shape {
             Shape::Scalar => match &scalar_type {
                 ScalarType::U16 => match &byte_order {
                     ByteOrder::LE => {
-                        let acc = MsgAcceptorScalarU16LE::new(series as i64, &common_queries);
+                        let acc = MsgAcceptorScalarU16LE::new(series as i64, opts);
                         (ts_msp_lsp_1, Box::new(acc) as _)
                     }
                     ByteOrder::BE => {
-                        let acc = MsgAcceptorScalarU16BE::new(series as i64, &common_queries);
+                        let acc = MsgAcceptorScalarU16BE::new(series as i64, opts);
                         (ts_msp_lsp_1, Box::new(acc) as _)
                     }
                 },
                 ScalarType::U32 => match &byte_order {
                     ByteOrder::LE => {
-                        let acc = MsgAcceptorScalarU32LE::new(series as i64, &common_queries);
+                        let acc = MsgAcceptorScalarU32LE::new(series as i64, opts);
                         (ts_msp_lsp_1, Box::new(acc) as _)
                     }
                     ByteOrder::BE => {
-                        let acc = MsgAcceptorScalarU32BE::new(series as i64, &common_queries);
+                        let acc = MsgAcceptorScalarU32BE::new(series as i64, opts);
                         (ts_msp_lsp_1, Box::new(acc) as _)
                     }
                 },
                 ScalarType::I16 => match &byte_order {
                     ByteOrder::LE => {
-                        let acc = MsgAcceptorScalarI16LE::new(series as i64, &common_queries);
+                        let acc = MsgAcceptorScalarI16LE::new(series as i64, opts);
                         (ts_msp_lsp_1, Box::new(acc) as _)
                     }
                     ByteOrder::BE => {
-                        let acc = MsgAcceptorScalarI16BE::new(series as i64, &common_queries);
+                        let acc = MsgAcceptorScalarI16BE::new(series as i64, opts);
                         (ts_msp_lsp_1, Box::new(acc) as _)
                     }
                 },
                 ScalarType::I32 => match &byte_order {
                     ByteOrder::LE => {
-                        let acc = MsgAcceptorScalarI32LE::new(series as i64, &common_queries);
+                        let acc = MsgAcceptorScalarI32LE::new(series as i64, opts);
                         (ts_msp_lsp_1, Box::new(acc) as _)
                     }
                     ByteOrder::BE => {
-                        let acc = MsgAcceptorScalarI32BE::new(series as i64, &common_queries);
+                        let acc = MsgAcceptorScalarI32BE::new(series as i64, opts);
                         (ts_msp_lsp_1, Box::new(acc) as _)
                     }
                 },
                 ScalarType::F32 => match &byte_order {
                     ByteOrder::LE => {
-                        let acc = MsgAcceptorScalarF32LE::new(series as i64, &common_queries);
+                        let acc = MsgAcceptorScalarF32LE::new(series as i64, opts);
                         (ts_msp_lsp_1, Box::new(acc) as _)
                     }
                     ByteOrder::BE => {
-                        let acc = MsgAcceptorScalarF32BE::new(series as i64, &common_queries);
+                        let acc = MsgAcceptorScalarF32BE::new(series as i64, opts);
                         (ts_msp_lsp_1, Box::new(acc) as _)
                     }
                 },
                 ScalarType::F64 => match &byte_order {
                     ByteOrder::LE => {
-                        let acc = MsgAcceptorScalarF64LE::new(series as i64, &common_queries);
+                        let acc = MsgAcceptorScalarF64LE::new(series as i64, opts);
                         (ts_msp_lsp_1, Box::new(acc) as _)
                     }
                     ByteOrder::BE => {
-                        let acc = MsgAcceptorScalarF64BE::new(series as i64, &common_queries);
+                        let acc = MsgAcceptorScalarF64BE::new(series as i64, opts);
                         (ts_msp_lsp_1, Box::new(acc) as _)
                     }
                 },
@@ -719,57 +757,57 @@ impl ChannelWriterAll {
                 match &scalar_type {
                     ScalarType::BOOL => match &byte_order {
                         _ => {
-                            let acc = MsgAcceptorArrayBool::new(series as i64, array_truncate, &common_queries);
+                            let acc = MsgAcceptorArrayBool::new(series as i64, opts);
                             (ts_msp_lsp_2, Box::new(acc) as _)
                         }
                     },
                     ScalarType::U16 => match &byte_order {
                         ByteOrder::LE => {
-                            let acc = MsgAcceptorArrayU16LE::new(series as i64, array_truncate, &common_queries);
+                            let acc = MsgAcceptorArrayU16LE::new(series as i64, opts);
                             (ts_msp_lsp_2, Box::new(acc) as _)
                         }
                         ByteOrder::BE => {
-                            let acc = MsgAcceptorArrayU16BE::new(series as i64, array_truncate, &common_queries);
+                            let acc = MsgAcceptorArrayU16BE::new(series as i64, opts);
                             (ts_msp_lsp_2, Box::new(acc) as _)
                         }
                     },
                     ScalarType::I16 => match &byte_order {
                         ByteOrder::LE => {
-                            let acc = MsgAcceptorArrayI16LE::new(series as i64, array_truncate, &common_queries);
+                            let acc = MsgAcceptorArrayI16LE::new(series as i64, opts);
                             (ts_msp_lsp_2, Box::new(acc) as _)
                         }
                         ByteOrder::BE => {
-                            let acc = MsgAcceptorArrayI16BE::new(series as i64, array_truncate, &common_queries);
+                            let acc = MsgAcceptorArrayI16BE::new(series as i64, opts);
                             (ts_msp_lsp_2, Box::new(acc) as _)
                         }
                     },
                     ScalarType::I32 => match &byte_order {
                         ByteOrder::LE => {
-                            let acc = MsgAcceptorArrayI32LE::new(series as i64, array_truncate, &common_queries);
+                            let acc = MsgAcceptorArrayI32LE::new(series as i64, opts);
                             (ts_msp_lsp_2, Box::new(acc) as _)
                         }
                         ByteOrder::BE => {
-                            let acc = MsgAcceptorArrayI32BE::new(series as i64, array_truncate, &common_queries);
+                            let acc = MsgAcceptorArrayI32BE::new(series as i64, opts);
                             (ts_msp_lsp_2, Box::new(acc) as _)
                         }
                     },
                     ScalarType::F32 => match &byte_order {
                         ByteOrder::LE => {
-                            let acc = MsgAcceptorArrayF32LE::new(series as i64, array_truncate, &common_queries);
+                            let acc = MsgAcceptorArrayF32LE::new(series as i64, opts);
                             (ts_msp_lsp_2, Box::new(acc) as _)
                         }
                         ByteOrder::BE => {
-                            let acc = MsgAcceptorArrayF32BE::new(series as i64, array_truncate, &common_queries);
+                            let acc = MsgAcceptorArrayF32BE::new(series as i64, opts);
                             (ts_msp_lsp_2, Box::new(acc) as _)
                         }
                     },
                     ScalarType::F64 => match &byte_order {
                         ByteOrder::LE => {
-                            let acc = MsgAcceptorArrayF64LE::new(series as i64, array_truncate, &common_queries);
+                            let acc = MsgAcceptorArrayF64LE::new(series as i64, opts);
                             (ts_msp_lsp_2, Box::new(acc) as _)
                         }
                         ByteOrder::BE => {
-                            let acc = MsgAcceptorArrayF64BE::new(series as i64, array_truncate, &common_queries);
+                            let acc = MsgAcceptorArrayF64BE::new(series as i64, opts);
                             (ts_msp_lsp_2, Box::new(acc) as _)
                         }
                     },
@@ -798,6 +836,7 @@ impl ChannelWriterAll {
             scalar_type,
             shape,
             pulse_last: 0,
+            skip_insert,
         };
         Ok(ret)
     }
@@ -814,14 +853,18 @@ impl ChannelWriterAll {
         let fut1 = if ts_msp != self.ts_msp_last {
             debug!("ts_msp changed  ts {ts}  pulse {pulse}  ts_msp {ts_msp}  ts_lsp {ts_lsp}");
             self.ts_msp_last = ts_msp;
-            // TODO make the passing of the query parameters type safe.
-            // TODO the "dtype" table field is not needed here. Drop from database.
-            let fut = ScyQueryFut::new(
-                self.scy.clone(),
-                self.common_queries.qu_insert_ts_msp.clone(),
-                (self.series as i64, ts_msp as i64),
-            );
-            Some(Box::pin(fut) as _)
+            if !self.skip_insert {
+                // TODO make the passing of the query parameters type safe.
+                // TODO the "dtype" table field is not needed here. Drop from database.
+                let fut = ScyQueryFut::new(
+                    self.scy.clone(),
+                    self.common_queries.qu_insert_ts_msp.clone(),
+                    (self.series as i64, ts_msp as i64),
+                );
+                Some(Box::pin(fut) as _)
+            } else {
+                None
+            }
         } else {
             None
         };
