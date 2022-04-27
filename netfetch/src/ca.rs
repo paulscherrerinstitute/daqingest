@@ -228,7 +228,7 @@ impl Stream for CaConn {
                                             Ready(Some(Ok(())))
                                         } else {
                                             info!("Received peer version {n}");
-                                            if false {
+                                            if true {
                                                 let msg = CaMsg {
                                                     ty: CaMsgTy::Search(Search {
                                                         id: 501,
@@ -279,6 +279,12 @@ impl Stream for CaConn {
                                         // TODO create a generic container for the data updates.
                                         Ready(Some(Ok(())))
                                     }
+                                    CaMsgTy::SearchRes(k) => {
+                                        let a = k.addr.to_be_bytes();
+                                        let addr = format!("{}.{}.{}.{}:{}", a[0], a[1], a[2], a[3], k.tcp_port);
+                                        info!("Search result indicates server address: {addr}");
+                                        Ready(Some(Ok(())))
+                                    }
                                     k => {
                                         info!("Got some other unhandled message: {k:?}");
                                         Ready(Some(Ok(())))
@@ -319,6 +325,13 @@ impl CaItem {
 struct Search {
     id: u32,
     channel: String,
+}
+
+#[derive(Debug)]
+struct SearchRes {
+    addr: u32,
+    tcp_port: u16,
+    sid: u32,
 }
 
 #[derive(Debug)]
@@ -415,6 +428,7 @@ enum CaMsgTy {
     ClientNameRes(ClientNameRes),
     HostName,
     Search(Search),
+    SearchRes(SearchRes),
     CreateChan(CreateChan),
     CreateChanRes(CreateChanRes),
     AccessRightsRes(AccessRightsRes),
@@ -433,6 +447,7 @@ impl CaMsgTy {
             ClientNameRes(_) => 20,
             HostName => 21,
             Search(_) => 6,
+            SearchRes(_) => 6,
             CreateChan(_) => 18,
             CreateChanRes(_) => 18,
             AccessRightsRes(_) => 22,
@@ -455,6 +470,7 @@ impl CaMsgTy {
             ClientNameRes(x) => (7 + x.name.len()) / 8 * 8,
             HostName => 8,
             Search(s) => (7 + s.channel.len()) / 8 * 8,
+            SearchRes(_) => 8,
             CreateChan(x) => (7 + x.channel.len()) / 8 * 8,
             CreateChanRes(_) => 0,
             AccessRightsRes(_) => 0,
@@ -482,6 +498,7 @@ impl CaMsgTy {
                 // Reply-flag
                 1
             }
+            SearchRes(x) => x.tcp_port,
             CreateChan(_) => 0,
             CreateChanRes(x) => x.data_type,
             AccessRightsRes(_) => 0,
@@ -500,6 +517,7 @@ impl CaMsgTy {
             ClientNameRes(_) => 0,
             HostName => 0,
             Search(_) => CA_PROTO_VERSION,
+            SearchRes(_) => 0,
             CreateChan(_) => 0,
             CreateChanRes(x) => x.data_count,
             AccessRightsRes(_) => 0,
@@ -518,6 +536,7 @@ impl CaMsgTy {
             ClientNameRes(_) => 0,
             HostName => 0,
             Search(e) => e.id,
+            SearchRes(x) => x.addr,
             CreateChan(x) => x.cid,
             CreateChanRes(x) => x.cid,
             AccessRightsRes(x) => x.cid,
@@ -536,6 +555,7 @@ impl CaMsgTy {
             ClientNameRes(_) => 0,
             HostName => 0,
             Search(e) => e.id,
+            SearchRes(x) => x.sid,
             CreateChan(_) => CA_PROTO_VERSION as _,
             CreateChanRes(x) => x.sid,
             AccessRightsRes(x) => x.rights,
@@ -572,6 +592,10 @@ impl CaMsgTy {
                     panic!();
                 }
                 unsafe { std::ptr::copy(&d[0] as _, &mut buf[0] as _, d.len()) };
+            }
+            SearchRes(_) => {
+                error!("should not attempt to write SearchRes");
+                panic!();
             }
             CreateChan(x) => {
                 for x in &mut buf[..] {
@@ -652,13 +676,23 @@ impl CaMsg {
                     ty: CaMsgTy::ClientNameRes(ClientNameRes { name }),
                 }
             }
+            // TODO make response type for host name:
             21 => CaMsg { ty: CaMsgTy::HostName },
-            6 => CaMsg {
-                ty: CaMsgTy::Search(Search {
-                    id: 88002,
-                    channel: String::new(),
-                }),
-            },
+            6 => {
+                if hi.payload_size != 8 {
+                    warn!("protocol error: search result is expected with fixed payload size 8");
+                }
+                if hi.data_count != 0 {
+                    warn!("protocol error: search result is expected with data count 0");
+                }
+                CaMsg {
+                    ty: CaMsgTy::SearchRes(SearchRes {
+                        tcp_port: hi.data_type,
+                        addr: hi.param1,
+                        sid: hi.param2,
+                    }),
+                }
+            }
             18 => {
                 CaMsg {
                     // TODO use different structs for request and response:
@@ -941,7 +975,7 @@ impl CaProto {
                         param1,
                         param2,
                     };
-                    if hi.cmdid > 26 || hi.data_type > 10 || hi.payload_size > 8 {
+                    if hi.cmdid == 6 || hi.cmdid > 26 || hi.data_type > 10 || hi.payload_size > 8 {
                         warn!("StdHead  {hi:?}");
                     }
                     if payload_size == 0xffff && data_count == 0 {
