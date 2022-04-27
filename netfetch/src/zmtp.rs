@@ -813,8 +813,8 @@ impl Zmtp {
         self.data_tx.clone()
     }
 
-    fn inpbuf_conn(&mut self) -> (&mut TcpStream, ReadBuf) {
-        (&mut self.conn, self.buf.read_buf_for_fill())
+    fn inpbuf_conn(&mut self, need_min: usize) -> (&mut TcpStream, ReadBuf) {
+        (&mut self.conn, self.buf.read_buf_for_fill(need_min))
     }
 
     fn outbuf_conn(&mut self) -> (&mut TcpStream, &[u8]) {
@@ -891,7 +891,6 @@ impl Zmtp {
                     Ok(k) => match self.outbuf.adv(k) {
                         Ok(()) => {
                             trace!("sent {} bytes", k);
-                            self.outbuf.rewind_if_needed();
                             Int::Empty
                         }
                         Err(e) => {
@@ -919,7 +918,8 @@ impl Zmtp {
         let read: Int<Result<(), _>> = if item_count > 0 || self.inp_eof {
             Int::NoWork
         } else {
-            if self.buf.cap() < self.conn_state.need_min() {
+            let need_min = self.conn_state.need_min();
+            if self.buf.cap() < need_min {
                 self.done = true;
                 let e = Error::with_msg_no_trace(format!(
                     "buffer too small for need_min  {}  {}",
@@ -927,9 +927,9 @@ impl Zmtp {
                     self.conn_state.need_min()
                 ));
                 Int::Item(Err(e))
-            } else if self.buf.len() < self.conn_state.need_min() {
+            } else if self.buf.len() < need_min {
                 self.record_input_state();
-                let (w, mut rbuf) = self.inpbuf_conn();
+                let (w, mut rbuf) = self.inpbuf_conn(need_min);
                 pin_mut!(w);
                 match w.poll_read(cx, &mut rbuf) {
                     Ready(k) => match k {

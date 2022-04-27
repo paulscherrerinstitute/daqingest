@@ -4,13 +4,12 @@ use err::Error;
 
 pub fn main() -> Result<(), Error> {
     taskrun::run(async {
-        log::info!("daqingest  version {}", clap::crate_version!());
         if false {
             return Err(Error::with_msg_no_trace(format!("unknown command")));
         } else {
         }
         let opts = DaqIngestOpts::parse();
-        log::info!("opts: {opts:?}");
+        log::info!("daqingest version {}", clap::crate_version!());
         match opts.subcmd {
             SubCmd::Bsread(k) => netfetch::zmtp::zmtp_client(k.into()).await?,
             SubCmd::ListPkey => daqingest::query::list_pkey().await?,
@@ -20,6 +19,7 @@ pub fn main() -> Result<(), Error> {
                 let mut f = netfetch::zmtp::BsreadDumper::new(k.source);
                 f.run().await?
             }
+            SubCmd::ChannelAccess(k) => netfetch::ca::ca_connect_3(k.into()).await?,
         }
         Ok(())
     })

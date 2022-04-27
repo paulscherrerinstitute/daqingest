@@ -1,6 +1,7 @@
 pub mod query;
 
 use clap::Parser;
+use netfetch::ca::CaConnectOpts;
 use netfetch::zmtp::ZmtpClientOpts;
 
 #[derive(Debug, Parser)]
@@ -10,7 +11,7 @@ pub struct DaqIngestOpts {
     #[clap(long, parse(from_occurrences))]
     pub verbose: u32,
     #[clap(long)]
-    pub tag: String,
+    pub tag: Option<String>,
     #[clap(subcommand)]
     pub subcmd: SubCmd,
 }
@@ -22,6 +23,7 @@ pub enum SubCmd {
     ListPulses,
     FetchEvents(FetchEvents),
     BsreadDump(BsreadDump),
+    ChannelAccess(ChannelAccess),
 }
 
 #[derive(Debug, Parser)]
@@ -67,4 +69,21 @@ pub struct FetchEvents {
 #[derive(Debug, Parser)]
 pub struct BsreadDump {
     pub source: String,
+}
+
+#[derive(Debug, Parser)]
+pub struct ChannelAccess {
+    #[clap(long)]
+    pub source: String,
+    #[clap(long)]
+    pub channel_name: String,
+}
+
+impl From<ChannelAccess> for CaConnectOpts {
+    fn from(k: ChannelAccess) -> Self {
+        Self {
+            source: k.source,
+            channel_name: k.channel_name,
+        }
+    }
 }

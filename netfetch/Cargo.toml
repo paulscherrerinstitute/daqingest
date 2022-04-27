@@ -1,6 +1,6 @@
 [package]
 name = "netfetch"
-version = "0.0.1-a.0"
+version = "0.0.2"
 authors = ["Dominik Werder <dominik.werder@gmail.com>"]
 edition = "2021"
 

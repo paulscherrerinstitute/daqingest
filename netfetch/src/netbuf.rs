@@ -31,6 +31,7 @@ impl NetBuf {
         self.wp - self.rp
     }
 
+    #[inline(always)]
     pub fn cap(&self) -> usize {
         check_invariants!(self);
         self.buf.len()
@@ -79,6 +80,32 @@ impl NetBuf {
         }
     }
 
+    pub fn read_u16_be(&mut self) -> Result<u16, Error> {
+        check_invariants!(self);
+        type T = u16;
+        const TS: usize = std::mem::size_of::<T>();
+        if self.len() < TS {
+            return Err(Error::with_msg_no_trace("not enough bytes"));
+        } else {
+            let val = T::from_be_bytes(self.buf[self.rp..self.rp + TS].try_into()?);
+            self.rp += TS;
+            Ok(val)
+        }
+    }
+
+    pub fn read_u32_be(&mut self) -> Result<u32, Error> {
+        check_invariants!(self);
+        type T = u32;
+        const TS: usize = std::mem::size_of::<T>();
+        if self.len() < TS {
+            return Err(Error::with_msg_no_trace("not enough bytes"));
+        } else {
+            let val = T::from_be_bytes(self.buf[self.rp..self.rp + TS].try_into()?);
+            self.rp += TS;
+            Ok(val)
+        }
+    }
+
     pub fn read_u64(&mut self) -> Result<u64, Error> {
         check_invariants!(self);
         type T = u64;
@@ -103,19 +130,32 @@ impl NetBuf {
         }
     }
 
-    pub fn read_buf_for_fill(&mut self) -> ReadBuf {
+    pub fn read_buf_for_fill(&mut self, need_min: usize) -> ReadBuf {
         check_invariants!(self);
-        self.rewind_if_needed();
+        self.rewind_if_needed(need_min);
         let read_buf = ReadBuf::new(&mut self.buf[self.wp..]);
         read_buf
     }
 
-    pub fn rewind_if_needed(&mut self) {
+    pub fn write_buf(&mut self, n: usize) -> Result<&mut [u8], Error> {
+        check_invariants!(self);
+        self.rewind_if_needed(n);
+        if self.wcap() < n {
+            Err(Error::with_msg_no_trace("write_buf not enough space"))
+        } else {
+            let ret = &mut self.buf[self.wp..self.wp + n];
+            self.wp += n;
+            Ok(ret)
+        }
+    }
+
+    #[inline(always)]
+    pub fn rewind_if_needed(&mut self, need_min: usize) {
         check_invariants!(self);
         if self.rp != 0 && self.rp == self.wp {
             self.rp = 0;
             self.wp = 0;
-        } else if self.rp > self.cap() / 2 {
+        } else if self.cap() - self.rp < need_min {
             self.buf.copy_within(self.rp..self.wp, 0);
             self.wp -= self.rp;
             self.rp = 0;
@@ -124,7 +164,7 @@ impl NetBuf {
 
     pub fn put_slice(&mut self, buf: &[u8]) -> Result<(), Error> {
         check_invariants!(self);
-        self.rewind_if_needed();
+        self.rewind_if_needed(buf.len());
         if self.wcap() < buf.len() {
             return Err(Error::with_msg_no_trace("not enough space"));
         } else {
@@ -138,7 +178,7 @@ impl NetBuf {
         check_invariants!(self);
         type T = u8;
         const TS: usize = std::mem::size_of::<T>();
-        self.rewind_if_needed();
+        self.rewind_if_needed(TS);
         if self.wcap() < TS {
             return Err(Error::with_msg_no_trace("not enough space"));
         } else {
@@ -152,7 +192,7 @@ impl NetBuf {
         check_invariants!(self);
         type T = u64;
         const TS: usize = std::mem::size_of::<T>();
-        self.rewind_if_needed();
+        self.rewind_if_needed(TS);
         if self.wcap() < TS {
             return Err(Error::with_msg_no_trace("not enough space"));
         } else {
