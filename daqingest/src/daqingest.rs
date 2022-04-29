@@ -76,14 +76,14 @@ pub struct ChannelAccess {
     #[clap(long)]
     pub source: String,
     #[clap(long)]
-    pub channel_name: String,
+    pub channel: Vec<String>,
 }
 
 impl From<ChannelAccess> for CaConnectOpts {
     fn from(k: ChannelAccess) -> Self {
         Self {
             source: k.source,
-            channel_name: k.channel_name,
+            channels: k.channel,
         }
     }
 }
