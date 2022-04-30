@@ -1,6 +1,8 @@
 pub mod conn;
 pub mod proto;
 
+use crate::ca::conn::FindIoc;
+
 use self::conn::CaConn;
 use err::Error;
 use futures_util::StreamExt;
@@ -14,6 +16,8 @@ pub struct CaConnectOpts {
 
 pub async fn ca_connect_3(opts: CaConnectOpts) -> Result<(), Error> {
     debug!("ca_connect_3");
+    let addr = FindIoc::new(opts.channels[0].clone()).await?;
+    info!("Found IOC address: {addr:?}");
     let tcp = TcpStream::connect(&opts.source).await?;
     let mut conn = CaConn::new(tcp);
     for c in opts.channels {
@@ -22,7 +26,7 @@ pub async fn ca_connect_3(opts: CaConnectOpts) -> Result<(), Error> {
     while let Some(item) = conn.next().await {
         match item {
             Ok(k) => {
-                info!("CaConn gives item: {k:?}");
+                trace!("CaConn gives item: {k:?}");
             }
             Err(e) => {
                 error!("CaConn gives error: {e:?}");

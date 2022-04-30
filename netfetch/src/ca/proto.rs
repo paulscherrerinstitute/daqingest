@@ -354,7 +354,7 @@ impl CaMsg {
         }
     }
 
-    fn from_proto_infos(hi: &HeadInfo, payload: &[u8]) -> Result<Self, Error> {
+    pub fn from_proto_infos(hi: &HeadInfo, payload: &[u8]) -> Result<Self, Error> {
         let msg = match hi.cmdid {
             0 => CaMsg {
                 ty: CaMsgTy::VersionRes(hi.data_count),
@@ -470,13 +470,37 @@ impl CaItem {
 }
 
 #[derive(Clone, Debug)]
-struct HeadInfo {
+pub struct HeadInfo {
     cmdid: u16,
     payload_size: u16,
     data_type: u16,
     data_count: u16,
     param1: u32,
     param2: u32,
+}
+
+impl HeadInfo {
+    pub fn from_netbuf(buf: &mut NetBuf) -> Result<Self, Error> {
+        let command = buf.read_u16_be()?;
+        let payload_size = buf.read_u16_be()?;
+        let data_type = buf.read_u16_be()?;
+        let data_count = buf.read_u16_be()?;
+        let param1 = buf.read_u32_be()?;
+        let param2 = buf.read_u32_be()?;
+        let hi = HeadInfo {
+            cmdid: command,
+            payload_size,
+            data_type,
+            data_count,
+            param1,
+            param2,
+        };
+        Ok(hi)
+    }
+
+    pub fn payload(&self) -> usize {
+        self.payload_size as _
+    }
 }
 
 enum CaState {
@@ -668,28 +692,15 @@ impl CaProto {
             }
             break match &self.state {
                 CaState::StdHead => {
-                    let command = self.buf.read_u16_be()?;
-                    let payload_size = self.buf.read_u16_be()?;
-                    let data_type = self.buf.read_u16_be()?;
-                    let data_count = self.buf.read_u16_be()?;
-                    let param1 = self.buf.read_u32_be()?;
-                    let param2 = self.buf.read_u32_be()?;
-                    let hi = HeadInfo {
-                        cmdid: command,
-                        payload_size,
-                        data_type,
-                        data_count,
-                        param1,
-                        param2,
-                    };
+                    let hi = HeadInfo::from_netbuf(&mut self.buf)?;
                     if hi.cmdid == 6 || hi.cmdid > 26 || hi.data_type > 10 || hi.payload_size > 8 {
                         warn!("StdHead  {hi:?}");
                     }
-                    if payload_size == 0xffff && data_count == 0 {
+                    if hi.payload_size == 0xffff && hi.data_count == 0 {
                         self.state = CaState::ExtHead(hi);
                         Ok(None)
                     } else {
-                        if payload_size == 0 {
+                        if hi.payload_size == 0 {
                             self.state = CaState::StdHead;
                             let msg = CaMsg::from_proto_infos(&hi, &[])?;
                             Ok(Some(CaItem::Msg(msg)))
