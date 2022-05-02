@@ -23,6 +23,7 @@ pub enum SubCmd {
     ListPulses,
     FetchEvents(FetchEvents),
     BsreadDump(BsreadDump),
+    #[clap(subcommand)]
     ChannelAccess(ChannelAccess),
 }
 
@@ -72,18 +73,25 @@ pub struct BsreadDump {
 }
 
 #[derive(Debug, Parser)]
-pub struct ChannelAccess {
-    #[clap(long)]
-    pub source: String,
+pub enum ChannelAccess {
+    CaChannel(CaChannel),
+    CaConfig(CaConfig),
+}
+
+#[derive(Debug, Parser)]
+pub struct CaChannel {
     #[clap(long)]
     pub channel: Vec<String>,
 }
 
-impl From<ChannelAccess> for CaConnectOpts {
-    fn from(k: ChannelAccess) -> Self {
-        Self {
-            source: k.source,
-            channels: k.channel,
-        }
+impl From<CaChannel> for CaConnectOpts {
+    fn from(k: CaChannel) -> Self {
+        Self { channels: k.channel }
     }
+}
+
+#[derive(Debug, Parser)]
+pub struct CaConfig {
+    #[clap(long)]
+    pub config: String,
 }

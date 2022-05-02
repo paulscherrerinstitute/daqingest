@@ -1,5 +1,5 @@
 use clap::Parser;
-use daqingest::{DaqIngestOpts, SubCmd};
+use daqingest::{ChannelAccess, DaqIngestOpts, SubCmd};
 use err::Error;
 
 pub fn main() -> Result<(), Error> {
@@ -19,7 +19,10 @@ pub fn main() -> Result<(), Error> {
                 let mut f = netfetch::zmtp::BsreadDumper::new(k.source);
                 f.run().await?
             }
-            SubCmd::ChannelAccess(k) => netfetch::ca::ca_connect_3(k.into()).await?,
+            SubCmd::ChannelAccess(k) => match k {
+                ChannelAccess::CaChannel(k) => netfetch::ca::ca_connect(k.into()).await?,
+                ChannelAccess::CaConfig(k) => netfetch::ca::ca_listen_from_file(k.config).await?,
+            },
         }
         Ok(())
     })

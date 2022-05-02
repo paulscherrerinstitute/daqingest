@@ -20,7 +20,8 @@ pub struct Search {
 pub struct SearchRes {
     pub addr: u32,
     pub tcp_port: u16,
-    pub sid: u32,
+    pub id: u32,
+    pub proto_version: u16,
 }
 
 #[derive(Debug)]
@@ -87,6 +88,8 @@ enum CaScalarType {
     I32,
     F32,
     F64,
+    Enum,
+    String,
 }
 
 impl CaScalarType {
@@ -98,6 +101,8 @@ impl CaScalarType {
             5 => I32,
             2 => F32,
             6 => F64,
+            3 => Enum,
+            0 => String,
             k => return Err(Error::with_msg_no_trace(format!("bad dbr type id: {k}"))),
         };
         Ok(ret)
@@ -153,11 +158,11 @@ impl CaMsgTy {
             Version => 0,
             VersionRes(_) => 0,
             ClientName => 8,
-            ClientNameRes(x) => (7 + x.name.len()) / 8 * 8,
+            ClientNameRes(x) => (x.name.len() + 1 + 7) / 8 * 8,
             HostName => 8,
-            Search(s) => (7 + s.channel.len()) / 8 * 8,
+            Search(x) => (x.channel.len() + 1 + 7) / 8 * 8,
             SearchRes(_) => 8,
-            CreateChan(x) => (7 + x.channel.len()) / 8 * 8,
+            CreateChan(x) => (x.channel.len() + 1 + 7) / 8 * 8,
             CreateChanRes(_) => 0,
             AccessRightsRes(_) => 0,
             EventAdd(_) => 16,
@@ -245,7 +250,7 @@ impl CaMsgTy {
             ClientNameRes(_) => 0,
             HostName => 0,
             Search(e) => e.id,
-            SearchRes(x) => x.sid,
+            SearchRes(x) => x.id,
             CreateChan(_) => CA_PROTO_VERSION as _,
             CreateChanRes(x) => x.sid,
             AccessRightsRes(x) => x.rights,
@@ -279,7 +284,7 @@ impl CaMsgTy {
                 }
                 let d = e.channel.as_bytes();
                 if buf.len() < d.len() + 1 {
-                    error!("bad buffer given");
+                    error!("bad buffer given for search payload {} vs {}", buf.len(), d.len());
                     panic!();
                 }
                 unsafe { std::ptr::copy(&d[0] as _, &mut buf[0] as _, d.len()) };
@@ -294,7 +299,7 @@ impl CaMsgTy {
                 }
                 let d = x.channel.as_bytes();
                 if buf.len() < d.len() + 1 {
-                    error!("bad buffer given");
+                    error!("bad buffer given for create chan payload {} vs {}", buf.len(), d.len());
                     panic!();
                 }
                 unsafe { std::ptr::copy(&d[0] as _, &mut buf[0] as _, d.len()) };
@@ -376,11 +381,16 @@ impl CaMsg {
                 if hi.data_count != 0 {
                     warn!("protocol error: search result is expected with data count 0");
                 }
+                if payload.len() < 2 {
+                    return Err(Error::with_msg_no_trace("server did not include protocol version"));
+                }
+                let proto_version = u16::from_be_bytes(payload[0..2].try_into()?);
                 CaMsg {
                     ty: CaMsgTy::SearchRes(SearchRes {
                         tcp_port: hi.data_type,
                         addr: hi.param1,
-                        sid: hi.param2,
+                        id: hi.param2,
+                        proto_version,
                     }),
                 }
             }
@@ -408,9 +418,36 @@ impl CaMsg {
                 let ca_st = CaScalarType::from_ca_u16(hi.data_type)?;
                 match ca_st {
                     CaScalarType::F64 => {
-                        // TODO handle wrong payload sizer in more distinct way.
+                        if payload.len() < 2 {
+                            return Err(Error::with_msg_no_trace(format!(
+                                "not enough payload for enum {}",
+                                payload.len()
+                            )));
+                        }
                         let v = f64::from_be_bytes(payload.try_into()?);
-                        info!("Payload as f64: {v}");
+                        info!("f64: {v}");
+                    }
+                    CaScalarType::Enum => {
+                        if payload.len() < 2 {
+                            return Err(Error::with_msg_no_trace(format!(
+                                "not enough payload for enum {}",
+                                payload.len()
+                            )));
+                        }
+                        let v = u16::from_be_bytes(payload[..2].try_into()?);
+                        info!("enum payload: {v}");
+                    }
+                    CaScalarType::String => {
+                        let mut ixn = payload.len();
+                        for (i, &c) in payload.iter().enumerate() {
+                            if c == 0 {
+                                ixn = i;
+                                break;
+                            }
+                        }
+                        info!("try to read string from payload len {} ixn {}", payload.len(), ixn);
+                        let v = String::from_utf8_lossy(&payload[..ixn]);
+                        info!("String payload: {v}");
                     }
                     _ => {
                         warn!("TODO handle {ca_st:?}");

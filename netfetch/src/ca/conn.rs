@@ -9,7 +9,8 @@ use std::net::Ipv4Addr;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
-use tokio::net::{TcpStream, UdpSocket};
+use tokio::io::unix::AsyncFd;
+use tokio::net::TcpStream;
 
 #[derive(Debug)]
 enum ChannelError {
@@ -325,17 +326,39 @@ impl Stream for CaConn {
 
 enum FindIocState {
     Init,
-    WaitWritable(Pin<Box<dyn Future<Output = Result<(), std::io::Error>> + Send>>),
-    WaitReadable(Pin<Box<dyn Future<Output = Result<(), std::io::Error>> + Send>>),
+    WaitWritable,
+    WaitReadable,
+}
+
+struct SockBox(c_int);
+
+impl Drop for SockBox {
+    fn drop(self: &mut Self) {
+        if self.0 != -1 {
+            unsafe {
+                libc::close(self.0);
+                self.0 = -1;
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Tcp4Addr {
+    pub addr: Ipv4Addr,
+    pub port: u16,
 }
 
 pub struct FindIoc {
     state: FindIocState,
     channel: String,
-    sock: Option<UdpSocket>,
+    search_id: u32,
+    sock: SockBox,
+    afd: Option<AsyncFd<i32>>,
     addr: libc::sockaddr_in,
     addr_len: usize,
     deadline: Pin<Box<tokio::time::Sleep>>,
+    result: Option<Tcp4Addr>,
 }
 
 // Do low-level approach first to make sure it works as specified.
@@ -345,24 +368,26 @@ impl FindIoc {
         Self {
             state: FindIocState::Init,
             channel,
-            sock: None,
+            search_id: 0x12345678,
+            sock: SockBox(-1),
+            afd: None,
             addr: addr,
             addr_len: 0,
-            deadline: Box::pin(tokio::time::sleep(Duration::from_millis(3000))),
+            deadline: Box::pin(tokio::time::sleep(Duration::from_millis(200))),
+            result: None,
         }
     }
 
     unsafe fn create_socket(&mut self) -> Result<(), Error> {
-        // TODO remember to clean up socket on failure.
         let ec = libc::socket(libc::AF_INET, libc::SOCK_DGRAM, 0);
         if ec == -1 {
             return Err("can not create socket".into());
         }
-        let sock = ec;
+        let sock = SockBox(ec);
         {
             let opt: libc::c_int = 1;
             let ec = libc::setsockopt(
-                sock,
+                sock.0,
                 libc::SOL_SOCKET,
                 libc::SO_BROADCAST,
                 &opt as *const _ as _,
@@ -373,16 +398,16 @@ impl FindIoc {
             }
         }
         {
-            let ec = libc::fcntl(sock, libc::F_SETFL, libc::O_NONBLOCK);
+            let ec = libc::fcntl(sock.0, libc::F_SETFL, libc::O_NONBLOCK);
             if ec == -1 {
                 return Err("can not set nonblock".into());
             }
         }
-        let ip: [u8; 4] = [172, 26, 120, 71];
+        //let ip: [u8; 4] = [172, 26, 120, 71];
+        let ip: [u8; 4] = [0, 0, 0, 0];
         let addr = libc::sockaddr_in {
             sin_family: libc::AF_INET as u16,
-            sin_port: u16::from_ne_bytes((13882 as u16).to_be_bytes()),
-            // 172.26.120.71
+            sin_port: 0,
             sin_addr: libc::in_addr {
                 s_addr: u32::from_ne_bytes(ip),
             },
@@ -391,26 +416,36 @@ impl FindIoc {
         let addr_len = std::mem::size_of::<libc::sockaddr_in>();
         self.addr = addr.clone();
         self.addr_len = addr_len;
-        let ec = libc::bind(sock, &addr as *const _ as _, addr_len as _);
+        let ec = libc::bind(sock.0, &addr as *const _ as _, addr_len as _);
         if ec == -1 {
             return Err("can not bind socket".into());
         }
-        let sock = <std::net::UdpSocket as std::os::unix::prelude::FromRawFd>::from_raw_fd(sock);
-        let sock = match UdpSocket::from_std(sock) {
-            Ok(k) => k,
-            Err(e) => {
-                error!("can not convert raw socket to tokio socket");
+        {
+            let mut addr = libc::sockaddr_in {
+                sin_family: libc::AF_INET as u16,
+                sin_port: 0,
+                sin_addr: libc::in_addr { s_addr: 0 },
+                sin_zero: [0; 8],
+            };
+            let mut addr_len = std::mem::size_of::<libc::sockaddr_in>();
+            let ec = libc::getsockname(sock.0, &mut addr as *mut _ as _, &mut addr_len as *mut _ as _);
+            if ec == -1 {
+                error!("getsockname {ec}");
                 return Err("can not convert raw socket to tokio socket".into());
+            } else {
+                if false {
+                    let ipv4 = Ipv4Addr::from(addr.sin_addr.s_addr.to_ne_bytes());
+                    let tcp_port = u16::from_be(addr.sin_port);
+                    info!("bound local socket to {:?} port {}", ipv4, tcp_port);
+                }
             }
-        };
-        self.sock = Some(sock);
-        info!("Ok created socket");
+        }
+        self.sock = sock;
         Ok(())
     }
 
-    unsafe fn try_write(&mut self) -> Result<Poll<()>, Error> {
-        use std::os::unix::prelude::AsRawFd;
-        let sock = self.sock.as_ref().unwrap().as_raw_fd();
+    unsafe fn try_write(&mut self) -> Result<(), Error> {
+        let sock = self.sock.0;
         let ip: [u8; 4] = [172, 26, 120, 255];
         let addr = libc::sockaddr_in {
             sin_family: libc::AF_INET as u16,
@@ -432,26 +467,22 @@ impl FindIoc {
             0, 6, 0, 0, //
             0, 0, 0, 13, //
             0, 0, 0, 0, //
-            11, 12, 11, 12,
+            0, 0, 0, 0,
             //
             //
         ];
         let chb = self.channel.as_bytes();
         let npadded = (chb.len() + 1 + 7) / 8 * 8;
         let npad = npadded - self.channel.len();
-        info!(
-            "string len {}  chb len {}  npadded {}  npad {}",
-            self.channel.len(),
-            chb.len(),
-            npadded,
-            npad
-        );
         buf.extend_from_slice(chb);
         buf.extend_from_slice(&vec![0u8; npad]);
         let npl = (npadded as u16).to_be_bytes();
         buf[16 + 2] = npl[0];
         buf[16 + 3] = npl[1];
-        info!("Sending {} bytes", buf.len());
+        let a = self.search_id.to_be_bytes();
+        for (x, y) in buf[16 + 12..16 + 16].iter_mut().zip(a.into_iter()) {
+            *x = y;
+        }
         let ec = libc::sendto(
             sock,
             &buf[0] as *const _ as _,
@@ -463,19 +494,17 @@ impl FindIoc {
         if ec == -1 {
             let errno = *libc::__errno_location();
             if errno == libc::EAGAIN {
-                info!("NOT YET READY FOR SENDING...");
-                return Ok(Poll::Pending);
+                error!("NOT YET READY FOR SENDING...");
+                return Err("socket not ready for write".into());
             } else {
                 return Err("can not send".into());
             }
         }
-        Ok(Poll::Ready(()))
+        Ok(())
     }
 
-    unsafe fn try_read(&mut self) -> Result<Poll<()>, Error> {
-        info!("Receiving...");
-        use std::os::unix::prelude::AsRawFd;
-        let sock = self.sock.as_ref().unwrap().as_raw_fd();
+    unsafe fn try_read(&mut self) -> Result<(), Error> {
+        let sock = self.sock.0;
         let mut saddr_mem = [0u8; std::mem::size_of::<libc::sockaddr>()];
         let mut saddr_len: libc::socklen_t = saddr_mem.len() as _;
         let mut buf = vec![0u8; 1024];
@@ -490,14 +519,16 @@ impl FindIoc {
         if ec == -1 {
             let errno = *libc::__errno_location();
             if errno == libc::EAGAIN {
-                info!("try_read BUT NOT YET READY FOR READING...");
-                return Ok(Poll::Pending);
+                error!("try_read BUT NOT YET READY FOR READING...");
+                return Err("socket not ready for read".into());
             } else {
                 return Err("can not read".into());
             }
-        }
-        info!("received ec {ec}");
-        if ec > 0 {
+        } else if ec < 0 {
+            error!("unexpected received {ec}");
+        } else if ec == 0 {
+            error!("received zero bytes");
+        } else {
             let saddr2: libc::sockaddr_in = std::mem::transmute_copy(&saddr_mem);
             let src_addr = Ipv4Addr::from(saddr2.sin_addr.s_addr.to_ne_bytes());
             let src_port = u16::from_be(saddr2.sin_port);
@@ -507,18 +538,14 @@ impl FindIoc {
                 for i in 0..(ec as usize) {
                     s1.extend(format!(" {:02x}", buf[i]).chars());
                 }
-                info!("received answer {s1}");
-                info!(
+                debug!("received answer {s1}");
+                debug!(
                     "received answer string {}",
                     String::from_utf8_lossy(buf[..ec as usize].into())
                 );
             }
-            // TODO handle that the remote should send its protocol version in the payload.
             // TODO handle if we get a too large answer.
-            // TODO
-            // Parse the contents of the received datagram...
-            // Reuse the existing logic for that.
-            let mut nb = crate::netbuf::NetBuf::new(1024);
+            let mut nb = crate::netbuf::NetBuf::new(2048);
             nb.put_slice(&buf[..ec as usize])?;
             let mut msgs = vec![];
             loop {
@@ -539,14 +566,33 @@ impl FindIoc {
                 nb.adv(hi.payload())?;
                 msgs.push(msg);
             }
-            info!("got {} messages", msgs.len());
-            for msg in &msgs {
+            info!("received {} msgs", msgs.len());
+            for (msg_ix, msg) in msgs.iter().enumerate() {
                 match &msg.ty {
                     CaMsgTy::SearchRes(k) => {
-                        // TODO make sure that search identifier is correct.
-                        let addr = Ipv4Addr::from(k.addr.to_be_bytes());
-                        info!("ADDRESS: {addr:?}");
-                        info!("PORT:    {}", k.tcp_port);
+                        if k.id != self.search_id {
+                            warn!("id mismatch  {} vs {}", k.id, self.search_id);
+                        }
+                        if false {
+                            let addr = Ipv4Addr::from(k.addr.to_be_bytes());
+                            info!("Converted address: {addr:?}");
+                        }
+                        info!(
+                            "Received: {}/{}  {:?}  {:?}  {}",
+                            msg_ix,
+                            msgs.len(),
+                            self.channel,
+                            src_addr,
+                            k.tcp_port
+                        );
+                        if self.result.is_none() {
+                            self.result = Some(Tcp4Addr {
+                                addr: src_addr,
+                                port: k.tcp_port,
+                            });
+                        } else {
+                            warn!("Result already populated for {}", self.channel);
+                        }
                     }
                     _ => {
                         info!("{msg:?}");
@@ -554,23 +600,32 @@ impl FindIoc {
                 }
             }
         }
-        Ok(Poll::Ready(()))
+        Ok(())
     }
 }
 
 impl Future for FindIoc {
-    type Output = Result<Ipv4Addr, Error>;
+    type Output = Result<Tcp4Addr, Error>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
         use Poll::*;
         loop {
+            match self.deadline.poll_unpin(cx) {
+                Ready(()) => {
+                    break Ready(
+                        self.result
+                            .clone()
+                            .ok_or_else(|| Error::with_msg_no_trace(format!("can not find host for {}", self.channel))),
+                    );
+                }
+                Pending => {}
+            }
             break match &mut self.state {
                 FindIocState::Init => match unsafe { Self::create_socket(&mut self) } {
                     Ok(()) => {
-                        let tmp1 = self.sock.as_mut().unwrap();
-                        let tmp2 = unsafe { &mut *(tmp1 as *mut UdpSocket) };
-                        let fut = tmp2.writable();
-                        self.state = FindIocState::WaitWritable(Box::pin(fut));
+                        let afd = tokio::io::unix::AsyncFd::new(self.sock.0).expect("can not create AsyncFd");
+                        self.afd = Some(afd);
+                        self.state = FindIocState::WaitWritable;
                         continue;
                     }
                     Err(e) => {
@@ -578,40 +633,35 @@ impl Future for FindIoc {
                         Ready(Err(e))
                     }
                 },
-                FindIocState::WaitWritable(ref mut fut) => match fut.poll_unpin(cx) {
-                    Ready(Ok(())) => match unsafe { Self::try_write(&mut self) } {
-                        Ok(Ready(())) => {
-                            info!("Writing done...");
-                            let tmp1 = self.sock.as_mut().unwrap();
-                            let tmp2 = unsafe { &mut *(tmp1 as *mut UdpSocket) };
-                            let fut = tmp2.readable();
-                            self.state = FindIocState::WaitReadable(Box::pin(fut));
-                            continue;
+                FindIocState::WaitWritable => match self.afd.as_mut().unwrap().poll_write_ready(cx) {
+                    Ready(Ok(ref mut g)) => {
+                        g.clear_ready();
+                        match unsafe { Self::try_write(&mut self) } {
+                            Ok(()) => {
+                                self.state = FindIocState::WaitReadable;
+                                continue;
+                            }
+                            Err(e) => Ready(Err(e)),
                         }
-                        Ok(Pending) => Pending,
-                        Err(e) => Ready(Err(e)),
-                    },
+                    }
                     Ready(Err(e)) => Ready(Err(e.into())),
                     Pending => Pending,
                 },
-                FindIocState::WaitReadable(ref mut fut) => match fut.poll_unpin(cx) {
-                    Ready(Ok(())) => match unsafe { Self::try_read(&mut self) } {
-                        Ok(Ready(())) => {
-                            info!("Reading done...");
-                            let addr = Ipv4Addr::new(127, 0, 0, 10);
-                            Ready(Ok(addr))
+                FindIocState::WaitReadable => match self.afd.as_mut().unwrap().poll_read_ready(cx) {
+                    Ready(Ok(ref mut g)) => {
+                        g.clear_ready();
+                        match unsafe { Self::try_read(&mut self) } {
+                            Ok(()) => {
+                                continue;
+                            }
+                            Err(e) => Ready(Err(e)),
                         }
-                        Ok(Pending) => Pending,
-                        Err(e) => Ready(Err(e)),
-                    },
-                    Ready(Err(e)) => Ready(Err(e.into())),
-                    Pending => match self.deadline.poll_unpin(cx) {
-                        Ready(()) => {
-                            info!("FindIoc deadline reached");
-                            Ready(Ok(Ipv4Addr::new(127, 0, 0, 10)))
-                        }
-                        Pending => Pending,
-                    },
+                    }
+                    Ready(Err(e)) => {
+                        error!("WaitReadable Err");
+                        Ready(Err(e.into()))
+                    }
+                    Pending => Pending,
                 },
             };
         }
