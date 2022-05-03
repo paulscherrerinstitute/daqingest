@@ -20,8 +20,9 @@ pub fn main() -> Result<(), Error> {
                 f.run().await?
             }
             SubCmd::ChannelAccess(k) => match k {
-                ChannelAccess::CaChannel(k) => netfetch::ca::ca_connect(k.into()).await?,
-                ChannelAccess::CaConfig(k) => netfetch::ca::ca_listen_from_file(k.config).await?,
+                ChannelAccess::CaChannel(_) => todo!(),
+                ChannelAccess::CaSearch(k) => netfetch::ca::ca_search(k.into()).await?,
+                ChannelAccess::CaConfig(k) => netfetch::ca::ca_connect(k.into()).await?,
             },
         }
         Ok(())

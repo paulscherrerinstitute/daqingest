@@ -445,7 +445,7 @@ impl CaMsg {
                                 break;
                             }
                         }
-                        info!("try to read string from payload len {} ixn {}", payload.len(), ixn);
+                        //info!("try to read string from payload len {} ixn {}", payload.len(), ixn);
                         let v = String::from_utf8_lossy(&payload[..ixn]);
                         info!("String payload: {v}");
                     }
@@ -730,7 +730,7 @@ impl CaProto {
             break match &self.state {
                 CaState::StdHead => {
                     let hi = HeadInfo::from_netbuf(&mut self.buf)?;
-                    if hi.cmdid == 6 || hi.cmdid > 26 || hi.data_type > 10 || hi.payload_size > 8 {
+                    if hi.cmdid == 6 || hi.cmdid > 26 || hi.data_type > 10 || hi.payload_size > 40 {
                         warn!("StdHead  {hi:?}");
                     }
                     if hi.payload_size == 0xffff && hi.data_count == 0 {
