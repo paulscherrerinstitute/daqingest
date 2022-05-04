@@ -2,7 +2,7 @@ use crate::zmtp::ZmtpMessage;
 use err::Error;
 #[allow(unused)]
 use log::*;
-use netpod::{ByteOrder, ScalarType, Shape};
+use netpod::{AggKind, ByteOrder, ScalarType, Shape};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsVal;
 
@@ -40,6 +40,54 @@ fn bsread_shape_default() -> JsVal {
 
 fn bsread_encoding_default() -> String {
     "little".into()
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum CompressionKind {
+    Lz4,
+    BitshuffleLz4,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ChannelDescDecoded {
+    pub name: String,
+    pub scalar_type: ScalarType,
+    pub shape: Shape,
+    pub byte_order: ByteOrder,
+    pub compression: Option<CompressionKind>,
+    pub agg_kind: AggKind,
+}
+
+impl TryFrom<&ChannelDesc> for ChannelDescDecoded {
+    type Error = Error;
+
+    fn try_from(cd: &ChannelDesc) -> Result<Self, Self::Error> {
+        let ret = ChannelDescDecoded {
+            name: cd.name.clone(),
+            scalar_type: ScalarType::from_bsread_str(&cd.ty)?,
+            shape: Shape::from_bsread_jsval(&cd.shape)?,
+            compression: match &cd.compression {
+                None => None,
+                Some(k) => match k.as_str() {
+                    "none" => None,
+                    "lz4" => Some(CompressionKind::Lz4),
+                    "bitshuffle_lz4" => Some(CompressionKind::BitshuffleLz4),
+                    _ => {
+                        return Err(Error::with_msg_no_trace(format!(
+                            "can not understand bsread compression kind: {k:?}"
+                        )))
+                    }
+                },
+            },
+            byte_order: match cd.encoding.as_str() {
+                "little" => ByteOrder::LE,
+                "big" => ByteOrder::BE,
+                _ => ByteOrder::LE,
+            },
+            agg_kind: AggKind::Plain,
+        };
+        Ok(ret)
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

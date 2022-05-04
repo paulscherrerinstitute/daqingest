@@ -1,15 +1,22 @@
 use super::proto::{CaItem, CaMsg, CaMsgTy, CaProto};
+use super::store::DataStore;
+use crate::bsread::ChannelDescDecoded;
 use crate::ca::proto::{CreateChan, EventAdd, HeadInfo, ReadNotify};
+use crate::series::{Existence, SeriesId};
 use err::Error;
-use futures_util::{Future, FutureExt, Stream, StreamExt};
+use futures_util::stream::FuturesUnordered;
+use futures_util::{Future, FutureExt, Stream, StreamExt, TryFutureExt};
 use libc::c_int;
 use log::*;
+use netpod::timeunits::SEC;
+use netpod::{ScalarType, Shape};
 use std::collections::BTreeMap;
 use std::net::{Ipv4Addr, SocketAddrV4};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::task::{Context, Poll};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 use tokio::io::unix::AsyncFd;
 use tokio::net::TcpStream;
 
@@ -25,8 +32,10 @@ struct EventedState {
 
 #[derive(Debug)]
 enum MonitoringState {
-    AddingEvent,
-    Evented(EventedState),
+    FetchSeriesId,
+    AddingEvent(SeriesId),
+    Evented(SeriesId, EventedState),
+    // TODO we also want to read while staying subscribed:
     Reading,
     Read,
     Muted,
@@ -36,6 +45,8 @@ enum MonitoringState {
 struct CreatedState {
     cid: u32,
     sid: u32,
+    scalar_type: ScalarType,
+    shape: Shape,
     ts_created: Instant,
     state: MonitoringState,
 }
@@ -82,10 +93,15 @@ pub struct CaConn {
     cid_by_subid: BTreeMap<u32, u32>,
     name_by_cid: BTreeMap<u32, String>,
     poll_count: usize,
+    data_store: Arc<DataStore>,
+    fut_get_series: FuturesUnordered<
+        Pin<Box<dyn Future<Output = Result<(u32, u32, u16, u16, Existence<SeriesId>), Error>> + Send>>,
+    >,
+    value_insert_futs: FuturesUnordered<Pin<Box<dyn Future<Output = Result<(), Error>> + Send>>>,
 }
 
 impl CaConn {
-    pub fn new(tcp: TcpStream) -> Self {
+    pub fn new(tcp: TcpStream, data_store: Arc<DataStore>) -> Self {
         Self {
             state: CaConnState::Init,
             proto: CaProto::new(tcp),
@@ -97,6 +113,9 @@ impl CaConn {
             cid_by_subid: BTreeMap::new(),
             name_by_cid: BTreeMap::new(),
             poll_count: 0,
+            data_store,
+            fut_get_series: FuturesUnordered::new(),
+            value_insert_futs: FuturesUnordered::new(),
         }
     }
 
@@ -135,6 +154,65 @@ impl Stream for CaConn {
             return Ready(None);
         }
         loop {
+            while self.value_insert_futs.len() > 0 {
+                match self.fut_get_series.poll_next_unpin(cx) {
+                    Pending => break,
+                    _ => {}
+                }
+            }
+            while self.fut_get_series.len() > 0 {
+                match self.fut_get_series.poll_next_unpin(cx) {
+                    Ready(Some(Ok(k))) => {
+                        info!("Have SeriesId {k:?}");
+                        let cid = k.0;
+                        let sid = k.1;
+                        let data_type = k.2;
+                        let data_count = k.3;
+                        let series = match k.4 {
+                            Existence::Created(k) => k,
+                            Existence::Existing(k) => k,
+                        };
+                        let subid = self.subid_store.next();
+                        self.cid_by_subid.insert(subid, cid);
+                        let name = self.name_by_cid(cid).unwrap().to_string();
+                        let msg = CaMsg {
+                            ty: CaMsgTy::EventAdd(EventAdd {
+                                sid,
+                                data_type,
+                                data_count,
+                                subid,
+                            }),
+                        };
+                        self.proto.push_out(msg);
+                        // TODO handle not-found error:
+                        let ch_s = self.channels.get_mut(&cid).unwrap();
+                        *ch_s = ChannelState::Created(CreatedState {
+                            cid,
+                            sid,
+                            // TODO handle error better! Transition channel to Error state?
+                            scalar_type: ScalarType::from_ca_id(data_type)?,
+                            shape: Shape::from_ca_count(data_count)?,
+                            ts_created: Instant::now(),
+                            state: MonitoringState::AddingEvent(series),
+                        });
+                        let scalar_type = ScalarType::from_ca_id(data_type)?;
+                        let shape = Shape::from_ca_count(data_count)?;
+                        let _cd = ChannelDescDecoded {
+                            name: name.to_string(),
+                            scalar_type,
+                            shape,
+                            agg_kind: netpod::AggKind::Plain,
+                            // TODO these play no role in series id:
+                            byte_order: netpod::ByteOrder::LE,
+                            compression: None,
+                        };
+                        cx.waker().wake_by_ref();
+                    }
+                    Ready(Some(Err(e))) => error!("series error: {e:?}"),
+                    Ready(None) => {}
+                    Pending => break,
+                }
+            }
             break match &self.state {
                 CaConnState::Init => {
                     let msg = CaMsg { ty: CaMsgTy::Version };
@@ -229,75 +307,169 @@ impl Stream for CaConn {
                     let res = match self.proto.poll_next_unpin(cx) {
                         Ready(Some(Ok(k))) => {
                             match k {
-                                CaItem::Msg(k) => match k.ty {
-                                    CaMsgTy::SearchRes(k) => {
-                                        let a = k.addr.to_be_bytes();
-                                        let addr = format!("{}.{}.{}.{}:{}", a[0], a[1], a[2], a[3], k.tcp_port);
-                                        info!("Search result indicates server address: {addr}");
-                                    }
-                                    CaMsgTy::CreateChanRes(k) => {
-                                        // TODO handle cid-not-found which can also indicate peer error.
-                                        let cid = k.cid;
-                                        let name = self.name_by_cid(cid);
-                                        info!("Channel created for {name:?} now register for events");
-                                        let subid = self.subid_store.next();
-                                        self.cid_by_subid.insert(subid, cid);
-                                        let msg = CaMsg {
-                                            ty: CaMsgTy::EventAdd(EventAdd {
-                                                sid: k.sid,
-                                                data_type: k.data_type,
-                                                data_count: k.data_count,
-                                                subid,
-                                            }),
-                                        };
-                                        self.proto.push_out(msg);
-                                        do_wake_again = true;
-                                        // TODO handle not-found error:
-                                        let ch_s = self.channels.get_mut(&k.cid).unwrap();
-                                        *ch_s = ChannelState::Created(CreatedState {
-                                            cid: k.cid,
-                                            sid: k.sid,
-                                            ts_created: Instant::now(),
-                                            state: MonitoringState::AddingEvent,
-                                        });
-                                        info!(
-                                            "Channel is created  cid {}  sid {}  name {}",
-                                            k.cid, k.sid, self.name_by_cid[&k.cid]
-                                        );
-                                    }
-                                    CaMsgTy::EventAddRes(k) => {
-                                        // TODO handle subid-not-found which can also be peer error:
-                                        let cid = *self.cid_by_subid.get(&k.subid).unwrap();
-                                        // TODO get rid of the string clone when I don't want the log output any longer:
-                                        let name: String = self.name_by_cid(cid).unwrap().into();
-                                        // TODO handle not-found error:
-                                        let ch_s = self.channels.get_mut(&cid).unwrap();
-                                        match ch_s {
-                                            ChannelState::Created(st) => {
-                                                match st.state {
-                                                    MonitoringState::AddingEvent => {
-                                                        info!("Confirmation {name} is subscribed.");
-                                                        // TODO get ts from faster common source:
-                                                        st.state = MonitoringState::Evented(EventedState {
-                                                            ts_last: Instant::now(),
-                                                        });
-                                                    }
-                                                    MonitoringState::Evented(ref mut st) => {
-                                                        // TODO get ts from faster common source:
-                                                        st.ts_last = Instant::now();
-                                                    }
-                                                    _ => {
-                                                        warn!("bad state? not always, could be late message.");
+                                CaItem::Msg(k) => {
+                                    match k.ty {
+                                        CaMsgTy::SearchRes(k) => {
+                                            let a = k.addr.to_be_bytes();
+                                            let addr = format!("{}.{}.{}.{}:{}", a[0], a[1], a[2], a[3], k.tcp_port);
+                                            info!("Search result indicates server address: {addr}");
+                                        }
+                                        CaMsgTy::CreateChanRes(k) => {
+                                            // TODO handle cid-not-found which can also indicate peer error.
+                                            let cid = k.cid;
+                                            let sid = k.sid;
+                                            // TODO handle error:
+                                            let name = self.name_by_cid(cid).unwrap().to_string();
+                                            info!("CreateChanRes {name:?}");
+                                            let scalar_type = ScalarType::from_ca_id(k.data_type)?;
+                                            let shape = Shape::from_ca_count(k.data_count)?;
+                                            // TODO handle not-found error:
+                                            let ch_s = self.channels.get_mut(&cid).unwrap();
+                                            *ch_s = ChannelState::Created(CreatedState {
+                                                cid,
+                                                sid,
+                                                scalar_type: scalar_type.clone(),
+                                                shape: shape.clone(),
+                                                ts_created: Instant::now(),
+                                                state: MonitoringState::FetchSeriesId,
+                                            });
+                                            // TODO handle error in different way. Should most likely not abort.
+                                            let cd = ChannelDescDecoded {
+                                                name: name.to_string(),
+                                                scalar_type,
+                                                shape,
+                                                agg_kind: netpod::AggKind::Plain,
+                                                // TODO these play no role in series id:
+                                                byte_order: netpod::ByteOrder::LE,
+                                                compression: None,
+                                            };
+                                            let y = self.as_ref();
+                                            let y = unsafe { Pin::into_inner_unchecked(y) };
+                                            let y = unsafe { &*(y as *const CaConn) };
+                                            let fut =
+                                                y.data_store.chan_reg.get_series_id(cd).map_ok(move |series| {
+                                                    (cid, k.sid, k.data_type, k.data_count, series)
+                                                });
+                                            // TODO throttle execution rate:
+                                            self.fut_get_series.push(Box::pin(fut) as _);
+                                            do_wake_again = true;
+                                        }
+                                        CaMsgTy::EventAddRes(k) => {
+                                            // TODO handle subid-not-found which can also be peer error:
+                                            let cid = *self.cid_by_subid.get(&k.subid).unwrap();
+                                            // TODO get rid of the string clone when I don't want the log output any longer:
+                                            let name: String = self.name_by_cid(cid).unwrap().into();
+                                            // TODO handle not-found error:
+                                            let mut series_2 = None;
+                                            let ch_s = self.channels.get_mut(&cid).unwrap();
+                                            match ch_s {
+                                                ChannelState::Created(st) => {
+                                                    match st.state {
+                                                        MonitoringState::AddingEvent(ref series) => {
+                                                            let series = series.clone();
+                                                            series_2 = Some(series.clone());
+                                                            info!("Confirmation {name} is subscribed.");
+                                                            // TODO get ts from faster common source:
+                                                            st.state = MonitoringState::Evented(
+                                                                series,
+                                                                EventedState {
+                                                                    ts_last: Instant::now(),
+                                                                },
+                                                            );
+                                                        }
+                                                        MonitoringState::Evented(ref series, ref mut st) => {
+                                                            series_2 = Some(series.clone());
+                                                            // TODO get ts from faster common source:
+                                                            st.ts_last = Instant::now();
+                                                        }
+                                                        _ => {
+                                                            error!(
+                                                                "unexpected state: EventAddRes while having {ch_s:?}"
+                                                            );
+                                                        }
                                                     }
                                                 }
+                                                _ => {
+                                                    error!("unexpected state: EventAddRes while having {ch_s:?}");
+                                                }
                                             }
-                                            _ => {
-                                                warn!("unexpected state: EventAddRes while having {ch_s:?}");
+                                            {
+                                                let series = series_2.unwrap();
+                                                // TODO where to actually get the time from?
+                                                let ts = SystemTime::now();
+                                                let epoch = ts.duration_since(std::time::UNIX_EPOCH).unwrap();
+                                                let ts = epoch.as_secs() * 1000000000 + epoch.subsec_nanos() as u64;
+                                                let ts_msp = ts / (30 * SEC) * (30 * SEC);
+                                                let ts_lsp = ts - ts_msp;
+                                                // TODO make sure that I only accept types I expect.
+                                                use crate::ca::proto::CaDataScalarValue::*;
+                                                use crate::ca::proto::CaDataValue::*;
+                                                match k.value {
+                                                    Scalar(v) => {
+                                                        match v {
+                                                            F64(val) => {
+                                                                match ch_s {
+                                                                    ChannelState::Created(st) => {
+                                                                        match st.shape {
+                                                                            Shape::Scalar => {
+                                                                                match st.scalar_type {
+                                                                                    ScalarType::F64 => {
+                                                                                        // TODO get msp/lsp: cap at some count. only one writer!!
+                                                                                        let y = self.as_ref();
+                                                                                        let y = unsafe {
+                                                                                            Pin::into_inner_unchecked(y)
+                                                                                        };
+                                                                                        let y = unsafe {
+                                                                                            &*(y as *const CaConn)
+                                                                                        };
+                                                                                        let fut1 = y.data_store.scy.execute(
+                                                                                            &y.data_store.qu_insert_ts_msp,
+                                                                                            (ts_msp as i64, ts_lsp as i64),
+                                                                                        ).map(|_| Ok::<_, Error>(()))
+                                                                                        .map_err(|e| Error::with_msg_no_trace(format!("{e:?}")));
+                                                                                        let fut2 = y.data_store.scy.execute(
+                                                                                        &y.data_store.qu_insert_scalar_f64,
+                                                                                        (series.id() as i64, ts_msp as i64, ts_lsp as i64, 0i64, val),
+                                                                                    ).map(|_| Ok::<_, Error>(()))
+                                                                                    .map_err(|e| Error::with_msg_no_trace(format!("{e:?}")));
+                                                                                        let fut = fut1
+                                                                                            .and_then(move |a| fut2);
+                                                                                        if self.value_insert_futs.len()
+                                                                                            > 10
+                                                                                        {
+                                                                                            warn!("can not keep up");
+                                                                                        } else {
+                                                                                            self.value_insert_futs
+                                                                                                .push(
+                                                                                                    Box::pin(fut) as _
+                                                                                                );
+                                                                                        }
+                                                                                    }
+                                                                                    _ => {
+                                                                                        error!("unexpected value type");
+                                                                                    }
+                                                                                }
+                                                                            }
+                                                                            _ => {
+                                                                                error!("unexpected value shape");
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                    _ => {
+                                                                        error!("got value but channel not created");
+                                                                    }
+                                                                }
+                                                            }
+                                                            _ => {}
+                                                        }
+                                                    }
+                                                    Array => {}
+                                                }
                                             }
                                         }
+                                        _ => {}
                                     }
-                                    _ => {}
-                                },
+                                }
                                 _ => {}
                             }
                             Ready(Some(Ok(())))

@@ -1,4 +1,4 @@
-use crate::bsread::{BsreadMessage, Parser};
+use crate::bsread::{BsreadMessage, ChannelDescDecoded, Parser};
 use crate::bsread::{ChannelDesc, GlobalTimestamp, HeadA, HeadB};
 use crate::channelwriter::{ChannelWriter, ChannelWriterAll};
 use crate::netbuf::NetBuf;
@@ -10,10 +10,10 @@ use futures_core::{Future, Stream};
 use futures_util::{pin_mut, FutureExt, StreamExt};
 use log::*;
 use netpod::timeunits::*;
-use netpod::{ByteOrder, ScalarType, Shape};
 use scylla::batch::{Batch, BatchType, Consistency};
 use scylla::prepared_statement::PreparedStatement;
 use scylla::transport::errors::QueryError;
+use scylla::transport::query_result::{FirstRowError, RowsExpectedError};
 use scylla::{Session as ScySession, SessionBuilder};
 use serde_json::Value as JsVal;
 use stats::CheckEvery;
@@ -33,6 +33,24 @@ pub trait ErrConv<T> {
 }
 
 impl<T> ErrConv<T> for Result<T, QueryError> {
+    fn err_conv(self) -> Result<T, Error> {
+        match self {
+            Ok(k) => Ok(k),
+            Err(e) => Err(Error::with_msg_no_trace(format!("{e:?}"))),
+        }
+    }
+}
+
+impl<T> ErrConv<T> for Result<T, RowsExpectedError> {
+    fn err_conv(self) -> Result<T, Error> {
+        match self {
+            Ok(k) => Ok(k),
+            Err(e) => Err(Error::with_msg_no_trace(format!("{e:?}"))),
+        }
+    }
+}
+
+impl<T> ErrConv<T> for Result<T, FirstRowError> {
     fn err_conv(self) -> Result<T, Error> {
         match self {
             Ok(k) => Ok(k),
@@ -72,7 +90,7 @@ fn test_service() -> Result<(), Error> {
     taskrun::run(fut)
 }
 
-pub fn get_series_id(chn: &ChannelDesc) -> u64 {
+pub fn __get_series_id(chn: &ChannelDesc) -> u64 {
     // TODO use a more stable format (with ScalarType, Shape) as hash input.
     // TODO do not depend at all on the mapping, instead look it up on demand and cache.
     use md5::Digest;
@@ -82,6 +100,11 @@ pub fn get_series_id(chn: &ChannelDesc) -> u64 {
     h.update(format!("{:?}", chn.shape).as_bytes());
     let f = h.finalize();
     u64::from_le_bytes(f.as_slice()[0..8].try_into().unwrap())
+}
+
+pub async fn get_series_id(scy: &ScySession, chn: &ChannelDescDecoded) -> Result<u64, Error> {
+    error!("TODO get_series_id");
+    err::todoval()
 }
 
 pub struct CommonQueries {
@@ -231,9 +254,11 @@ impl BsreadClient {
                                         if dh_md5_last.is_empty() {
                                             info!("data header hash {}", bm.head_b_md5);
                                             dh_md5_last = bm.head_b_md5.clone();
+                                            let scy = self.scy.clone();
                                             for chn in &head_b.channels {
                                                 info!("Setup writer for {}", chn.name);
-                                                match self.setup_channel_writers(chn).await {
+                                                let cd: ChannelDescDecoded = chn.try_into()?;
+                                                match self.setup_channel_writers(&scy, &cd).await {
                                                     Ok(_) => {}
                                                     Err(e) => {
                                                         warn!("can not set up writer for {}  {e:?}", chn.name);
@@ -283,13 +308,16 @@ impl BsreadClient {
                                     .len()
                                     .min(self.opts.process_channel_count_limit.unwrap_or(4000))
                                 {
+                                    // TODO skip decoding if header unchanged.
                                     let chn = &head_b.channels[i1];
+                                    let chd: ChannelDescDecoded = chn.try_into()?;
                                     let fr = &msg.frames[2 + 2 * i1];
+                                    // TODO refactor to make correctness evident.
                                     if i1 >= series_ids.len() {
                                         series_ids.resize(head_b.channels.len(), (0u8, 0u64));
                                     }
                                     if series_ids[i1].0 == 0 {
-                                        let series = get_series_id(chn);
+                                        let series = get_series_id(&self.scy, &chd).await?;
                                         series_ids[i1].0 = 1;
                                         series_ids[i1].1 = series;
                                     }
@@ -349,38 +377,32 @@ impl BsreadClient {
         Ok(())
     }
 
-    async fn setup_channel_writers(&mut self, chn: &ChannelDesc) -> Result<(), Error> {
-        let series = get_series_id(chn);
-        let has_comp = match &chn.compression {
-            Some(s) => s != "none",
-            None => false,
-        };
+    async fn setup_channel_writers(&mut self, scy: &ScySession, cd: &ChannelDescDecoded) -> Result<(), Error> {
+        let series = get_series_id(scy, cd).await?;
+        let has_comp = cd.compression.is_some();
         if has_comp {
-            warn!("Compression not yet supported  [{}]", chn.name);
+            warn!("Compression not yet supported  [{}]", cd.name);
             return Ok(());
         }
-        let scalar_type = ScalarType::from_bsread_str(&chn.ty)?;
-        let shape = Shape::from_bsread_jsval(&chn.shape)?;
-        let byte_order = ByteOrder::from_bsread_str(&chn.encoding)?;
         let trunc = self.opts.array_truncate.unwrap_or(64);
         let cw = ChannelWriterAll::new(
             series,
             self.common_queries.clone(),
             self.scy.clone(),
-            scalar_type.clone(),
-            shape.clone(),
-            byte_order.clone(),
+            cd.scalar_type.clone(),
+            cd.shape.clone(),
+            cd.byte_order.clone(),
             trunc,
             self.opts.skip_insert,
         )?;
-        let shape_dims = shape.to_scylla_vec();
+        let shape_dims = cd.shape.to_scylla_vec();
         self.channel_writers.insert(series, Box::new(cw));
         if !self.opts.skip_insert {
             // TODO insert correct facility name
             self.scy
             .query(
-                "insert into series_by_channel (facility, channel_name, series, scalar_type, shape_dims) values (?, ?, ?, ?, ?)",
-                ("scylla", &chn.name, series as i64, scalar_type.to_scylla_i32(), &shape_dims),
+                "insert into series_by_channel (facility, channel_name, series, scalar_type, shape_dims) values (?, ?, ?, ?, ?) if not exists",
+                ("scylla", &cd.name, series as i64, cd.scalar_type.to_scylla_i32(), &shape_dims),
             )
             .await
             .err_conv()?;
@@ -655,28 +677,8 @@ impl BsreadDumper {
                                 let mut bytes_payload = 0u64;
                                 for i1 in 0..head_b.channels.len() {
                                     let chn = &head_b.channels[i1];
+                                    let _cd: ChannelDescDecoded = chn.try_into()?;
                                     let fr = &msg.frames[2 + 2 * i1];
-                                    let _series = get_series_id(chn);
-                                    if chn.ty == "string" {
-                                        info!("string channel: {}  {:?}", chn.name, chn.shape);
-                                        if let Ok(shape) = Shape::from_bsread_jsval(&chn.shape) {
-                                            if let Ok(_bo) = ByteOrder::from_bsread_str(&chn.encoding) {
-                                                match &shape {
-                                                    Shape::Scalar => {
-                                                        info!("scalar string...");
-                                                        let s = String::from_utf8_lossy(fr.data());
-                                                        info!("STRING: {s:?}");
-                                                    }
-                                                    _ => {
-                                                        warn!(
-                                                            "non-scalar string channels not yet implemented  {}",
-                                                            chn.name
-                                                        );
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
                                     bytes_payload += fr.data().len() as u64;
                                 }
                                 info!("zmtp message  ts {ts}  pulse {pulse}  bytes_payload {bytes_payload}");

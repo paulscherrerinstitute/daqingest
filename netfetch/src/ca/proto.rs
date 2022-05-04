@@ -63,6 +63,7 @@ pub struct EventAddRes {
     pub data_count: u16,
     pub status: u32,
     pub subid: u32,
+    pub value: CaDataValue,
 }
 
 #[derive(Debug)]
@@ -90,6 +91,23 @@ enum CaScalarType {
     F64,
     Enum,
     String,
+}
+
+#[derive(Clone, Debug)]
+pub enum CaDataScalarValue {
+    I8(i8),
+    I16(i16),
+    I32(i32),
+    F32(f32),
+    F64(f64),
+    Enum(i16),
+    String(String),
+}
+
+#[derive(Clone, Debug)]
+pub enum CaDataValue {
+    Scalar(CaDataScalarValue),
+    Array,
 }
 
 impl CaScalarType {
@@ -416,7 +434,7 @@ impl CaMsg {
             }
             1 => {
                 let ca_st = CaScalarType::from_ca_u16(hi.data_type)?;
-                match ca_st {
+                let value = match ca_st {
                     CaScalarType::F64 => {
                         if payload.len() < 2 {
                             return Err(Error::with_msg_no_trace(format!(
@@ -425,7 +443,7 @@ impl CaMsg {
                             )));
                         }
                         let v = f64::from_be_bytes(payload.try_into()?);
-                        info!("f64: {v}");
+                        CaDataValue::Scalar(CaDataScalarValue::F64(v))
                     }
                     CaScalarType::Enum => {
                         if payload.len() < 2 {
@@ -434,8 +452,8 @@ impl CaMsg {
                                 payload.len()
                             )));
                         }
-                        let v = u16::from_be_bytes(payload[..2].try_into()?);
-                        info!("enum payload: {v}");
+                        let v = i16::from_be_bytes(payload[..2].try_into()?);
+                        CaDataValue::Scalar(CaDataScalarValue::I16(v))
                     }
                     CaScalarType::String => {
                         let mut ixn = payload.len();
@@ -447,17 +465,19 @@ impl CaMsg {
                         }
                         //info!("try to read string from payload len {} ixn {}", payload.len(), ixn);
                         let v = String::from_utf8_lossy(&payload[..ixn]);
-                        info!("String payload: {v}");
+                        CaDataValue::Scalar(CaDataScalarValue::String(v.into()))
                     }
                     _ => {
                         warn!("TODO handle {ca_st:?}");
+                        return Err(Error::with_msg_no_trace(format!("can not yet handle type {ca_st:?}")));
                     }
-                }
+                };
                 let d = EventAddRes {
                     data_type: hi.data_type,
                     data_count: hi.data_count,
                     status: hi.param1,
                     subid: hi.param2,
+                    value,
                 };
                 CaMsg {
                     ty: CaMsgTy::EventAddRes(d),

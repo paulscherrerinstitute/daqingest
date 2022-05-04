@@ -1,5 +1,6 @@
 pub mod conn;
 pub mod proto;
+pub mod store;
 
 use conn::{CaConn, FindIoc};
 use err::Error;
@@ -13,12 +14,15 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, VecDeque};
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::fs::OpenOptions;
 use tokio::io::AsyncReadExt;
 use tokio::net::TcpStream;
 use tokio::task::JoinError;
 use tokio::time::error::Elapsed;
+
+use self::store::{ChannelRegistry, DataStore};
 
 #[derive(Debug, Serialize, Deserialize)]
 struct ChannelConfig {
@@ -229,9 +233,12 @@ pub async fn ca_search(opts: ListenFromFileOpts) -> Result<(), Error> {
     for (host, channels) in &channels_by_host {
         info!("Have: {:?}  {:?}", host, channels.len());
     }
+    let nil = None::<i8>;
     for ch in &opts.channels {
         if !channels_set.contains_key(ch) {
-            error!("Could not locate {ch:?}");
+            scy.execute(&qu, (ch, "", nil))
+                .await
+                .map_err(|e| Error::with_msg_no_trace(format!("{e:?}")))?;
         }
     }
     Ok(())
@@ -246,6 +253,7 @@ pub async fn ca_connect(opts: ListenFromFileOpts) -> Result<(), Error> {
         .build()
         .await
         .map_err(|e| Error::with_msg_no_trace(format!("{e:?}")))?;
+    let scy = Arc::new(scy);
     let qu_find_addr = scy
         .prepare("select addr from ioc_by_channel where channel = ?")
         .await
@@ -274,12 +282,14 @@ pub async fn ca_connect(opts: ListenFromFileOpts) -> Result<(), Error> {
     if opts.abort_after_search == 1 {
         return Ok(());
     }
+    let data_store = Arc::new(DataStore::new(scy.clone()).await?);
     let mut conn_jhs = vec![];
     for (host, channels) in channels_by_host {
+        let data_store = data_store.clone();
         let conn_block = async move {
             info!("Create TCP connection to {:?}", (host.ip(), host.port()));
             let tcp = TcpStream::connect((host.ip().clone(), host.port())).await?;
-            let mut conn = CaConn::new(tcp);
+            let mut conn = CaConn::new(tcp, data_store.clone());
             for c in channels {
                 conn.channel_add(c);
             }
