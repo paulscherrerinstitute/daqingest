@@ -53,10 +53,12 @@ pub async fn get_series_id(scy: &ScySession, cd: &ChannelDescDecoded) -> Result<
         let mut h = md5::Md5::new();
         h.update(facility.as_bytes());
         h.update(channel_name.as_bytes());
-        h.update(format!("{:?}", scalar_type).as_bytes());
-        h.update(format!("{:?}", shape).as_bytes());
+        h.update(format!("{:?} {:?}", scalar_type, shape).as_bytes());
         let f = h.finalize();
         let mut series = u64::from_le_bytes(f.as_slice()[0..8].try_into().unwrap());
+        // TODO technically we could/should assert that we run on 2-complement machine.
+        const SMASK: u64 = 0x7fffffffffffffff;
+        series = series & SMASK;
         for _ in 0..2000 {
             let res = scy
                 .query(
@@ -77,6 +79,7 @@ pub async fn get_series_id(scy: &ScySession, cd: &ChannelDescDecoded) -> Result<
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
             series += 1;
+            series = series & SMASK;
         }
         Err(Error::with_msg_no_trace(format!("can not create and insert series id")))
     } else {

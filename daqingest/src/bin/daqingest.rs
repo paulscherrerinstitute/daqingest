@@ -21,7 +21,7 @@ pub fn main() -> Result<(), Error> {
             }
             SubCmd::ChannelAccess(k) => match k {
                 ChannelAccess::CaChannel(_) => todo!(),
-                ChannelAccess::CaSearch(k) => netfetch::ca::ca_search(k.into()).await?,
+                ChannelAccess::CaSearch(k) => netfetch::ca::ca_search_2(k.into()).await?,
                 ChannelAccess::CaConfig(k) => netfetch::ca::ca_connect(k.into()).await?,
             },
         }

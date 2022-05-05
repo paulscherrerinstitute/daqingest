@@ -2,16 +2,16 @@ pub mod conn;
 pub mod proto;
 pub mod store;
 
-use conn::{CaConn, FindIoc};
+use self::conn::FindIocStream;
+use self::store::DataStore;
+use crate::zmtp::ErrConv;
+use conn::CaConn;
 use err::Error;
-use futures_util::stream::FuturesUnordered;
-use futures_util::{StreamExt, TryFutureExt};
+use futures_util::StreamExt;
 use log::*;
 use scylla::batch::Consistency;
-use scylla::prepared_statement::PreparedStatement;
-use scylla::Session as ScySession;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::BTreeMap;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -19,10 +19,6 @@ use std::time::Duration;
 use tokio::fs::OpenOptions;
 use tokio::io::AsyncReadExt;
 use tokio::net::TcpStream;
-use tokio::task::JoinError;
-use tokio::time::error::Elapsed;
-
-use self::store::{ChannelRegistry, DataStore};
 
 #[derive(Debug, Serialize, Deserialize)]
 struct ChannelConfig {
@@ -85,41 +81,39 @@ pub struct CaConnectOpts {
     pub abort_after_search: u32,
 }
 
-async fn unwrap_search_result(
-    item: Result<Result<Result<(String, SocketAddrV4, Option<SocketAddrV4>), Error>, Elapsed>, JoinError>,
-    scy: &ScySession,
-    qu: &PreparedStatement,
-) -> Result<(String, SocketAddrV4, Option<SocketAddrV4>), Error> {
-    match item {
-        Ok(k) => match k {
-            Ok(k) => match k {
-                Ok(h) => match h.2 {
-                    Some(k) => {
-                        scy.execute(qu, (&h.0, format!("{:?}", h.1), format!("{:?}", k)))
-                            .await
-                            .map_err(|e| Error::with_msg_no_trace(format!("{e:?}")))?;
-                        Ok(h)
+async fn resolve_address(addr_str: &str) -> Result<SocketAddrV4, Error> {
+    const PORT_DEFAULT: u16 = 5064;
+    let ac = match addr_str.parse::<SocketAddrV4>() {
+        Ok(k) => k,
+        Err(_) => match addr_str.parse::<Ipv4Addr>() {
+            Ok(k) => SocketAddrV4::new(k, PORT_DEFAULT),
+            Err(e) => match tokio::net::lookup_host(&addr_str).await {
+                Ok(k) => {
+                    let vs: Vec<_> = k
+                        .filter_map(|x| match x {
+                            SocketAddr::V4(k) => Some(k),
+                            SocketAddr::V6(_) => None,
+                        })
+                        .collect();
+                    if let Some(k) = vs.first() {
+                        *k
+                    } else {
+                        error!("Can not understand name for {:?}  {:?}", addr_str, vs);
+                        return Err(e.into());
                     }
-                    None => Ok(h),
-                },
+                }
                 Err(e) => {
-                    error!("bad search {e:?}");
-                    Err(e)
+                    error!("{e:?}");
+                    return Err(e.into());
                 }
             },
-            Err(e) => {
-                error!("Elapsed");
-                Err(Error::with_msg_no_trace(format!("{e:?}")))
-            }
         },
-        Err(e) => {
-            error!("JoinError");
-            Err(Error::with_msg_no_trace(format!("{e:?}")))
-        }
-    }
+    };
+    Ok(ac)
 }
 
-pub async fn ca_search(opts: ListenFromFileOpts) -> Result<(), Error> {
+pub async fn ca_search_2(opts: ListenFromFileOpts) -> Result<(), Error> {
+    let facility = "scylla";
     let opts = parse_config(opts.config).await?;
     let scy = scylla::SessionBuilder::new()
         .known_node("sf-nube-11:19042")
@@ -129,122 +123,67 @@ pub async fn ca_search(opts: ListenFromFileOpts) -> Result<(), Error> {
         .await
         .map_err(|e| Error::with_msg_no_trace(format!("{e:?}")))?;
     let qu = scy
-        .prepare("insert into ioc_by_channel (channel, searchaddr, addr) values (?, ?, ?)")
+        .prepare("insert into ioc_by_channel (facility, channel, searchaddr, addr) values (?, ?, ?, ?)")
         .await
         .map_err(|e| Error::with_msg_no_trace(format!("{e:?}")))?;
-    const PORT_DEFAULT: u16 = 5064;
-    info!("Look up {} channel hosts", opts.channels.len());
-    let mut fut_queue = FuturesUnordered::new();
-    let mut res2 = vec![];
-    let mut chns = VecDeque::new();
+    let mut addrs = vec![];
+    for s in &opts.search {
+        let x = resolve_address(s).await?;
+        addrs.push(x);
+    }
+    let mut finder = FindIocStream::new(addrs);
     for ch in &opts.channels {
-        for ac in &opts.search {
-            chns.push_back((ch.clone(), ac.clone()));
-        }
+        finder.push(ch.into());
     }
-    let max_simul = opts.max_simul;
-    let timeout = opts.timeout;
-    let mut ix1 = 0;
-    'lo2: loop {
-        while fut_queue.len() < max_simul && chns.len() > 0 {
-            let (ch, ac) = chns.pop_front().unwrap();
-            let ch2 = ch.clone();
-            let ac = match ac.parse::<SocketAddrV4>() {
-                Ok(k) => k,
-                Err(_) => match ac.parse::<Ipv4Addr>() {
-                    Ok(k) => SocketAddrV4::new(k, PORT_DEFAULT),
-                    Err(e) => match tokio::net::lookup_host(&ac).await {
-                        Ok(k) => {
-                            let vs: Vec<_> = k
-                                .filter_map(|x| match x {
-                                    SocketAddr::V4(k) => Some(k),
-                                    SocketAddr::V6(_) => None,
-                                })
-                                .collect();
-                            if let Some(k) = vs.first() {
-                                *k
-                            } else {
-                                error!("Can not understand name for {:?}  {:?}", ac, vs);
-                                return Err(e.into());
-                            }
-                        }
-                        Err(e) => {
-                            error!("{e:?}");
-                            return Err(e.into());
-                        }
-                    },
-                },
-            };
-            ix1 += 1;
-            if ix1 >= 500 {
-                info!("Start search for {} {}", ch, ac);
-                ix1 = 0;
+    let deadline = tokio::time::Instant::now()
+        .checked_add(Duration::from_millis(100000000))
+        .unwrap();
+    let mut i1 = 0;
+    loop {
+        let k = tokio::time::timeout_at(deadline, finder.next()).await;
+        let item = match k {
+            Ok(Some(k)) => k,
+            Ok(None) => {
+                info!("Search stream exhausted");
+                break;
             }
-            let fut = FindIoc::new(ch.clone(), Ipv4Addr::UNSPECIFIED, ac.clone(), timeout)
-                .map_ok(move |x| (ch2, ac.clone(), x));
-            let fut = tokio::time::timeout(Duration::from_millis(timeout + 1000), fut);
-            let jh = tokio::spawn(fut);
-            fut_queue.push(jh);
-            if chns.is_empty() {
-                break 'lo2;
-            }
-        }
-        while fut_queue.len() >= max_simul {
-            match fut_queue.next().await {
-                Some(item) => {
-                    let item = unwrap_search_result(item, &scy, &qu).await;
-                    res2.push(item);
-                }
-                None => break,
-            }
-        }
-    }
-    while fut_queue.len() > 0 {
-        match fut_queue.next().await {
-            Some(item) => {
-                let item = unwrap_search_result(item, &scy, &qu).await;
-                res2.push(item);
-            }
-            None => break,
-        }
-    }
-    info!("Collected {} results", res2.len());
-    let mut channels_set = BTreeMap::new();
-    let mut channels_by_host = BTreeMap::new();
-    for item in res2 {
-        // TODO should we continue even if some channel gives an error or can not be located?
-        match item {
-            Ok((ch, ac, Some(addr))) => {
-                info!("Found address  {}  {:?}  {:?}", ch, ac, addr);
-                channels_set.insert(ch.clone(), true);
-                let key = addr;
-                if !channels_by_host.contains_key(&key) {
-                    channels_by_host.insert(key, vec![ch]);
-                } else {
-                    channels_by_host.get_mut(&key).unwrap().push(ch);
-                }
-            }
-            Ok((_, _, None)) => {}
-            Err(e) => {
-                error!("Error in res2 list: {e:?}");
+            Err(_) => {
+                warn!("timed out");
+                break;
             }
         };
-    }
-    for (host, channels) in &channels_by_host {
-        info!("Have: {:?}  {:?}", host, channels.len());
-    }
-    let nil = None::<i8>;
-    for ch in &opts.channels {
-        if !channels_set.contains_key(ch) {
-            scy.execute(&qu, (ch, "", nil))
-                .await
-                .map_err(|e| Error::with_msg_no_trace(format!("{e:?}")))?;
+        let item = match item {
+            Ok(k) => k,
+            Err(e) => {
+                error!("ca_search_2 {e:?}");
+                continue;
+            }
+        };
+        for item in item {
+            scy.execute(
+                &qu,
+                (
+                    facility,
+                    &item.channel,
+                    item.src.to_string(),
+                    item.addr.map(|x| x.to_string()),
+                ),
+            )
+            .await
+            .err_conv()?;
+        }
+        tokio::time::sleep(Duration::from_millis(1)).await;
+        i1 += 1;
+        if i1 > 500 {
+            i1 = 0;
+            info!("{}", finder.quick_state());
         }
     }
     Ok(())
 }
 
 pub async fn ca_connect(opts: ListenFromFileOpts) -> Result<(), Error> {
+    let facility = "scylla";
     let opts = parse_config(opts.config).await?;
     let scy = scylla::SessionBuilder::new()
         .known_node("sf-nube-11:19042")
@@ -254,14 +193,15 @@ pub async fn ca_connect(opts: ListenFromFileOpts) -> Result<(), Error> {
         .await
         .map_err(|e| Error::with_msg_no_trace(format!("{e:?}")))?;
     let scy = Arc::new(scy);
+    info!("FIND IOCS");
     let qu_find_addr = scy
-        .prepare("select addr from ioc_by_channel where channel = ?")
+        .prepare("select addr from ioc_by_channel where facility = ? and channel = ?")
         .await
         .map_err(|e| Error::with_msg_no_trace(format!("{e:?}")))?;
     let mut channels_by_host = BTreeMap::new();
     for (ix, ch) in opts.channels.iter().enumerate() {
         let res = scy
-            .execute(&qu_find_addr, (ch,))
+            .execute(&qu_find_addr, (facility, ch))
             .await
             .map_err(|e| Error::with_msg_no_trace(format!("{e:?}")))?;
         if res.rows_num().unwrap() == 0 {
@@ -282,6 +222,7 @@ pub async fn ca_connect(opts: ListenFromFileOpts) -> Result<(), Error> {
     if opts.abort_after_search == 1 {
         return Ok(());
     }
+    info!("CONNECT TO HOSTS");
     let data_store = Arc::new(DataStore::new(scy.clone()).await?);
     let mut conn_jhs = vec![];
     for (host, channels) in channels_by_host {
