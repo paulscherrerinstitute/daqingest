@@ -1,4 +1,4 @@
-use crate::zmtp::ErrConv;
+use crate::errconv::ErrConv;
 use crate::zmtp::{CommonQueries, ZmtpFrame};
 use err::Error;
 use futures_core::Future;

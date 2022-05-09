@@ -1,6 +1,7 @@
 use crate::bsread::{BsreadMessage, ChannelDescDecoded, Parser};
 use crate::bsread::{ChannelDesc, GlobalTimestamp, HeadA, HeadB};
 use crate::channelwriter::{ChannelWriter, ChannelWriterAll};
+use crate::errconv::ErrConv;
 use crate::netbuf::NetBuf;
 use async_channel::{Receiver, Sender};
 #[allow(unused)]
@@ -12,8 +13,6 @@ use log::*;
 use netpod::timeunits::*;
 use scylla::batch::{Batch, BatchType, Consistency};
 use scylla::prepared_statement::PreparedStatement;
-use scylla::transport::errors::QueryError;
-use scylla::transport::query_result::{FirstRowError, RowsExpectedError};
 use scylla::{Session as ScySession, SessionBuilder};
 use serde_json::Value as JsVal;
 use stats::CheckEvery;
@@ -27,37 +26,6 @@ use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::TcpStream;
-
-pub trait ErrConv<T> {
-    fn err_conv(self) -> Result<T, Error>;
-}
-
-impl<T> ErrConv<T> for Result<T, QueryError> {
-    fn err_conv(self) -> Result<T, Error> {
-        match self {
-            Ok(k) => Ok(k),
-            Err(e) => Err(Error::with_msg_no_trace(format!("{e:?}"))),
-        }
-    }
-}
-
-impl<T> ErrConv<T> for Result<T, RowsExpectedError> {
-    fn err_conv(self) -> Result<T, Error> {
-        match self {
-            Ok(k) => Ok(k),
-            Err(e) => Err(Error::with_msg_no_trace(format!("{e:?}"))),
-        }
-    }
-}
-
-impl<T> ErrConv<T> for Result<T, FirstRowError> {
-    fn err_conv(self) -> Result<T, Error> {
-        match self {
-            Ok(k) => Ok(k),
-            Err(e) => Err(Error::with_msg_no_trace(format!("{e:?}"))),
-        }
-    }
-}
 
 #[allow(unused)]
 fn test_listen() -> Result<(), Error> {
@@ -398,6 +366,8 @@ impl BsreadClient {
         let shape_dims = cd.shape.to_scylla_vec();
         self.channel_writers.insert(series, Box::new(cw));
         if !self.opts.skip_insert {
+            error!("TODO use PGSQL and existing function instead.");
+            err::todo();
             // TODO insert correct facility name
             self.scy
             .query(

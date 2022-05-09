@@ -4,18 +4,18 @@ pub mod store;
 
 use self::conn::FindIocStream;
 use self::store::DataStore;
-use crate::zmtp::ErrConv;
 use conn::CaConn;
 use err::Error;
 use futures_util::StreamExt;
 use log::*;
+use netpod::Database;
 use scylla::batch::Consistency;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::fs::OpenOptions;
 use tokio::io::AsyncReadExt;
 use tokio::net::TcpStream;
@@ -32,6 +32,7 @@ struct ChannelConfig {
     timeout: Option<u64>,
     #[serde(default)]
     abort_after_search: u32,
+    pg_pass: String,
 }
 
 pub struct ListenFromFileOpts {
@@ -68,6 +69,7 @@ pub async fn parse_config(config: PathBuf) -> Result<CaConnectOpts, Error> {
         max_simul: conf.max_simul.unwrap_or(113),
         timeout: conf.timeout.unwrap_or(2000),
         abort_after_search: conf.abort_after_search,
+        pg_pass: conf.pg_pass,
     })
 }
 
@@ -79,6 +81,7 @@ pub struct CaConnectOpts {
     pub max_simul: usize,
     pub timeout: u64,
     pub abort_after_search: u32,
+    pub pg_pass: String,
 }
 
 async fn resolve_address(addr_str: &str) -> Result<SocketAddrV4, Error> {
@@ -112,20 +115,42 @@ async fn resolve_address(addr_str: &str) -> Result<SocketAddrV4, Error> {
     Ok(ac)
 }
 
-pub async fn ca_search_2(opts: ListenFromFileOpts) -> Result<(), Error> {
+pub async fn ca_search(opts: ListenFromFileOpts) -> Result<(), Error> {
     let facility = "scylla";
     let opts = parse_config(opts.config).await?;
-    let scy = scylla::SessionBuilder::new()
-        .known_node("sf-nube-11:19042")
-        .default_consistency(Consistency::Quorum)
-        .use_keyspace("ks1", true)
-        .build()
+    let d = Database {
+        name: "daqbuffer".into(),
+        host: "sf-nube-11".into(),
+        user: "daqbuffer".into(),
+        pass: opts.pg_pass.clone(),
+    };
+    let (pg_client, pg_conn) = tokio_postgres::connect(
+        &format!("postgresql://{}:{}@{}:{}/{}", d.user, d.pass, d.host, 5432, d.name),
+        tokio_postgres::tls::NoTls,
+    )
+    .await
+    .unwrap();
+    // TODO join pg_conn in the end:
+    tokio::spawn(pg_conn);
+    let pg_client = Arc::new(pg_client);
+    let qu_insert = {
+        const TEXT: tokio_postgres::types::Type = tokio_postgres::types::Type::TEXT;
+        pg_client
+            .prepare_typed(
+                "insert into ioc_by_channel (facility, channel, searchaddr, addr) values ($1, $2, $3, $4)",
+                &[TEXT, TEXT, TEXT, TEXT],
+            )
+            .await
+            .unwrap()
+    };
+    let qu_select = pg_client
+        .prepare("select addr from ioc_by_channel where facility = $1 and channel = $2 and searchaddr = $3")
         .await
-        .map_err(|e| Error::with_msg_no_trace(format!("{e:?}")))?;
-    let qu = scy
-        .prepare("insert into ioc_by_channel (facility, channel, searchaddr, addr) values (?, ?, ?, ?)")
+        .unwrap();
+    let qu_update = pg_client
+        .prepare("update ioc_by_channel set addr = $4 where facility = $1 and channel = $2 and searchaddr = $3")
         .await
-        .map_err(|e| Error::with_msg_no_trace(format!("{e:?}")))?;
+        .unwrap();
     let mut addrs = vec![];
     for s in &opts.search {
         let x = resolve_address(s).await?;
@@ -135,12 +160,14 @@ pub async fn ca_search_2(opts: ListenFromFileOpts) -> Result<(), Error> {
     for ch in &opts.channels {
         finder.push(ch.into());
     }
-    let deadline = tokio::time::Instant::now()
-        .checked_add(Duration::from_millis(100000000))
-        .unwrap();
-    let mut i1 = 0;
+    let mut ts_last = Instant::now();
     loop {
-        let k = tokio::time::timeout_at(deadline, finder.next()).await;
+        let ts_now = Instant::now();
+        if ts_now.duration_since(ts_last) >= Duration::from_millis(1000) {
+            ts_last = ts_now;
+            info!("{}", finder.quick_state());
+        }
+        let k = tokio::time::timeout(Duration::from_millis(200), finder.next()).await;
         let item = match k {
             Ok(Some(k)) => k,
             Ok(None) => {
@@ -148,36 +175,39 @@ pub async fn ca_search_2(opts: ListenFromFileOpts) -> Result<(), Error> {
                 break;
             }
             Err(_) => {
-                warn!("timed out");
-                break;
+                continue;
             }
         };
         let item = match item {
             Ok(k) => k,
             Err(e) => {
-                error!("ca_search_2 {e:?}");
+                error!("ca_search {e:?}");
                 continue;
             }
         };
         for item in item {
-            scy.execute(
-                &qu,
-                (
-                    facility,
-                    &item.channel,
-                    item.src.to_string(),
-                    item.addr.map(|x| x.to_string()),
-                ),
-            )
-            .await
-            .err_conv()?;
+            let searchaddr = item.src.to_string();
+            let addr = item.addr.map(|x| x.to_string()).unwrap_or(String::new());
+            let rows = pg_client
+                .query(&qu_select, &[&facility, &item.channel, &searchaddr])
+                .await
+                .unwrap();
+            if rows.is_empty() {
+                pg_client
+                    .execute(&qu_insert, &[&facility, &item.channel, &searchaddr, &addr])
+                    .await
+                    .unwrap();
+            } else {
+                let addr2: &str = rows[0].get(0);
+                if addr2 != addr {
+                    pg_client
+                        .execute(&qu_update, &[&facility, &item.channel, &searchaddr, &addr])
+                        .await
+                        .unwrap();
+                }
+            }
         }
         tokio::time::sleep(Duration::from_millis(1)).await;
-        i1 += 1;
-        if i1 > 500 {
-            i1 = 0;
-            info!("{}", finder.quick_state());
-        }
     }
     Ok(())
 }
@@ -185,6 +215,21 @@ pub async fn ca_search_2(opts: ListenFromFileOpts) -> Result<(), Error> {
 pub async fn ca_connect(opts: ListenFromFileOpts) -> Result<(), Error> {
     let facility = "scylla";
     let opts = parse_config(opts.config).await?;
+    let d = Database {
+        name: "daqbuffer".into(),
+        host: "sf-nube-11".into(),
+        user: "daqbuffer".into(),
+        pass: opts.pg_pass.clone(),
+    };
+    let (pg_client, pg_conn) = tokio_postgres::connect(
+        &format!("postgresql://{}:{}@{}:{}/{}", d.user, d.pass, d.host, 5432, d.name),
+        tokio_postgres::tls::NoTls,
+    )
+    .await
+    .unwrap();
+    // TODO allow clean shutdown on ctrl-c and join the pg_conn in the end:
+    tokio::spawn(pg_conn);
+    let pg_client = Arc::new(pg_client);
     let scy = scylla::SessionBuilder::new()
         .known_node("sf-nube-11:19042")
         .default_consistency(Consistency::Quorum)
@@ -194,22 +239,28 @@ pub async fn ca_connect(opts: ListenFromFileOpts) -> Result<(), Error> {
         .map_err(|e| Error::with_msg_no_trace(format!("{e:?}")))?;
     let scy = Arc::new(scy);
     info!("FIND IOCS");
-    let qu_find_addr = scy
-        .prepare("select addr from ioc_by_channel where facility = ? and channel = ?")
+    let qu_find_addr = pg_client
+        .prepare("select addr from ioc_by_channel where facility = $1 and channel = $2")
         .await
         .map_err(|e| Error::with_msg_no_trace(format!("{e:?}")))?;
     let mut channels_by_host = BTreeMap::new();
     for (ix, ch) in opts.channels.iter().enumerate() {
-        let res = scy
-            .execute(&qu_find_addr, (facility, ch))
+        let rows = pg_client
+            .query(&qu_find_addr, &[&facility, ch])
             .await
             .map_err(|e| Error::with_msg_no_trace(format!("{e:?}")))?;
-        if res.rows_num().unwrap() == 0 {
+        if rows.is_empty() {
             error!("can not find address of channel {}", ch);
         } else {
-            let (addr,) = res.first_row_typed::<(String,)>().unwrap();
-            let addr: SocketAddrV4 = addr.parse().unwrap();
-            if ix % 500 == 0 {
+            let addr: &str = rows[0].get(0);
+            let addr: SocketAddrV4 = match addr.parse() {
+                Ok(k) => k,
+                Err(e) => {
+                    error!("can not parse {addr:?}  {e:?}");
+                    continue;
+                }
+            };
+            if ix % 1 == 0 {
                 info!("{}  {}  {:?}", ix, ch, addr);
             }
             if !channels_by_host.contains_key(&addr) {
@@ -223,14 +274,18 @@ pub async fn ca_connect(opts: ListenFromFileOpts) -> Result<(), Error> {
         return Ok(());
     }
     info!("CONNECT TO HOSTS");
-    let data_store = Arc::new(DataStore::new(scy.clone()).await?);
+    let data_store = Arc::new(DataStore::new(pg_client, scy.clone()).await?);
     let mut conn_jhs = vec![];
     for (host, channels) in channels_by_host {
+        if false && host.ip() != &"172.26.24.76".parse::<Ipv4Addr>().unwrap() {
+            continue;
+        }
         let data_store = data_store.clone();
         let conn_block = async move {
             info!("Create TCP connection to {:?}", (host.ip(), host.port()));
-            let tcp = TcpStream::connect((host.ip().clone(), host.port())).await?;
-            let mut conn = CaConn::new(tcp, data_store.clone());
+            let addr = SocketAddrV4::new(host.ip().clone(), host.port());
+            let tcp = TcpStream::connect(addr).await?;
+            let mut conn = CaConn::new(tcp, addr, data_store.clone());
             for c in channels {
                 conn.channel_add(c);
             }

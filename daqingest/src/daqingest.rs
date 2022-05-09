@@ -99,6 +99,7 @@ impl From<CaChannel> for CaConnectOpts {
             max_simul: 113,
             timeout: 2000,
             abort_after_search: 0,
+            pg_pass: "".into(),
         }
     }
 }

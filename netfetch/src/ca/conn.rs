@@ -3,6 +3,7 @@ use super::store::DataStore;
 use crate::bsread::ChannelDescDecoded;
 use crate::ca::proto::{CreateChan, EventAdd, HeadInfo, ReadNotify};
 use crate::series::{Existence, SeriesId};
+use crate::store::ScyInsertFut;
 use err::Error;
 use futures_util::stream::FuturesUnordered;
 use futures_util::{Future, FutureExt, Stream, StreamExt, TryFutureExt};
@@ -20,7 +21,8 @@ use std::time::{Duration, Instant, SystemTime};
 use tokio::io::unix::AsyncFd;
 use tokio::net::TcpStream;
 
-const INSERT_FUTS_MAX: usize = 10;
+const INSERT_FUTS_MAX: usize = 200;
+const TABLE_SERIES_MOD: u32 = 2;
 
 #[derive(Debug)]
 enum ChannelError {
@@ -78,10 +80,204 @@ impl IdStore {
     }
 
     fn next(&mut self) -> u32 {
-        let ret = self.next;
         self.next += 1;
+        let ret = self.next;
         ret
     }
+}
+
+// TODO test that errors are properly forwarded.
+macro_rules! insert_scalar_impl {
+    ($fname:ident, $valty:ty, $qu_insert:ident) => {
+        fn $fname(
+            data_store: Arc<DataStore>,
+            // TODO maybe use a newtype?
+            futs_queue: &mut FuturesUnordered<Pin<Box<dyn Future<Output = Result<(), Error>> + Send>>>,
+            series: SeriesId,
+            ts_msp: u64,
+            ts_lsp: u64,
+            val: $valty,
+            ts_msp_changed: bool,
+            st: Option<ScalarType>,
+            sh: Option<Shape>,
+        ) {
+            let pulse = 0 as u64;
+            let params = (
+                series.id() as i64,
+                ts_msp as i64,
+                ts_lsp as i64,
+                pulse as i64,
+                val,
+            );
+            let fut3 = ScyInsertFut::new(data_store.scy.clone(), data_store.$qu_insert.clone(), params);
+            let fut = if ts_msp_changed {
+                let fut1 = ScyInsertFut::new(
+                    data_store.scy.clone(),
+                    data_store.qu_insert_series.clone(),
+                    (
+                        (series.id() as u32 % TABLE_SERIES_MOD) as i32,
+                        series.id() as i64,
+                        ts_msp as i64,
+                        st.map(|x| x.to_scylla_i32()),
+                        sh.map(|x| x.to_scylla_vec()),
+                    ),
+                );
+                let fut2 = ScyInsertFut::new(
+                    data_store.scy.clone(),
+                    data_store.qu_insert_ts_msp.clone(),
+                    (series.id() as i64, ts_msp as i64),
+                );
+                Box::pin(fut1.and_then(move |_| fut2).and_then(move |_| fut3)) as _
+            } else {
+                Box::pin(fut3) as _
+            };
+            if futs_queue.len() >= INSERT_FUTS_MAX {
+                warn!("can not keep up");
+                // TODO count these events, this means dataloss.
+            } else {
+                futs_queue.push(fut);
+            }
+        }
+    };
+}
+
+// TODO test that errors are properly forwarded.
+macro_rules! insert_array_impl {
+    ($fname:ident, $valty:ty, $qu_insert:ident) => {
+        fn $fname(
+            data_store: Arc<DataStore>,
+            // TODO maybe use a newtype?
+            futs_queue: &mut FuturesUnordered<Pin<Box<dyn Future<Output = Result<(), Error>> + Send>>>,
+            series: SeriesId,
+            ts_msp: u64,
+            ts_lsp: u64,
+            val: Vec<$valty>,
+            ts_msp_changed: bool,
+            st: Option<ScalarType>,
+            sh: Option<Shape>,
+        ) {
+            let pulse = 0 as u64;
+            let params = (
+                series.id() as i64,
+                ts_msp as i64,
+                ts_lsp as i64,
+                pulse as i64,
+                val,
+            );
+            let fut3 = ScyInsertFut::new(data_store.scy.clone(), data_store.$qu_insert.clone(), params);
+            let fut = if ts_msp_changed {
+                let fut1 = ScyInsertFut::new(
+                    data_store.scy.clone(),
+                    data_store.qu_insert_series.clone(),
+                    (
+                        (series.id() as u32 % TABLE_SERIES_MOD) as i32,
+                        series.id() as i64,
+                        ts_msp as i64,
+                        st.map(|x| x.to_scylla_i32()),
+                        sh.map(|x| x.to_scylla_vec()),
+                    ),
+                );
+                let fut2 = ScyInsertFut::new(
+                    data_store.scy.clone(),
+                    data_store.qu_insert_ts_msp.clone(),
+                    (series.id() as i64, ts_msp as i64),
+                );
+                Box::pin(fut1.and_then(move |_| fut2).and_then(move |_| fut3)) as _
+            } else {
+                Box::pin(fut3) as _
+            };
+            if futs_queue.len() >= INSERT_FUTS_MAX {
+                warn!("can not keep up");
+                // TODO count these events, this means dataloss.
+            } else {
+                futs_queue.push(fut);
+            }
+        }
+    };
+}
+
+insert_scalar_impl!(insert_scalar_i8, i8, qu_insert_scalar_i8);
+insert_scalar_impl!(insert_scalar_i16, i16, qu_insert_scalar_i16);
+insert_scalar_impl!(insert_scalar_i32, i32, qu_insert_scalar_i32);
+insert_scalar_impl!(insert_scalar_f32, f32, qu_insert_scalar_f32);
+insert_scalar_impl!(insert_scalar_f64, f64, qu_insert_scalar_f64);
+insert_scalar_impl!(insert_scalar_string, String, qu_insert_scalar_string);
+
+insert_array_impl!(insert_array_f32, f32, qu_insert_array_f32);
+insert_array_impl!(insert_array_f64, f64, qu_insert_array_f64);
+
+macro_rules! match_scalar_value_insert {
+    ($stv:ident, $insf:ident, $val:expr, $comm:expr) => {{
+        let (data_store, futs_queue, ch_s, series, ts_msp, ts_lsp, ts_msp_changed, channel_scalar_type, channel_shape) =
+            $comm;
+        match ch_s {
+            ChannelState::Created(st) => match st.shape {
+                Shape::Scalar => match st.scalar_type {
+                    ScalarType::$stv => $insf(
+                        data_store,
+                        futs_queue,
+                        series,
+                        ts_msp,
+                        ts_lsp,
+                        $val,
+                        ts_msp_changed,
+                        channel_scalar_type,
+                        channel_shape,
+                    ),
+                    _ => {
+                        error!("unexpected value type  insf {:?}", stringify!($insf));
+                    }
+                },
+                _ => {
+                    error!(
+                        "unexpected value shape  insf {:?}  st.shape {:?}",
+                        stringify!($insf),
+                        st.shape
+                    );
+                }
+            },
+            _ => {
+                error!("got value but channel not created  insf {:?}", stringify!($insf));
+            }
+        }
+    }};
+}
+
+macro_rules! match_array_value_insert {
+    ($stv:ident, $insf:ident, $val:expr, $comm:expr) => {{
+        let (data_store, futs_queue, ch_s, series, ts_msp, ts_lsp, ts_msp_changed, channel_scalar_type, channel_shape) =
+            $comm;
+        match ch_s {
+            ChannelState::Created(st) => match st.shape {
+                Shape::Wave(_) => match st.scalar_type {
+                    ScalarType::$stv => $insf(
+                        data_store,
+                        futs_queue,
+                        series,
+                        ts_msp,
+                        ts_lsp,
+                        $val,
+                        ts_msp_changed,
+                        channel_scalar_type,
+                        channel_shape,
+                    ),
+                    _ => {
+                        error!("unexpected value type  insf {:?}", stringify!($insf));
+                    }
+                },
+                _ => {
+                    error!(
+                        "unexpected value shape  insf {:?}  st.shape {:?}",
+                        stringify!($insf),
+                        st.shape
+                    );
+                }
+            },
+            _ => {
+                error!("got value but channel not created  insf {:?}", stringify!($insf));
+            }
+        }
+    }};
 }
 
 pub struct CaConn {
@@ -93,6 +289,7 @@ pub struct CaConn {
     channels: BTreeMap<u32, ChannelState>,
     cid_by_name: BTreeMap<String, u32>,
     cid_by_subid: BTreeMap<u32, u32>,
+    ts_msp_last_by_series: BTreeMap<SeriesId, u64>,
     name_by_cid: BTreeMap<u32, String>,
     poll_count: usize,
     data_store: Arc<DataStore>,
@@ -100,24 +297,27 @@ pub struct CaConn {
         Pin<Box<dyn Future<Output = Result<(u32, u32, u16, u16, Existence<SeriesId>), Error>> + Send>>,
     >,
     value_insert_futs: FuturesUnordered<Pin<Box<dyn Future<Output = Result<(), Error>> + Send>>>,
+    remote_addr_dbg: SocketAddrV4,
 }
 
 impl CaConn {
-    pub fn new(tcp: TcpStream, data_store: Arc<DataStore>) -> Self {
+    pub fn new(tcp: TcpStream, remote_addr_dbg: SocketAddrV4, data_store: Arc<DataStore>) -> Self {
         Self {
             state: CaConnState::Init,
-            proto: CaProto::new(tcp),
+            proto: CaProto::new(tcp, remote_addr_dbg),
             cid_store: IdStore::new(),
             ioid_store: IdStore::new(),
             subid_store: IdStore::new(),
             channels: BTreeMap::new(),
             cid_by_name: BTreeMap::new(),
             cid_by_subid: BTreeMap::new(),
+            ts_msp_last_by_series: BTreeMap::new(),
             name_by_cid: BTreeMap::new(),
             poll_count: 0,
             data_store,
             fut_get_series: FuturesUnordered::new(),
             value_insert_futs: FuturesUnordered::new(),
+            remote_addr_dbg,
         }
     }
 
@@ -144,6 +344,75 @@ impl CaConn {
         self.name_by_cid.get(&cid).map(|x| x.as_str())
     }
 
+    fn handle_insert_futs(&mut self, cx: &mut Context) -> Result<(), Error> {
+        use Poll::*;
+        while self.value_insert_futs.len() > 0 {
+            match self.value_insert_futs.poll_next_unpin(cx) {
+                Pending => break,
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    fn handle_get_series_futs(&mut self, cx: &mut Context) -> Result<(), Error> {
+        use Poll::*;
+        while self.fut_get_series.len() > 0 {
+            match self.fut_get_series.poll_next_unpin(cx) {
+                Ready(Some(Ok(k))) => {
+                    info!("Have SeriesId {k:?}");
+                    let cid = k.0;
+                    let sid = k.1;
+                    let data_type = k.2;
+                    let data_count = k.3;
+                    let series = match k.4 {
+                        Existence::Created(k) => k,
+                        Existence::Existing(k) => k,
+                    };
+                    let subid = self.subid_store.next();
+                    self.cid_by_subid.insert(subid, cid);
+                    let name = self.name_by_cid(cid).unwrap().to_string();
+                    let msg = CaMsg {
+                        ty: CaMsgTy::EventAdd(EventAdd {
+                            sid,
+                            data_type,
+                            data_count,
+                            subid,
+                        }),
+                    };
+                    self.proto.push_out(msg);
+                    // TODO handle not-found error:
+                    let ch_s = self.channels.get_mut(&cid).unwrap();
+                    *ch_s = ChannelState::Created(CreatedState {
+                        cid,
+                        sid,
+                        // TODO handle error better! Transition channel to Error state?
+                        scalar_type: ScalarType::from_ca_id(data_type)?,
+                        shape: Shape::from_ca_count(data_count)?,
+                        ts_created: Instant::now(),
+                        state: MonitoringState::AddingEvent(series),
+                    });
+                    let scalar_type = ScalarType::from_ca_id(data_type)?;
+                    let shape = Shape::from_ca_count(data_count)?;
+                    let _cd = ChannelDescDecoded {
+                        name: name.to_string(),
+                        scalar_type,
+                        shape,
+                        agg_kind: netpod::AggKind::Plain,
+                        // TODO these play no role in series id:
+                        byte_order: netpod::ByteOrder::LE,
+                        compression: None,
+                    };
+                    cx.waker().wake_by_ref();
+                }
+                Ready(Some(Err(e))) => error!("series error: {e:?}"),
+                Ready(None) => {}
+                Pending => break,
+            }
+        }
+        Ok(())
+    }
+
     fn handle_event_add_res(&mut self, ev: proto::EventAddRes) {
         // TODO handle subid-not-found which can also be peer error:
         let cid = *self.cid_by_subid.get(&ev.subid).unwrap();
@@ -152,13 +421,16 @@ impl CaConn {
         // TODO handle not-found error:
         let mut series_2 = None;
         let ch_s = self.channels.get_mut(&cid).unwrap();
+        let mut channel_scalar_type = None;
+        let mut channel_shape = None;
         match ch_s {
             ChannelState::Created(st) => {
+                channel_scalar_type = Some(st.scalar_type.clone());
+                channel_shape = Some(st.shape.clone());
                 match st.state {
                     MonitoringState::AddingEvent(ref series) => {
                         let series = series.clone();
                         series_2 = Some(series.clone());
-                        info!("Confirmation {name} is subscribed.");
                         // TODO get ts from faster common source:
                         st.state = MonitoringState::Evented(
                             series,
@@ -182,67 +454,236 @@ impl CaConn {
             }
         }
         {
-            let series = series_2.unwrap();
+            let series = match series_2 {
+                Some(k) => k,
+                None => {
+                    error!("handle_event_add_res  but no series");
+                    // TODO allow return Result
+                    return;
+                }
+            };
             // TODO where to actually get the time from?
             let ts = SystemTime::now();
             let epoch = ts.duration_since(std::time::UNIX_EPOCH).unwrap();
             // TODO decide on better msp/lsp: random offset!
             // As long as one writer is active, the msp is arbitrary.
             let ts = epoch.as_secs() * 1000000000 + epoch.subsec_nanos() as u64;
-            let ts_msp = ts / (30 * SEC) * (30 * SEC);
+            let ts_msp = ts / (60 * SEC) * (60 * SEC);
             let ts_lsp = ts - ts_msp;
+            let ts_msp_changed = if let Some(ts_msp_cur) = self.ts_msp_last_by_series.get_mut(&series) {
+                if ts_msp != *ts_msp_cur {
+                    *ts_msp_cur = ts_msp;
+                    true
+                } else {
+                    false
+                }
+            } else {
+                self.ts_msp_last_by_series.insert(series.clone(), ts_msp);
+                true
+            };
             // TODO make sure that I only accept types I expect.
             use crate::ca::proto::CaDataScalarValue::*;
             use crate::ca::proto::CaDataValue::*;
+            let data_store = self.data_store.clone();
+            let futs_queue = &mut self.value_insert_futs;
+            let comm = (
+                data_store,
+                futs_queue,
+                ch_s,
+                series,
+                ts_msp,
+                ts_lsp,
+                ts_msp_changed,
+                channel_scalar_type,
+                channel_shape,
+            );
             match ev.value {
                 Scalar(v) => match v {
-                    F64(val) => match ch_s {
-                        ChannelState::Created(st) => match st.shape {
-                            Shape::Scalar => match st.scalar_type {
-                                ScalarType::F64 => self.insert_scalar_f64(series, ts_msp, ts_lsp, val),
-                                _ => {
-                                    error!("unexpected value type");
-                                }
-                            },
-                            _ => {
-                                error!("unexpected value shape");
-                            }
-                        },
-                        _ => {
-                            error!("got value but channel not created");
-                        }
-                    },
-                    _ => {}
+                    I8(val) => match_scalar_value_insert!(I8, insert_scalar_i8, val, comm),
+                    I16(val) => match_scalar_value_insert!(I16, insert_scalar_i16, val, comm),
+                    I32(val) => match_scalar_value_insert!(I32, insert_scalar_i32, val, comm),
+                    F32(val) => match_scalar_value_insert!(F32, insert_scalar_f32, val, comm),
+                    F64(val) => match_scalar_value_insert!(F64, insert_scalar_f64, val, comm),
+                    String(val) => match_scalar_value_insert!(STRING, insert_scalar_string, val, comm),
+                    _ => {
+                        warn!("can not handle Scalar {:?}", v);
+                    }
                 },
-                Array => {}
+                Array(v) => {
+                    use crate::ca::proto::CaDataArrayValue::*;
+                    match v {
+                        F32(val) => match_array_value_insert!(F32, insert_array_f32, val, comm),
+                        F64(val) => match_array_value_insert!(F64, insert_array_f64, val, comm),
+                        _ => {
+                            warn!("can not handle Array  ty {}  n {}", ev.data_type, ev.data_count);
+                        }
+                    }
+                }
             }
         }
     }
 
-    fn insert_scalar_f64(&mut self, series: SeriesId, ts_msp: u64, ts_lsp: u64, val: f64) {
-        let pulse = 0 as u64;
-        let y = unsafe { &*(self as *const CaConn) };
-        let fut1 = y
-            .data_store
-            .scy
-            .execute(&y.data_store.qu_insert_ts_msp, (series.id() as i64, ts_msp as i64))
-            .map(|_| Ok::<_, Error>(()))
-            .map_err(|e| Error::with_msg_no_trace(format!("{e:?}")));
-        let fut2 = y
-            .data_store
-            .scy
-            .execute(
-                &y.data_store.qu_insert_scalar_f64,
-                (series.id() as i64, ts_msp as i64, ts_lsp as i64, pulse as i64, val),
-            )
-            .map(|_| Ok::<_, Error>(()))
-            .map_err(|e| Error::with_msg_no_trace(format!("{e:?}")));
-        let fut = fut1.and_then(move |_a| fut2);
-        if self.value_insert_futs.len() > INSERT_FUTS_MAX {
-            warn!("can not keep up");
-        } else {
-            self.value_insert_futs.push(Box::pin(fut) as _);
+    fn handle_conn_listen(&mut self, cx: &mut Context) -> Option<Poll<Option<Result<(), Error>>>> {
+        use Poll::*;
+        match self.proto.poll_next_unpin(cx) {
+            Ready(Some(k)) => match k {
+                Ok(k) => match k {
+                    CaItem::Empty => {
+                        info!("CaItem::Empty");
+                        Some(Ready(Some(Ok(()))))
+                    }
+                    CaItem::Msg(msg) => match msg.ty {
+                        CaMsgTy::VersionRes(n) => {
+                            if n < 12 || n > 13 {
+                                error!("See some unexpected version {n}  channel search may not work.");
+                                Some(Ready(Some(Ok(()))))
+                            } else {
+                                info!("Received peer version {n}");
+                                self.state = CaConnState::PeerReady;
+                                None
+                            }
+                        }
+                        k => {
+                            warn!("Got some other unhandled message: {k:?}");
+                            Some(Ready(Some(Ok(()))))
+                        }
+                    },
+                },
+                Err(e) => {
+                    error!("got error item from CaProto {e:?}");
+                    Some(Ready(Some(Ok(()))))
+                }
+            },
+            Ready(None) => {
+                warn!("CaProto is done  {:?}", self.remote_addr_dbg);
+                self.state = CaConnState::Done;
+                None
+            }
+            Pending => Some(Pending),
         }
+    }
+
+    fn check_channels_state_init(&mut self, msgs_tmp: &mut Vec<CaMsg>) -> Result<(), Error> {
+        // TODO profile, efficient enough?
+        let keys: Vec<u32> = self.channels.keys().map(|x| *x).collect();
+        for cid in keys {
+            match self.channels.get_mut(&cid).unwrap() {
+                ChannelState::Init => {
+                    let name = self
+                        .name_by_cid(cid)
+                        .ok_or_else(|| Error::with_msg_no_trace("name for cid not known"));
+                    let name = match name {
+                        Ok(k) => k,
+                        Err(e) => return Err(e),
+                    };
+                    info!("Sending CreateChan for {}", name);
+                    let msg = CaMsg {
+                        ty: CaMsgTy::CreateChan(CreateChan {
+                            cid,
+                            channel: name.into(),
+                        }),
+                    };
+                    msgs_tmp.push(msg);
+                    // TODO handle not-found error:
+                    let ch_s = self.channels.get_mut(&cid).unwrap();
+                    *ch_s = ChannelState::Creating {
+                        cid,
+                        ts_beg: Instant::now(),
+                    };
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    fn handle_peer_ready(&mut self, cx: &mut Context) -> Poll<Option<Result<(), Error>>> {
+        use Poll::*;
+        // TODO unify with Listen state where protocol gets polled as well.
+        let mut msgs_tmp = vec![];
+        self.check_channels_state_init(&mut msgs_tmp)?;
+        let mut do_wake_again = false;
+        if msgs_tmp.len() > 0 {
+            info!("msgs_tmp.len() {}", msgs_tmp.len());
+            do_wake_again = true;
+        }
+        // TODO be careful to not overload outgoing message queue.
+        for msg in msgs_tmp {
+            self.proto.push_out(msg);
+        }
+        let res = match self.proto.poll_next_unpin(cx) {
+            Ready(Some(Ok(k))) => {
+                match k {
+                    CaItem::Msg(k) => {
+                        match k.ty {
+                            CaMsgTy::SearchRes(k) => {
+                                let a = k.addr.to_be_bytes();
+                                let addr = format!("{}.{}.{}.{}:{}", a[0], a[1], a[2], a[3], k.tcp_port);
+                                info!("Search result indicates server address: {addr}");
+                            }
+                            CaMsgTy::CreateChanRes(k) => {
+                                // TODO handle cid-not-found which can also indicate peer error.
+                                let cid = k.cid;
+                                let sid = k.sid;
+                                // TODO handle error:
+                                let name = self.name_by_cid(cid).unwrap().to_string();
+                                info!("CreateChanRes {name:?}");
+                                let scalar_type = ScalarType::from_ca_id(k.data_type)?;
+                                let shape = Shape::from_ca_count(k.data_count)?;
+                                // TODO handle not-found error:
+                                let ch_s = self.channels.get_mut(&cid).unwrap();
+                                *ch_s = ChannelState::Created(CreatedState {
+                                    cid,
+                                    sid,
+                                    scalar_type: scalar_type.clone(),
+                                    shape: shape.clone(),
+                                    ts_created: Instant::now(),
+                                    state: MonitoringState::FetchSeriesId,
+                                });
+                                // TODO handle error in different way. Should most likely not abort.
+                                let cd = ChannelDescDecoded {
+                                    name: name.to_string(),
+                                    scalar_type,
+                                    shape,
+                                    agg_kind: netpod::AggKind::Plain,
+                                    // TODO these play no role in series id:
+                                    byte_order: netpod::ByteOrder::LE,
+                                    compression: None,
+                                };
+                                let y = unsafe { &*(&self as &Self as *const CaConn) };
+                                let fut = y
+                                    .data_store
+                                    .chan_reg
+                                    .get_series_id(cd)
+                                    .map_ok(move |series| (cid, k.sid, k.data_type, k.data_count, series));
+                                // TODO throttle execution rate:
+                                self.fut_get_series.push(Box::pin(fut) as _);
+                                do_wake_again = true;
+                            }
+                            CaMsgTy::EventAddRes(k) => Self::handle_event_add_res(self, k),
+                            _ => {}
+                        }
+                    }
+                    _ => {}
+                }
+                Ready(Some(Ok(())))
+            }
+            Ready(Some(Err(e))) => {
+                error!("CaProto yields error: {e:?}");
+                Ready(Some(Err(e)))
+            }
+            Ready(None) => {
+                warn!("CaProto is done");
+                self.state = CaConnState::Done;
+                Ready(Some(Ok(())))
+            }
+            Pending => Pending,
+        };
+        if do_wake_again {
+            info!("do_wake_again");
+            cx.waker().wake_by_ref();
+        }
+        res
     }
 }
 
@@ -252,70 +693,9 @@ impl Stream for CaConn {
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
         use Poll::*;
         self.poll_count += 1;
-        if false && self.poll_count > 3000 {
-            error!("TODO CaConn reached poll_count limit");
-            return Ready(None);
-        }
         loop {
-            while self.value_insert_futs.len() > 0 {
-                match self.fut_get_series.poll_next_unpin(cx) {
-                    Pending => break,
-                    _ => {}
-                }
-            }
-            while self.fut_get_series.len() > 0 {
-                match self.fut_get_series.poll_next_unpin(cx) {
-                    Ready(Some(Ok(k))) => {
-                        info!("Have SeriesId {k:?}");
-                        let cid = k.0;
-                        let sid = k.1;
-                        let data_type = k.2;
-                        let data_count = k.3;
-                        let series = match k.4 {
-                            Existence::Created(k) => k,
-                            Existence::Existing(k) => k,
-                        };
-                        let subid = self.subid_store.next();
-                        self.cid_by_subid.insert(subid, cid);
-                        let name = self.name_by_cid(cid).unwrap().to_string();
-                        let msg = CaMsg {
-                            ty: CaMsgTy::EventAdd(EventAdd {
-                                sid,
-                                data_type,
-                                data_count,
-                                subid,
-                            }),
-                        };
-                        self.proto.push_out(msg);
-                        // TODO handle not-found error:
-                        let ch_s = self.channels.get_mut(&cid).unwrap();
-                        *ch_s = ChannelState::Created(CreatedState {
-                            cid,
-                            sid,
-                            // TODO handle error better! Transition channel to Error state?
-                            scalar_type: ScalarType::from_ca_id(data_type)?,
-                            shape: Shape::from_ca_count(data_count)?,
-                            ts_created: Instant::now(),
-                            state: MonitoringState::AddingEvent(series),
-                        });
-                        let scalar_type = ScalarType::from_ca_id(data_type)?;
-                        let shape = Shape::from_ca_count(data_count)?;
-                        let _cd = ChannelDescDecoded {
-                            name: name.to_string(),
-                            scalar_type,
-                            shape,
-                            agg_kind: netpod::AggKind::Plain,
-                            // TODO these play no role in series id:
-                            byte_order: netpod::ByteOrder::LE,
-                            compression: None,
-                        };
-                        cx.waker().wake_by_ref();
-                    }
-                    Ready(Some(Err(e))) => error!("series error: {e:?}"),
-                    Ready(None) => {}
-                    Pending => break,
-                }
-            }
+            self.handle_insert_futs(cx)?;
+            self.handle_get_series_futs(cx)?;
             break match &self.state {
                 CaConnState::Init => {
                     let msg = CaMsg { ty: CaMsgTy::Version };
@@ -329,157 +709,11 @@ impl Stream for CaConn {
                     self.state = CaConnState::Listen;
                     continue;
                 }
-                CaConnState::Listen => match self.proto.poll_next_unpin(cx) {
-                    Ready(Some(k)) => match k {
-                        Ok(k) => match k {
-                            CaItem::Empty => {
-                                info!("CaItem::Empty");
-                                Ready(Some(Ok(())))
-                            }
-                            CaItem::Msg(msg) => match msg.ty {
-                                CaMsgTy::VersionRes(n) => {
-                                    if n < 12 || n > 13 {
-                                        error!("See some unexpected version {n}  channel search may not work.");
-                                        Ready(Some(Ok(())))
-                                    } else {
-                                        info!("Received peer version {n}");
-                                        self.state = CaConnState::PeerReady;
-                                        continue;
-                                    }
-                                }
-                                k => {
-                                    warn!("Got some other unhandled message: {k:?}");
-                                    Ready(Some(Ok(())))
-                                }
-                            },
-                        },
-                        Err(e) => {
-                            error!("got error item from CaProto {e:?}");
-                            Ready(Some(Ok(())))
-                        }
-                    },
-                    Ready(None) => {
-                        warn!("CaProto is done");
-                        self.state = CaConnState::Done;
-                        continue;
-                    }
-                    Pending => Pending,
+                CaConnState::Listen => match self.handle_conn_listen(cx) {
+                    Some(k) => k,
+                    None => continue,
                 },
-                CaConnState::PeerReady => {
-                    // TODO unify with Listen state where protocol gets polled as well.
-                    let mut msgs_tmp = vec![];
-                    // TODO profile, efficient enough?
-                    let keys: Vec<u32> = self.channels.keys().map(|x| *x).collect();
-                    for cid in keys {
-                        match self.channels.get_mut(&cid).unwrap() {
-                            ChannelState::Init => {
-                                let name = self
-                                    .name_by_cid(cid)
-                                    .ok_or_else(|| Error::with_msg_no_trace("name for cid not known"));
-                                let name = match name {
-                                    Ok(k) => k,
-                                    Err(e) => return Ready(Some(Err(e))),
-                                };
-                                info!("Sending CreateChan for {}", name);
-                                let msg = CaMsg {
-                                    ty: CaMsgTy::CreateChan(CreateChan {
-                                        cid,
-                                        channel: name.into(),
-                                    }),
-                                };
-                                msgs_tmp.push(msg);
-                                // TODO handle not-found error:
-                                let ch_s = self.channels.get_mut(&cid).unwrap();
-                                *ch_s = ChannelState::Creating {
-                                    cid,
-                                    ts_beg: Instant::now(),
-                                };
-                            }
-                            _ => {}
-                        }
-                    }
-                    let mut do_wake_again = false;
-                    if msgs_tmp.len() > 0 {
-                        info!("msgs_tmp.len() {}", msgs_tmp.len());
-                        do_wake_again = true;
-                    }
-                    // TODO be careful to not overload outgoing message queue.
-                    for msg in msgs_tmp {
-                        self.proto.push_out(msg);
-                    }
-                    let res = match self.proto.poll_next_unpin(cx) {
-                        Ready(Some(Ok(k))) => {
-                            match k {
-                                CaItem::Msg(k) => {
-                                    match k.ty {
-                                        CaMsgTy::SearchRes(k) => {
-                                            let a = k.addr.to_be_bytes();
-                                            let addr = format!("{}.{}.{}.{}:{}", a[0], a[1], a[2], a[3], k.tcp_port);
-                                            info!("Search result indicates server address: {addr}");
-                                        }
-                                        CaMsgTy::CreateChanRes(k) => {
-                                            // TODO handle cid-not-found which can also indicate peer error.
-                                            let cid = k.cid;
-                                            let sid = k.sid;
-                                            // TODO handle error:
-                                            let name = self.name_by_cid(cid).unwrap().to_string();
-                                            info!("CreateChanRes {name:?}");
-                                            let scalar_type = ScalarType::from_ca_id(k.data_type)?;
-                                            let shape = Shape::from_ca_count(k.data_count)?;
-                                            // TODO handle not-found error:
-                                            let ch_s = self.channels.get_mut(&cid).unwrap();
-                                            *ch_s = ChannelState::Created(CreatedState {
-                                                cid,
-                                                sid,
-                                                scalar_type: scalar_type.clone(),
-                                                shape: shape.clone(),
-                                                ts_created: Instant::now(),
-                                                state: MonitoringState::FetchSeriesId,
-                                            });
-                                            // TODO handle error in different way. Should most likely not abort.
-                                            let cd = ChannelDescDecoded {
-                                                name: name.to_string(),
-                                                scalar_type,
-                                                shape,
-                                                agg_kind: netpod::AggKind::Plain,
-                                                // TODO these play no role in series id:
-                                                byte_order: netpod::ByteOrder::LE,
-                                                compression: None,
-                                            };
-                                            let y = unsafe { &*(&self as &Self as *const CaConn) };
-                                            let fut =
-                                                y.data_store.chan_reg.get_series_id(cd).map_ok(move |series| {
-                                                    (cid, k.sid, k.data_type, k.data_count, series)
-                                                });
-                                            // TODO throttle execution rate:
-                                            self.fut_get_series.push(Box::pin(fut) as _);
-                                            do_wake_again = true;
-                                        }
-                                        CaMsgTy::EventAddRes(k) => Self::handle_event_add_res(&mut self, k),
-                                        _ => {}
-                                    }
-                                }
-                                _ => {}
-                            }
-                            Ready(Some(Ok(())))
-                        }
-                        Ready(Some(Err(e))) => {
-                            error!("CaProto yields error: {e:?}");
-                            Ready(Some(Err(e)))
-                        }
-                        Ready(None) => {
-                            warn!("CaProto is done");
-                            self.state = CaConnState::Done;
-                            Ready(Some(Ok(())))
-                        }
-                        Pending => Pending,
-                    };
-                    if do_wake_again {
-                        info!("do_wake_again");
-                        cx.waker().wake_by_ref();
-                    }
-                    res
-                }
+                CaConnState::PeerReady => self.handle_peer_ready(cx),
                 CaConnState::Done => Ready(None),
             };
         }
@@ -499,6 +733,7 @@ impl Drop for SockBox {
     }
 }
 
+// TODO should be able to get away with non-atomic counters.
 static BATCH_ID: AtomicUsize = AtomicUsize::new(0);
 static SEARCH_ID2: AtomicUsize = AtomicUsize::new(0);
 
@@ -509,7 +744,6 @@ struct BatchId(u32);
 struct SearchId(u32);
 
 struct SearchBatch {
-    id: BatchId,
     ts_beg: Instant,
     tgts: VecDeque<usize>,
     channels: Vec<String>,
@@ -547,7 +781,6 @@ pub struct FindIocStream {
 
 impl FindIocStream {
     pub fn new(tgts: Vec<SocketAddrV4>) -> Self {
-        info!("FindIocStream  tgts {tgts:?}");
         let sock = unsafe { Self::create_socket() }.unwrap();
         let afd = AsyncFd::new(sock.0).unwrap();
         Self {
@@ -669,7 +902,6 @@ impl FindIocStream {
             sin_zero: [0; 8],
         };
         let addr_len = std::mem::size_of::<libc::sockaddr_in>();
-        //info!("sendto {ip:?}  {}  n {}", port, buf.len());
         let ec = libc::sendto(
             sock,
             &buf[0] as *const _ as _,
@@ -756,7 +988,6 @@ impl FindIocStream {
                 nb.adv(hi.payload())?;
                 msgs.push(msg);
             }
-            //info!("received {} msgs  {:?}", msgs.len(), msgs);
             let mut res = vec![];
             for msg in msgs.iter() {
                 match &msg.ty {
@@ -793,7 +1024,6 @@ impl FindIocStream {
     fn create_in_flight(&mut self) {
         let bid = BATCH_ID.fetch_add(1, Ordering::AcqRel);
         let bid = BatchId(bid as u32);
-        //info!("create_in_flight  {bid:?}");
         let mut sids = vec![];
         let mut chs = vec![];
         while chs.len() < self.channels_per_batch && self.channels_input.len() > 0 {
@@ -804,7 +1034,6 @@ impl FindIocStream {
             chs.push(self.channels_input.pop_front().unwrap());
         }
         let batch = SearchBatch {
-            id: bid.clone(),
             ts_beg: Instant::now(),
             channels: chs,
             tgts: self.tgts.iter().enumerate().map(|x| x.0).collect(),
@@ -855,7 +1084,6 @@ impl FindIocStream {
                                 all_done = false;
                             }
                             if all_done {
-                                //info!("all searches done for {bid:?}");
                                 self.bids_all_done.insert(bid.clone(), ());
                                 self.in_flight.remove(bid);
                             }
@@ -888,9 +1116,10 @@ impl FindIocStream {
         let mut chns = vec![];
         for (bid, batch) in &mut self.in_flight {
             if now.duration_since(batch.ts_beg) > self.batch_run_max {
+                self.bids_timed_out.insert(bid.clone(), ());
                 for (i2, sid) in batch.sids.iter().enumerate() {
                     if batch.done.contains(sid) == false {
-                        warn!("Timeout: {bid:?} {}", batch.channels[i2]);
+                        debug!("Timeout: {bid:?} {}", batch.channels[i2]);
                     }
                     sids.push(sid.clone());
                     chns.push(batch.channels[i2].clone());
@@ -1014,7 +1243,6 @@ impl Stream for FindIocStream {
                     }
                     Pending => {
                         g.clear_ready();
-                        //warn!("socket seemed ready for read, but is not");
                         continue;
                     }
                 },
