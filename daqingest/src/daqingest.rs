@@ -14,6 +14,8 @@ pub struct DaqIngestOpts {
     pub tag: Option<String>,
     #[clap(subcommand)]
     pub subcmd: SubCmd,
+    #[clap(long)]
+    pub nworkers: Option<usize>,
 }
 
 #[derive(Debug, Parser)]

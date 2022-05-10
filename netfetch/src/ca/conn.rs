@@ -11,10 +11,11 @@ use libc::c_int;
 use log::*;
 use netpod::timeunits::SEC;
 use netpod::{ScalarType, Shape};
+use stats::CaConnStats;
 use std::collections::{BTreeMap, VecDeque};
 use std::net::{Ipv4Addr, SocketAddrV4};
 use std::pin::Pin;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant, SystemTime};
@@ -53,6 +54,8 @@ struct CreatedState {
     shape: Shape,
     ts_created: Instant,
     state: MonitoringState,
+    ts_msp_last: u64,
+    inserted_in_ts_msp: u64,
 }
 
 #[derive(Debug)]
@@ -98,8 +101,9 @@ macro_rules! insert_scalar_impl {
             ts_lsp: u64,
             val: $valty,
             ts_msp_changed: bool,
-            st: Option<ScalarType>,
-            sh: Option<Shape>,
+            st: ScalarType,
+            sh: Shape,
+            inserts_discarded: &AtomicU64,
         ) {
             let pulse = 0 as u64;
             let params = (
@@ -118,8 +122,8 @@ macro_rules! insert_scalar_impl {
                         (series.id() as u32 % TABLE_SERIES_MOD) as i32,
                         series.id() as i64,
                         ts_msp as i64,
-                        st.map(|x| x.to_scylla_i32()),
-                        sh.map(|x| x.to_scylla_vec()),
+                        st.to_scylla_i32(),
+                        sh.to_scylla_vec(),
                     ),
                 );
                 let fut2 = ScyInsertFut::new(
@@ -132,8 +136,7 @@ macro_rules! insert_scalar_impl {
                 Box::pin(fut3) as _
             };
             if futs_queue.len() >= INSERT_FUTS_MAX {
-                warn!("can not keep up");
-                // TODO count these events, this means dataloss.
+                inserts_discarded.fetch_add(1, Ordering::Release);
             } else {
                 futs_queue.push(fut);
             }
@@ -153,8 +156,9 @@ macro_rules! insert_array_impl {
             ts_lsp: u64,
             val: Vec<$valty>,
             ts_msp_changed: bool,
-            st: Option<ScalarType>,
-            sh: Option<Shape>,
+            st: ScalarType,
+            sh: Shape,
+            inserts_discarded: &AtomicU64,
         ) {
             let pulse = 0 as u64;
             let params = (
@@ -173,8 +177,8 @@ macro_rules! insert_array_impl {
                         (series.id() as u32 % TABLE_SERIES_MOD) as i32,
                         series.id() as i64,
                         ts_msp as i64,
-                        st.map(|x| x.to_scylla_i32()),
-                        sh.map(|x| x.to_scylla_vec()),
+                        st.to_scylla_i32(),
+                        sh.to_scylla_vec(),
                     ),
                 );
                 let fut2 = ScyInsertFut::new(
@@ -187,8 +191,7 @@ macro_rules! insert_array_impl {
                 Box::pin(fut3) as _
             };
             if futs_queue.len() >= INSERT_FUTS_MAX {
-                warn!("can not keep up");
-                // TODO count these events, this means dataloss.
+                inserts_discarded.fetch_add(1, Ordering::Release);
             } else {
                 futs_queue.push(fut);
             }
@@ -203,81 +206,74 @@ insert_scalar_impl!(insert_scalar_f32, f32, qu_insert_scalar_f32);
 insert_scalar_impl!(insert_scalar_f64, f64, qu_insert_scalar_f64);
 insert_scalar_impl!(insert_scalar_string, String, qu_insert_scalar_string);
 
+insert_array_impl!(insert_array_i8, i8, qu_insert_array_i8);
 insert_array_impl!(insert_array_f32, f32, qu_insert_array_f32);
 insert_array_impl!(insert_array_f64, f64, qu_insert_array_f64);
 
 macro_rules! match_scalar_value_insert {
     ($stv:ident, $insf:ident, $val:expr, $comm:expr) => {{
-        let (data_store, futs_queue, ch_s, series, ts_msp, ts_lsp, ts_msp_changed, channel_scalar_type, channel_shape) =
+        let (data_store, futs_queue, series, ts_msp, ts_lsp, ts_msp_changed, scalar_type, shape, inserts_discarded) =
             $comm;
-        match ch_s {
-            ChannelState::Created(st) => match st.shape {
-                Shape::Scalar => match st.scalar_type {
-                    ScalarType::$stv => $insf(
-                        data_store,
-                        futs_queue,
-                        series,
-                        ts_msp,
-                        ts_lsp,
-                        $val,
-                        ts_msp_changed,
-                        channel_scalar_type,
-                        channel_shape,
-                    ),
-                    _ => {
-                        error!("unexpected value type  insf {:?}", stringify!($insf));
-                    }
-                },
+        match shape {
+            Shape::Scalar => match scalar_type {
+                ScalarType::$stv => $insf(
+                    data_store,
+                    futs_queue,
+                    series,
+                    ts_msp,
+                    ts_lsp,
+                    $val,
+                    ts_msp_changed,
+                    scalar_type,
+                    shape,
+                    inserts_discarded,
+                ),
                 _ => {
-                    error!(
-                        "unexpected value shape  insf {:?}  st.shape {:?}",
-                        stringify!($insf),
-                        st.shape
-                    );
+                    error!("unexpected value type  insf {:?}", stringify!($insf));
                 }
             },
             _ => {
-                error!("got value but channel not created  insf {:?}", stringify!($insf));
+                error!(
+                    "unexpected value shape  insf {:?}  shape {:?}",
+                    stringify!($insf),
+                    shape
+                );
             }
         }
-    }};
+    };};
 }
 
 macro_rules! match_array_value_insert {
     ($stv:ident, $insf:ident, $val:expr, $comm:expr) => {{
-        let (data_store, futs_queue, ch_s, series, ts_msp, ts_lsp, ts_msp_changed, channel_scalar_type, channel_shape) =
+        let (data_store, futs_queue, series, ts_msp, ts_lsp, ts_msp_changed, scalar_type, shape, inserts_discarded) =
             $comm;
-        match ch_s {
-            ChannelState::Created(st) => match st.shape {
-                Shape::Wave(_) => match st.scalar_type {
-                    ScalarType::$stv => $insf(
-                        data_store,
-                        futs_queue,
-                        series,
-                        ts_msp,
-                        ts_lsp,
-                        $val,
-                        ts_msp_changed,
-                        channel_scalar_type,
-                        channel_shape,
-                    ),
-                    _ => {
-                        error!("unexpected value type  insf {:?}", stringify!($insf));
-                    }
-                },
+        match shape {
+            Shape::Wave(_) => match scalar_type {
+                ScalarType::$stv => $insf(
+                    data_store,
+                    futs_queue,
+                    series,
+                    ts_msp,
+                    ts_lsp,
+                    $val,
+                    ts_msp_changed,
+                    scalar_type,
+                    shape,
+                    inserts_discarded,
+                ),
                 _ => {
-                    error!(
-                        "unexpected value shape  insf {:?}  st.shape {:?}",
-                        stringify!($insf),
-                        st.shape
-                    );
+                    error!("unexpected value type  insf {:?}", stringify!($insf));
                 }
             },
             _ => {
-                error!("got value but channel not created  insf {:?}", stringify!($insf));
+                error!(
+                    "unexpected value shape  insf {:?}  shape {:?}",
+                    stringify!($insf),
+                    shape
+                );
             }
         }
-    }};
+    };};
 }
 
 pub struct CaConn {
@@ -287,6 +283,7 @@ pub struct CaConn {
     ioid_store: IdStore,
     subid_store: IdStore,
     channels: BTreeMap<u32, ChannelState>,
+    init_state_count: u64,
     cid_by_name: BTreeMap<String, u32>,
     cid_by_subid: BTreeMap<u32, u32>,
     ts_msp_last_by_series: BTreeMap<SeriesId, u64>,
@@ -298,6 +295,7 @@ pub struct CaConn {
     >,
     value_insert_futs: FuturesUnordered<Pin<Box<dyn Future<Output = Result<(), Error>> + Send>>>,
     remote_addr_dbg: SocketAddrV4,
+    stats: Arc<CaConnStats>,
 }
 
 impl CaConn {
@@ -309,6 +307,7 @@ impl CaConn {
             ioid_store: IdStore::new(),
             subid_store: IdStore::new(),
             channels: BTreeMap::new(),
+            init_state_count: 0,
             cid_by_name: BTreeMap::new(),
             cid_by_subid: BTreeMap::new(),
             ts_msp_last_by_series: BTreeMap::new(),
@@ -318,7 +317,12 @@ impl CaConn {
             fut_get_series: FuturesUnordered::new(),
             value_insert_futs: FuturesUnordered::new(),
             remote_addr_dbg,
+            stats: Arc::new(CaConnStats::new()),
         }
+    }
+
+    pub fn stats(&self) -> Arc<CaConnStats> {
+        self.stats.clone()
     }
 
     pub fn channel_add(&mut self, channel: String) {
@@ -326,6 +330,8 @@ impl CaConn {
         if self.channels.contains_key(&cid) {
         } else {
             self.channels.insert(cid, ChannelState::Init);
+            // TODO do not count, use separate queue for those channels.
+            self.init_state_count += 1;
         }
     }
 
@@ -344,6 +350,7 @@ impl CaConn {
         self.name_by_cid.get(&cid).map(|x| x.as_str())
     }
 
+    #[inline(never)]
     fn handle_insert_futs(&mut self, cx: &mut Context) -> Result<(), Error> {
         use Poll::*;
         while self.value_insert_futs.len() > 0 {
@@ -355,12 +362,13 @@ impl CaConn {
         Ok(())
     }
 
+    #[inline(never)]
     fn handle_get_series_futs(&mut self, cx: &mut Context) -> Result<(), Error> {
         use Poll::*;
         while self.fut_get_series.len() > 0 {
             match self.fut_get_series.poll_next_unpin(cx) {
                 Ready(Some(Ok(k))) => {
-                    info!("Have SeriesId {k:?}");
+                    //info!("Have SeriesId {k:?}");
                     let cid = k.0;
                     let sid = k.1;
                     let data_type = k.2;
@@ -369,6 +377,9 @@ impl CaConn {
                         Existence::Created(k) => k,
                         Existence::Existing(k) => k,
                     };
+                    if series.id() == 0 {
+                        warn!("Weird series id: {series:?}");
+                    }
                     let subid = self.subid_store.next();
                     self.cid_by_subid.insert(subid, cid);
                     let name = self.name_by_cid(cid).unwrap().to_string();
@@ -391,6 +402,8 @@ impl CaConn {
                         shape: Shape::from_ca_count(data_count)?,
                         ts_created: Instant::now(),
                         state: MonitoringState::AddingEvent(series),
+                        ts_msp_last: 0,
+                        inserted_in_ts_msp: u64::MAX,
                     });
                     let scalar_type = ScalarType::from_ca_id(data_type)?;
                     let shape = Shape::from_ca_count(data_count)?;
@@ -413,20 +426,109 @@ impl CaConn {
         Ok(())
     }
 
-    fn handle_event_add_res(&mut self, ev: proto::EventAddRes) {
+    #[inline(never)]
+    fn event_add_insert(
+        &mut self,
+        series: SeriesId,
+        scalar_type: ScalarType,
+        shape: Shape,
+        ev: proto::EventAddRes,
+        cid: u32,
+        ts_msp_last: u64,
+        inserted_in_ts_msp: u64,
+    ) -> Result<(), Error> {
+        // TODO where to actually get the timestamp of the event from?
+        let ts = SystemTime::now();
+        let epoch = ts.duration_since(std::time::UNIX_EPOCH).unwrap();
+        // TODO decide on better msp/lsp: random offset!
+        // As long as one writer is active, the msp is arbitrary.
+        let ts = epoch.as_secs() * 1000000000 + epoch.subsec_nanos() as u64;
+        let ts_msp = if inserted_in_ts_msp > 2000 {
+            let ts_msp = ts / (60 * SEC) * (60 * SEC);
+            if let ChannelState::Created(st) = self.channels.get_mut(&cid).unwrap() {
+                st.ts_msp_last = ts_msp;
+                st.inserted_in_ts_msp = 1;
+            } else {
+                error!("logic error expect ChannelState::Created");
+            }
+            ts_msp
+        } else {
+            if let ChannelState::Created(st) = self.channels.get_mut(&cid).unwrap() {
+                st.inserted_in_ts_msp += 1;
+            } else {
+                error!("logic error expect ChannelState::Created");
+            }
+            ts_msp_last
+        };
+        let ts_lsp = ts - ts_msp;
+        let ts_msp_changed = if let Some(ts_msp_cur) = self.ts_msp_last_by_series.get_mut(&series) {
+            if ts_msp != *ts_msp_cur {
+                *ts_msp_cur = ts_msp;
+                true
+            } else {
+                false
+            }
+        } else {
+            self.ts_msp_last_by_series.insert(series.clone(), ts_msp);
+            true
+        };
+        // TODO make sure that I only accept types I expect.
+        use crate::ca::proto::CaDataScalarValue::*;
+        use crate::ca::proto::CaDataValue::*;
+        let data_store = self.data_store.clone();
+        let futs_queue = &mut self.value_insert_futs;
+        let comm = (
+            data_store,
+            futs_queue,
+            series,
+            ts_msp,
+            ts_lsp,
+            ts_msp_changed,
+            scalar_type,
+            shape,
+            &self.stats.inserts_discarded,
+        );
+        match ev.value {
+            Scalar(v) => match v {
+                I8(val) => match_scalar_value_insert!(I8, insert_scalar_i8, val, comm),
+                I16(val) => match_scalar_value_insert!(I16, insert_scalar_i16, val, comm),
+                I32(val) => match_scalar_value_insert!(I32, insert_scalar_i32, val, comm),
+                F32(val) => match_scalar_value_insert!(F32, insert_scalar_f32, val, comm),
+                F64(val) => match_scalar_value_insert!(F64, insert_scalar_f64, val, comm),
+                String(val) => match_scalar_value_insert!(STRING, insert_scalar_string, val, comm),
+                _ => {
+                    warn!("can not handle Scalar {:?}", v);
+                }
+            },
+            Array(v) => {
+                use crate::ca::proto::CaDataArrayValue::*;
+                match v {
+                    I8(val) => match_array_value_insert!(I8, insert_array_i8, val, comm),
+                    F32(val) => match_array_value_insert!(F32, insert_array_f32, val, comm),
+                    F64(val) => match_array_value_insert!(F64, insert_array_f64, val, comm),
+                    _ => {
+                        warn!("can not handle Array  ty {}  n {}", ev.data_type, ev.data_count);
+                    }
+                }
+            }
+        }
+        self.stats.inserts_started.fetch_add(1, Ordering::Release);
+        Ok(())
+    }
+
+    #[inline(never)]
+    fn handle_event_add_res(&mut self, ev: proto::EventAddRes) -> Result<(), Error> {
         // TODO handle subid-not-found which can also be peer error:
         let cid = *self.cid_by_subid.get(&ev.subid).unwrap();
         // TODO get rid of the string clone when I don't want the log output any longer:
-        let name: String = self.name_by_cid(cid).unwrap().into();
+        //let name: String = self.name_by_cid(cid).unwrap().into();
         // TODO handle not-found error:
         let mut series_2 = None;
         let ch_s = self.channels.get_mut(&cid).unwrap();
-        let mut channel_scalar_type = None;
-        let mut channel_shape = None;
         match ch_s {
             ChannelState::Created(st) => {
-                channel_scalar_type = Some(st.scalar_type.clone());
-                channel_shape = Some(st.shape.clone());
+                let scalar_type = st.scalar_type.clone();
+                let shape = st.shape.clone();
                 match st.state {
                     MonitoringState::AddingEvent(ref series) => {
                         let series = series.clone();
@@ -445,84 +547,29 @@ impl CaConn {
                         st.ts_last = Instant::now();
                     }
                     _ => {
-                        error!("unexpected state: EventAddRes while having {ch_s:?}");
+                        error!("unexpected state: EventAddRes while having {:?}", st.state);
                     }
                 }
+                let series = match series_2 {
+                    Some(k) => k,
+                    None => {
+                        error!("handle_event_add_res  but no series");
+                        // TODO allow return Result
+                        return Err(format!("no series id on insert").into());
+                    }
+                };
+                let ts_msp_last = st.ts_msp_last;
+                let inserted_in_ts_msp = st.inserted_in_ts_msp;
+                self.event_add_insert(series, scalar_type, shape, ev, cid, ts_msp_last, inserted_in_ts_msp)?;
             }
             _ => {
                 error!("unexpected state: EventAddRes while having {ch_s:?}");
             }
         }
-        {
-            let series = match series_2 {
-                Some(k) => k,
-                None => {
-                    error!("handle_event_add_res  but no series");
-                    // TODO allow return Result
-                    return;
-                }
-            };
-            // TODO where to actually get the time from?
-            let ts = SystemTime::now();
-            let epoch = ts.duration_since(std::time::UNIX_EPOCH).unwrap();
-            // TODO decide on better msp/lsp: random offset!
-            // As long as one writer is active, the msp is arbitrary.
-            let ts = epoch.as_secs() * 1000000000 + epoch.subsec_nanos() as u64;
-            let ts_msp = ts / (60 * SEC) * (60 * SEC);
-            let ts_lsp = ts - ts_msp;
-            let ts_msp_changed = if let Some(ts_msp_cur) = self.ts_msp_last_by_series.get_mut(&series) {
-                if ts_msp != *ts_msp_cur {
-                    *ts_msp_cur = ts_msp;
-                    true
-                } else {
-                    false
-                }
-            } else {
-                self.ts_msp_last_by_series.insert(series.clone(), ts_msp);
-                true
-            };
-            // TODO make sure that I only accept types I expect.
-            use crate::ca::proto::CaDataScalarValue::*;
-            use crate::ca::proto::CaDataValue::*;
-            let data_store = self.data_store.clone();
-            let futs_queue = &mut self.value_insert_futs;
-            let comm = (
-                data_store,
-                futs_queue,
-                ch_s,
-                series,
-                ts_msp,
-                ts_lsp,
-                ts_msp_changed,
-                channel_scalar_type,
-                channel_shape,
-            );
-            match ev.value {
-                Scalar(v) => match v {
-                    I8(val) => match_scalar_value_insert!(I8, insert_scalar_i8, val, comm),
-                    I16(val) => match_scalar_value_insert!(I16, insert_scalar_i16, val, comm),
-                    I32(val) => match_scalar_value_insert!(I32, insert_scalar_i32, val, comm),
-                    F32(val) => match_scalar_value_insert!(F32, insert_scalar_f32, val, comm),
-                    F64(val) => match_scalar_value_insert!(F64, insert_scalar_f64, val, comm),
-                    String(val) => match_scalar_value_insert!(STRING, insert_scalar_string, val, comm),
-                    _ => {
-                        warn!("can not handle Scalar {:?}", v);
-                    }
-                },
-                Array(v) => {
-                    use crate::ca::proto::CaDataArrayValue::*;
-                    match v {
-                        F32(val) => match_array_value_insert!(F32, insert_array_f32, val, comm),
-                        F64(val) => match_array_value_insert!(F64, insert_array_f64, val, comm),
-                        _ => {
-                            warn!("can not handle Array  ty {}  n {}", ev.data_type, ev.data_count);
-                        }
-                    }
-                }
-            }
-        }
+        Ok(())
     }
 
+    #[inline(never)]
     fn handle_conn_listen(&mut self, cx: &mut Context) -> Option<Poll<Option<Result<(), Error>>>> {
         use Poll::*;
         match self.proto.poll_next_unpin(cx) {
@@ -538,7 +585,9 @@ impl CaConn {
                                 error!("See some unexpected version {n}  channel search may not work.");
                                 Some(Ready(Some(Ok(()))))
                             } else {
-                                info!("Received peer version {n}");
+                                if n != 13 {
+                                    warn!("Received peer version {n}");
+                                }
                                 self.state = CaConnState::PeerReady;
                                 None
                             }
@@ -563,8 +612,12 @@ impl CaConn {
         }
     }
 
+    #[inline(never)]
     fn check_channels_state_init(&mut self, msgs_tmp: &mut Vec<CaMsg>) -> Result<(), Error> {
         // TODO profile, efficient enough?
+        if self.init_state_count == 0 {
+            return Ok(());
+        }
         let keys: Vec<u32> = self.channels.keys().map(|x| *x).collect();
         for cid in keys {
             match self.channels.get_mut(&cid).unwrap() {
@@ -576,7 +629,7 @@ impl CaConn {
                         Ok(k) => k,
                         Err(e) => return Err(e),
                     };
-                    info!("Sending CreateChan for {}", name);
+                    debug!("Sending CreateChan for {}", name);
                     let msg = CaMsg {
                         ty: CaMsgTy::CreateChan(CreateChan {
                             cid,
@@ -590,6 +643,7 @@ impl CaConn {
                         cid,
                         ts_beg: Instant::now(),
                     };
+                    self.init_state_count -= 1;
                 }
                 _ => {}
             }
@@ -597,14 +651,21 @@ impl CaConn {
         Ok(())
     }
 
+    #[inline(never)]
     fn handle_peer_ready(&mut self, cx: &mut Context) -> Poll<Option<Result<(), Error>>> {
         use Poll::*;
+        let mut ts1 = Instant::now();
         // TODO unify with Listen state where protocol gets polled as well.
         let mut msgs_tmp = vec![];
         self.check_channels_state_init(&mut msgs_tmp)?;
+        let ts2 = Instant::now();
+        self.stats
+            .time_check_channels_state_init
+            .fetch_add((ts2.duration_since(ts1) * 1000000).as_secs(), Ordering::Release);
+        ts1 = ts2;
         let mut do_wake_again = false;
         if msgs_tmp.len() > 0 {
-            info!("msgs_tmp.len() {}", msgs_tmp.len());
+            //info!("msgs_tmp.len() {}", msgs_tmp.len());
             do_wake_again = true;
         }
         // TODO be careful to not overload outgoing message queue.
@@ -627,7 +688,7 @@ impl CaConn {
                                 let sid = k.sid;
                                 // TODO handle error:
                                 let name = self.name_by_cid(cid).unwrap().to_string();
-                                info!("CreateChanRes {name:?}");
+                                debug!("CreateChanRes {name:?}");
                                 let scalar_type = ScalarType::from_ca_id(k.data_type)?;
                                 let shape = Shape::from_ca_count(k.data_count)?;
                                 // TODO handle not-found error:
@@ -639,6 +700,8 @@ impl CaConn {
                                     shape: shape.clone(),
                                     ts_created: Instant::now(),
                                     state: MonitoringState::FetchSeriesId,
+                                    ts_msp_last: 0,
+                                    inserted_in_ts_msp: u64::MAX,
                                 });
                                 // TODO handle error in different way. Should most likely not abort.
                                 let cd = ChannelDescDecoded {
@@ -660,7 +723,15 @@ impl CaConn {
                                 self.fut_get_series.push(Box::pin(fut) as _);
                                 do_wake_again = true;
                             }
-                            CaMsgTy::EventAddRes(k) => Self::handle_event_add_res(self, k),
+                            CaMsgTy::EventAddRes(k) => {
+                                let res = Self::handle_event_add_res(self, k);
+                                let ts2 = Instant::now();
+                                self.stats
+                                    .time_handle_event_add_res
+                                    .fetch_add((ts2.duration_since(ts1) * 1000000).as_secs(), Ordering::Release);
+                                ts1 = ts2;
+                                res?
+                            }
                             _ => {}
                         }
                     }
@@ -680,7 +751,8 @@ impl CaConn {
             Pending => Pending,
         };
         if do_wake_again {
-            info!("do_wake_again");
+            // TODO remove the need for this:
+            trace!("do_wake_again");
             cx.waker().wake_by_ref();
         }
         res
@@ -692,10 +764,22 @@ impl Stream for CaConn {
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
         use Poll::*;
+        let ts1 = Instant::now();
         self.poll_count += 1;
-        loop {
+        let ret = loop {
+            let ts1 = Instant::now();
             self.handle_insert_futs(cx)?;
+            let ts2 = Instant::now();
+            self.stats
+                .poll_time_handle_insert_futs
+                .fetch_add((ts2.duration_since(ts1) * 1000000).as_secs(), Ordering::AcqRel);
+            let ts1 = ts2;
             self.handle_get_series_futs(cx)?;
+            let ts2 = Instant::now();
+            self.stats
+                .poll_time_get_series_futs
+                .fetch_add((ts2.duration_since(ts1) * 1000000).as_secs(), Ordering::AcqRel);
+            let mut ts1 = ts2;
             break match &self.state {
                 CaConnState::Init => {
                     let msg = CaMsg { ty: CaMsgTy::Version };
@@ -709,14 +793,35 @@ impl Stream for CaConn {
                     self.state = CaConnState::Listen;
                     continue;
                 }
-                CaConnState::Listen => match self.handle_conn_listen(cx) {
+                CaConnState::Listen => match {
+                    let res = self.handle_conn_listen(cx);
+                    let ts2 = Instant::now();
+                    self.stats
+                        .time_handle_conn_listen
+                        .fetch_add((ts2.duration_since(ts1) * 1000000).as_secs(), Ordering::AcqRel);
+                    ts1 = ts2;
+                    res
+                } {
                     Some(k) => k,
                     None => continue,
                 },
-                CaConnState::PeerReady => self.handle_peer_ready(cx),
+                CaConnState::PeerReady => {
+                    let res = self.handle_peer_ready(cx);
+                    let ts2 = Instant::now();
+                    self.stats
+                        .time_handle_peer_ready
+                        .fetch_add((ts2.duration_since(ts1) * 1000000).as_secs(), Ordering::AcqRel);
+                    ts1 = ts2;
+                    res
+                }
                 CaConnState::Done => Ready(None),
             };
-        }
+        };
+        let ts2 = Instant::now();
+        self.stats
+            .poll_time_all
+            .fetch_add((ts2.duration_since(ts1) * 1000000).as_secs(), Ordering::AcqRel);
+        ret
     }
 }
 

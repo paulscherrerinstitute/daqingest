@@ -120,6 +120,9 @@ pub async fn get_series_id(pg_client: &PgClient, cd: &ChannelDescDecoded) -> Res
         h.update(format!("{:?} {:?}", scalar_type, shape).as_bytes());
         let f = h.finalize();
         let mut series = u64::from_le_bytes(f.as_slice()[0..8].try_into().unwrap());
+        if series > i64::MAX as u64 {
+            series &= 0x7fffffffffffffff;
+        }
         for _ in 0..2000 {
             if series > i64::MAX as u64 {
                 series = 0;
@@ -129,7 +132,7 @@ pub async fn get_series_id(pg_client: &PgClient, cd: &ChannelDescDecoded) -> Res
                     concat!(
                         "insert into series_by_channel",
                         " (series, facility, channel, scalar_type, shape_dims, agg_kind)",
-                        " values ($1, $2, $3, $4, $5, 0)"
+                        " values ($1, $2, $3, $4, $5, 0) on conflict do nothing"
                     ),
                     &[&(series as i64), &facility, channel_name, &scalar_type, &shape],
                 )
@@ -139,7 +142,7 @@ pub async fn get_series_id(pg_client: &PgClient, cd: &ChannelDescDecoded) -> Res
                 let series = Existence::Created(SeriesId(series));
                 return Ok(series);
             } else {
-                error!("tried to insert but series exists...");
+                error!("tried to insert {series:?} for {channel_name} but it exists");
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
             series += 1;

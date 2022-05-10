@@ -3,13 +3,14 @@ use daqingest::{ChannelAccess, DaqIngestOpts, SubCmd};
 use err::Error;
 
 pub fn main() -> Result<(), Error> {
-    taskrun::run(async {
+    let opts = DaqIngestOpts::parse();
+    log::info!("daqingest version {}", clap::crate_version!());
+    let runtime = taskrun::get_runtime_opts(opts.nworkers.unwrap_or(12), 32);
+    let res = runtime.block_on(async move {
         if false {
             return Err(Error::with_msg_no_trace(format!("unknown command")));
         } else {
         }
-        let opts = DaqIngestOpts::parse();
-        log::info!("daqingest version {}", clap::crate_version!());
         match opts.subcmd {
             SubCmd::Bsread(k) => netfetch::zmtp::zmtp_client(k.into()).await?,
             SubCmd::ListPkey => daqingest::query::list_pkey().await?,
@@ -26,5 +27,12 @@ pub fn main() -> Result<(), Error> {
             },
         }
         Ok(())
-    })
+    });
+    match res {
+        Ok(k) => Ok(k),
+        Err(e) => {
+            log::error!("Catched: {:?}", e);
+            Err(e)
+        }
+    }
 }

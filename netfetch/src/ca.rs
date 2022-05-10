@@ -11,6 +11,7 @@ use log::*;
 use netpod::Database;
 use scylla::batch::Consistency;
 use serde::{Deserialize, Serialize};
+use stats::CaConnVecStats;
 use std::collections::BTreeMap;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::path::PathBuf;
@@ -232,7 +233,7 @@ pub async fn ca_connect(opts: ListenFromFileOpts) -> Result<(), Error> {
     let pg_client = Arc::new(pg_client);
     let scy = scylla::SessionBuilder::new()
         .known_node("sf-nube-11:19042")
-        .default_consistency(Consistency::Quorum)
+        .default_consistency(Consistency::One)
         .use_keyspace("ks1", true)
         .build()
         .await
@@ -253,46 +254,52 @@ pub async fn ca_connect(opts: ListenFromFileOpts) -> Result<(), Error> {
             error!("can not find address of channel {}", ch);
         } else {
             let addr: &str = rows[0].get(0);
-            let addr: SocketAddrV4 = match addr.parse() {
-                Ok(k) => k,
-                Err(e) => {
-                    error!("can not parse {addr:?}  {e:?}");
-                    continue;
-                }
-            };
-            if ix % 1 == 0 {
-                info!("{}  {}  {:?}", ix, ch, addr);
-            }
-            if !channels_by_host.contains_key(&addr) {
-                channels_by_host.insert(addr, vec![ch.to_string()]);
+            if addr == "" {
+                // TODO the address was searched before but could not be found.
             } else {
-                channels_by_host.get_mut(&addr).unwrap().push(ch.to_string());
+                let addr: SocketAddrV4 = match addr.parse() {
+                    Ok(k) => k,
+                    Err(e) => {
+                        error!("can not parse {addr:?}  {e:?}");
+                        continue;
+                    }
+                };
+                if ix % 100 == 0 {
+                    info!("{}  {}  {:?}", ix, ch, addr);
+                }
+                if !channels_by_host.contains_key(&addr) {
+                    channels_by_host.insert(addr, vec![ch.to_string()]);
+                } else {
+                    channels_by_host.get_mut(&addr).unwrap().push(ch.to_string());
+                }
             }
         }
     }
     if opts.abort_after_search == 1 {
         return Ok(());
     }
-    info!("CONNECT TO HOSTS");
     let data_store = Arc::new(DataStore::new(pg_client, scy.clone()).await?);
     let mut conn_jhs = vec![];
+    let mut conn_stats_all = vec![];
     for (host, channels) in channels_by_host {
         if false && host.ip() != &"172.26.24.76".parse::<Ipv4Addr>().unwrap() {
             continue;
         }
         let data_store = data_store.clone();
+        debug!("Create TCP connection to {:?}", (host.ip(), host.port()));
+        let addr = SocketAddrV4::new(host.ip().clone(), host.port());
+        let tcp = TcpStream::connect(addr).await?;
+        let mut conn = CaConn::new(tcp, addr, data_store.clone());
+        conn_stats_all.push(conn.stats());
+        for c in channels {
+            conn.channel_add(c);
+        }
         let conn_block = async move {
-            info!("Create TCP connection to {:?}", (host.ip(), host.port()));
-            let addr = SocketAddrV4::new(host.ip().clone(), host.port());
-            let tcp = TcpStream::connect(addr).await?;
-            let mut conn = CaConn::new(tcp, addr, data_store.clone());
-            for c in channels {
-                conn.channel_add(c);
-            }
             while let Some(item) = conn.next().await {
                 match item {
-                    Ok(k) => {
-                        trace!("CaConn gives item: {k:?}");
+                    Ok(_) => {
+                        // TODO test if performance can be noticed:
+                        //trace!("CaConn gives item: {k:?}");
                     }
                     Err(e) => {
                         error!("CaConn gives error: {e:?}");
@@ -304,6 +311,17 @@ pub async fn ca_connect(opts: ListenFromFileOpts) -> Result<(), Error> {
         };
         let jh = tokio::spawn(conn_block);
         conn_jhs.push(jh);
+    }
+    let mut agg_last = CaConnVecStats::new(Instant::now());
+    loop {
+        tokio::time::sleep(Duration::from_millis(2000)).await;
+        let mut agg = CaConnVecStats::new(Instant::now());
+        for st in &conn_stats_all {
+            agg.push(&st);
+        }
+        let diff = agg.diff_against(&agg_last);
+        info!("{diff}");
+        agg_last = agg;
     }
     for jh in conn_jhs {
         match jh.await {

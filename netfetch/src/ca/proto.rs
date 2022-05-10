@@ -107,6 +107,7 @@ pub enum CaDataScalarValue {
 
 #[derive(Clone, Debug)]
 pub enum CaDataArrayValue {
+    I8(Vec<i8>),
     F32(Vec<f32>),
     F64(Vec<f64>),
 }
@@ -520,6 +521,19 @@ impl CaMsg {
                         }
                     },
                     Shape::Wave(n) => match ca_st {
+                        CaScalarType::I8 => {
+                            type ST = i8;
+                            const STL: usize = std::mem::size_of::<ST>();
+                            let nn = (n as usize).min(payload.len() / STL);
+                            let mut a = Vec::with_capacity(nn);
+                            let mut bb = &payload[..];
+                            for _ in 0..nn {
+                                let v = ST::from_be_bytes(bb[..STL].try_into()?);
+                                bb = &bb[STL..];
+                                a.push(v);
+                            }
+                            CaDataValue::Array(CaDataArrayValue::I8(a))
+                        }
                         CaScalarType::F32 => {
                             type ST = f32;
                             const STL: usize = std::mem::size_of::<ST>();

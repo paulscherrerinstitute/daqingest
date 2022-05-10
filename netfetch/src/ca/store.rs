@@ -47,6 +47,7 @@ pub struct DataStore {
     pub qu_insert_scalar_f32: Arc<PreparedStatement>,
     pub qu_insert_scalar_f64: Arc<PreparedStatement>,
     pub qu_insert_scalar_string: Arc<PreparedStatement>,
+    pub qu_insert_array_i8: Arc<PreparedStatement>,
     pub qu_insert_array_f32: Arc<PreparedStatement>,
     pub qu_insert_array_f64: Arc<PreparedStatement>,
     pub chan_reg: Arc<ChannelRegistry>,
@@ -96,6 +97,11 @@ impl DataStore {
         let qu_insert_scalar_string = Arc::new(q);
         // array
         let q = scy
+            .prepare("insert into events_array_i8 (series, ts_msp, ts_lsp, pulse, value) values (?, ?, ?, ?, ?)")
+            .await
+            .map_err(|e| Error::with_msg_no_trace(format!("{e:?}")))?;
+        let qu_insert_array_i8 = Arc::new(q);
+        let q = scy
             .prepare("insert into events_array_f32 (series, ts_msp, ts_lsp, pulse, value) values (?, ?, ?, ?, ?)")
             .await
             .map_err(|e| Error::with_msg_no_trace(format!("{e:?}")))?;
@@ -116,6 +122,7 @@ impl DataStore {
             qu_insert_scalar_f32,
             qu_insert_scalar_f64,
             qu_insert_scalar_string,
+            qu_insert_array_i8,
             qu_insert_array_f32,
             qu_insert_array_f64,
         };
