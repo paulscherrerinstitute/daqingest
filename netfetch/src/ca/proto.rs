@@ -294,7 +294,7 @@ impl CaMsgTy {
             VersionRes(_) => {}
             ClientName => {
                 // TODO allow variable client name.
-                let s = "werder_d".as_bytes();
+                let s = "daqingest".as_bytes();
                 let n = s.len();
                 buf.fill(0);
                 buf[..n].copy_from_slice(s);
@@ -718,7 +718,6 @@ impl CaProto {
             if let Ok(buf) = self.outbuf.write_buf(item.len()) {
                 Some((item, buf))
             } else {
-                error!("output buffer too small for message");
                 None
             }
         } else {
@@ -755,8 +754,13 @@ impl CaProto {
                 break None;
             }
             while let Some((msg, buf)) = self.out_msg_buf() {
-                msg.place_into(buf);
-                self.out.pop_front();
+                if msg.len() > buf.len() {
+                    error!("got output buffer but too small");
+                    break;
+                } else {
+                    msg.place_into(buf);
+                    self.out.pop_front();
+                }
             }
             while self.outbuf.len() > 0 {
                 match Self::attempt_output(self.as_mut(), cx)? {
@@ -851,7 +855,12 @@ impl CaProto {
             break match &self.state {
                 CaState::StdHead => {
                     let hi = HeadInfo::from_netbuf(&mut self.buf)?;
-                    if hi.cmdid == 6 || hi.cmdid > 26 || hi.data_type > 10 || hi.payload_size > 2800 {
+                    if hi.cmdid == 6
+                        || hi.cmdid > 26
+                        || hi.data_type > 10
+                        || hi.data_count > 4096
+                        || hi.payload_size > 1024 * 32
+                    {
                         warn!("StdHead sees  {hi:?}");
                     }
                     if hi.payload_size == 0xffff && hi.data_count == 0 {

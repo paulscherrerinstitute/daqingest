@@ -1,6 +1,6 @@
 use std::fmt;
 use std::sync::atomic::AtomicU64;
-use std::sync::atomic::Ordering::{AcqRel, Acquire};
+use std::sync::atomic::Ordering::{AcqRel, Acquire, SeqCst};
 use std::sync::RwLock;
 use std::time::{Duration, Instant};
 
@@ -8,6 +8,7 @@ const US: u64 = 1000;
 const MS: u64 = US * 1000;
 const SEC: u64 = MS * 1000;
 
+#[derive(Debug)]
 pub struct EMA {
     ema: f32,
     emv: f32,
@@ -84,6 +85,44 @@ impl CheckEvery {
     }
 }
 
+#[derive(Debug)]
+pub struct IntervalEma {
+    tslast: Option<Instant>,
+    ema: EMA,
+}
+
+impl IntervalEma {
+    pub fn new() -> Self {
+        Self {
+            tslast: None,
+            ema: EMA::default(),
+        }
+    }
+
+    pub fn tick(&mut self, tsnow: Instant) {
+        match self.tslast {
+            Some(tslast) => {
+                let dt = tsnow.duration_since(tslast);
+                self.tslast = Some(tsnow);
+                self.ema.update(dt.as_secs_f32());
+            }
+            None => {
+                self.tslast = Some(tsnow);
+            }
+        }
+    }
+}
+
+stats_proc::stats_struct!(
+    name(CaConnStats2),
+    counters(
+        //
+        inserts_val,
+        inserts_msp,
+        inserts_discard,
+    )
+);
+
 pub struct CaConnStats {
     pub poll_time_all: AtomicU64,
     pub poll_time_handle_insert_futs: AtomicU64,
@@ -94,6 +133,7 @@ pub struct CaConnStats {
     pub time_handle_event_add_res: AtomicU64,
     pub inserts_started: AtomicU64,
     pub inserts_discarded: AtomicU64,
+    pub insert_queue_len: AtomicU64,
 }
 
 impl CaConnStats {
@@ -108,12 +148,14 @@ impl CaConnStats {
             time_handle_event_add_res: AtomicU64::new(0),
             inserts_started: AtomicU64::new(0),
             inserts_discarded: AtomicU64::new(0),
+            insert_queue_len: AtomicU64::new(0),
         }
     }
 }
 
 pub struct CaConnVecStats {
     pub ts_create: RwLock<Instant>,
+    pub nstats: AtomicU64,
     pub poll_time_all: AtomicU64,
     pub poll_time_handle_insert_futs: AtomicU64,
     pub poll_time_get_series_futs: AtomicU64,
@@ -123,10 +165,12 @@ pub struct CaConnVecStats {
     pub time_handle_event_add_res: AtomicU64,
     pub inserts_started: AtomicU64,
     pub inserts_discarded: AtomicU64,
+    pub insert_queue_len: AtomicU64,
 }
 
 pub struct CaConnVecStatsDiff {
     pub dt: AtomicU64,
+    pub nstats: AtomicU64,
     pub poll_time_all: AtomicU64,
     pub poll_time_handle_insert_futs: AtomicU64,
     pub poll_time_get_series_futs: AtomicU64,
@@ -136,12 +180,14 @@ pub struct CaConnVecStatsDiff {
     pub time_handle_event_add_res: AtomicU64,
     pub inserts_started: AtomicU64,
     pub inserts_discarded: AtomicU64,
+    pub insert_queue_len: AtomicU64,
 }
 
 impl CaConnVecStats {
     pub fn new(ts_create: Instant) -> Self {
         Self {
             ts_create: RwLock::new(ts_create),
+            nstats: AtomicU64::new(0),
             poll_time_all: AtomicU64::new(0),
             poll_time_handle_insert_futs: AtomicU64::new(0),
             poll_time_get_series_futs: AtomicU64::new(0),
@@ -151,10 +197,12 @@ impl CaConnVecStats {
             time_handle_event_add_res: AtomicU64::new(0),
             inserts_started: AtomicU64::new(0),
             inserts_discarded: AtomicU64::new(0),
+            insert_queue_len: AtomicU64::new(0),
         }
     }
 
     pub fn push(&mut self, k: &CaConnStats) {
+        self.nstats.fetch_add(1, AcqRel);
         self.poll_time_all.fetch_add(k.poll_time_all.load(Acquire), AcqRel);
         self.poll_time_handle_insert_futs
             .fetch_add(k.poll_time_handle_insert_futs.load(Acquire), AcqRel);
@@ -171,6 +219,8 @@ impl CaConnVecStats {
         self.inserts_started.fetch_add(k.inserts_started.load(Acquire), AcqRel);
         self.inserts_discarded
             .fetch_add(k.inserts_discarded.load(Acquire), AcqRel);
+        self.insert_queue_len
+            .fetch_add(k.insert_queue_len.load(Acquire), SeqCst);
     }
 
     pub fn diff_against(&self, k: &Self) -> CaConnVecStatsDiff {
@@ -181,6 +231,7 @@ impl CaConnVecStats {
             .duration_since(*k.ts_create.read().unwrap());
         CaConnVecStatsDiff {
             dt: AtomicU64::new(dur.as_secs() * SEC + dur.subsec_nanos() as u64),
+            nstats: AtomicU64::new(self.nstats.load(Acquire)),
             poll_time_all: AtomicU64::new(self.poll_time_all.load(Acquire) - k.poll_time_all.load(Acquire)),
             poll_time_handle_insert_futs: AtomicU64::new(
                 self.poll_time_handle_insert_futs.load(Acquire) - k.poll_time_handle_insert_futs.load(Acquire),
@@ -202,12 +253,14 @@ impl CaConnVecStats {
             ),
             inserts_started: AtomicU64::new(self.inserts_started.load(Acquire) - k.inserts_started.load(Acquire)),
             inserts_discarded: AtomicU64::new(self.inserts_discarded.load(Acquire) - k.inserts_discarded.load(Acquire)),
+            insert_queue_len: AtomicU64::new(self.insert_queue_len.load(Acquire)),
         }
     }
 }
 
 impl fmt::Display for CaConnVecStatsDiff {
     fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+        let nstats = self.nstats.load(Acquire);
         let insert_freq = self.inserts_started.load(Acquire) / (self.dt.load(Acquire) / SEC);
         let poll_time = self.poll_time_all.load(Acquire);
         let poll_time_handle_insert_futs = self.poll_time_handle_insert_futs.load(Acquire);
@@ -223,10 +276,19 @@ impl fmt::Display for CaConnVecStatsDiff {
         let pct_check_channels_state_init = time_check_channels_state_init * 100 / poll_time;
         let pct_handle_event_add_res = time_handle_event_add_res * 100 / poll_time;
         let inserts_discarded_freq = self.inserts_discarded.load(Acquire);
+        let insert_queue_len = self.insert_queue_len.load(Acquire);
+        let insqavg = insert_queue_len as f32 / nstats as f32;
         write!(
             fmt,
-            "insfreq {} disc {} poll_time {:5} ms inserts {:2}% seriesid {:2}% listen {:2}% peer {:2}% checkinit {:2}% evadd {:2}%",
-            insert_freq,inserts_discarded_freq,
+            "nstats {}  insq {}  insqavg {:.2}\n",
+            nstats, insert_queue_len, insqavg
+        )
+        .unwrap();
+        write!(
+            fmt,
+            "infr {} dis {} pt {:5} ins {:2}% sid {:2}% listen {:2}% peer {:2}% checkinit {:2}% evadd {:2}%",
+            insert_freq,
+            inserts_discarded_freq,
             poll_time / 1000,
             poll_pct_handle_insert_futs,
             poll_pct_get_series_futs,

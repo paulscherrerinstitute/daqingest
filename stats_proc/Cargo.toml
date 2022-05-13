@@ -1,0 +1,12 @@
+[package]
+name = "stats_proc"
+version = "0.0.1"
+authors = ["Dominik Werder <dominik.werder@gmail.com>"]
+edition = "2021"
+
+[lib]
+path = "src/stats_proc.rs"
+proc-macro = true
+
+[dependencies]
+syn = "1"

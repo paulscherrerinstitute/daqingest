@@ -11,7 +11,7 @@ use log::*;
 use netpod::Database;
 use scylla::batch::Consistency;
 use serde::{Deserialize, Serialize};
-use stats::CaConnVecStats;
+use stats::{CaConnStats2, CaConnVecStats};
 use std::collections::BTreeMap;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::path::PathBuf;
@@ -232,7 +232,7 @@ pub async fn ca_connect(opts: ListenFromFileOpts) -> Result<(), Error> {
     tokio::spawn(pg_conn);
     let pg_client = Arc::new(pg_client);
     let scy = scylla::SessionBuilder::new()
-        .known_node("sf-nube-11:19042")
+        .known_node("sf-nube-14:19042")
         .default_consistency(Consistency::One)
         .use_keyspace("ks1", true)
         .build()
@@ -241,7 +241,7 @@ pub async fn ca_connect(opts: ListenFromFileOpts) -> Result<(), Error> {
     let scy = Arc::new(scy);
     info!("FIND IOCS");
     let qu_find_addr = pg_client
-        .prepare("select addr from ioc_by_channel where facility = $1 and channel = $2")
+        .prepare("select t2.addr from ioc_by_channel t1, ioc_by_channel t2 where t2.facility = t1.facility and t2.channel = t1.channel and t1.facility = $1 and t1.channel = $2")
         .await
         .map_err(|e| Error::with_msg_no_trace(format!("{e:?}")))?;
     let mut channels_by_host = BTreeMap::new();
@@ -264,7 +264,7 @@ pub async fn ca_connect(opts: ListenFromFileOpts) -> Result<(), Error> {
                         continue;
                     }
                 };
-                if ix % 100 == 0 {
+                if ix % 200 == 0 {
                     info!("{}  {}  {:?}", ix, ch, addr);
                 }
                 if !channels_by_host.contains_key(&addr) {
@@ -281,6 +281,7 @@ pub async fn ca_connect(opts: ListenFromFileOpts) -> Result<(), Error> {
     let data_store = Arc::new(DataStore::new(pg_client, scy.clone()).await?);
     let mut conn_jhs = vec![];
     let mut conn_stats_all = vec![];
+    let mut conn_stats2 = vec![];
     for (host, channels) in channels_by_host {
         if false && host.ip() != &"172.26.24.76".parse::<Ipv4Addr>().unwrap() {
             continue;
@@ -291,6 +292,7 @@ pub async fn ca_connect(opts: ListenFromFileOpts) -> Result<(), Error> {
         let tcp = TcpStream::connect(addr).await?;
         let mut conn = CaConn::new(tcp, addr, data_store.clone());
         conn_stats_all.push(conn.stats());
+        conn_stats2.push(conn.stats2());
         for c in channels {
             conn.channel_add(c);
         }
@@ -313,6 +315,7 @@ pub async fn ca_connect(opts: ListenFromFileOpts) -> Result<(), Error> {
         conn_jhs.push(jh);
     }
     let mut agg_last = CaConnVecStats::new(Instant::now());
+    let mut agg2_last = CaConnStats2Agg::new();
     loop {
         tokio::time::sleep(Duration::from_millis(2000)).await;
         let mut agg = CaConnVecStats::new(Instant::now());
