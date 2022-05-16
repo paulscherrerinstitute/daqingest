@@ -1,6 +1,7 @@
+use stats_types::*;
 use std::fmt;
 use std::sync::atomic::AtomicU64;
-use std::sync::atomic::Ordering::{AcqRel, Acquire, SeqCst};
+use std::sync::atomic::Ordering::{self, AcqRel, Acquire, SeqCst};
 use std::sync::RwLock;
 use std::time::{Duration, Instant};
 
@@ -113,15 +114,18 @@ impl IntervalEma {
     }
 }
 
-stats_proc::stats_struct!(
-    name(CaConnStats2),
-    counters(
-        //
-        inserts_val,
-        inserts_msp,
-        inserts_discard,
-    )
-);
+stats_proc::stats_struct2!((
+    StatsStruct(
+        name(CaConnStats2),
+        counters(
+            //
+            inserts_val,
+            inserts_msp,
+            inserts_discard,
+        ),
+    ),
+    StatsStruct(name(SomeOtherStats), counters(c1, c2,),),
+));
 
 pub struct CaConnStats {
     pub poll_time_all: AtomicU64,

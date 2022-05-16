@@ -1,0 +1,10 @@
+[package]
+name = "stats_types"
+version = "0.0.1"
+authors = ["Dominik Werder <dominik.werder@gmail.com>"]
+edition = "2021"
+
+[lib]
+path = "src/stats_types.rs"
+
+#[dependencies]

@@ -11,7 +11,7 @@ use log::*;
 use netpod::Database;
 use scylla::batch::Consistency;
 use serde::{Deserialize, Serialize};
-use stats::{CaConnStats2, CaConnVecStats};
+use stats::{CaConnStats2, CaConnStats2Agg, CaConnVecStats};
 use std::collections::BTreeMap;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::path::PathBuf;
@@ -322,9 +322,14 @@ pub async fn ca_connect(opts: ListenFromFileOpts) -> Result<(), Error> {
         for st in &conn_stats_all {
             agg.push(&st);
         }
+        let mut agg2 = CaConnStats2Agg::new();
+        for st in &conn_stats2 {
+            agg2.push(&st);
+        }
         let diff = agg.diff_against(&agg_last);
         info!("{diff}");
         agg_last = agg;
+        agg2_last = agg2;
     }
     for jh in conn_jhs {
         match jh.await {
