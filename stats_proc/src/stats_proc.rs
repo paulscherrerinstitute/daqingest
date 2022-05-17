@@ -1,32 +1,33 @@
-use proc_macro::{Delimiter, Span, TokenStream, TokenTree};
+use proc_macro::TokenStream;
 use quote::quote;
-use stats_types::*;
 use syn::parse::ParseStream;
-use syn::punctuated::Punctuated;
-use syn::{parse_macro_input, ExprTuple, Ident, Token};
+use syn::{parse_macro_input, Ident};
 
-fn parse_name(gr: proc_macro::Group) -> String {
-    for tok in gr.stream() {
-        match tok {
-            TokenTree::Ident(k) => {
-                return k.to_string();
-            }
-            _ => {}
-        }
-    }
-    panic!();
+type PunctExpr = syn::punctuated::Punctuated<syn::Expr, syn::token::Comma>;
+
+struct FuncCallWithArgs {
+    name: Ident,
+    args: PunctExpr,
 }
 
-fn parse_counters(gr: proc_macro::Group, a: &mut Vec<Counter>) {
-    for tok in gr.stream() {
-        match tok {
-            TokenTree::Ident(k) => {
-                let x = Counter { name: k.to_string() };
-                a.push(x);
-            }
-            _ => {}
-        }
-    }
+#[derive(Clone, Debug)]
+struct StatsStructDef {
+    name: syn::Ident,
+    counters: Vec<syn::Ident>,
+}
+
+#[derive(Debug)]
+struct AggStructDef {
+    name: syn::Ident,
+    parent: syn::Ident,
+    // TODO this currently describes our input (especially the input's name):
+    stats: StatsStructDef,
+}
+
+#[derive(Debug)]
+struct DiffStructDef {
+    name: syn::Ident,
+    input: syn::Ident,
 }
 
 fn extend_str(mut a: String, x: impl AsRef<str>) -> String {
@@ -34,38 +35,131 @@ fn extend_str(mut a: String, x: impl AsRef<str>) -> String {
     a
 }
 
-fn stats_struct_agg_impl(st: &StatsStructDef) -> String {
-    let name = format!("{}Agg", st.name);
-    let name_inp = &st.name;
-    let counters_decl: Vec<_> = st
-        .counters
-        .iter()
-        .map(|x| format!("pub {}: AtomicU64", x.to_string()))
-        .collect();
-    let counters_decl = counters_decl.join(",\n");
+fn stats_struct_impl(st: &StatsStructDef) -> String {
+    let name = &st.name;
     let inits: Vec<_> = st
         .counters
         .iter()
-        .map(|x| format!("{}: AtomicU64::new(0)", x.to_string()))
+        .map(|x| format!("{:12}{}: AtomicU64::new(0)", "", x.to_string()))
         .collect();
     let inits = inits.join(",\n");
-    let mut code = format!(
+    let incers: String = st
+        .counters
+        .iter()
+        .map(|x| {
+            let nn = x.to_string();
+            format!(
+                "
+    pub fn {nn}_inc(&self) {{
+        self.{nn}.fetch_add(1, Ordering::AcqRel);
+    }}
+    pub fn {nn}_add(&self, v: u64) {{
+        self.{nn}.fetch_add(v, Ordering::AcqRel);
+    }}
+    pub fn {nn}_dur(&self, v: Duration) {{
+        self.{nn}.fetch_add((v * 1000000).as_secs(), Ordering::AcqRel);
+    }}
+"
+            )
+        })
+        .fold(String::new(), |a, x| format!("{}{}", a, x));
+    format!(
+        "
+impl {name} {{
+    pub fn new() -> Self {{
+        Self {{
+            ts_create: Instant::now(),
+{inits}
+        }}
+    }}
+
+    {incers}
+}}
+    "
+    )
+}
+
+fn stats_struct_decl_impl(st: &StatsStructDef) -> String {
+    let name = &st.name;
+    let counters_decl = st
+        .counters
+        .iter()
+        .map(|x| format!("{:4}pub {}: AtomicU64,\n", "", x.to_string()))
+        .fold(String::new(), extend_str);
+    let structt = format!(
         "
 pub struct {name} {{
     pub ts_create: Instant,
-    pub aggcount: AtomicU64,
-    {counters_decl},
+{counters_decl}
 }}
 
+"
+    );
+    let code = format!("{}\n\n{}", structt, stats_struct_impl(st),);
+    code
+}
+
+fn agg_decl_impl(st: &StatsStructDef, ag: &AggStructDef) -> String {
+    let name = &ag.name;
+    let name_inp = &st.name;
+    let counters_decl = st
+        .counters
+        .iter()
+        .map(|x| format!("{:4}pub {}: AtomicU64,\n", "", x.to_string()))
+        .fold(String::new(), extend_str);
+    let mut code = String::new();
+    let s = format!(
+        "
+// Agg decl
+pub struct {name} {{
+    pub ts_create: Instant,
+    pub aggcount: AtomicU64,
+{counters_decl}
+}}
+"
+    );
+    code.push_str(&s);
+    let clone_counters = st
+        .counters
+        .iter()
+        .map(|x| {
+            let n = x.to_string();
+            format!("{:12}{}: AtomicU64::new(self.{}.load(Ordering::Acquire)),\n", "", n, n)
+        })
+        .fold(String::new(), extend_str);
+    let s = format!(
+        "
+impl Clone for {name} {{
+    fn clone(&self) -> Self {{
+        Self {{
+            ts_create: self.ts_create.clone(),
+            aggcount: AtomicU64::new(self.aggcount.load(Ordering::Acquire)),
+{clone_counters}
+        }}
+    }}
+}}
+"
+    );
+    code.push_str(&s);
+    let inits = st
+        .counters
+        .iter()
+        .map(|x| format!("{:12}{}: AtomicU64::new(0),\n", "", x.to_string()))
+        .fold(String::new(), extend_str);
+    let s = format!(
+        "
+// Agg impl
 impl {name} {{
     pub fn new() -> Self {{
         Self {{
             ts_create: Instant::now(),
             aggcount: AtomicU64::new(0),
-            {inits},
+{inits}
         }}
-    }}"
+    }}
+"
     );
+    code.push_str(&s);
     let counters_add = st
         .counters
         .iter()
@@ -80,7 +174,107 @@ impl {name} {{
     let s = format!(
         "
     pub fn push(&self, inp: &{name_inp}) {{
+        self.aggcount.fetch_add(1, Ordering::AcqRel);
         {counters_add}
+    }}
+"
+    );
+    code.push_str(&s);
+    {
+        let mut buf = String::new();
+        for x in &st.counters {
+            let n = x.to_string();
+            buf.push_str(&format!(
+                "ret.push_str(&format!(\"{} {{}}\\n\", self.{}.load(Ordering::Acquire)));\n",
+                n, n
+            ));
+        }
+        let s = format!(
+            "
+        pub fn prometheus(&self) -> String {{
+            let mut ret = String::new();
+            ret.push_str(&format!(\"aggcount {{}}\\n\", self.aggcount.load(Ordering::Acquire)));
+{buf}
+            ret
+        }}
+    "
+        );
+        code.push_str(&s);
+    }
+    code.push_str(
+        "
+}
+",
+    );
+    code
+}
+
+// TODO maybe basic and agg structs need a different treatment?
+// Should probably implement the methods behind a common trait.
+fn diff_decl_impl(st: &DiffStructDef, inp: &StatsStructDef) -> String {
+    let name = &st.name;
+    let inp_ty = &inp.name;
+    let decl = inp
+        .counters
+        .iter()
+        .map(|x| format!("{:4}pub {}: AtomicU64,\n", "", x.to_string()))
+        .fold(String::new(), extend_str);
+    let mut code = String::new();
+    let s = format!(
+        "
+pub struct {name} {{
+    pub dt: AtomicU64,
+{decl}
+}}
+"
+    );
+    code.push_str(&s);
+    code.push_str(&format!(
+        "impl {name} {{
+"
+    ));
+    let diffs = inp
+        .counters
+        .iter()
+        .map(|x| {
+            let n = x.to_string();
+            format!(
+                "{:12}let {} = AtomicU64::new(b.{}.load(Ordering::Acquire) - a.{}.load(Ordering::Acquire));\n",
+                "", n, n, n
+            )
+        })
+        .fold(String::new(), extend_str);
+    let inits = inp
+        .counters
+        .iter()
+        .map(|x| {
+            let n = x.to_string();
+            format!("{:16}{},\n", "", n)
+        })
+        .fold(String::new(), extend_str);
+    let s = format!(
+        "
+        pub fn diff_from(a: &{inp_ty}, b: &{inp_ty}) -> Self {{
+            let dur = b.ts_create.duration_since(a.ts_create);
+{diffs}
+            Self {{
+                dt: AtomicU64::new(dur.as_secs() * SEC + dur.subsec_nanos() as u64),
+{inits}
+            }}
+        }}
+    "
+    );
+    code.push_str(&s);
+    let mut a = String::new();
+    let mut b = String::new();
+    for h in &inp.counters {
+        a.push_str(&format!("{} {{}}  ", h.to_string()));
+        b.push_str(&format!("self.{}.load(Ordering::Acquire), ", h.to_string()));
+    }
+    let s = format!(
+        "
+    pub fn display(&self) -> String {{
+        format!(\"dt {{}}  {a}\", self.dt.load(Ordering::Acquire) / 1000000, {b})
     }}
 "
     );
@@ -91,123 +285,6 @@ impl {name} {{
 ",
     );
     code
-}
-
-fn stats_struct_impl(st: &StatsStructDef) -> String {
-    let name = &st.name;
-    let inits: Vec<_> = st
-        .counters
-        .iter()
-        .map(|x| format!("{}: AtomicU64::new(0)", x.to_string()))
-        .collect();
-    let inits = inits.join(",\n");
-    let incers: String = st
-        .counters
-        .iter()
-        .map(|x| {
-            let nn = x.to_string();
-            format!(
-                "
-    pub fn {nn}_inc(&mut self) {{
-        self.{nn}.fetch_add(1, Ordering::AcqRel);
-    }}
-    pub fn {nn}_add(&mut self, v: u64) {{
-        self.{nn}.fetch_add(v, Ordering::AcqRel);
-    }}
-"
-            )
-        })
-        .fold(String::new(), |a, x| format!("{}{}", a, x));
-    format!(
-        "
-impl {name} {{
-    pub fn new() -> Self {{
-        Self {{
-            ts_create: Instant::now(),
-            {inits}
-        }}
-    }}
-
-    {incers}
-}}
-    "
-    )
-}
-
-fn stats_struct_agg_diff_impl(st: &StatsStruct) -> String {
-    let name = format!("{}AggDiff", st.name);
-    let name_inp = &st.name;
-    let decl = st
-        .counters
-        .iter()
-        .map(|x| format!("{}: AtomicU64,\n", x.name))
-        .fold(String::new(), extend_str);
-
-    // TODO the diff method must belong to StructAgg.
-    let diffs = st
-        .counters
-        .iter()
-        .map(|x| {
-            format!(
-                "
-    pub fn diff_against(&self, k: &Self) -> {name} {{
-
-    }}
-"
-            )
-        })
-        .fold(String::new(), extend_str);
-    let code = format!(
-        "
-pub struct {name} {{
-    pub dt: AtomicU64,
-    pub aggcount: AtomicU64,
-    {decl},
-}}
-
-impl {name} {{
-    {diffs}
-}}
-"
-    );
-    code
-}
-
-fn stats_struct_decl_impl(st: &StatsStructDef) -> String {
-    let name = &st.name;
-    let counters_decl = st
-        .counters
-        .iter()
-        .map(|x| format!("pub {}: AtomicU64,\n", x.to_string()))
-        .fold(String::new(), extend_str);
-    let structt = format!(
-        "
-pub struct {name} {{
-    pub ts_create: Instant,
-    {counters_decl}
-}}
-"
-    );
-    let code = format!(
-        "{}\n\n{}\n\n{}",
-        structt,
-        stats_struct_impl(st),
-        stats_struct_agg_impl(st)
-    );
-    code
-}
-
-fn stats_struct_def(st: &StatsStruct) -> String {
-    let name_def = format!("{}", st.name);
-    let structt = format!(
-        "
-const {name_def}: StatsStructDef = StatsStructDef {{
-    name: String::new(),
-    counters: vec![],
-}};
-"
-    );
-    structt
 }
 
 fn ident_from_expr(inp: syn::Expr) -> syn::Result<syn::Ident> {
@@ -250,71 +327,6 @@ fn func_name_from_expr(inp: syn::Expr) -> syn::Result<syn::Ident> {
     }
 }
 
-fn extract_some_stuff_as_string(inp: impl IntoIterator<Item = syn::Expr>) -> Result<Vec<String>, syn::Error> {
-    use syn::spanned::Spanned;
-    use syn::{Error, Expr};
-    let inp: Vec<_> = inp.into_iter().collect();
-    let args: Vec<_> = inp
-        .into_iter()
-        .map(|k| match k {
-            Expr::Path(k) => {
-                let sp = k.span();
-                if k.path.segments.len() != 1 {
-                    return Err(Error::new(sp, "Expect function name with one segment"));
-                }
-                let res = k.path.segments[0].ident.clone();
-                Ok(res)
-            }
-            _ => {
-                return Err(Error::new(k.span(), format!("Expect function name Path {k:?}")));
-            }
-        })
-        .collect();
-    for k in &args {
-        if k.is_err() {
-            return Err(k.clone().unwrap_err());
-        }
-    }
-    let args = args.into_iter().map(Result::unwrap).map(|x| x.to_string()).collect();
-    Ok(args)
-}
-
-fn func_args_from_expr(inp: Punctuated<syn::Expr, syn::token::Comma>) -> Result<Vec<syn::Ident>, syn::Error> {
-    use syn::spanned::Spanned;
-    use syn::{Error, Expr};
-    let inp: Vec<_> = inp.into_iter().collect();
-    let args: Vec<_> = inp
-        .into_iter()
-        .map(|k| match k {
-            Expr::Path(k) => {
-                let sp = k.span();
-                if k.path.segments.len() != 1 {
-                    return Err(Error::new(sp, "Expect function name with one segment"));
-                }
-                let res = k.path.segments[0].ident.clone();
-                Ok(res)
-            }
-            _ => {
-                return Err(Error::new(k.span(), format!("Expect function name Path {k:?}")));
-            }
-        })
-        .collect();
-    for k in &args {
-        if k.is_err() {
-            return Err(k.clone().unwrap_err());
-        }
-    }
-    let args = args.into_iter().map(Result::unwrap).collect();
-    Ok(args)
-}
-
-type PunctExpr = syn::punctuated::Punctuated<syn::Expr, syn::token::Comma>;
-
-struct FuncCallWithArgs {
-    name: Ident,
-    args: PunctExpr,
-}
-
 impl FuncCallWithArgs {
     fn from_expr(inp: syn::Expr) -> Result<Self, syn::Error> {
         use syn::spanned::Spanned;
@@ -334,13 +346,14 @@ impl FuncCallWithArgs {
     }
 }
 
-#[derive(Debug)]
-struct StatsStructDef {
-    name: syn::Ident,
-    counters: Vec<syn::Ident>,
-}
-
 impl StatsStructDef {
+    fn empty() -> Self {
+        Self {
+            name: syn::parse_str("__empty").unwrap(),
+            counters: vec![],
+        }
+    }
+
     fn from_args(inp: PunctExpr) -> syn::Result<Self> {
         let mut name = None;
         let mut counters = None;
@@ -363,87 +376,155 @@ impl StatsStructDef {
     }
 }
 
+impl AggStructDef {
+    fn from_args(inp: PunctExpr) -> syn::Result<Self> {
+        let mut name = None;
+        let mut parent = None;
+        for k in inp {
+            let fa = FuncCallWithArgs::from_expr(k)?;
+            if fa.name == "name" {
+                let ident = ident_from_expr(fa.args[0].clone())?;
+                name = Some(ident);
+            }
+            if fa.name == "parent" {
+                let ident = ident_from_expr(fa.args[0].clone())?;
+                parent = Some(ident);
+            }
+        }
+        let ret = AggStructDef {
+            name: name.expect("Expect name for AggStructDef"),
+            // Will get resolved later:
+            stats: StatsStructDef::empty(),
+            parent: parent.expect("Expect parent"),
+        };
+        Ok(ret)
+    }
+}
+
+impl DiffStructDef {
+    fn from_args(inp: PunctExpr) -> syn::Result<Self> {
+        let mut name = None;
+        let mut input = None;
+        for k in inp {
+            let fa = FuncCallWithArgs::from_expr(k)?;
+            if fa.name == "name" {
+                let ident = ident_from_expr(fa.args[0].clone())?;
+                name = Some(ident);
+            }
+            if fa.name == "input" {
+                let ident = ident_from_expr(fa.args[0].clone())?;
+                input = Some(ident);
+            }
+        }
+        let ret = DiffStructDef {
+            name: name.expect("Expect name for DiffStructDef"),
+            input: input.expect("Expect input for DiffStructDef"),
+        };
+        Ok(ret)
+    }
+}
+
 #[derive(Debug)]
 struct StatsTreeDef {
     stats_struct_defs: Vec<StatsStructDef>,
+    agg_defs: Vec<AggStructDef>,
+    diff_defs: Vec<DiffStructDef>,
 }
 
 impl syn::parse::Parse for StatsTreeDef {
     fn parse(inp: ParseStream) -> syn::Result<Self> {
         let k = inp.parse::<syn::ExprTuple>()?;
         let mut a = vec![];
+        let mut agg_defs = vec![];
+        let mut diff_defs = vec![];
         for k in k.elems {
             let fa = FuncCallWithArgs::from_expr(k)?;
-            if fa.name == "StatsStruct" {
+            if fa.name == "stats_struct" {
                 let stats_struct_def = StatsStructDef::from_args(fa.args)?;
                 a.push(stats_struct_def);
+            } else if fa.name == "agg" {
+                let agg_def = AggStructDef::from_args(fa.args)?;
+                agg_defs.push(agg_def);
+            } else if fa.name == "diff" {
+                let diff_def = DiffStructDef::from_args(fa.args)?;
+                diff_defs.push(diff_def);
             } else {
                 return Err(syn::Error::new(fa.name.span(), "Unexpected"));
             }
         }
-        let ret = StatsTreeDef { stats_struct_defs: a };
+        let ret = StatsTreeDef {
+            stats_struct_defs: a,
+            agg_defs,
+            diff_defs,
+        };
         Ok(ret)
     }
 }
 
 #[proc_macro]
-pub fn stats_struct2(ts: TokenStream) -> TokenStream {
-    let def: StatsTreeDef = parse_macro_input!(ts);
-    //panic!("DEF: {def:?}");
+pub fn stats_struct(ts: TokenStream) -> TokenStream {
+    let mut def: StatsTreeDef = parse_macro_input!(ts);
+    for h in &mut def.agg_defs {
+        for k in &def.stats_struct_defs {
+            if k.name == h.parent {
+                // TODO factor this out..
+                h.stats = k.clone();
+            }
+        }
+    }
+    if false {
+        for j in &def.agg_defs {
+            let h = StatsStructDef {
+                name: j.name.clone(),
+                counters: j.stats.counters.clone(),
+            };
+            def.stats_struct_defs.push(h);
+        }
+    }
+    let mut code = String::new();
     let mut ts1 = TokenStream::new();
-    for k in def.stats_struct_defs {
-        let s = stats_struct_decl_impl(&k);
+    for k in &def.stats_struct_defs {
+        let s = stats_struct_decl_impl(k);
+        code.push_str(&s);
         let ts2: TokenStream = s.parse().unwrap();
         ts1.extend(ts2);
     }
+    for k in &def.agg_defs {
+        for st in &def.stats_struct_defs {
+            if st.name == k.parent {
+                let s = agg_decl_impl(st, k);
+                code.push_str(&s);
+                let ts2: TokenStream = s.parse().unwrap();
+                ts1.extend(ts2);
+            }
+        }
+    }
+    for k in &def.diff_defs {
+        for j in &def.agg_defs {
+            if j.name == k.input {
+                // TODO currently, "j.stats" describes the input to the "agg", so that contains the wrong name.
+                let p = StatsStructDef {
+                    name: k.input.clone(),
+                    counters: j.stats.counters.clone(),
+                };
+                let s = diff_decl_impl(k, &p);
+                code.push_str(&s);
+                let ts2: TokenStream = s.parse().unwrap();
+                ts1.extend(ts2);
+            }
+        }
+        for j in &def.stats_struct_defs {
+            if j.name == k.input {
+                let s = diff_decl_impl(k, j);
+                code.push_str(&s);
+                let ts2: TokenStream = s.parse().unwrap();
+                ts1.extend(ts2);
+            }
+        }
+    }
+    //panic!("CODE: {}", code);
     let _ts3 = TokenStream::from(quote!(
         mod asd {}
     ));
     ts1
-}
-
-#[proc_macro]
-pub fn stats_struct(ts: TokenStream) -> TokenStream {
-    use std::fmt::Write;
-    let mut counters = vec![];
-    let mut log = String::new();
-    let mut in_name = false;
-    let mut in_counters = false;
-    let mut name = None;
-    for tt in ts.clone() {
-        match tt {
-            TokenTree::Ident(k) => {
-                if k.to_string() == "name" {
-                    in_name = true;
-                }
-                if k.to_string() == "counters" {
-                    in_counters = true;
-                }
-            }
-            TokenTree::Group(k) => {
-                if in_counters {
-                    in_counters = false;
-                    parse_counters(k, &mut counters);
-                } else if in_name {
-                    in_name = false;
-                    name = Some(parse_name(k));
-                }
-            }
-            TokenTree::Punct(..) => (),
-            TokenTree::Literal(k) => {
-                if in_name {
-                    write!(log, "NAME write literal {}\n", k);
-                    name = Some(k.to_string());
-                }
-            }
-        }
-    }
-    let name = name.unwrap();
-    let stats_struct = StatsStruct { name, counters };
-    write!(log, "{:?}\n", stats_struct);
-    //panic!("{}", make_code(&stats_struct));
-    //panic!("{}", log);
-    //let ts2 = TokenStream::from_iter(ts.into_iter());
-    //TokenTree::Group(proc_macro::Group::new(Delimiter::Brace, TokenStream::new()));
-    stats_struct_def(&stats_struct).parse().unwrap()
 }

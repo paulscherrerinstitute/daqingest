@@ -11,15 +11,30 @@ use log::*;
 use netpod::Database;
 use scylla::batch::Consistency;
 use serde::{Deserialize, Serialize};
-use stats::{CaConnStats2, CaConnStats2Agg, CaConnVecStats};
+use stats::{CaConnStats2Agg, CaConnStats2AggDiff};
 use std::collections::BTreeMap;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, Once};
 use std::time::{Duration, Instant};
 use tokio::fs::OpenOptions;
 use tokio::io::AsyncReadExt;
 use tokio::net::TcpStream;
+
+static mut METRICS: Option<Mutex<Option<CaConnStats2Agg>>> = None;
+static METRICS_ONCE: Once = Once::new();
+
+fn get_metrics() -> &'static mut Option<CaConnStats2Agg> {
+    METRICS_ONCE.call_once(|| unsafe {
+        METRICS = Some(Mutex::new(None));
+    });
+    let mut g = unsafe { METRICS.as_mut().unwrap().lock().unwrap() };
+    //let ret = g.as_mut().unwrap();
+    //let ret = g.as_mut(;
+    let ret: &mut Option<CaConnStats2Agg> = &mut *g;
+    let ret = unsafe { &mut *(ret as *mut _) };
+    ret
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 struct ChannelConfig {
@@ -214,6 +229,7 @@ pub async fn ca_search(opts: ListenFromFileOpts) -> Result<(), Error> {
 }
 
 pub async fn ca_connect(opts: ListenFromFileOpts) -> Result<(), Error> {
+    tokio::spawn(start_metrics_service());
     let facility = "scylla";
     let opts = parse_config(opts.config).await?;
     let d = Database {
@@ -249,7 +265,7 @@ pub async fn ca_connect(opts: ListenFromFileOpts) -> Result<(), Error> {
         let rows = pg_client
             .query(&qu_find_addr, &[&facility, ch])
             .await
-            .map_err(|e| Error::with_msg_no_trace(format!("{e:?}")))?;
+            .map_err(|e| Error::with_msg_no_trace(format!("PG error: {e:?}")))?;
         if rows.is_empty() {
             error!("can not find address of channel {}", ch);
         } else {
@@ -280,8 +296,7 @@ pub async fn ca_connect(opts: ListenFromFileOpts) -> Result<(), Error> {
     }
     let data_store = Arc::new(DataStore::new(pg_client, scy.clone()).await?);
     let mut conn_jhs = vec![];
-    let mut conn_stats_all = vec![];
-    let mut conn_stats2 = vec![];
+    let mut conn_stats = vec![];
     for (host, channels) in channels_by_host {
         if false && host.ip() != &"172.26.24.76".parse::<Ipv4Addr>().unwrap() {
             continue;
@@ -289,10 +304,15 @@ pub async fn ca_connect(opts: ListenFromFileOpts) -> Result<(), Error> {
         let data_store = data_store.clone();
         debug!("Create TCP connection to {:?}", (host.ip(), host.port()));
         let addr = SocketAddrV4::new(host.ip().clone(), host.port());
-        let tcp = TcpStream::connect(addr).await?;
+        let tcp = match TcpStream::connect(addr).await {
+            Ok(k) => k,
+            Err(e) => {
+                error!("Can not connect to {addr:?} {e:?}");
+                continue;
+            }
+        };
         let mut conn = CaConn::new(tcp, addr, data_store.clone());
-        conn_stats_all.push(conn.stats());
-        conn_stats2.push(conn.stats2());
+        conn_stats.push(conn.stats2());
         for c in channels {
             conn.channel_add(c);
         }
@@ -314,22 +334,21 @@ pub async fn ca_connect(opts: ListenFromFileOpts) -> Result<(), Error> {
         let jh = tokio::spawn(conn_block);
         conn_jhs.push(jh);
     }
-    let mut agg_last = CaConnVecStats::new(Instant::now());
-    let mut agg2_last = CaConnStats2Agg::new();
+    let mut agg_last = CaConnStats2Agg::new();
     loop {
         tokio::time::sleep(Duration::from_millis(2000)).await;
-        let mut agg = CaConnVecStats::new(Instant::now());
-        for st in &conn_stats_all {
-            agg.push(&st);
+        let agg = CaConnStats2Agg::new();
+        for g in &conn_stats {
+            agg.push(&g);
         }
-        let mut agg2 = CaConnStats2Agg::new();
-        for st in &conn_stats2 {
-            agg2.push(&st);
-        }
-        let diff = agg.diff_against(&agg_last);
-        info!("{diff}");
+        let m = get_metrics();
+        *m = Some(agg.clone());
+        let diff = CaConnStats2AggDiff::diff_from(&agg_last, &agg);
+        info!("{}", diff.display());
         agg_last = agg;
-        agg2_last = agg2;
+        if false {
+            break;
+        }
     }
     for jh in conn_jhs {
         match jh.await {
@@ -345,4 +364,21 @@ pub async fn ca_connect(opts: ListenFromFileOpts) -> Result<(), Error> {
         }
     }
     Ok(())
+}
+
+async fn start_metrics_service() {
+    let app = axum::Router::new().route(
+        "/metrics",
+        axum::routing::get(|| async {
+            let stats = get_metrics();
+            match stats {
+                Some(s) => s.prometheus(),
+                None => String::new(),
+            }
+        }),
+    );
+    axum::Server::bind(&"0.0.0.0:3011".parse().unwrap())
+        .serve(app.into_make_service())
+        .await
+        .unwrap()
 }

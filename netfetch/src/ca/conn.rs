@@ -11,11 +11,11 @@ use libc::c_int;
 use log::*;
 use netpod::timeunits::SEC;
 use netpod::{ScalarType, Shape};
-use stats::{CaConnStats, CaConnStats2, IntervalEma};
+use stats::{CaConnStats2, IntervalEma};
 use std::collections::{BTreeMap, VecDeque};
 use std::net::{Ipv4Addr, SocketAddrV4};
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant, SystemTime};
@@ -105,10 +105,10 @@ macro_rules! insert_scalar_impl {
             ts_msp_changed: bool,
             st: ScalarType,
             sh: Shape,
-            stats2: Arc<CaConnStats2>,
+            stats: Arc<CaConnStats2>,
         ) {
             if futs_queue.len() >= INSERT_FUTS_LIM {
-                stats2.inserts_discard.fetch_add(1, Ordering::Release);
+                stats.inserts_discard.fetch_add(1, Ordering::AcqRel);
                 return;
             }
             let pulse = 0 as u64;
@@ -120,7 +120,7 @@ macro_rules! insert_scalar_impl {
                 val,
             );
             let fut3 = ScyInsertFut::new(data_store.scy.clone(), data_store.$qu_insert.clone(), params);
-            stats2.inserts_val.fetch_add(1, Ordering::Release);
+            stats.inserts_val.fetch_add(1, Ordering::AcqRel);
             let fut = if ts_msp_changed {
                 let fut1 = ScyInsertFut::new(
                     data_store.scy.clone(),
@@ -138,7 +138,7 @@ macro_rules! insert_scalar_impl {
                     data_store.qu_insert_ts_msp.clone(),
                     (series.id() as i64, ts_msp as i64),
                 );
-                stats2.inserts_msp.fetch_add(1, Ordering::Release);
+                stats.inserts_msp.fetch_add(1, Ordering::AcqRel);
                 Box::pin(fut1.and_then(move |_| fut2).and_then(move |_| fut3)) as _
             } else {
                 Box::pin(fut3) as _
@@ -162,10 +162,10 @@ macro_rules! insert_array_impl {
             ts_msp_changed: bool,
             st: ScalarType,
             sh: Shape,
-            stats2: Arc<CaConnStats2>,
+            stats: Arc<CaConnStats2>,
         ) {
             if futs_queue.len() >= INSERT_FUTS_LIM {
-                stats2.inserts_discard.fetch_add(1, Ordering::Release);
+                stats.inserts_discard.fetch_add(1, Ordering::AcqRel);
                 return;
             }
             let pulse = 0 as u64;
@@ -177,7 +177,7 @@ macro_rules! insert_array_impl {
                 val,
             );
             let fut3 = ScyInsertFut::new(data_store.scy.clone(), data_store.$qu_insert.clone(), params);
-            stats2.inserts_val.fetch_add(1, Ordering::Release);
+            stats.inserts_val.fetch_add(1, Ordering::AcqRel);
             let fut = if ts_msp_changed {
                 let fut1 = ScyInsertFut::new(
                     data_store.scy.clone(),
@@ -195,7 +195,7 @@ macro_rules! insert_array_impl {
                     data_store.qu_insert_ts_msp.clone(),
                     (series.id() as i64, ts_msp as i64),
                 );
-                stats2.inserts_msp.fetch_add(1, Ordering::Release);
+                stats.inserts_msp.fetch_add(1, Ordering::AcqRel);
                 Box::pin(fut1.and_then(move |_| fut2).and_then(move |_| fut3)) as _
             } else {
                 Box::pin(fut3) as _
@@ -298,7 +298,6 @@ pub struct CaConn {
         FuturesOrdered<Pin<Box<dyn Future<Output = Result<(u32, u32, u16, u16, Existence<SeriesId>), Error>> + Send>>>,
     value_insert_futs: FuturesOrdered<Pin<Box<dyn Future<Output = Result<(), Error>> + Send>>>,
     remote_addr_dbg: SocketAddrV4,
-    stats: Arc<CaConnStats>,
     stats2: Arc<CaConnStats2>,
 }
 
@@ -321,13 +320,8 @@ impl CaConn {
             fut_get_series: FuturesOrdered::new(),
             value_insert_futs: FuturesOrdered::new(),
             remote_addr_dbg,
-            stats: Arc::new(CaConnStats::new()),
             stats2: Arc::new(CaConnStats2::new()),
         }
-    }
-
-    pub fn stats(&self) -> Arc<CaConnStats> {
-        self.stats.clone()
     }
 
     pub fn stats2(&self) -> Arc<CaConnStats2> {
@@ -522,7 +516,6 @@ impl CaConn {
                 }
             }
         }
-        self.stats.inserts_started.fetch_add(1, Ordering::Release);
         Ok(())
     }
 
@@ -669,7 +662,7 @@ impl CaConn {
         let mut msgs_tmp = vec![];
         self.check_channels_state_init(&mut msgs_tmp)?;
         let ts2 = Instant::now();
-        self.stats
+        self.stats2
             .time_check_channels_state_init
             .fetch_add((ts2.duration_since(ts1) * 1000000).as_secs(), Ordering::Release);
         ts1 = ts2;
@@ -737,7 +730,7 @@ impl CaConn {
                             CaMsgTy::EventAddRes(k) => {
                                 let res = Self::handle_event_add_res(self, k);
                                 let ts2 = Instant::now();
-                                self.stats
+                                self.stats2
                                     .time_handle_event_add_res
                                     .fetch_add((ts2.duration_since(ts1) * 1000000).as_secs(), Ordering::Release);
                                 ts1 = ts2;
@@ -781,13 +774,13 @@ impl Stream for CaConn {
         let ret = loop {
             self.handle_insert_futs(cx)?;
             let ts2 = Instant::now();
-            self.stats
+            self.stats2
                 .poll_time_handle_insert_futs
                 .fetch_add((ts2.duration_since(ts1) * 1000000).as_secs(), Ordering::AcqRel);
             ts1 = ts2;
             self.handle_get_series_futs(cx)?;
             let ts2 = Instant::now();
-            self.stats
+            self.stats2
                 .poll_time_get_series_futs
                 .fetch_add((ts2.duration_since(ts1) * 1000000).as_secs(), Ordering::AcqRel);
             ts1 = ts2;
@@ -812,7 +805,7 @@ impl Stream for CaConn {
                 CaConnState::Listen => match {
                     let res = self.handle_conn_listen(cx);
                     let ts2 = Instant::now();
-                    self.stats
+                    self.stats2
                         .time_handle_conn_listen
                         .fetch_add((ts2.duration_since(ts1) * 1000000).as_secs(), Ordering::AcqRel);
                     ts1 = ts2;
@@ -824,9 +817,7 @@ impl Stream for CaConn {
                 CaConnState::PeerReady => {
                     let res = self.handle_peer_ready(cx);
                     let ts2 = Instant::now();
-                    self.stats
-                        .time_handle_peer_ready
-                        .fetch_add((ts2.duration_since(ts1) * 1000000).as_secs(), Ordering::AcqRel);
+                    self.stats2.time_handle_peer_ready_dur(ts2.duration_since(ts1));
                     ts1 = ts2;
                     res
                 }
@@ -837,12 +828,9 @@ impl Stream for CaConn {
         if nn > 1000 {
             warn!("insert_queue_len {nn}");
         }
-        self.stats.insert_queue_len.store(nn, Ordering::Release);
+        self.stats2.inserts_queue_len.store(nn, Ordering::Release);
         let ts_outer_2 = Instant::now();
-        self.stats.poll_time_all.fetch_add(
-            (ts_outer_2.duration_since(ts_outer_1) * 1000000).as_secs(),
-            Ordering::AcqRel,
-        );
+        self.stats2.poll_time_all_dur(ts_outer_2.duration_since(ts_outer_1));
         ret
     }
 }
