@@ -2,7 +2,7 @@ use crate::netbuf::NetBuf;
 use err::Error;
 use futures_util::{pin_mut, Stream};
 use log::*;
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::net::SocketAddrV4;
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -42,6 +42,11 @@ pub struct CreateChanRes {
     pub data_count: u16,
     pub cid: u32,
     pub sid: u32,
+}
+
+#[derive(Debug)]
+pub struct CreateChanFail {
+    pub cid: u32,
 }
 
 #[derive(Debug)]
@@ -108,6 +113,8 @@ pub enum CaDataScalarValue {
 #[derive(Clone, Debug)]
 pub enum CaDataArrayValue {
     I8(Vec<i8>),
+    I16(Vec<i16>),
+    I32(Vec<i32>),
     F32(Vec<f32>),
     F64(Vec<f64>),
 }
@@ -146,6 +153,7 @@ pub enum CaMsgTy {
     SearchRes(SearchRes),
     CreateChan(CreateChan),
     CreateChanRes(CreateChanRes),
+    CreateChanFail(CreateChanFail),
     AccessRightsRes(AccessRightsRes),
     EventAdd(EventAdd),
     EventAddRes(EventAddRes),
@@ -166,6 +174,7 @@ impl CaMsgTy {
             SearchRes(_) => 0x06,
             CreateChan(_) => 0x12,
             CreateChanRes(_) => 0x12,
+            CreateChanFail(_) => 0x1a,
             AccessRightsRes(_) => 0x16,
             EventAdd(_) => 0x01,
             EventAddRes(_) => 0x01,
@@ -190,6 +199,7 @@ impl CaMsgTy {
             SearchRes(_) => 8,
             CreateChan(x) => (x.channel.len() + 1 + 7) / 8 * 8,
             CreateChanRes(_) => 0,
+            CreateChanFail(_) => 0,
             AccessRightsRes(_) => 0,
             EventAdd(_) => 16,
             EventAddRes(_) => {
@@ -219,6 +229,7 @@ impl CaMsgTy {
             SearchRes(x) => x.tcp_port,
             CreateChan(_) => 0,
             CreateChanRes(x) => x.data_type,
+            CreateChanFail(_) => 0,
             AccessRightsRes(_) => 0,
             EventAdd(x) => x.data_type,
             EventAddRes(x) => x.data_type,
@@ -239,6 +250,7 @@ impl CaMsgTy {
             SearchRes(_) => 0,
             CreateChan(_) => 0,
             CreateChanRes(x) => x.data_count,
+            CreateChanFail(_) => 0,
             AccessRightsRes(_) => 0,
             EventAdd(x) => x.data_count,
             EventAddRes(x) => x.data_count,
@@ -259,6 +271,7 @@ impl CaMsgTy {
             SearchRes(x) => x.addr,
             CreateChan(x) => x.cid,
             CreateChanRes(x) => x.cid,
+            CreateChanFail(x) => x.cid,
             AccessRightsRes(x) => x.cid,
             EventAdd(x) => x.sid,
             EventAddRes(x) => x.status,
@@ -279,6 +292,7 @@ impl CaMsgTy {
             SearchRes(x) => x.id,
             CreateChan(_) => CA_PROTO_VERSION as _,
             CreateChanRes(x) => x.sid,
+            CreateChanFail(_) => 0,
             AccessRightsRes(x) => x.rights,
             EventAdd(x) => x.subid,
             EventAddRes(x) => x.subid,
@@ -337,10 +351,11 @@ impl CaMsgTy {
                 unsafe { std::ptr::copy(&d[0] as _, &mut buf[0] as _, d.len()) };
             }
             CreateChanRes(_) => {}
+            CreateChanFail(_) => {}
             AccessRightsRes(_) => {}
             EventAdd(_) => {
                 // TODO allow to customize the mask. Test if it works.
-                buf.copy_from_slice(&[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 15, 0, 0]);
+                buf.copy_from_slice(&[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x0e, 0, 0]);
             }
             EventAddRes(_) => {}
             ReadNotify(_) => {}
@@ -391,7 +406,7 @@ impl CaMsg {
         }
     }
 
-    pub fn from_proto_infos(hi: &HeadInfo, payload: &[u8]) -> Result<Self, Error> {
+    pub fn from_proto_infos(hi: &HeadInfo, payload: &[u8], array_truncate: usize) -> Result<Self, Error> {
         let msg = match hi.cmdid {
             0 => CaMsg {
                 ty: CaMsgTy::VersionRes(hi.data_count),
@@ -446,12 +461,42 @@ impl CaMsg {
                     }),
                 }
             }
+            26 => {
+                CaMsg {
+                    // TODO use different structs for request and response:
+                    ty: CaMsgTy::CreateChanFail(CreateChanFail { cid: hi.param1 }),
+                }
+            }
             1 => {
                 use netpod::Shape;
                 let ca_st = CaScalarType::from_ca_u16(hi.data_type)?;
                 let ca_sh = Shape::from_ca_count(hi.data_count)?;
                 let value = match ca_sh {
                     Shape::Scalar => match ca_st {
+                        CaScalarType::I8 => {
+                            type ST = i8;
+                            const STL: usize = std::mem::size_of::<ST>();
+                            if payload.len() < STL {
+                                return Err(Error::with_msg_no_trace(format!(
+                                    "not enough payload for i8 {}",
+                                    payload.len()
+                                )));
+                            }
+                            let v = ST::from_be_bytes(payload[..STL].try_into()?);
+                            CaDataValue::Scalar(CaDataScalarValue::I8(v))
+                        }
+                        CaScalarType::I16 => {
+                            type ST = i16;
+                            const STL: usize = std::mem::size_of::<ST>();
+                            if payload.len() < STL {
+                                return Err(Error::with_msg_no_trace(format!(
+                                    "not enough payload for i16 {}",
+                                    payload.len()
+                                )));
+                            }
+                            let v = ST::from_be_bytes(payload[..STL].try_into()?);
+                            CaDataValue::Scalar(CaDataScalarValue::I16(v))
+                        }
                         CaScalarType::I32 => {
                             type ST = i32;
                             const STL: usize = std::mem::size_of::<ST>();
@@ -513,18 +558,12 @@ impl CaMsg {
                             let v = String::from_utf8_lossy(&payload[..ixn]);
                             CaDataValue::Scalar(CaDataScalarValue::String(v.into()))
                         }
-                        _ => {
-                            warn!("TODO handle {ca_st:?}");
-                            return Err(Error::with_msg_no_trace(format!(
-                                "can not yet handle type scalar {ca_st:?}"
-                            )));
-                        }
                     },
                     Shape::Wave(n) => match ca_st {
                         CaScalarType::I8 => {
                             type ST = i8;
                             const STL: usize = std::mem::size_of::<ST>();
-                            let nn = (n as usize).min(payload.len() / STL);
+                            let nn = (n as usize).min(payload.len() / STL).min(array_truncate);
                             let mut a = Vec::with_capacity(nn);
                             let mut bb = &payload[..];
                             for _ in 0..nn {
@@ -534,10 +573,36 @@ impl CaMsg {
                             }
                             CaDataValue::Array(CaDataArrayValue::I8(a))
                         }
+                        CaScalarType::I16 => {
+                            type ST = i16;
+                            const STL: usize = std::mem::size_of::<ST>();
+                            let nn = (n as usize).min(payload.len() / STL).min(array_truncate);
+                            let mut a = Vec::with_capacity(nn);
+                            let mut bb = &payload[..];
+                            for _ in 0..nn {
+                                let v = ST::from_be_bytes(bb[..STL].try_into()?);
+                                bb = &bb[STL..];
+                                a.push(v);
+                            }
+                            CaDataValue::Array(CaDataArrayValue::I16(a))
+                        }
+                        CaScalarType::I32 => {
+                            type ST = i32;
+                            const STL: usize = std::mem::size_of::<ST>();
+                            let nn = (n as usize).min(payload.len() / STL).min(array_truncate);
+                            let mut a = Vec::with_capacity(nn);
+                            let mut bb = &payload[..];
+                            for _ in 0..nn {
+                                let v = ST::from_be_bytes(bb[..STL].try_into()?);
+                                bb = &bb[STL..];
+                                a.push(v);
+                            }
+                            CaDataValue::Array(CaDataArrayValue::I32(a))
+                        }
                         CaScalarType::F32 => {
                             type ST = f32;
                             const STL: usize = std::mem::size_of::<ST>();
-                            let nn = (n as usize).min(payload.len() / STL);
+                            let nn = (n as usize).min(payload.len() / STL).min(array_truncate);
                             let mut a = Vec::with_capacity(nn);
                             let mut bb = &payload[..];
                             for _ in 0..nn {
@@ -550,7 +615,7 @@ impl CaMsg {
                         CaScalarType::F64 => {
                             type ST = f64;
                             const STL: usize = std::mem::size_of::<ST>();
-                            let nn = (n as usize).min(payload.len() / STL);
+                            let nn = (n as usize).min(payload.len() / STL).min(array_truncate);
                             let mut a = Vec::with_capacity(nn);
                             let mut bb = &payload[..];
                             for _ in 0..nn {
@@ -561,7 +626,7 @@ impl CaMsg {
                             CaDataValue::Array(CaDataArrayValue::F64(a))
                         }
                         _ => {
-                            warn!("TODO handle {ca_st:?}");
+                            warn!("TODO handle array {ca_st:?}");
                             return Err(Error::with_msg_no_trace(format!(
                                 "can not yet handle type array {ca_st:?}"
                             )));
@@ -687,10 +752,12 @@ pub struct CaProto {
     buf: NetBuf,
     outbuf: NetBuf,
     out: VecDeque<CaMsg>,
+    array_truncate: usize,
+    logged_proto_error_for_cid: BTreeMap<u32, bool>,
 }
 
 impl CaProto {
-    pub fn new(tcp: TcpStream, remote_addr_dbg: SocketAddrV4) -> Self {
+    pub fn new(tcp: TcpStream, remote_addr_dbg: SocketAddrV4, array_truncate: usize) -> Self {
         Self {
             tcp,
             remote_addr_dbg,
@@ -698,6 +765,8 @@ impl CaProto {
             buf: NetBuf::new(1024 * 128),
             outbuf: NetBuf::new(1024 * 128),
             out: VecDeque::new(),
+            array_truncate,
+            logged_proto_error_for_cid: BTreeMap::new(),
         }
     }
 
@@ -855,13 +924,22 @@ impl CaProto {
             break match &self.state {
                 CaState::StdHead => {
                     let hi = HeadInfo::from_netbuf(&mut self.buf)?;
-                    if hi.cmdid == 6
-                        || hi.cmdid > 26
-                        || hi.data_type > 10
-                        || hi.data_count > 4096
-                        || hi.payload_size > 1024 * 32
-                    {
-                        warn!("StdHead sees  {hi:?}");
+                    if hi.cmdid == 1 || hi.cmdid == 15 {
+                        let sid = hi.param1;
+                        if hi.payload_size == 0xffff && hi.data_count == 0 {
+                        } else if hi.payload_size > 16368 {
+                            if self.logged_proto_error_for_cid.contains_key(&sid) {
+                                // TODO emit this as Item so that downstream can translate SID to name.
+                                warn!(
+                                    "Protocol error  payload_size 0x{:04x}  data_count 0x{:04x}  hi {:?}",
+                                    hi.payload_size, hi.data_count, hi
+                                );
+                                self.logged_proto_error_for_cid.insert(sid, true);
+                            }
+                        }
+                    }
+                    if hi.cmdid > 26 {
+                        warn!("Enexpected cmdid  {hi:?}");
                     }
                     if hi.payload_size == 0xffff && hi.data_count == 0 {
                         self.state = CaState::ExtHead(hi);
@@ -869,7 +947,7 @@ impl CaProto {
                     } else {
                         if hi.payload_size == 0 {
                             self.state = CaState::StdHead;
-                            let msg = CaMsg::from_proto_infos(&hi, &[])?;
+                            let msg = CaMsg::from_proto_infos(&hi, &[], self.array_truncate)?;
                             Ok(Some(CaItem::Msg(msg)))
                         } else {
                             self.state = CaState::Payload(hi);
@@ -880,9 +958,18 @@ impl CaProto {
                 CaState::ExtHead(hi) => {
                     let payload_size = self.buf.read_u32_be()?;
                     let data_count = self.buf.read_u32_be()?;
-                    warn!("ExtHead  payload_size {payload_size}  data_count {data_count}");
-                    if payload_size == 0 {
-                        let msg = CaMsg::from_proto_infos(hi, &[])?;
+                    if payload_size > 1024 * 256 {
+                        warn!(
+                            "ExtHead  data_type {}  payload_size {payload_size}  data_count {data_count}",
+                            hi.data_type
+                        );
+                    }
+                    if payload_size <= 16368 {
+                        warn!(
+                            "ExtHead  data_type {}  payload_size {payload_size}  data_count {data_count}",
+                            hi.data_type
+                        );
+                        let msg = CaMsg::from_proto_infos(hi, &[], self.array_truncate)?;
                         self.state = CaState::StdHead;
                         Ok(Some(CaItem::Msg(msg)))
                     } else {
@@ -892,7 +979,7 @@ impl CaProto {
                 }
                 CaState::Payload(hi) => {
                     let g = self.buf.read_bytes(hi.payload_size as _)?;
-                    let msg = CaMsg::from_proto_infos(hi, g)?;
+                    let msg = CaMsg::from_proto_infos(hi, g, self.array_truncate)?;
                     self.state = CaState::StdHead;
                     Ok(Some(CaItem::Msg(msg)))
                 }

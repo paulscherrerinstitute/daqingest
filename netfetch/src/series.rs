@@ -142,11 +142,14 @@ pub async fn get_series_id(pg_client: &PgClient, cd: &ChannelDescDecoded) -> Res
                 let series = Existence::Created(SeriesId(series));
                 return Ok(series);
             } else {
-                error!("tried to insert {series:?} for {channel_name} but it exists");
+                warn!(
+                    "tried to insert {series:?} for {facility} {channel_name} {scalar_type:?} {shape:?} trying again..."
+                );
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
             series += 1;
         }
+        error!("tried to insert {series:?} for {facility} {channel_name} {scalar_type:?} {shape:?} but it failed");
         Err(Error::with_msg_no_trace(format!("get_series_id  can not create and insert series id  {facility:?}  {channel_name:?}  {scalar_type:?}  {shape:?}")))
     } else {
         let series = all[0] as u64;

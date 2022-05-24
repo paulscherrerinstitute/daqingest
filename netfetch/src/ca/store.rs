@@ -1,5 +1,6 @@
 use crate::bsread::ChannelDescDecoded;
 use crate::series::{Existence, SeriesId};
+use crate::store::{CommonInsertQueue, CommonInsertQueueSender};
 use async_channel::{Receiver, Sender};
 use err::Error;
 use scylla::prepared_statement::PreparedStatement;
@@ -48,13 +49,20 @@ pub struct DataStore {
     pub qu_insert_scalar_f64: Arc<PreparedStatement>,
     pub qu_insert_scalar_string: Arc<PreparedStatement>,
     pub qu_insert_array_i8: Arc<PreparedStatement>,
+    pub qu_insert_array_i16: Arc<PreparedStatement>,
+    pub qu_insert_array_i32: Arc<PreparedStatement>,
     pub qu_insert_array_f32: Arc<PreparedStatement>,
     pub qu_insert_array_f64: Arc<PreparedStatement>,
     pub chan_reg: Arc<ChannelRegistry>,
+    pub ciqs: CommonInsertQueueSender,
 }
 
 impl DataStore {
-    pub async fn new(pg_client: Arc<PgClient>, scy: Arc<ScySession>) -> Result<Self, Error> {
+    pub async fn new(
+        pg_client: Arc<PgClient>,
+        scy: Arc<ScySession>,
+        ciqs: CommonInsertQueueSender,
+    ) -> Result<Self, Error> {
         let q = scy
             .prepare("insert into series (part, series, ts_msp, scalar_type, shape_dims) values (?, ?, ?, ?, ?)")
             .await
@@ -102,6 +110,16 @@ impl DataStore {
             .map_err(|e| Error::with_msg_no_trace(format!("{e:?}")))?;
         let qu_insert_array_i8 = Arc::new(q);
         let q = scy
+            .prepare("insert into events_array_i16 (series, ts_msp, ts_lsp, pulse, value) values (?, ?, ?, ?, ?)")
+            .await
+            .map_err(|e| Error::with_msg_no_trace(format!("{e:?}")))?;
+        let qu_insert_array_i16 = Arc::new(q);
+        let q = scy
+            .prepare("insert into events_array_i32 (series, ts_msp, ts_lsp, pulse, value) values (?, ?, ?, ?, ?)")
+            .await
+            .map_err(|e| Error::with_msg_no_trace(format!("{e:?}")))?;
+        let qu_insert_array_i32 = Arc::new(q);
+        let q = scy
             .prepare("insert into events_array_f32 (series, ts_msp, ts_lsp, pulse, value) values (?, ?, ?, ?, ?)")
             .await
             .map_err(|e| Error::with_msg_no_trace(format!("{e:?}")))?;
@@ -123,8 +141,11 @@ impl DataStore {
             qu_insert_scalar_f64,
             qu_insert_scalar_string,
             qu_insert_array_i8,
+            qu_insert_array_i16,
+            qu_insert_array_i32,
             qu_insert_array_f32,
             qu_insert_array_f64,
+            ciqs,
         };
         Ok(ret)
     }

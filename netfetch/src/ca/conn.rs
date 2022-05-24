@@ -11,7 +11,7 @@ use libc::c_int;
 use log::*;
 use netpod::timeunits::SEC;
 use netpod::{ScalarType, Shape};
-use stats::{CaConnStats2, IntervalEma};
+use stats::{CaConnStats, IntervalEma};
 use std::collections::{BTreeMap, VecDeque};
 use std::net::{Ipv4Addr, SocketAddrV4};
 use std::pin::Pin;
@@ -22,8 +22,8 @@ use std::time::{Duration, Instant, SystemTime};
 use tokio::io::unix::AsyncFd;
 use tokio::net::TcpStream;
 
-const INSERT_FUTS_MAX: usize = 200;
-const INSERT_FUTS_LIM: usize = 80000;
+const INSERT_FUTS_MAX: usize = 2;
+const INSERT_FUTS_LIM: usize = 16;
 const TABLE_SERIES_MOD: u32 = 128;
 
 #[derive(Debug)]
@@ -105,7 +105,7 @@ macro_rules! insert_scalar_impl {
             ts_msp_changed: bool,
             st: ScalarType,
             sh: Shape,
-            stats: Arc<CaConnStats2>,
+            stats: Arc<CaConnStats>,
         ) {
             if futs_queue.len() >= INSERT_FUTS_LIM {
                 stats.inserts_discard.fetch_add(1, Ordering::AcqRel);
@@ -144,6 +144,7 @@ macro_rules! insert_scalar_impl {
                 Box::pin(fut3) as _
             };
             futs_queue.push(fut);
+            stats.inserts_queue_push_inc();
         }
     };
 }
@@ -162,7 +163,7 @@ macro_rules! insert_array_impl {
             ts_msp_changed: bool,
             st: ScalarType,
             sh: Shape,
-            stats: Arc<CaConnStats2>,
+            stats: Arc<CaConnStats>,
         ) {
             if futs_queue.len() >= INSERT_FUTS_LIM {
                 stats.inserts_discard.fetch_add(1, Ordering::AcqRel);
@@ -201,6 +202,7 @@ macro_rules! insert_array_impl {
                 Box::pin(fut3) as _
             };
             futs_queue.push(fut);
+            stats.inserts_queue_push_inc();
         }
     };
 }
@@ -213,6 +215,8 @@ insert_scalar_impl!(insert_scalar_f64, f64, qu_insert_scalar_f64);
 insert_scalar_impl!(insert_scalar_string, String, qu_insert_scalar_string);
 
 insert_array_impl!(insert_array_i8, i8, qu_insert_array_i8);
+insert_array_impl!(insert_array_i16, i16, qu_insert_array_i16);
+insert_array_impl!(insert_array_i32, i32, qu_insert_array_i32);
 insert_array_impl!(insert_array_f32, f32, qu_insert_array_f32);
 insert_array_impl!(insert_array_f64, f64, qu_insert_array_f64);
 
@@ -298,14 +302,19 @@ pub struct CaConn {
         FuturesOrdered<Pin<Box<dyn Future<Output = Result<(u32, u32, u16, u16, Existence<SeriesId>), Error>> + Send>>>,
     value_insert_futs: FuturesOrdered<Pin<Box<dyn Future<Output = Result<(), Error>> + Send>>>,
     remote_addr_dbg: SocketAddrV4,
-    stats2: Arc<CaConnStats2>,
+    stats: Arc<CaConnStats>,
 }
 
 impl CaConn {
-    pub fn new(tcp: TcpStream, remote_addr_dbg: SocketAddrV4, data_store: Arc<DataStore>) -> Self {
+    pub fn new(
+        tcp: TcpStream,
+        remote_addr_dbg: SocketAddrV4,
+        data_store: Arc<DataStore>,
+        array_truncate: usize,
+    ) -> Self {
         Self {
             state: CaConnState::Init,
-            proto: CaProto::new(tcp, remote_addr_dbg),
+            proto: CaProto::new(tcp, remote_addr_dbg, array_truncate),
             cid_store: IdStore::new(),
             ioid_store: IdStore::new(),
             subid_store: IdStore::new(),
@@ -320,12 +329,12 @@ impl CaConn {
             fut_get_series: FuturesOrdered::new(),
             value_insert_futs: FuturesOrdered::new(),
             remote_addr_dbg,
-            stats2: Arc::new(CaConnStats2::new()),
+            stats: Arc::new(CaConnStats::new()),
         }
     }
 
-    pub fn stats2(&self) -> Arc<CaConnStats2> {
-        self.stats2.clone()
+    pub fn stats(&self) -> Arc<CaConnStats> {
+        self.stats.clone()
     }
 
     pub fn channel_add(&mut self, channel: String) {
@@ -359,7 +368,9 @@ impl CaConn {
         while self.value_insert_futs.len() > 0 {
             match self.value_insert_futs.poll_next_unpin(cx) {
                 Pending => break,
-                _ => {}
+                _ => {
+                    self.stats.inserts_queue_pop_inc();
+                }
             }
         }
         Ok(())
@@ -490,7 +501,7 @@ impl CaConn {
             ts_msp_changed,
             scalar_type,
             shape,
-            self.stats2.clone(),
+            self.stats.clone(),
         );
         match ev.value {
             Scalar(v) => match v {
@@ -508,6 +519,8 @@ impl CaConn {
                 use crate::ca::proto::CaDataArrayValue::*;
                 match v {
                     I8(val) => match_array_value_insert!(I8, insert_array_i8, val, comm),
+                    I16(val) => match_array_value_insert!(I16, insert_array_i16, val, comm),
+                    I32(val) => match_array_value_insert!(I32, insert_array_i32, val, comm),
                     F32(val) => match_array_value_insert!(F32, insert_array_f32, val, comm),
                     F64(val) => match_array_value_insert!(F64, insert_array_f64, val, comm),
                     _ => {
@@ -662,7 +675,7 @@ impl CaConn {
         let mut msgs_tmp = vec![];
         self.check_channels_state_init(&mut msgs_tmp)?;
         let ts2 = Instant::now();
-        self.stats2
+        self.stats
             .time_check_channels_state_init
             .fetch_add((ts2.duration_since(ts1) * 1000000).as_secs(), Ordering::Release);
         ts1 = ts2;
@@ -730,7 +743,7 @@ impl CaConn {
                             CaMsgTy::EventAddRes(k) => {
                                 let res = Self::handle_event_add_res(self, k);
                                 let ts2 = Instant::now();
-                                self.stats2
+                                self.stats
                                     .time_handle_event_add_res
                                     .fetch_add((ts2.duration_since(ts1) * 1000000).as_secs(), Ordering::Release);
                                 ts1 = ts2;
@@ -774,13 +787,13 @@ impl Stream for CaConn {
         let ret = loop {
             self.handle_insert_futs(cx)?;
             let ts2 = Instant::now();
-            self.stats2
+            self.stats
                 .poll_time_handle_insert_futs
                 .fetch_add((ts2.duration_since(ts1) * 1000000).as_secs(), Ordering::AcqRel);
             ts1 = ts2;
             self.handle_get_series_futs(cx)?;
             let ts2 = Instant::now();
-            self.stats2
+            self.stats
                 .poll_time_get_series_futs
                 .fetch_add((ts2.duration_since(ts1) * 1000000).as_secs(), Ordering::AcqRel);
             ts1 = ts2;
@@ -805,7 +818,7 @@ impl Stream for CaConn {
                 CaConnState::Listen => match {
                     let res = self.handle_conn_listen(cx);
                     let ts2 = Instant::now();
-                    self.stats2
+                    self.stats
                         .time_handle_conn_listen
                         .fetch_add((ts2.duration_since(ts1) * 1000000).as_secs(), Ordering::AcqRel);
                     ts1 = ts2;
@@ -817,20 +830,19 @@ impl Stream for CaConn {
                 CaConnState::PeerReady => {
                     let res = self.handle_peer_ready(cx);
                     let ts2 = Instant::now();
-                    self.stats2.time_handle_peer_ready_dur(ts2.duration_since(ts1));
+                    self.stats.time_handle_peer_ready_dur(ts2.duration_since(ts1));
                     ts1 = ts2;
                     res
                 }
                 CaConnState::Done => Ready(None),
             };
         };
-        let nn = self.value_insert_futs.len() as u64;
-        if nn > 1000 {
-            warn!("insert_queue_len {nn}");
+        let nn = self.value_insert_futs.len();
+        if nn > INSERT_FUTS_LIM {
+            warn!("value_insert_futs len {nn}");
         }
-        self.stats2.inserts_queue_len.store(nn, Ordering::Release);
         let ts_outer_2 = Instant::now();
-        self.stats2.poll_time_all_dur(ts_outer_2.duration_since(ts_outer_1));
+        self.stats.poll_time_all_dur(ts_outer_2.duration_since(ts_outer_1));
         ret
     }
 }
@@ -1099,7 +1111,7 @@ impl FindIocStream {
                     error!("incomplete message, missing payload");
                     break;
                 }
-                let msg = CaMsg::from_proto_infos(&hi, nb.data())?;
+                let msg = CaMsg::from_proto_infos(&hi, nb.data(), 32)?;
                 nb.adv(hi.payload())?;
                 msgs.push(msg);
             }

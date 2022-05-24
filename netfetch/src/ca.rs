@@ -2,6 +2,8 @@ pub mod conn;
 pub mod proto;
 pub mod store;
 
+use crate::store::CommonInsertQueue;
+
 use self::conn::FindIocStream;
 use self::store::DataStore;
 use conn::CaConn;
@@ -11,7 +13,7 @@ use log::*;
 use netpod::Database;
 use scylla::batch::Consistency;
 use serde::{Deserialize, Serialize};
-use stats::{CaConnStats2Agg, CaConnStats2AggDiff};
+use stats::{CaConnStatsAgg, CaConnStatsAggDiff};
 use std::collections::BTreeMap;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::path::PathBuf;
@@ -21,17 +23,15 @@ use tokio::fs::OpenOptions;
 use tokio::io::AsyncReadExt;
 use tokio::net::TcpStream;
 
-static mut METRICS: Option<Mutex<Option<CaConnStats2Agg>>> = None;
+static mut METRICS: Option<Mutex<Option<CaConnStatsAgg>>> = None;
 static METRICS_ONCE: Once = Once::new();
 
-fn get_metrics() -> &'static mut Option<CaConnStats2Agg> {
+fn get_metrics() -> &'static mut Option<CaConnStatsAgg> {
     METRICS_ONCE.call_once(|| unsafe {
         METRICS = Some(Mutex::new(None));
     });
     let mut g = unsafe { METRICS.as_mut().unwrap().lock().unwrap() };
-    //let ret = g.as_mut().unwrap();
-    //let ret = g.as_mut(;
-    let ret: &mut Option<CaConnStats2Agg> = &mut *g;
+    let ret: &mut Option<CaConnStatsAgg> = &mut *g;
     let ret = unsafe { &mut *(ret as *mut _) };
     ret
 }
@@ -49,6 +49,7 @@ struct ChannelConfig {
     #[serde(default)]
     abort_after_search: u32,
     pg_pass: String,
+    array_truncate: Option<usize>,
 }
 
 pub struct ListenFromFileOpts {
@@ -86,6 +87,7 @@ pub async fn parse_config(config: PathBuf) -> Result<CaConnectOpts, Error> {
         timeout: conf.timeout.unwrap_or(2000),
         abort_after_search: conf.abort_after_search,
         pg_pass: conf.pg_pass,
+        array_truncate: conf.array_truncate.unwrap_or(512),
     })
 }
 
@@ -98,6 +100,7 @@ pub struct CaConnectOpts {
     pub timeout: u64,
     pub abort_after_search: u32,
     pub pg_pass: String,
+    pub array_truncate: usize,
 }
 
 async fn resolve_address(addr_str: &str) -> Result<SocketAddrV4, Error> {
@@ -230,6 +233,10 @@ pub async fn ca_search(opts: ListenFromFileOpts) -> Result<(), Error> {
 
 pub async fn ca_connect(opts: ListenFromFileOpts) -> Result<(), Error> {
     tokio::spawn(start_metrics_service());
+
+    // TODO maybe this should hold the resources needed by the futures?
+    let ciq = CommonInsertQueue::new();
+
     let facility = "scylla";
     let opts = parse_config(opts.config).await?;
     let d = Database {
@@ -257,36 +264,53 @@ pub async fn ca_connect(opts: ListenFromFileOpts) -> Result<(), Error> {
     let scy = Arc::new(scy);
     info!("FIND IOCS");
     let qu_find_addr = pg_client
-        .prepare("select t2.addr from ioc_by_channel t1, ioc_by_channel t2 where t2.facility = t1.facility and t2.channel = t1.channel and t1.facility = $1 and t1.channel = $2")
+        .prepare("select t2.channel, t2.addr from ioc_by_channel t1, ioc_by_channel t2 where t2.facility = t1.facility and t2.channel = t1.channel and t1.facility = $1 and t1.channel in ($2, $3, $4, $5, $6, $7, $8, $9)")
         .await
         .map_err(|e| Error::with_msg_no_trace(format!("{e:?}")))?;
     let mut channels_by_host = BTreeMap::new();
-    for (ix, ch) in opts.channels.iter().enumerate() {
+    let mut chns_todo = &opts.channels[..];
+    let mut chstmp = ["__NONE__"; 8];
+    let mut ix = 0;
+    while chns_todo.len() > 0 {
+        for (s1, s2) in chns_todo.iter().zip(chstmp.iter_mut()) {
+            *s2 = s1;
+        }
+        chns_todo = &chns_todo[chstmp.len().min(chns_todo.len())..];
         let rows = pg_client
-            .query(&qu_find_addr, &[&facility, ch])
+            .query(
+                &qu_find_addr,
+                &[
+                    &facility, &chstmp[0], &chstmp[1], &chstmp[2], &chstmp[3], &chstmp[4], &chstmp[5], &chstmp[6],
+                    &chstmp[7],
+                ],
+            )
             .await
             .map_err(|e| Error::with_msg_no_trace(format!("PG error: {e:?}")))?;
         if rows.is_empty() {
-            error!("can not find address of channel {}", ch);
+            error!("can not find any addresses of channels {:?}", chstmp);
         } else {
-            let addr: &str = rows[0].get(0);
-            if addr == "" {
-                // TODO the address was searched before but could not be found.
-            } else {
-                let addr: SocketAddrV4 = match addr.parse() {
-                    Ok(k) => k,
-                    Err(e) => {
-                        error!("can not parse {addr:?}  {e:?}");
-                        continue;
-                    }
-                };
-                if ix % 200 == 0 {
-                    info!("{}  {}  {:?}", ix, ch, addr);
-                }
-                if !channels_by_host.contains_key(&addr) {
-                    channels_by_host.insert(addr, vec![ch.to_string()]);
+            for row in rows {
+                let ch: &str = row.get(0);
+                let addr: &str = row.get(1);
+                if addr == "" {
+                    // TODO the address was searched before but could not be found.
                 } else {
-                    channels_by_host.get_mut(&addr).unwrap().push(ch.to_string());
+                    let addr: SocketAddrV4 = match addr.parse() {
+                        Ok(k) => k,
+                        Err(e) => {
+                            error!("can not parse {addr:?} for channel {ch:?}  {e:?}");
+                            continue;
+                        }
+                    };
+                    ix += 1;
+                    if ix % 1000 == 0 {
+                        info!("{} of {}   {}  {:?}", ix, opts.channels.len(), ch, addr);
+                    }
+                    if !channels_by_host.contains_key(&addr) {
+                        channels_by_host.insert(addr, vec![ch.to_string()]);
+                    } else {
+                        channels_by_host.get_mut(&addr).unwrap().push(ch.to_string());
+                    }
                 }
             }
         }
@@ -294,7 +318,7 @@ pub async fn ca_connect(opts: ListenFromFileOpts) -> Result<(), Error> {
     if opts.abort_after_search == 1 {
         return Ok(());
     }
-    let data_store = Arc::new(DataStore::new(pg_client, scy.clone()).await?);
+    let data_store = Arc::new(DataStore::new(pg_client, scy.clone(), ciq.sender()).await?);
     let mut conn_jhs = vec![];
     let mut conn_stats = vec![];
     for (host, channels) in channels_by_host {
@@ -311,8 +335,8 @@ pub async fn ca_connect(opts: ListenFromFileOpts) -> Result<(), Error> {
                 continue;
             }
         };
-        let mut conn = CaConn::new(tcp, addr, data_store.clone());
-        conn_stats.push(conn.stats2());
+        let mut conn = CaConn::new(tcp, addr, data_store.clone(), opts.array_truncate);
+        conn_stats.push(conn.stats());
         for c in channels {
             conn.channel_add(c);
         }
@@ -334,17 +358,19 @@ pub async fn ca_connect(opts: ListenFromFileOpts) -> Result<(), Error> {
         let jh = tokio::spawn(conn_block);
         conn_jhs.push(jh);
     }
-    let mut agg_last = CaConnStats2Agg::new();
+    let mut agg_last = CaConnStatsAgg::new();
     loop {
-        tokio::time::sleep(Duration::from_millis(2000)).await;
-        let agg = CaConnStats2Agg::new();
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let agg = CaConnStatsAgg::new();
         for g in &conn_stats {
             agg.push(&g);
         }
         let m = get_metrics();
         *m = Some(agg.clone());
-        let diff = CaConnStats2AggDiff::diff_from(&agg_last, &agg);
-        info!("{}", diff.display());
+        if false {
+            let diff = CaConnStatsAggDiff::diff_from(&agg_last, &agg);
+            info!("{}", diff.display());
+        }
         agg_last = agg;
         if false {
             break;
@@ -372,8 +398,14 @@ async fn start_metrics_service() {
         axum::routing::get(|| async {
             let stats = get_metrics();
             match stats {
-                Some(s) => s.prometheus(),
-                None => String::new(),
+                Some(s) => {
+                    trace!("Metrics");
+                    s.prometheus()
+                }
+                None => {
+                    trace!("Metrics empty");
+                    String::new()
+                }
             }
         }),
     );

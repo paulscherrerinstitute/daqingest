@@ -102,6 +102,7 @@ impl From<CaChannel> for CaConnectOpts {
             timeout: 2000,
             abort_after_search: 0,
             pg_pass: "".into(),
+            array_truncate: 512,
         }
     }
 }

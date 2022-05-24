@@ -113,12 +113,13 @@ impl IntervalEma {
 
 stats_proc::stats_struct!((
     stats_struct(
-        name(CaConnStats2),
+        name(CaConnStats),
         counters(
             inserts_val,
             inserts_msp,
             inserts_discard,
-            inserts_queue_len,
+            inserts_queue_push,
+            inserts_queue_pop,
             poll_time_all,
             poll_time_handle_insert_futs,
             poll_time_get_series_futs,
@@ -128,6 +129,6 @@ stats_proc::stats_struct!((
             time_handle_event_add_res,
         ),
     ),
-    agg(name(CaConnStats2Agg), parent(CaConnStats2)),
-    diff(name(CaConnStats2AggDiff), input(CaConnStats2Agg)),
+    agg(name(CaConnStatsAgg), parent(CaConnStats)),
+    diff(name(CaConnStatsAggDiff), input(CaConnStatsAgg)),
 ));

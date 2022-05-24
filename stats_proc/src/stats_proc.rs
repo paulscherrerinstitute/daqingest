@@ -185,7 +185,7 @@ impl {name} {{
         for x in &st.counters {
             let n = x.to_string();
             buf.push_str(&format!(
-                "ret.push_str(&format!(\"{} {{}}\\n\", self.{}.load(Ordering::Acquire)));\n",
+                "ret.push_str(&format!(\"daqingest_{} {{}}\\n\", self.{}.load(Ordering::Acquire)));\n",
                 n, n
             ));
         }
@@ -193,7 +193,7 @@ impl {name} {{
             "
         pub fn prometheus(&self) -> String {{
             let mut ret = String::new();
-            ret.push_str(&format!(\"aggcount {{}}\\n\", self.aggcount.load(Ordering::Acquire)));
+            ret.push_str(&format!(\"daqingest_aggcount {{}}\\n\", self.aggcount.load(Ordering::Acquire)));
 {buf}
             ret
         }}
