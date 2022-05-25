@@ -115,11 +115,12 @@ stats_proc::stats_struct!((
     stats_struct(
         name(CaConnStats),
         counters(
+            insert_item_create,
             inserts_val,
             inserts_msp,
-            inserts_discard,
             inserts_queue_push,
             inserts_queue_pop,
+            store_worker_item_recv,
             poll_time_all,
             poll_time_handle_insert_futs,
             poll_time_get_series_futs,

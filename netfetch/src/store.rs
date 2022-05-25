@@ -1,13 +1,16 @@
+use crate::ca::proto::{CaDataArrayValue, CaDataScalarValue, CaDataValue};
+use crate::ca::store::DataStore;
 use crate::errconv::ErrConv;
 use err::Error;
 use futures_util::stream::FuturesOrdered;
 use futures_util::{Future, FutureExt, Stream, StreamExt};
 use log::*;
+use netpod::{ScalarType, Shape};
 use scylla::frame::value::ValueList;
 use scylla::prepared_statement::PreparedStatement;
 use scylla::transport::errors::QueryError;
 use scylla::{QueryResult, Session as ScySession};
-use std::collections::VecDeque;
+use stats::CaConnStats;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -15,6 +18,7 @@ use std::time::Instant;
 
 const CHANNEL_CAP: usize = 128;
 const POLLING_CAP: usize = 32;
+const TABLE_SERIES_MOD: u32 = 128;
 
 pub struct ScyInsertFut {
     #[allow(unused)]
@@ -82,6 +86,158 @@ impl Future for ScyInsertFut {
             };
         }
     }
+}
+
+#[derive(Debug)]
+pub struct InsertItem {
+    pub series: u64,
+    pub ts_msp: u64,
+    pub ts_lsp: u64,
+    pub msp_bump: bool,
+    pub pulse: u64,
+    pub scalar_type: ScalarType,
+    pub shape: Shape,
+    pub val: CaDataValue,
+}
+
+pub struct CommonInsertItemQueueSender {
+    sender: async_channel::Sender<InsertItem>,
+}
+
+impl CommonInsertItemQueueSender {
+    #[inline(always)]
+    pub fn send(&self, k: InsertItem) -> async_channel::Send<InsertItem> {
+        self.sender.send(k)
+    }
+}
+
+pub struct CommonInsertItemQueue {
+    sender: async_channel::Sender<InsertItem>,
+    recv: async_channel::Receiver<InsertItem>,
+}
+
+impl CommonInsertItemQueue {
+    pub fn new(cap: usize) -> Self {
+        let (tx, rx) = async_channel::bounded(cap);
+        Self {
+            sender: tx.clone(),
+            recv: rx,
+        }
+    }
+
+    pub fn sender(&self) -> CommonInsertItemQueueSender {
+        CommonInsertItemQueueSender {
+            sender: self.sender.clone(),
+        }
+    }
+
+    pub fn receiver(&self) -> async_channel::Receiver<InsertItem> {
+        self.recv.clone()
+    }
+}
+
+struct InsParCom {
+    series: u64,
+    ts_msp: u64,
+    ts_lsp: u64,
+    pulse: u64,
+}
+
+async fn insert_scalar_gen<ST>(
+    par: InsParCom,
+    val: ST,
+    qu: &PreparedStatement,
+    data_store: &DataStore,
+) -> Result<(), Error>
+where
+    ST: scylla::frame::value::Value,
+{
+    let params = (
+        par.series as i64,
+        par.ts_msp as i64,
+        par.ts_lsp as i64,
+        par.pulse as i64,
+        val,
+    );
+    data_store.scy.execute(qu, params).await.err_conv()?;
+    Ok(())
+}
+
+async fn insert_array_gen<ST>(
+    par: InsParCom,
+    val: Vec<ST>,
+    qu: &PreparedStatement,
+    data_store: &DataStore,
+) -> Result<(), Error>
+where
+    ST: scylla::frame::value::Value,
+{
+    let params = (
+        par.series as i64,
+        par.ts_msp as i64,
+        par.ts_lsp as i64,
+        par.pulse as i64,
+        val,
+    );
+    data_store.scy.execute(qu, params).await.err_conv()?;
+    Ok(())
+}
+
+pub async fn insert_item(item: InsertItem, data_store: &DataStore, stats: &CaConnStats) -> Result<(), Error> {
+    if item.msp_bump {
+        let params = (
+            (item.series as u32 % TABLE_SERIES_MOD) as i32,
+            item.series as i64,
+            item.ts_msp as i64,
+            item.scalar_type.to_scylla_i32(),
+            item.shape.to_scylla_vec(),
+        );
+        data_store
+            .scy
+            .execute(&data_store.qu_insert_series, params)
+            .await
+            .err_conv()?;
+        let params = (item.series as i64, item.ts_msp as i64);
+        data_store
+            .scy
+            .execute(&data_store.qu_insert_ts_msp, params)
+            .await
+            .err_conv()?;
+        stats.inserts_msp_inc()
+    }
+    let par = InsParCom {
+        series: item.series,
+        ts_msp: item.ts_msp,
+        ts_lsp: item.ts_lsp,
+        pulse: item.pulse,
+    };
+    use CaDataValue::*;
+    match item.val {
+        Scalar(val) => {
+            use CaDataScalarValue::*;
+            match val {
+                I8(val) => insert_scalar_gen(par, val, &data_store.qu_insert_scalar_i8, &data_store).await?,
+                I16(val) => insert_scalar_gen(par, val, &data_store.qu_insert_scalar_i16, &data_store).await?,
+                Enum(val) => insert_scalar_gen(par, val, &data_store.qu_insert_scalar_i16, &data_store).await?,
+                I32(val) => insert_scalar_gen(par, val, &data_store.qu_insert_scalar_i32, &data_store).await?,
+                F32(val) => insert_scalar_gen(par, val, &data_store.qu_insert_scalar_f32, &data_store).await?,
+                F64(val) => insert_scalar_gen(par, val, &data_store.qu_insert_scalar_f64, &data_store).await?,
+                String(_) => (),
+            }
+        }
+        Array(val) => {
+            use CaDataArrayValue::*;
+            match val {
+                I8(val) => insert_array_gen(par, val, &data_store.qu_insert_array_i8, &data_store).await?,
+                I16(val) => insert_array_gen(par, val, &data_store.qu_insert_array_i16, &data_store).await?,
+                I32(val) => insert_array_gen(par, val, &data_store.qu_insert_array_i32, &data_store).await?,
+                F32(val) => insert_array_gen(par, val, &data_store.qu_insert_array_f32, &data_store).await?,
+                F64(val) => insert_array_gen(par, val, &data_store.qu_insert_array_f64, &data_store).await?,
+            }
+        }
+    }
+    stats.inserts_val_inc();
+    Ok(())
 }
 
 type FutTy = Pin<Box<dyn Future<Output = Result<(), Error>> + Send>>;

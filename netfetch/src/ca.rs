@@ -2,10 +2,9 @@ pub mod conn;
 pub mod proto;
 pub mod store;
 
-use crate::store::CommonInsertQueue;
-
 use self::conn::FindIocStream;
 use self::store::DataStore;
+use crate::store::{CommonInsertItemQueue, CommonInsertQueue};
 use conn::CaConn;
 use err::Error;
 use futures_util::StreamExt;
@@ -50,6 +49,10 @@ struct ChannelConfig {
     abort_after_search: u32,
     pg_pass: String,
     array_truncate: Option<usize>,
+    insert_worker_count: Option<usize>,
+    insert_scylla_sessions: Option<usize>,
+    insert_queue_max: Option<usize>,
+    insert_item_queue_cap: Option<usize>,
 }
 
 pub struct ListenFromFileOpts {
@@ -88,6 +91,10 @@ pub async fn parse_config(config: PathBuf) -> Result<CaConnectOpts, Error> {
         abort_after_search: conf.abort_after_search,
         pg_pass: conf.pg_pass,
         array_truncate: conf.array_truncate.unwrap_or(512),
+        insert_worker_count: conf.insert_worker_count.unwrap_or(1),
+        insert_scylla_sessions: conf.insert_scylla_sessions.unwrap_or(1),
+        insert_queue_max: conf.insert_queue_max.unwrap_or(16),
+        insert_item_queue_cap: conf.insert_item_queue_cap.unwrap_or(256),
     })
 }
 
@@ -101,6 +108,10 @@ pub struct CaConnectOpts {
     pub abort_after_search: u32,
     pub pg_pass: String,
     pub array_truncate: usize,
+    pub insert_worker_count: usize,
+    pub insert_scylla_sessions: usize,
+    pub insert_queue_max: usize,
+    pub insert_item_queue_cap: usize,
 }
 
 async fn resolve_address(addr_str: &str) -> Result<SocketAddrV4, Error> {
@@ -254,6 +265,7 @@ pub async fn ca_connect(opts: ListenFromFileOpts) -> Result<(), Error> {
     // TODO allow clean shutdown on ctrl-c and join the pg_conn in the end:
     tokio::spawn(pg_conn);
     let pg_client = Arc::new(pg_client);
+
     let scy = scylla::SessionBuilder::new()
         .known_node("sf-nube-14:19042")
         .default_consistency(Consistency::One)
@@ -262,6 +274,7 @@ pub async fn ca_connect(opts: ListenFromFileOpts) -> Result<(), Error> {
         .await
         .map_err(|e| Error::with_msg_no_trace(format!("{e:?}")))?;
     let scy = Arc::new(scy);
+
     info!("FIND IOCS");
     let qu_find_addr = pg_client
         .prepare("select t2.channel, t2.addr from ioc_by_channel t1, ioc_by_channel t2 where t2.facility = t1.facility and t2.channel = t1.channel and t1.facility = $1 and t1.channel in ($2, $3, $4, $5, $6, $7, $8, $9)")
@@ -318,7 +331,44 @@ pub async fn ca_connect(opts: ListenFromFileOpts) -> Result<(), Error> {
     if opts.abort_after_search == 1 {
         return Ok(());
     }
-    let data_store = Arc::new(DataStore::new(pg_client, scy.clone(), ciq.sender()).await?);
+    let data_store = Arc::new(DataStore::new(pg_client.clone(), scy.clone(), ciq.sender()).await?);
+    let insert_item_queue = CommonInsertItemQueue::new(opts.insert_item_queue_cap);
+
+    // TODO use a new stats struct
+    let store_stats = Arc::new(stats::CaConnStats::new());
+
+    let mut data_stores = vec![];
+    for _ in 0..opts.insert_scylla_sessions {
+        let scy = scylla::SessionBuilder::new()
+            .known_node("sf-nube-14:19042")
+            .default_consistency(Consistency::One)
+            .use_keyspace("ks1", true)
+            .build()
+            .await
+            .map_err(|e| Error::with_msg_no_trace(format!("{e:?}")))?;
+        let scy = Arc::new(scy);
+        let data_store = Arc::new(DataStore::new(pg_client.clone(), scy.clone(), ciq.sender()).await?);
+        data_stores.push(data_store);
+    }
+    for i1 in 0..opts.insert_worker_count {
+        let data_store = data_stores[i1 * data_stores.len() / opts.insert_worker_count].clone();
+        let stats = store_stats.clone();
+        let recv = insert_item_queue.receiver();
+        let fut = async move {
+            while let Ok(item) = recv.recv().await {
+                stats.store_worker_item_recv_inc();
+                match crate::store::insert_item(item, &data_store, &stats).await {
+                    Ok(_) => {}
+                    Err(e) => {
+                        // TODO back off but continue.
+                        error!("insert worker sees error: {e:?}");
+                        break;
+                    }
+                }
+            }
+        };
+        tokio::spawn(fut);
+    }
     let mut conn_jhs = vec![];
     let mut conn_stats = vec![];
     for (host, channels) in channels_by_host {
@@ -335,7 +385,14 @@ pub async fn ca_connect(opts: ListenFromFileOpts) -> Result<(), Error> {
                 continue;
             }
         };
-        let mut conn = CaConn::new(tcp, addr, data_store.clone(), opts.array_truncate);
+        let mut conn = CaConn::new(
+            tcp,
+            addr,
+            data_store.clone(),
+            insert_item_queue.sender(),
+            opts.array_truncate,
+            opts.insert_queue_max,
+        );
         conn_stats.push(conn.stats());
         for c in channels {
             conn.channel_add(c);
@@ -362,6 +419,7 @@ pub async fn ca_connect(opts: ListenFromFileOpts) -> Result<(), Error> {
     loop {
         tokio::time::sleep(Duration::from_millis(500)).await;
         let agg = CaConnStatsAgg::new();
+        agg.push(&store_stats);
         for g in &conn_stats {
             agg.push(&g);
         }

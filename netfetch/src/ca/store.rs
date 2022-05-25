@@ -1,6 +1,6 @@
 use crate::bsread::ChannelDescDecoded;
 use crate::series::{Existence, SeriesId};
-use crate::store::{CommonInsertQueue, CommonInsertQueueSender};
+use crate::store::CommonInsertQueueSender;
 use async_channel::{Receiver, Sender};
 use err::Error;
 use scylla::prepared_statement::PreparedStatement;
@@ -8,6 +8,7 @@ use scylla::Session as ScySession;
 use std::sync::Arc;
 use tokio_postgres::Client as PgClient;
 
+#[allow(unused)]
 pub struct RegisterJob {
     desc: ChannelDescDecoded,
 }
@@ -18,11 +19,13 @@ impl RegisterJob {
     }
 }
 
+#[allow(unused)]
 pub struct RegisterChannel {
     tx: Sender<RegisterJob>,
     rx: Receiver<RegisterJob>,
 }
 
+#[allow(unused)]
 pub struct ChannelRegistry {
     scy: Arc<ScySession>,
     pg_client: Arc<PgClient>,

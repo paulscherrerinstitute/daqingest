@@ -70,7 +70,7 @@ pub fn __get_series_id(chn: &ChannelDesc) -> u64 {
     u64::from_le_bytes(f.as_slice()[0..8].try_into().unwrap())
 }
 
-pub async fn get_series_id(scy: &ScySession, chn: &ChannelDescDecoded) -> Result<u64, Error> {
+pub async fn get_series_id(_scy: &ScySession, _chn: &ChannelDescDecoded) -> Result<u64, Error> {
     error!("TODO get_series_id");
     err::todoval()
 }
