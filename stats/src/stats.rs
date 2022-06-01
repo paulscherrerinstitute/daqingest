@@ -6,7 +6,7 @@ const US: u64 = 1000;
 const MS: u64 = US * 1000;
 const SEC: u64 = MS * 1000;
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct EMA {
     ema: f32,
     emv: f32,
@@ -56,6 +56,10 @@ impl EMA {
     pub fn emv(&self) -> f32 {
         self.emv
     }
+
+    pub fn k(&self) -> f32 {
+        self.k
+    }
 }
 
 pub struct CheckEvery {
@@ -83,7 +87,7 @@ impl CheckEvery {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct IntervalEma {
     tslast: Option<Instant>,
     ema: EMA,
@@ -109,6 +113,22 @@ impl IntervalEma {
             }
         }
     }
+
+    pub fn ema_preview(&self, tsnow: Instant) -> Option<f32> {
+        match self.tslast {
+            Some(tslast) => {
+                let dt = tsnow.duration_since(tslast);
+                let v = dt.as_secs_f32();
+                let dv = v - self.ema.ema;
+                Some(self.ema.ema + self.ema.k * dv)
+            }
+            None => None,
+        }
+    }
+
+    pub fn ema(&self) -> &EMA {
+        &self.ema
+    }
 }
 
 stats_proc::stats_struct!((
@@ -118,9 +138,15 @@ stats_proc::stats_struct!((
             insert_item_create,
             inserts_val,
             inserts_msp,
+            inserts_msp_grid,
+            inserts_queue_pop_for_global,
             inserts_queue_push,
-            inserts_queue_pop,
+            inserts_queue_drop,
+            channel_fast_item_drop,
             store_worker_item_recv,
+            store_worker_item_insert,
+            store_worker_item_drop,
+            store_worker_item_error,
             poll_time_all,
             poll_time_handle_insert_futs,
             poll_time_get_series_futs,
@@ -128,6 +154,12 @@ stats_proc::stats_struct!((
             time_handle_peer_ready,
             time_check_channels_state_init,
             time_handle_event_add_res,
+            ioc_lookup,
+            tcp_connected,
+            get_series_id_ok,
+            conn_item_count,
+            conn_stream_ready,
+            conn_stream_pending,
         ),
     ),
     agg(name(CaConnStatsAgg), parent(CaConnStats)),

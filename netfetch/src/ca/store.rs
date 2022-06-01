@@ -1,6 +1,5 @@
 use crate::bsread::ChannelDescDecoded;
 use crate::series::{Existence, SeriesId};
-use crate::store::CommonInsertQueueSender;
 use async_channel::{Receiver, Sender};
 use err::Error;
 use scylla::prepared_statement::PreparedStatement;
@@ -25,15 +24,13 @@ pub struct RegisterChannel {
     rx: Receiver<RegisterJob>,
 }
 
-#[allow(unused)]
 pub struct ChannelRegistry {
-    scy: Arc<ScySession>,
     pg_client: Arc<PgClient>,
 }
 
 impl ChannelRegistry {
-    pub fn new(pg_client: Arc<PgClient>, scy: Arc<ScySession>) -> Self {
-        Self { pg_client, scy }
+    pub fn new(pg_client: Arc<PgClient>) -> Self {
+        Self { pg_client }
     }
 
     pub async fn get_series_id(&self, cd: ChannelDescDecoded) -> Result<Existence<SeriesId>, Error> {
@@ -43,8 +40,8 @@ impl ChannelRegistry {
 
 pub struct DataStore {
     pub scy: Arc<ScySession>,
-    pub qu_insert_series: Arc<PreparedStatement>,
     pub qu_insert_ts_msp: Arc<PreparedStatement>,
+    pub qu_insert_series_by_ts_msp: Arc<PreparedStatement>,
     pub qu_insert_scalar_i8: Arc<PreparedStatement>,
     pub qu_insert_scalar_i16: Arc<PreparedStatement>,
     pub qu_insert_scalar_i32: Arc<PreparedStatement>,
@@ -57,25 +54,21 @@ pub struct DataStore {
     pub qu_insert_array_f32: Arc<PreparedStatement>,
     pub qu_insert_array_f64: Arc<PreparedStatement>,
     pub chan_reg: Arc<ChannelRegistry>,
-    pub ciqs: CommonInsertQueueSender,
 }
 
 impl DataStore {
-    pub async fn new(
-        pg_client: Arc<PgClient>,
-        scy: Arc<ScySession>,
-        ciqs: CommonInsertQueueSender,
-    ) -> Result<Self, Error> {
-        let q = scy
-            .prepare("insert into series (part, series, ts_msp, scalar_type, shape_dims) values (?, ?, ?, ?, ?)")
-            .await
-            .map_err(|e| Error::with_msg_no_trace(format!("{e:?}")))?;
-        let qu_insert_series = Arc::new(q);
+    pub async fn new(pg_client: Arc<PgClient>, scy: Arc<ScySession>) -> Result<Self, Error> {
         let q = scy
             .prepare("insert into ts_msp (series, ts_msp) values (?, ?)")
             .await
             .map_err(|e| Error::with_msg_no_trace(format!("{e:?}")))?;
         let qu_insert_ts_msp = Arc::new(q);
+        let q = scy
+            .prepare("insert into series_by_ts_msp (ts_msp, shape_kind, scalar_type, series) values (?, ?, ?, ?)")
+            .await
+            .map_err(|e| Error::with_msg_no_trace(format!("{e:?}")))?;
+        let qu_insert_series_by_ts_msp = Arc::new(q);
+        // scalar:
         let q = scy
             .prepare("insert into events_scalar_i8 (series, ts_msp, ts_lsp, pulse, value) values (?, ?, ?, ?, ?)")
             .await
@@ -133,10 +126,10 @@ impl DataStore {
             .map_err(|e| Error::with_msg_no_trace(format!("{e:?}")))?;
         let qu_insert_array_f64 = Arc::new(q);
         let ret = Self {
-            chan_reg: Arc::new(ChannelRegistry::new(pg_client, scy.clone())),
+            chan_reg: Arc::new(ChannelRegistry::new(pg_client)),
             scy,
-            qu_insert_series,
             qu_insert_ts_msp,
+            qu_insert_series_by_ts_msp,
             qu_insert_scalar_i8,
             qu_insert_scalar_i16,
             qu_insert_scalar_i32,
@@ -148,7 +141,6 @@ impl DataStore {
             qu_insert_array_i32,
             qu_insert_array_f32,
             qu_insert_array_f64,
-            ciqs,
         };
         Ok(ret)
     }

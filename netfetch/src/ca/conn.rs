@@ -15,7 +15,7 @@ use stats::{CaConnStats, IntervalEma};
 use std::collections::{BTreeMap, VecDeque};
 use std::net::{Ipv4Addr, SocketAddrV4};
 use std::pin::Pin;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant, SystemTime};
@@ -47,18 +47,24 @@ enum MonitoringState {
     Muted,
 }
 
-#[allow(unused)]
 #[derive(Debug)]
 struct CreatedState {
+    #[allow(unused)]
     cid: u32,
+    #[allow(unused)]
     sid: u32,
     scalar_type: ScalarType,
     shape: Shape,
+    #[allow(unused)]
     ts_created: Instant,
     state: MonitoringState,
     ts_msp_last: u64,
+    ts_msp_grid_last: u32,
     inserted_in_ts_msp: u64,
-    ivl_ema: IntervalEma,
+    insert_item_ivl_ema: IntervalEma,
+    insert_next_earliest: Instant,
+    #[allow(unused)]
+    fast_warn_count: u32,
 }
 
 #[allow(unused)]
@@ -116,6 +122,7 @@ pub struct CaConn {
     remote_addr_dbg: SocketAddrV4,
     stats: Arc<CaConnStats>,
     insert_queue_max: usize,
+    insert_ivl_min: Arc<AtomicU64>,
 }
 
 impl CaConn {
@@ -126,6 +133,7 @@ impl CaConn {
         insert_item_sender: CommonInsertItemQueueSender,
         array_truncate: usize,
         insert_queue_max: usize,
+        insert_ivl_min: Arc<AtomicU64>,
     ) -> Self {
         Self {
             state: CaConnState::Init,
@@ -148,6 +156,7 @@ impl CaConn {
             remote_addr_dbg,
             stats: Arc::new(CaConnStats::new()),
             insert_queue_max,
+            insert_ivl_min,
         }
     }
 
@@ -191,13 +200,28 @@ impl CaConn {
                         self.insert_item_send_fut = None;
                     }
                     Ready(Err(_)) => break Ready(Err(Error::with_msg_no_trace(format!("can not send the item")))),
-                    Pending => break Pending,
+                    Pending => {
+                        if false {
+                            // Drop the item and continue.
+                            // TODO this causes performance degradation in the channel.
+                            self.stats.inserts_queue_drop_inc();
+                            self.insert_item_send_fut = None;
+                        } else {
+                            // Wait until global queue is ready (peer will see network pressure)
+                            break Pending;
+                        }
+                    }
                 },
                 None => {}
             }
             if let Some(item) = self.insert_item_queue.pop_front() {
+                self.stats.inserts_queue_pop_for_global_inc();
                 let sender = unsafe { &*(&self.insert_item_sender as *const CommonInsertItemQueueSender) };
-                self.insert_item_send_fut = Some(sender.send(item));
+                if sender.is_full() {
+                    self.stats.inserts_queue_drop_inc();
+                } else {
+                    self.insert_item_send_fut = Some(sender.send(item));
+                }
             } else {
                 break Ready(Ok(()));
             }
@@ -209,7 +233,7 @@ impl CaConn {
         while self.fut_get_series.len() > 0 {
             match self.fut_get_series.poll_next_unpin(cx) {
                 Ready(Some(Ok(k))) => {
-                    //info!("Have SeriesId {k:?}");
+                    self.stats.get_series_id_ok_inc();
                     let cid = k.0;
                     let sid = k.1;
                     let data_type = k.2;
@@ -244,8 +268,11 @@ impl CaConn {
                         ts_created: Instant::now(),
                         state: MonitoringState::AddingEvent(series),
                         ts_msp_last: 0,
+                        ts_msp_grid_last: 0,
                         inserted_in_ts_msp: u64::MAX,
-                        ivl_ema: IntervalEma::new(),
+                        insert_item_ivl_ema: IntervalEma::new(),
+                        insert_next_earliest: Instant::now(),
+                        fast_warn_count: 0,
                     });
                     let scalar_type = ScalarType::from_ca_id(data_type)?;
                     let shape = Shape::from_ca_count(data_count)?;
@@ -274,17 +301,15 @@ impl CaConn {
         series: SeriesId,
         scalar_type: ScalarType,
         shape: Shape,
+        ts: u64,
         ev: proto::EventAddRes,
         cid: u32,
         ts_msp_last: u64,
         inserted_in_ts_msp: u64,
+        ts_msp_grid: Option<u32>,
     ) -> Result<(), Error> {
-        // TODO where to actually get the timestamp of the event from?
-        let ts = SystemTime::now();
-        let epoch = ts.duration_since(std::time::UNIX_EPOCH).unwrap();
         // TODO decide on better msp/lsp: random offset!
         // As long as one writer is active, the msp is arbitrary.
-        let ts = epoch.as_secs() * SEC + epoch.subsec_nanos() as u64;
         let ts_msp = if inserted_in_ts_msp > 2000 {
             let ts_msp = ts / (60 * SEC) * (60 * SEC);
             if let ChannelState::Created(st) = self.channels.get_mut(&cid).unwrap() {
@@ -324,6 +349,7 @@ impl CaConn {
             scalar_type,
             shape,
             val: ev.value,
+            ts_msp_grid,
         };
         item_queue.push_back(item);
         self.stats.insert_item_create_inc();
@@ -372,9 +398,44 @@ impl CaConn {
                         return Err(format!("no series id on insert").into());
                     }
                 };
-                let ts_msp_last = st.ts_msp_last;
-                let inserted_in_ts_msp = st.inserted_in_ts_msp;
-                self.event_add_insert(series, scalar_type, shape, ev, cid, ts_msp_last, inserted_in_ts_msp)?;
+                let tsnow = Instant::now();
+                if tsnow >= st.insert_next_earliest {
+                    st.insert_item_ivl_ema.tick(tsnow);
+                    let em = st.insert_item_ivl_ema.ema();
+                    let ema = em.ema();
+                    let mm = self.insert_ivl_min.load(Ordering::Acquire);
+                    let mm = (mm as f32) * 1e-6;
+                    let dt = (mm - ema) / em.k();
+                    st.insert_next_earliest = tsnow
+                        .checked_add(Duration::from_micros((dt * 1e6) as u64))
+                        .ok_or_else(|| Error::with_msg_no_trace("time overflow in next insert"))?;
+                    let ts_msp_last = st.ts_msp_last;
+                    let inserted_in_ts_msp = st.inserted_in_ts_msp;
+                    // TODO get event timestamp from channel access field
+                    let ts = SystemTime::now();
+                    let epoch = ts.duration_since(std::time::UNIX_EPOCH).unwrap();
+                    let ts = epoch.as_secs() * SEC + epoch.subsec_nanos() as u64;
+                    let ts_msp_grid = (ts / (SEC * 10 * 6 * 2)) as u32 * (6 * 2);
+                    let ts_msp_grid = if st.ts_msp_grid_last != ts_msp_grid {
+                        st.ts_msp_grid_last = ts_msp_grid;
+                        Some(ts_msp_grid)
+                    } else {
+                        None
+                    };
+                    self.event_add_insert(
+                        series,
+                        scalar_type,
+                        shape,
+                        ts,
+                        ev,
+                        cid,
+                        ts_msp_last,
+                        inserted_in_ts_msp,
+                        ts_msp_grid,
+                    )?;
+                } else {
+                    self.stats.channel_fast_item_drop_inc();
+                }
             }
             _ => {
                 error!("unexpected state: EventAddRes while having {ch_s:?}");
@@ -522,8 +583,11 @@ impl CaConn {
                                     ts_created: Instant::now(),
                                     state: MonitoringState::FetchSeriesId,
                                     ts_msp_last: 0,
+                                    ts_msp_grid_last: 0,
                                     inserted_in_ts_msp: u64::MAX,
-                                    ivl_ema: IntervalEma::new(),
+                                    insert_item_ivl_ema: IntervalEma::new(),
+                                    insert_next_earliest: Instant::now(),
+                                    fast_warn_count: 0,
                                 });
                                 // TODO handle error in different way. Should most likely not abort.
                                 let cd = ChannelDescDecoded {
@@ -673,6 +737,10 @@ impl Stream for CaConn {
         let ts_outer_2 = Instant::now();
         self.stats.poll_time_all_dur(ts_outer_2.duration_since(ts_outer_1));
         // TODO currently, this will never stop by itself
+        match &ret {
+            Ready(_) => self.stats.conn_stream_ready_inc(),
+            Pending => self.stats.conn_stream_pending_inc(),
+        }
         ret
     }
 }

@@ -2,8 +2,7 @@ use crate::ca::proto::{CaDataArrayValue, CaDataScalarValue, CaDataValue};
 use crate::ca::store::DataStore;
 use crate::errconv::ErrConv;
 use err::Error;
-use futures_util::stream::FuturesOrdered;
-use futures_util::{Future, FutureExt, Stream, StreamExt};
+use futures_util::{Future, FutureExt};
 use log::*;
 use netpod::{ScalarType, Shape};
 use scylla::frame::value::ValueList;
@@ -15,10 +14,6 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Instant;
-
-const CHANNEL_CAP: usize = 128;
-const POLLING_CAP: usize = 32;
-const TABLE_SERIES_MOD: u32 = 128;
 
 pub struct ScyInsertFut {
     #[allow(unused)]
@@ -94,6 +89,7 @@ pub struct InsertItem {
     pub ts_msp: u64,
     pub ts_lsp: u64,
     pub msp_bump: bool,
+    pub ts_msp_grid: Option<u32>,
     pub pulse: u64,
     pub scalar_type: ScalarType,
     pub shape: Shape,
@@ -108,6 +104,11 @@ impl CommonInsertItemQueueSender {
     #[inline(always)]
     pub fn send(&self, k: InsertItem) -> async_channel::Send<InsertItem> {
         self.sender.send(k)
+    }
+
+    #[inline(always)]
+    pub fn is_full(&self) -> bool {
+        self.sender.is_full()
     }
 }
 
@@ -185,18 +186,6 @@ where
 
 pub async fn insert_item(item: InsertItem, data_store: &DataStore, stats: &CaConnStats) -> Result<(), Error> {
     if item.msp_bump {
-        let params = (
-            (item.series as u32 % TABLE_SERIES_MOD) as i32,
-            item.series as i64,
-            item.ts_msp as i64,
-            item.scalar_type.to_scylla_i32(),
-            item.shape.to_scylla_vec(),
-        );
-        data_store
-            .scy
-            .execute(&data_store.qu_insert_series, params)
-            .await
-            .err_conv()?;
         let params = (item.series as i64, item.ts_msp as i64);
         data_store
             .scy
@@ -204,6 +193,20 @@ pub async fn insert_item(item: InsertItem, data_store: &DataStore, stats: &CaCon
             .await
             .err_conv()?;
         stats.inserts_msp_inc()
+    }
+    if let Some(ts_msp_grid) = item.ts_msp_grid {
+        let params = (
+            ts_msp_grid as i32,
+            if item.shape.to_scylla_vec().is_empty() { 0 } else { 1 } as i32,
+            item.scalar_type.to_scylla_i32(),
+            item.series as i64,
+        );
+        data_store
+            .scy
+            .execute(&data_store.qu_insert_series_by_ts_msp, params)
+            .await
+            .err_conv()?;
+        stats.inserts_msp_grid_inc()
     }
     let par = InsParCom {
         series: item.series,
@@ -238,83 +241,4 @@ pub async fn insert_item(item: InsertItem, data_store: &DataStore, stats: &CaCon
     }
     stats.inserts_val_inc();
     Ok(())
-}
-
-type FutTy = Pin<Box<dyn Future<Output = Result<(), Error>> + Send>>;
-
-pub struct CommonInsertQueueSender {
-    sender: async_channel::Sender<FutTy>,
-}
-
-impl CommonInsertQueueSender {
-    pub async fn send(&self, k: FutTy) -> Result<(), Error> {
-        self.sender
-            .send(k)
-            .await
-            .map_err(|e| Error::with_msg_no_trace(format!("{e:?}")))
-    }
-}
-
-pub struct CommonInsertQueue {
-    sender: async_channel::Sender<FutTy>,
-    recv: async_channel::Receiver<FutTy>,
-    futs: FuturesOrdered<FutTy>,
-    inp_done: bool,
-}
-
-impl CommonInsertQueue {
-    pub fn new() -> Self {
-        let (tx, rx) = async_channel::bounded(CHANNEL_CAP);
-        Self {
-            sender: tx.clone(),
-            recv: rx,
-            futs: FuturesOrdered::new(),
-            inp_done: false,
-        }
-    }
-
-    pub fn sender(&self) -> CommonInsertQueueSender {
-        CommonInsertQueueSender {
-            sender: self.sender.clone(),
-        }
-    }
-}
-
-impl Stream for CommonInsertQueue {
-    type Item = Result<(), Error>;
-
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
-        use Poll::*;
-        loop {
-            let _res_inp = if self.futs.len() < POLLING_CAP && !self.inp_done {
-                match self.recv.poll_next_unpin(cx) {
-                    Ready(Some(k)) => {
-                        self.futs.push(k);
-                        continue;
-                    }
-                    Ready(None) => {
-                        self.inp_done = true;
-                        Ready(None)
-                    }
-                    Pending => Pending,
-                }
-            } else {
-                Ready(Some(()))
-            };
-            let res_qu = match self.futs.poll_next_unpin(cx) {
-                Ready(Some(Ok(_k))) => Ready(Some(Ok(()))),
-                Ready(Some(Err(e))) => Ready(Some(Err(e))),
-                Ready(None) => {
-                    if self.inp_done {
-                        Ready(None)
-                    } else {
-                        Pending
-                    }
-                }
-                Pending => Pending,
-            };
-            // TODO monitor queue length and queue pushes per poll of this.
-            break res_qu;
-        }
-    }
 }
