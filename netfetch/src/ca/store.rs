@@ -64,7 +64,9 @@ impl DataStore {
             .map_err(|e| Error::with_msg_no_trace(format!("{e:?}")))?;
         let qu_insert_ts_msp = Arc::new(q);
         let q = scy
-            .prepare("insert into series_by_ts_msp (ts_msp, shape_kind, scalar_type, series) values (?, ?, ?, ?)")
+            .prepare(
+                "insert into series_by_ts_msp (part, ts_msp, shape_kind, scalar_type, series) values (?, ?, ?, ?, ?)",
+            )
             .await
             .map_err(|e| Error::with_msg_no_trace(format!("{e:?}")))?;
         let qu_insert_series_by_ts_msp = Arc::new(q);

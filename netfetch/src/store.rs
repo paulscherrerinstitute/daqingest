@@ -196,6 +196,7 @@ pub async fn insert_item(item: InsertItem, data_store: &DataStore, stats: &CaCon
     }
     if let Some(ts_msp_grid) = item.ts_msp_grid {
         let params = (
+            (item.series as i32) & 0xff,
             ts_msp_grid as i32,
             if item.shape.to_scylla_vec().is_empty() { 0 } else { 1 } as i32,
             item.scalar_type.to_scylla_i32(),

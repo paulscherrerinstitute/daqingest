@@ -154,6 +154,7 @@ pub async fn ca_search(opts: ListenFromFileOpts) -> Result<(), Error> {
     let d = Database {
         name: "daqbuffer".into(),
         host: "sf-nube-11".into(),
+        port: 5432,
         user: "daqbuffer".into(),
         pass: opts.pg_pass.clone(),
     };
@@ -317,6 +318,7 @@ pub async fn ca_connect(opts: ListenFromFileOpts) -> Result<(), Error> {
     let d = Database {
         name: "daqbuffer".into(),
         host: "sf-nube-11".into(),
+        port: 5432,
         user: "daqbuffer".into(),
         pass: opts.pg_pass.clone(),
     };

@@ -53,8 +53,8 @@ pub async fn get_series_id(pg_client: &PgClient, cd: &ChannelDescDecoded) -> Res
             series &= 0x7fffffffffffffff;
         }
         for _ in 0..2000 {
-            if series > i64::MAX as u64 {
-                series = 0;
+            if series < 1 || series > i64::MAX as u64 {
+                series = 1;
             }
             let res = pg_client
                 .execute(
