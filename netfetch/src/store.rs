@@ -96,13 +96,36 @@ pub struct InsertItem {
     pub val: CaDataValue,
 }
 
+#[derive(Debug)]
+pub struct MuteItem {
+    pub series: u64,
+    pub ts: u64,
+    pub ema: f32,
+    pub emd: f32,
+}
+
+#[derive(Debug)]
+pub struct IvlItem {
+    pub series: u64,
+    pub ts: u64,
+    pub ema: f32,
+    pub emd: f32,
+}
+
+#[derive(Debug)]
+pub enum QueryItem {
+    Insert(InsertItem),
+    Mute(MuteItem),
+    Ivl(IvlItem),
+}
+
 pub struct CommonInsertItemQueueSender {
-    sender: async_channel::Sender<InsertItem>,
+    sender: async_channel::Sender<QueryItem>,
 }
 
 impl CommonInsertItemQueueSender {
     #[inline(always)]
-    pub fn send(&self, k: InsertItem) -> async_channel::Send<InsertItem> {
+    pub fn send(&self, k: QueryItem) -> async_channel::Send<QueryItem> {
         self.sender.send(k)
     }
 
@@ -113,8 +136,8 @@ impl CommonInsertItemQueueSender {
 }
 
 pub struct CommonInsertItemQueue {
-    sender: async_channel::Sender<InsertItem>,
-    recv: async_channel::Receiver<InsertItem>,
+    sender: async_channel::Sender<QueryItem>,
+    recv: async_channel::Receiver<QueryItem>,
 }
 
 impl CommonInsertItemQueue {
@@ -132,7 +155,7 @@ impl CommonInsertItemQueue {
         }
     }
 
-    pub fn receiver(&self) -> async_channel::Receiver<InsertItem> {
+    pub fn receiver(&self) -> async_channel::Receiver<QueryItem> {
         self.recv.clone()
     }
 }

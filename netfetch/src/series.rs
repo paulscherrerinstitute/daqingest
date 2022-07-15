@@ -1,9 +1,8 @@
 use crate::bsread::ChannelDescDecoded;
 use crate::errconv::ErrConv;
 use err::Error;
-#[allow(unused)]
 use log::*;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio_postgres::Client as PgClient;
 
 #[derive(Clone, Debug)]
@@ -41,20 +40,28 @@ pub async fn get_series_id(pg_client: &PgClient, cd: &ChannelDescDecoded) -> Res
         all.push(series);
     }
     let rn = all.len();
+    let tsbeg = Instant::now();
     if rn == 0 {
         use md5::Digest;
         let mut h = md5::Md5::new();
         h.update(facility.as_bytes());
         h.update(channel_name.as_bytes());
-        h.update(format!("{:?} {:?}", scalar_type, shape).as_bytes());
-        let f = h.finalize();
-        let mut series = u64::from_le_bytes(f.as_slice()[0..8].try_into().unwrap());
-        if series > i64::MAX as u64 {
-            series &= 0x7fffffffffffffff;
-        }
-        for _ in 0..2000 {
-            if series < 1 || series > i64::MAX as u64 {
+        h.update(format!("{:?}", scalar_type).as_bytes());
+        h.update(format!("{:?}", shape).as_bytes());
+        for _ in 0..200 {
+            h.update(tsbeg.elapsed().subsec_nanos().to_ne_bytes());
+            let f = h.clone().finalize();
+            let mut series = u64::from_le_bytes(f.as_slice()[0..8].try_into().unwrap());
+            if series > i64::MAX as u64 {
+                series &= 0x7fffffffffffffff;
+            }
+            if series == 0 {
                 series = 1;
+            }
+            if series <= 0 || series > i64::MAX as u64 {
+                return Err(Error::with_msg_no_trace(format!(
+                    "attempt to insert bad series id {series}"
+                )));
             }
             let res = pg_client
                 .execute(
@@ -76,9 +83,8 @@ pub async fn get_series_id(pg_client: &PgClient, cd: &ChannelDescDecoded) -> Res
                 );
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
-            series += 1;
         }
-        error!("tried to insert {series:?} for {facility} {channel_name} {scalar_type:?} {shape:?} but it failed");
+        error!("tried to insert new series id for {facility} {channel_name} {scalar_type:?} {shape:?} but failed");
         Err(Error::with_msg_no_trace(format!("get_series_id  can not create and insert series id  {facility:?}  {channel_name:?}  {scalar_type:?}  {shape:?}")))
     } else {
         let series = all[0] as u64;

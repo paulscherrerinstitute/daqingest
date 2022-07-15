@@ -3,7 +3,7 @@ use super::store::DataStore;
 use crate::bsread::ChannelDescDecoded;
 use crate::ca::proto::{CreateChan, EventAdd, HeadInfo};
 use crate::series::{Existence, SeriesId};
-use crate::store::{CommonInsertItemQueueSender, InsertItem};
+use crate::store::{CommonInsertItemQueueSender, InsertItem, IvlItem, MuteItem, QueryItem};
 use err::Error;
 use futures_util::stream::FuturesOrdered;
 use futures_util::{Future, FutureExt, Stream, StreamExt, TryFutureExt};
@@ -62,9 +62,10 @@ struct CreatedState {
     ts_msp_grid_last: u32,
     inserted_in_ts_msp: u64,
     insert_item_ivl_ema: IntervalEma,
+    item_recv_ivl_ema: IntervalEma,
+    insert_recv_ivl_last: Instant,
     insert_next_earliest: Instant,
-    #[allow(unused)]
-    fast_warn_count: u32,
+    muted_before: u32,
 }
 
 #[allow(unused)]
@@ -114,9 +115,9 @@ pub struct CaConn {
     name_by_cid: BTreeMap<u32, String>,
     poll_count: usize,
     data_store: Arc<DataStore>,
-    insert_item_queue: VecDeque<InsertItem>,
+    insert_item_queue: VecDeque<QueryItem>,
     insert_item_sender: CommonInsertItemQueueSender,
-    insert_item_send_fut: Option<async_channel::Send<'static, InsertItem>>,
+    insert_item_send_fut: Option<async_channel::Send<'static, QueryItem>>,
     fut_get_series:
         FuturesOrdered<Pin<Box<dyn Future<Output = Result<(u32, u32, u16, u16, Existence<SeriesId>), Error>> + Send>>>,
     remote_addr_dbg: SocketAddrV4,
@@ -271,8 +272,10 @@ impl CaConn {
                         ts_msp_grid_last: 0,
                         inserted_in_ts_msp: u64::MAX,
                         insert_item_ivl_ema: IntervalEma::new(),
+                        item_recv_ivl_ema: IntervalEma::new(),
+                        insert_recv_ivl_last: Instant::now(),
                         insert_next_earliest: Instant::now(),
-                        fast_warn_count: 0,
+                        muted_before: 0,
                     });
                     let scalar_type = ScalarType::from_ca_id(data_type)?;
                     let shape = Shape::from_ca_count(data_count)?;
@@ -351,7 +354,7 @@ impl CaConn {
             val: ev.value,
             ts_msp_grid,
         };
-        item_queue.push_back(item);
+        item_queue.push_back(QueryItem::Insert(item));
         self.stats.insert_item_create_inc();
         Ok(())
     }
@@ -398,23 +401,26 @@ impl CaConn {
                         return Err(format!("no series id on insert").into());
                     }
                 };
+                let ts = {
+                    let ts = SystemTime::now();
+                    let epoch = ts.duration_since(std::time::UNIX_EPOCH).unwrap();
+                    epoch.as_secs() * SEC + epoch.subsec_nanos() as u64
+                };
                 let tsnow = Instant::now();
                 if tsnow >= st.insert_next_earliest {
+                    st.muted_before = 0;
                     st.insert_item_ivl_ema.tick(tsnow);
                     let em = st.insert_item_ivl_ema.ema();
                     let ema = em.ema();
-                    let mm = self.insert_ivl_min.load(Ordering::Acquire);
-                    let mm = (mm as f32) * 1e-6;
-                    let dt = (mm - ema) / em.k();
+                    let ivl_min = self.insert_ivl_min.load(Ordering::Acquire);
+                    let ivl_min = (ivl_min as f32) * 1e-6;
+                    let dt = (ivl_min - ema).max(0.) / em.k();
                     st.insert_next_earliest = tsnow
                         .checked_add(Duration::from_micros((dt * 1e6) as u64))
                         .ok_or_else(|| Error::with_msg_no_trace("time overflow in next insert"))?;
                     let ts_msp_last = st.ts_msp_last;
                     let inserted_in_ts_msp = st.inserted_in_ts_msp;
                     // TODO get event timestamp from channel access field
-                    let ts = SystemTime::now();
-                    let epoch = ts.duration_since(std::time::UNIX_EPOCH).unwrap();
-                    let ts = epoch.as_secs() * SEC + epoch.subsec_nanos() as u64;
                     let ts_msp_grid = (ts / (SEC * 10 * 6 * 2)) as u32 * (6 * 2);
                     let ts_msp_grid = if st.ts_msp_grid_last != ts_msp_grid {
                         st.ts_msp_grid_last = ts_msp_grid;
@@ -435,6 +441,28 @@ impl CaConn {
                     )?;
                 } else {
                     self.stats.channel_fast_item_drop_inc();
+                    if tsnow.duration_since(st.insert_recv_ivl_last) >= Duration::from_millis(2000) {
+                        st.insert_recv_ivl_last = tsnow;
+                        let ema = st.insert_item_ivl_ema.ema();
+                        let item = IvlItem {
+                            series: series.id(),
+                            ts,
+                            ema: ema.ema(),
+                            emd: ema.emv().sqrt(),
+                        };
+                        self.insert_item_queue.push_back(QueryItem::Ivl(item));
+                    }
+                    if false && st.muted_before == 0 {
+                        let ema = st.insert_item_ivl_ema.ema();
+                        let item = MuteItem {
+                            series: series.id(),
+                            ts,
+                            ema: ema.ema(),
+                            emd: ema.emv().sqrt(),
+                        };
+                        self.insert_item_queue.push_back(QueryItem::Mute(item));
+                    }
+                    st.muted_before = 1;
                 }
             }
             _ => {
@@ -586,8 +614,10 @@ impl CaConn {
                                     ts_msp_grid_last: 0,
                                     inserted_in_ts_msp: u64::MAX,
                                     insert_item_ivl_ema: IntervalEma::new(),
+                                    item_recv_ivl_ema: IntervalEma::new(),
+                                    insert_recv_ivl_last: Instant::now(),
                                     insert_next_earliest: Instant::now(),
-                                    fast_warn_count: 0,
+                                    muted_before: 0,
                                 });
                                 // TODO handle error in different way. Should most likely not abort.
                                 let cd = ChannelDescDecoded {

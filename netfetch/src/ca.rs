@@ -4,7 +4,7 @@ pub mod store;
 
 use self::conn::FindIocStream;
 use self::store::DataStore;
-use crate::store::CommonInsertItemQueue;
+use crate::store::{CommonInsertItemQueue, QueryItem};
 use conn::CaConn;
 use err::Error;
 use futures_util::StreamExt;
@@ -275,29 +275,77 @@ async fn spawn_scylla_insert_workers(
         let fut = async move {
             let mut i1 = 0;
             while let Ok(item) = recv.recv().await {
-                stats.store_worker_item_recv_inc();
-                let insert_frac = insert_frac.load(Ordering::Acquire);
-                if i1 % 1000 < insert_frac {
-                    match crate::store::insert_item(item, &data_store, &stats).await {
-                        Ok(_) => {
-                            stats.store_worker_item_insert_inc();
+                match item {
+                    QueryItem::Insert(item) => {
+                        stats.store_worker_item_recv_inc();
+                        let insert_frac = insert_frac.load(Ordering::Acquire);
+                        if i1 % 1000 < insert_frac {
+                            match crate::store::insert_item(item, &data_store, &stats).await {
+                                Ok(_) => {
+                                    stats.store_worker_item_insert_inc();
+                                }
+                                Err(e) => {
+                                    stats.store_worker_item_error_inc();
+                                    // TODO introduce more structured error variants.
+                                    if e.msg().contains("WriteTimeout") {
+                                        tokio::time::sleep(Duration::from_millis(100)).await;
+                                    } else {
+                                        // TODO back off but continue.
+                                        error!("insert worker sees error: {e:?}");
+                                        break;
+                                    }
+                                }
+                            }
+                        } else {
+                            stats.store_worker_item_drop_inc();
                         }
-                        Err(e) => {
-                            stats.store_worker_item_error_inc();
-                            // TODO introduce more structured error variants.
-                            if e.msg().contains("WriteTimeout") {
-                                tokio::time::sleep(Duration::from_millis(100)).await;
-                            } else {
-                                // TODO back off but continue.
-                                error!("insert worker sees error: {e:?}");
-                                break;
+                        i1 += 1;
+                    }
+                    QueryItem::Mute(item) => {
+                        let values = (
+                            (item.series & 0xff) as i32,
+                            item.series as i64,
+                            item.ts as i64,
+                            item.ema,
+                            item.emd,
+                        );
+                        let qres = data_store
+                            .scy
+                            .query(
+                                "insert into muted (part, series, ts, ema, emd) values (?, ?, ?, ?, ?)",
+                                values,
+                            )
+                            .await;
+                        match qres {
+                            Ok(_) => {}
+                            Err(_) => {
+                                stats.store_worker_item_error_inc();
                             }
                         }
                     }
-                } else {
-                    stats.store_worker_item_drop_inc();
+                    QueryItem::Ivl(item) => {
+                        let values = (
+                            (item.series & 0xff) as i32,
+                            item.series as i64,
+                            item.ts as i64,
+                            item.ema,
+                            item.emd,
+                        );
+                        let qres = data_store
+                            .scy
+                            .query(
+                                "insert into item_recv_ivl (part, series, ts, ema, emd) values (?, ?, ?, ?, ?)",
+                                values,
+                            )
+                            .await;
+                        match qres {
+                            Ok(_) => {}
+                            Err(_) => {
+                                stats.store_worker_item_error_inc();
+                            }
+                        }
+                    }
                 }
-                i1 += 1;
             }
         };
         tokio::spawn(fut);
