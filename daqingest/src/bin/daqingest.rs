@@ -8,10 +8,6 @@ pub fn main() -> Result<(), Error> {
     log::info!("daqingest version {}", clap::crate_version!());
     let runtime = taskrun::get_runtime_opts(opts.nworkers.unwrap_or(12), 32);
     let res = runtime.block_on(async move {
-        if false {
-            return Err(Error::with_msg_no_trace(format!("unknown command")));
-        } else {
-        }
         match opts.subcmd {
             SubCmd::Bsread(k) => netfetch::zmtp::zmtp_client(k.into()).await?,
             SubCmd::ListPkey => daqingest::query::list_pkey().await?,
@@ -22,8 +18,11 @@ pub fn main() -> Result<(), Error> {
                 f.run().await?
             }
             SubCmd::ChannelAccess(k) => match k {
-                ChannelAccess::CaSearch(k) => netfetch::ca::ca_search(k.into()).await?,
-                ChannelAccess::CaConfig(k) => netfetch::ca::ca_connect(k.into()).await?,
+                ChannelAccess::CaSearch(k) => {
+                    let opts = daqingest::CaConfig { config: k.config }.into();
+                    netfetch::ca::search::ca_search(opts).await?
+                }
+                ChannelAccess::CaIngest(k) => netfetch::ca::ca_connect(k.into()).await?,
             },
         }
         Ok(())
