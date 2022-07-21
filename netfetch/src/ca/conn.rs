@@ -2,6 +2,7 @@ use super::proto::{self, CaItem, CaMsg, CaMsgTy, CaProto};
 use super::store::DataStore;
 use crate::bsread::ChannelDescDecoded;
 use crate::ca::proto::{CreateChan, EventAdd, HeadInfo};
+use crate::ca::store::ChannelRegistry;
 use crate::series::{Existence, SeriesId};
 use crate::store::{CommonInsertItemQueueSender, InsertItem, IvlItem, MuteItem, QueryItem};
 use err::Error;
@@ -78,10 +79,17 @@ enum ChannelState {
 }
 
 enum CaConnState {
+    Unconnected,
+    Connecting(Pin<Box<dyn Future<Output = Result<TcpStream, Error>> + Send>>),
     Init,
     Listen,
     PeerReady,
-    Done,
+    Wait(Pin<Box<dyn Future<Output = ()> + Send>>),
+}
+
+fn wait_fut(dt: u64) -> Pin<Box<dyn Future<Output = ()> + Send>> {
+    let fut = tokio::time::sleep(Duration::from_millis(dt));
+    Box::pin(fut)
 }
 
 struct IdStore {
@@ -103,7 +111,7 @@ impl IdStore {
 #[allow(unused)]
 pub struct CaConn {
     state: CaConnState,
-    proto: CaProto,
+    proto: Option<CaProto>,
     cid_store: IdStore,
     ioid_store: IdStore,
     subid_store: IdStore,
@@ -121,6 +129,8 @@ pub struct CaConn {
     fut_get_series:
         FuturesOrdered<Pin<Box<dyn Future<Output = Result<(u32, u32, u16, u16, Existence<SeriesId>), Error>> + Send>>>,
     remote_addr_dbg: SocketAddrV4,
+    local_epics_hostname: String,
+    array_truncate: usize,
     stats: Arc<CaConnStats>,
     insert_queue_max: usize,
     insert_ivl_min: Arc<AtomicU64>,
@@ -128,8 +138,8 @@ pub struct CaConn {
 
 impl CaConn {
     pub fn new(
-        tcp: TcpStream,
         remote_addr_dbg: SocketAddrV4,
+        local_epics_hostname: String,
         data_store: Arc<DataStore>,
         insert_item_sender: CommonInsertItemQueueSender,
         array_truncate: usize,
@@ -137,8 +147,8 @@ impl CaConn {
         insert_ivl_min: Arc<AtomicU64>,
     ) -> Self {
         Self {
-            state: CaConnState::Init,
-            proto: CaProto::new(tcp, remote_addr_dbg, array_truncate),
+            state: CaConnState::Unconnected,
+            proto: None,
             cid_store: IdStore::new(),
             ioid_store: IdStore::new(),
             subid_store: IdStore::new(),
@@ -155,6 +165,8 @@ impl CaConn {
             insert_item_send_fut: None,
             fut_get_series: FuturesOrdered::new(),
             remote_addr_dbg,
+            local_epics_hostname,
+            array_truncate,
             stats: Arc::new(CaConnStats::new()),
             insert_queue_max,
             insert_ivl_min,
@@ -190,7 +202,6 @@ impl CaConn {
         self.name_by_cid.get(&cid).map(|x| x.as_str())
     }
 
-    #[inline(never)]
     fn handle_insert_futs(&mut self, cx: &mut Context) -> Poll<Result<(), Error>> {
         use Poll::*;
         loop {
@@ -246,18 +257,24 @@ impl CaConn {
                     if series.id() == 0 {
                         warn!("Weird series id: {series:?}");
                     }
+                    if data_type > 6 {
+                        error!("data type of series unexpected: {}", data_type);
+                    }
                     let subid = self.subid_store.next();
                     self.cid_by_subid.insert(subid, cid);
                     let name = self.name_by_cid(cid).unwrap().to_string();
+                    // TODO convert first to CaDbrType, set to `Time`, then convert to ix:
+                    let data_type_asked = data_type + 14;
                     let msg = CaMsg {
                         ty: CaMsgTy::EventAdd(EventAdd {
                             sid,
-                            data_type,
+                            data_type: data_type_asked,
                             data_count,
                             subid,
                         }),
                     };
-                    self.proto.push_out(msg);
+                    let proto = self.proto.as_mut().unwrap();
+                    proto.push_out(msg);
                     // TODO handle not-found error:
                     let ch_s = self.channels.get_mut(&cid).unwrap();
                     *ch_s = ChannelState::Created(CreatedState {
@@ -298,7 +315,6 @@ impl CaConn {
         Ok(())
     }
 
-    #[inline(never)]
     fn event_add_insert(
         &mut self,
         series: SeriesId,
@@ -313,8 +329,8 @@ impl CaConn {
     ) -> Result<(), Error> {
         // TODO decide on better msp/lsp: random offset!
         // As long as one writer is active, the msp is arbitrary.
-        let ts_msp = if inserted_in_ts_msp > 2000 {
-            let ts_msp = ts / (60 * SEC) * (60 * SEC);
+        let ts_msp = if inserted_in_ts_msp > 20000 {
+            let ts_msp = ts / (10 * SEC) * (10 * SEC);
             if let ChannelState::Created(st) = self.channels.get_mut(&cid).unwrap() {
                 st.ts_msp_last = ts_msp;
                 st.inserted_in_ts_msp = 1;
@@ -351,7 +367,7 @@ impl CaConn {
             pulse: 0,
             scalar_type,
             shape,
-            val: ev.value,
+            val: ev.value.data,
             ts_msp_grid,
         };
         item_queue.push_back(QueryItem::Insert(item));
@@ -359,17 +375,17 @@ impl CaConn {
         Ok(())
     }
 
-    #[inline(never)]
-    fn handle_event_add_res(&mut self, ev: proto::EventAddRes) -> Result<(), Error> {
+    fn handle_event_add_res(&mut self, ev: proto::EventAddRes, tsnow: Instant) -> Result<(), Error> {
         // TODO handle subid-not-found which can also be peer error:
         let cid = *self.cid_by_subid.get(&ev.subid).unwrap();
+        //let name = self.name_by_cid(cid).unwrap().to_string();
         // TODO get rid of the string clone when I don't want the log output any longer:
-        //let name: String = self.name_by_cid(cid).unwrap().into();
         // TODO handle not-found error:
         let mut series_2 = None;
         let ch_s = self.channels.get_mut(&cid).unwrap();
         match ch_s {
             ChannelState::Created(st) => {
+                st.item_recv_ivl_ema.tick(Instant::now());
                 let scalar_type = st.scalar_type.clone();
                 let shape = st.shape.clone();
                 match st.state {
@@ -401,12 +417,24 @@ impl CaConn {
                         return Err(format!("no series id on insert").into());
                     }
                 };
-                let ts = {
+                let ts_local = {
                     let ts = SystemTime::now();
                     let epoch = ts.duration_since(std::time::UNIX_EPOCH).unwrap();
                     epoch.as_secs() * SEC + epoch.subsec_nanos() as u64
                 };
-                let tsnow = Instant::now();
+                let ts = ev.value.ts.map_or(0, |x| x.get());
+                let ts_diff = ts.abs_diff(ts_local);
+                if ts_diff > SEC * 300 {
+                    self.stats.ca_ts_off_4_inc();
+                    //warn!("Bad time for {name}  {ts} vs {ts_local}  diff {}", ts_diff / SEC);
+                    // TODO mute this channel for some time, discard the event.
+                } else if ts_diff > SEC * 120 {
+                    self.stats.ca_ts_off_3_inc();
+                } else if ts_diff > SEC * 20 {
+                    self.stats.ca_ts_off_2_inc();
+                } else if ts_diff > SEC * 3 {
+                    self.stats.ca_ts_off_1_inc();
+                }
                 if tsnow >= st.insert_next_earliest {
                     st.muted_before = 0;
                     st.insert_item_ivl_ema.tick(tsnow);
@@ -441,7 +469,7 @@ impl CaConn {
                     )?;
                 } else {
                     self.stats.channel_fast_item_drop_inc();
-                    if tsnow.duration_since(st.insert_recv_ivl_last) >= Duration::from_millis(2000) {
+                    if tsnow.duration_since(st.insert_recv_ivl_last) >= Duration::from_millis(10000) {
                         st.insert_recv_ivl_last = tsnow;
                         let ema = st.insert_item_ivl_ema.ema();
                         let item = IvlItem {
@@ -477,10 +505,9 @@ impl CaConn {
     Pending
     Ready(no-more-work, something-was-done, error)
     */
-    #[inline(never)]
     fn handle_conn_listen(&mut self, cx: &mut Context) -> Poll<Option<Result<(), Error>>> {
         use Poll::*;
-        match self.proto.poll_next_unpin(cx) {
+        match self.proto.as_mut().unwrap().poll_next_unpin(cx) {
             Ready(Some(k)) => match k {
                 Ok(k) => match k {
                     CaItem::Empty => {
@@ -513,14 +540,14 @@ impl CaConn {
             },
             Ready(None) => {
                 warn!("CaProto is done  {:?}", self.remote_addr_dbg);
-                self.state = CaConnState::Done;
+                self.state = CaConnState::Wait(wait_fut(10000));
+                self.proto = None;
                 Ready(None)
             }
             Pending => Pending,
         }
     }
 
-    #[inline(never)]
     fn check_channels_state_init(&mut self, msgs_tmp: &mut Vec<CaMsg>) -> Result<(), Error> {
         // TODO profile, efficient enough?
         if self.init_state_count == 0 {
@@ -561,7 +588,6 @@ impl CaConn {
 
     // Can return:
     // Pending, error, work-done (pending state unknown), no-more-work-ever-again.
-    #[inline(never)]
     fn handle_peer_ready(&mut self, cx: &mut Context) -> Poll<Option<Result<(), Error>>> {
         use Poll::*;
         let mut ts1 = Instant::now();
@@ -578,11 +604,15 @@ impl CaConn {
             //info!("msgs_tmp.len() {}", msgs_tmp.len());
             do_wake_again = true;
         }
-        // TODO be careful to not overload outgoing message queue.
-        for msg in msgs_tmp {
-            self.proto.push_out(msg);
+        {
+            let proto = self.proto.as_mut().unwrap();
+            // TODO be careful to not overload outgoing message queue.
+            for msg in msgs_tmp {
+                proto.push_out(msg);
+            }
         }
-        let res = match self.proto.poll_next_unpin(cx) {
+        let tsnow = Instant::now();
+        let res = match self.proto.as_mut().unwrap().poll_next_unpin(cx) {
             Ready(Some(Ok(k))) => {
                 match k {
                     CaItem::Msg(k) => {
@@ -599,6 +629,12 @@ impl CaConn {
                                 // TODO handle error:
                                 let name = self.name_by_cid(cid).unwrap().to_string();
                                 debug!("CreateChanRes {name:?}");
+                                if false && name.contains(".STAT") {
+                                    info!("Channel created for {}", name);
+                                }
+                                if k.data_type > 6 {
+                                    error!("CreateChanRes with unexpected data_type {}", k.data_type);
+                                }
                                 let scalar_type = ScalarType::from_ca_id(k.data_type)?;
                                 let shape = Shape::from_ca_count(k.data_count)?;
                                 // TODO handle not-found error:
@@ -608,15 +644,15 @@ impl CaConn {
                                     sid,
                                     scalar_type: scalar_type.clone(),
                                     shape: shape.clone(),
-                                    ts_created: Instant::now(),
+                                    ts_created: tsnow,
                                     state: MonitoringState::FetchSeriesId,
                                     ts_msp_last: 0,
                                     ts_msp_grid_last: 0,
                                     inserted_in_ts_msp: u64::MAX,
                                     insert_item_ivl_ema: IntervalEma::new(),
                                     item_recv_ivl_ema: IntervalEma::new(),
-                                    insert_recv_ivl_last: Instant::now(),
-                                    insert_next_earliest: Instant::now(),
+                                    insert_recv_ivl_last: tsnow,
+                                    insert_next_earliest: tsnow,
                                     muted_before: 0,
                                 });
                                 // TODO handle error in different way. Should most likely not abort.
@@ -629,10 +665,10 @@ impl CaConn {
                                     byte_order: netpod::ByteOrder::LE,
                                     compression: None,
                                 };
-                                let y = unsafe { &*(&self as &Self as *const CaConn) };
-                                let fut = y
-                                    .data_store
-                                    .chan_reg
+                                let z = unsafe {
+                                    &*(&self.data_store.chan_reg as &ChannelRegistry as *const ChannelRegistry)
+                                };
+                                let fut = z
                                     .get_series_id(cd)
                                     .map_ok(move |series| (cid, k.sid, k.data_type, k.data_count, series));
                                 // TODO throttle execution rate:
@@ -640,7 +676,7 @@ impl CaConn {
                                 do_wake_again = true;
                             }
                             CaMsgTy::EventAddRes(k) => {
-                                let res = Self::handle_event_add_res(self, k);
+                                let res = Self::handle_event_add_res(self, k, tsnow);
                                 let ts2 = Instant::now();
                                 self.stats
                                     .time_handle_event_add_res
@@ -662,7 +698,8 @@ impl CaConn {
             }
             Ready(None) => {
                 warn!("CaProto is done");
-                self.state = CaConnState::Done;
+                self.state = CaConnState::Wait(wait_fut(10000));
+                self.proto = None;
                 Ready(None)
             }
             Pending => Pending,
@@ -697,28 +734,63 @@ impl Stream for CaConn {
                 Pending => break Pending,
             }
 
-            self.handle_get_series_futs(cx)?;
-            let ts2 = Instant::now();
-            self.stats
-                .poll_time_get_series_futs
-                .fetch_add((ts2.duration_since(ts1) * MS as u32).as_secs(), Ordering::AcqRel);
-            ts1 = ts2;
-
             if self.insert_item_queue.len() >= self.insert_queue_max {
                 break Pending;
             }
 
             break loop {
-                break match &self.state {
+                break match &mut self.state {
+                    CaConnState::Unconnected => {
+                        let addr = self.remote_addr_dbg.clone();
+                        let fut = async move {
+                            trace!("create tcp connection to {:?}", (addr.ip(), addr.port()));
+                            match tokio::time::timeout(Duration::from_millis(500), TcpStream::connect(addr)).await {
+                                Ok(Ok(k)) => Ok(k),
+                                Ok(Err(e)) => {
+                                    error!("Can not connect to {addr:?} {e:?}");
+                                    Err(e.into())
+                                }
+                                Err(e) => {
+                                    error!("Can not connect to {addr:?} {e:?}");
+                                    Err(Error::with_msg_no_trace(format!("timeout")))
+                                }
+                            }
+                        };
+                        self.state = CaConnState::Connecting(Box::pin(fut));
+                        continue 'outer;
+                    }
+                    CaConnState::Connecting(ref mut fut) => {
+                        match fut.poll_unpin(cx) {
+                            Ready(Ok(tcp)) => {
+                                let proto = CaProto::new(tcp, self.remote_addr_dbg.clone(), self.array_truncate);
+                                self.state = CaConnState::Init;
+                                self.proto = Some(proto);
+                                continue 'outer;
+                            }
+                            Ready(Err(e)) => {
+                                error!("Connection error: {e:?}");
+                                // We can not connect to the remote.
+                                // TODO do exponential backoff.
+                                self.state = CaConnState::Wait(wait_fut(10000));
+                                self.proto = None;
+                                continue 'outer;
+                            }
+                            Pending => Pending,
+                        }
+                    }
                     CaConnState::Init => {
+                        let hostname = self.local_epics_hostname.clone();
+                        let proto = self.proto.as_mut().unwrap();
                         let msg = CaMsg { ty: CaMsgTy::Version };
-                        self.proto.push_out(msg);
+                        proto.push_out(msg);
                         let msg = CaMsg {
                             ty: CaMsgTy::ClientName,
                         };
-                        self.proto.push_out(msg);
-                        let msg = CaMsg { ty: CaMsgTy::HostName };
-                        self.proto.push_out(msg);
+                        proto.push_out(msg);
+                        let msg = CaMsg {
+                            ty: CaMsgTy::HostName(hostname),
+                        };
+                        proto.push_out(msg);
                         self.state = CaConnState::Listen;
                         continue 'outer;
                     }
@@ -737,6 +809,14 @@ impl Stream for CaConn {
                         Pending => Pending,
                     },
                     CaConnState::PeerReady => {
+                        {
+                            self.handle_get_series_futs(cx)?;
+                            let ts2 = Instant::now();
+                            self.stats
+                                .poll_time_get_series_futs
+                                .fetch_add((ts2.duration_since(ts1) * MS as u32).as_secs(), Ordering::AcqRel);
+                            ts1 = ts2;
+                        }
                         let res = self.handle_peer_ready(cx);
                         let ts2 = Instant::now();
                         self.stats.time_handle_peer_ready_dur(ts2.duration_since(ts1));
@@ -757,10 +837,14 @@ impl Stream for CaConn {
                             Pending => Pending,
                         }
                     }
-                    CaConnState::Done => {
-                        // TODO handle better
-                        Pending
-                    }
+                    CaConnState::Wait(inst) => match inst.poll_unpin(cx) {
+                        Ready(_) => {
+                            self.state = CaConnState::Unconnected;
+                            self.proto = None;
+                            continue 'outer;
+                        }
+                        Pending => Pending,
+                    },
                 };
             };
         };

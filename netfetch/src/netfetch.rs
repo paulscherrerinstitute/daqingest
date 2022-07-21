@@ -2,6 +2,7 @@ pub mod bsread;
 pub mod ca;
 pub mod channelwriter;
 pub mod errconv;
+pub mod metrics;
 pub mod netbuf;
 pub mod series;
 pub mod store;

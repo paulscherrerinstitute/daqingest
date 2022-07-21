@@ -5,7 +5,7 @@ use log::*;
 
 pub fn main() -> Result<(), Error> {
     let opts = DaqIngestOpts::parse();
-    log::info!("daqingest version {}", clap::crate_version!());
+    info!("daqingest version {}", clap::crate_version!());
     let runtime = taskrun::get_runtime_opts(opts.nworkers.unwrap_or(12), 32);
     let res = runtime.block_on(async move {
         match opts.subcmd {

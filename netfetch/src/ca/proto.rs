@@ -2,14 +2,17 @@ use crate::netbuf::NetBuf;
 use err::Error;
 use futures_util::{pin_mut, Stream};
 use log::*;
+use netpod::timeunits::*;
 use std::collections::{BTreeMap, VecDeque};
 use std::net::SocketAddrV4;
+use std::num::{NonZeroU16, NonZeroU64};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::TcpStream;
 
 const CA_PROTO_VERSION: u16 = 13;
+const EPICS_EPOCH_OFFSET: u64 = 631152000;
 
 #[derive(Debug)]
 pub struct Search {
@@ -69,7 +72,7 @@ pub struct EventAddRes {
     pub data_count: u16,
     pub status: u32,
     pub subid: u32,
-    pub value: CaDataValue,
+    pub value: CaEventValue,
 }
 
 #[derive(Debug)]
@@ -99,6 +102,49 @@ enum CaScalarType {
     String,
 }
 
+#[derive(Debug)]
+enum CaDbrMetaType {
+    Plain,
+    Status,
+    Time,
+}
+
+#[derive(Debug)]
+pub struct CaDbrType {
+    meta: CaDbrMetaType,
+    scalar_type: CaScalarType,
+}
+
+impl CaDbrType {
+    pub fn from_ca_u16(k: u16) -> Result<Self, Error> {
+        if k > 20 {
+            return Err(Error::with_msg_no_trace(format!(
+                "can not understand ca dbr type id {}",
+                k
+            )));
+        }
+        let (meta, k) = if k >= 14 {
+            (CaDbrMetaType::Time, k - 14)
+        } else if k >= 7 {
+            (CaDbrMetaType::Status, k - 7)
+        } else {
+            (CaDbrMetaType::Plain, k)
+        };
+        use CaScalarType::*;
+        let scalar_type = match k {
+            4 => I8,
+            1 => I16,
+            5 => I32,
+            2 => F32,
+            6 => F64,
+            3 => Enum,
+            0 => String,
+            k => return Err(Error::with_msg_no_trace(format!("bad ca scalar type id: {k}"))),
+        };
+        Ok(CaDbrType { meta, scalar_type })
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum CaDataScalarValue {
     I8(i8),
@@ -125,21 +171,12 @@ pub enum CaDataValue {
     Array(CaDataArrayValue),
 }
 
-impl CaScalarType {
-    fn from_ca_u16(k: u16) -> Result<Self, Error> {
-        use CaScalarType::*;
-        let ret = match k {
-            4 => I8,
-            1 => I16,
-            5 => I32,
-            2 => F32,
-            6 => F64,
-            3 => Enum,
-            0 => String,
-            k => return Err(Error::with_msg_no_trace(format!("bad dbr type id: {k}"))),
-        };
-        Ok(ret)
-    }
+#[derive(Clone, Debug)]
+pub struct CaEventValue {
+    pub ts: Option<NonZeroU64>,
+    pub status: Option<NonZeroU16>,
+    pub severity: Option<NonZeroU16>,
+    pub data: CaDataValue,
 }
 
 #[derive(Debug)]
@@ -148,7 +185,7 @@ pub enum CaMsgTy {
     VersionRes(u16),
     ClientName,
     ClientNameRes(ClientNameRes),
-    HostName,
+    HostName(String),
     Search(Search),
     SearchRes(SearchRes),
     CreateChan(CreateChan),
@@ -169,7 +206,7 @@ impl CaMsgTy {
             VersionRes(_) => 0,
             ClientName => 0x14,
             ClientNameRes(_) => 0x14,
-            HostName => 0x15,
+            HostName(_) => 0x15,
             Search(_) => 0x06,
             SearchRes(_) => 0x06,
             CreateChan(_) => 0x12,
@@ -194,7 +231,7 @@ impl CaMsgTy {
             VersionRes(_) => 0,
             ClientName => 0x10,
             ClientNameRes(x) => (x.name.len() + 1 + 7) / 8 * 8,
-            HostName => 0x18,
+            HostName(_) => 0x18,
             Search(x) => (x.channel.len() + 1 + 7) / 8 * 8,
             SearchRes(_) => 8,
             CreateChan(x) => (x.channel.len() + 1 + 7) / 8 * 8,
@@ -221,7 +258,7 @@ impl CaMsgTy {
             VersionRes(n) => *n,
             ClientName => 0,
             ClientNameRes(_) => 0,
-            HostName => 0,
+            HostName(_) => 0,
             Search(_) => {
                 // Reply-flag
                 1
@@ -245,7 +282,7 @@ impl CaMsgTy {
             VersionRes(_) => 0,
             ClientName => 0,
             ClientNameRes(_) => 0,
-            HostName => 0,
+            HostName(_) => 0,
             Search(_) => CA_PROTO_VERSION,
             SearchRes(_) => 0,
             CreateChan(_) => 0,
@@ -266,7 +303,7 @@ impl CaMsgTy {
             VersionRes(_) => 0,
             ClientName => 0,
             ClientNameRes(_) => 0,
-            HostName => 0,
+            HostName(_) => 0,
             Search(e) => e.id,
             SearchRes(x) => x.addr,
             CreateChan(x) => x.cid,
@@ -287,7 +324,7 @@ impl CaMsgTy {
             VersionRes(_) => 0,
             ClientName => 0,
             ClientNameRes(_) => 0,
-            HostName => 0,
+            HostName(_) => 0,
             Search(e) => e.id,
             SearchRes(x) => x.id,
             CreateChan(_) => CA_PROTO_VERSION as _,
@@ -317,9 +354,8 @@ impl CaMsgTy {
                 error!("should not attempt to write ClientNameRes");
                 panic!();
             }
-            HostName => {
-                // TODO allow variable host name. Null-extend always to 8 byte align.
-                let s = "sf-nube-11.psi.ch".as_bytes();
+            HostName(name) => {
+                let s = name.as_bytes();
                 let n = s.len();
                 buf.fill(0);
                 buf[..n].copy_from_slice(s);
@@ -364,6 +400,39 @@ impl CaMsgTy {
     }
 }
 
+macro_rules! convert_scalar_value {
+    ($st:ty, $var:ident, $buf:expr) => {{
+        type ST = $st;
+        const STL: usize = std::mem::size_of::<ST>();
+        if $buf.len() < STL {
+            return Err(Error::with_msg_no_trace(format!(
+                "not enough payload for {} {}",
+                std::any::type_name::<ST>(),
+                $buf.len()
+            )));
+        }
+        let v = ST::from_be_bytes($buf[..STL].try_into()?);
+        CaDataValue::Scalar(CaDataScalarValue::$var(v))
+    }};
+}
+
+macro_rules! convert_wave_value {
+    ($st:ty, $var:ident, $n:expr, $buf:expr) => {{
+        type ST = $st;
+        const STL: usize = std::mem::size_of::<ST>();
+        let nn = $n.min($buf.len() / STL);
+        let mut a = Vec::with_capacity(nn);
+        // TODO optimize with unsafe?
+        let mut bb = &$buf[..];
+        for _ in 0..nn {
+            let v = ST::from_be_bytes(bb[..STL].try_into()?);
+            bb = &bb[STL..];
+            a.push(v);
+        }
+        CaDataValue::Array(CaDataArrayValue::$var(a))
+    }};
+}
+
 #[derive(Debug)]
 pub struct CaMsg {
     pub ty: CaMsgTy,
@@ -406,6 +475,48 @@ impl CaMsg {
         }
     }
 
+    fn ca_scalar_value(scalar_type: &CaScalarType, buf: &[u8]) -> Result<CaDataValue, Error> {
+        let val = match scalar_type {
+            CaScalarType::I8 => convert_scalar_value!(i8, I8, buf),
+            CaScalarType::I16 => convert_scalar_value!(i16, I16, buf),
+            CaScalarType::I32 => convert_scalar_value!(i32, I32, buf),
+            CaScalarType::F32 => convert_scalar_value!(f32, F32, buf),
+            CaScalarType::F64 => convert_scalar_value!(f64, F64, buf),
+            CaScalarType::Enum => convert_scalar_value!(i16, I16, buf),
+            CaScalarType::String => {
+                // TODO constrain string length to the CA `data_count`.
+                let mut ixn = buf.len();
+                for (i, &c) in buf.iter().enumerate() {
+                    if c == 0 {
+                        ixn = i;
+                        break;
+                    }
+                }
+                //info!("try to read string from payload len {} ixn {}", buf.len(), ixn);
+                let v = String::from_utf8_lossy(&buf[..ixn]);
+                CaDataValue::Scalar(CaDataScalarValue::String(v.into()))
+            }
+        };
+        Ok(val)
+    }
+
+    fn ca_wave_value(scalar_type: &CaScalarType, n: usize, buf: &[u8]) -> Result<CaDataValue, Error> {
+        let val = match scalar_type {
+            CaScalarType::I8 => convert_wave_value!(i8, I8, n, buf),
+            CaScalarType::I16 => convert_wave_value!(i16, I16, n, buf),
+            CaScalarType::I32 => convert_wave_value!(i32, I32, n, buf),
+            CaScalarType::F32 => convert_wave_value!(f32, F32, n, buf),
+            CaScalarType::F64 => convert_wave_value!(f64, F64, n, buf),
+            _ => {
+                warn!("TODO conversion array {scalar_type:?}");
+                return Err(Error::with_msg_no_trace(format!(
+                    "can not yet handle conversion of type array {scalar_type:?}"
+                )));
+            }
+        };
+        Ok(val)
+    }
+
     pub fn from_proto_infos(hi: &HeadInfo, payload: &[u8], array_truncate: usize) -> Result<Self, Error> {
         let msg = match hi.cmdid {
             0 => CaMsg {
@@ -420,7 +531,9 @@ impl CaMsg {
                 }
             }
             // TODO make response type for host name:
-            21 => CaMsg { ty: CaMsgTy::HostName },
+            21 => CaMsg {
+                ty: CaMsgTy::HostName("TODOx5288".into()),
+            },
             6 => {
                 if hi.payload_size != 8 {
                     warn!("protocol error: search result is expected with fixed payload size 8");
@@ -469,173 +582,42 @@ impl CaMsg {
             }
             1 => {
                 use netpod::Shape;
-                let ca_st = CaScalarType::from_ca_u16(hi.data_type)?;
+                let ca_dbr_ty = CaDbrType::from_ca_u16(hi.data_type)?;
+                if let CaDbrMetaType::Time = ca_dbr_ty.meta {
+                } else {
+                    return Err(Error::with_msg_no_trace(format!(
+                        "expect ca dbr time type, got: {:?}",
+                        ca_dbr_ty
+                    )));
+                }
+                if payload.len() < 12 {
+                    return Err(Error::with_msg_no_trace(format!(
+                        "not enough payload for time metadata {}",
+                        payload.len()
+                    )));
+                }
+                let ca_status = u16::from_be_bytes(payload[0..2].try_into()?);
+                let ca_severity = u16::from_be_bytes(payload[2..4].try_into()?);
+                let ca_secs = u32::from_be_bytes(payload[4..8].try_into()?);
+                let ca_nanos = u32::from_be_bytes(payload[8..12].try_into()?);
                 let ca_sh = Shape::from_ca_count(hi.data_count)?;
+                let valbuf = &payload[12..];
                 let value = match ca_sh {
-                    Shape::Scalar => match ca_st {
-                        CaScalarType::I8 => {
-                            type ST = i8;
-                            const STL: usize = std::mem::size_of::<ST>();
-                            if payload.len() < STL {
-                                return Err(Error::with_msg_no_trace(format!(
-                                    "not enough payload for i8 {}",
-                                    payload.len()
-                                )));
-                            }
-                            let v = ST::from_be_bytes(payload[..STL].try_into()?);
-                            CaDataValue::Scalar(CaDataScalarValue::I8(v))
-                        }
-                        CaScalarType::I16 => {
-                            type ST = i16;
-                            const STL: usize = std::mem::size_of::<ST>();
-                            if payload.len() < STL {
-                                return Err(Error::with_msg_no_trace(format!(
-                                    "not enough payload for i16 {}",
-                                    payload.len()
-                                )));
-                            }
-                            let v = ST::from_be_bytes(payload[..STL].try_into()?);
-                            CaDataValue::Scalar(CaDataScalarValue::I16(v))
-                        }
-                        CaScalarType::I32 => {
-                            type ST = i32;
-                            const STL: usize = std::mem::size_of::<ST>();
-                            if payload.len() < STL {
-                                return Err(Error::with_msg_no_trace(format!(
-                                    "not enough payload for i32 {}",
-                                    payload.len()
-                                )));
-                            }
-                            let v = ST::from_be_bytes(payload[..STL].try_into()?);
-                            CaDataValue::Scalar(CaDataScalarValue::I32(v))
-                        }
-                        CaScalarType::F32 => {
-                            type ST = f32;
-                            const STL: usize = std::mem::size_of::<ST>();
-                            if payload.len() < STL {
-                                return Err(Error::with_msg_no_trace(format!(
-                                    "not enough payload for f32 {}",
-                                    payload.len()
-                                )));
-                            }
-                            let v = ST::from_be_bytes(payload[..STL].try_into()?);
-                            CaDataValue::Scalar(CaDataScalarValue::F32(v))
-                        }
-                        CaScalarType::F64 => {
-                            type ST = f64;
-                            const STL: usize = std::mem::size_of::<ST>();
-                            if payload.len() < STL {
-                                return Err(Error::with_msg_no_trace(format!(
-                                    "not enough payload for f64 {}",
-                                    payload.len()
-                                )));
-                            }
-                            let v = ST::from_be_bytes(payload[..STL].try_into()?);
-                            CaDataValue::Scalar(CaDataScalarValue::F64(v))
-                        }
-                        CaScalarType::Enum => {
-                            type ST = i16;
-                            const STL: usize = std::mem::size_of::<ST>();
-                            if payload.len() < STL {
-                                return Err(Error::with_msg_no_trace(format!(
-                                    "not enough payload for i16 {}",
-                                    payload.len()
-                                )));
-                            }
-                            let v = ST::from_be_bytes(payload[..STL].try_into()?);
-                            CaDataValue::Scalar(CaDataScalarValue::I16(v))
-                        }
-                        CaScalarType::String => {
-                            // TODO constrain string length to the CA `data_count`.
-                            let mut ixn = payload.len();
-                            for (i, &c) in payload.iter().enumerate() {
-                                if c == 0 {
-                                    ixn = i;
-                                    break;
-                                }
-                            }
-                            //info!("try to read string from payload len {} ixn {}", payload.len(), ixn);
-                            let v = String::from_utf8_lossy(&payload[..ixn]);
-                            CaDataValue::Scalar(CaDataScalarValue::String(v.into()))
-                        }
-                    },
-                    Shape::Wave(n) => match ca_st {
-                        CaScalarType::I8 => {
-                            type ST = i8;
-                            const STL: usize = std::mem::size_of::<ST>();
-                            let nn = (n as usize).min(payload.len() / STL).min(array_truncate);
-                            let mut a = Vec::with_capacity(nn);
-                            let mut bb = &payload[..];
-                            for _ in 0..nn {
-                                let v = ST::from_be_bytes(bb[..STL].try_into()?);
-                                bb = &bb[STL..];
-                                a.push(v);
-                            }
-                            CaDataValue::Array(CaDataArrayValue::I8(a))
-                        }
-                        CaScalarType::I16 => {
-                            type ST = i16;
-                            const STL: usize = std::mem::size_of::<ST>();
-                            let nn = (n as usize).min(payload.len() / STL).min(array_truncate);
-                            let mut a = Vec::with_capacity(nn);
-                            let mut bb = &payload[..];
-                            for _ in 0..nn {
-                                let v = ST::from_be_bytes(bb[..STL].try_into()?);
-                                bb = &bb[STL..];
-                                a.push(v);
-                            }
-                            CaDataValue::Array(CaDataArrayValue::I16(a))
-                        }
-                        CaScalarType::I32 => {
-                            type ST = i32;
-                            const STL: usize = std::mem::size_of::<ST>();
-                            let nn = (n as usize).min(payload.len() / STL).min(array_truncate);
-                            let mut a = Vec::with_capacity(nn);
-                            let mut bb = &payload[..];
-                            for _ in 0..nn {
-                                let v = ST::from_be_bytes(bb[..STL].try_into()?);
-                                bb = &bb[STL..];
-                                a.push(v);
-                            }
-                            CaDataValue::Array(CaDataArrayValue::I32(a))
-                        }
-                        CaScalarType::F32 => {
-                            type ST = f32;
-                            const STL: usize = std::mem::size_of::<ST>();
-                            let nn = (n as usize).min(payload.len() / STL).min(array_truncate);
-                            let mut a = Vec::with_capacity(nn);
-                            let mut bb = &payload[..];
-                            for _ in 0..nn {
-                                let v = ST::from_be_bytes(bb[..STL].try_into()?);
-                                bb = &bb[STL..];
-                                a.push(v);
-                            }
-                            CaDataValue::Array(CaDataArrayValue::F32(a))
-                        }
-                        CaScalarType::F64 => {
-                            type ST = f64;
-                            const STL: usize = std::mem::size_of::<ST>();
-                            let nn = (n as usize).min(payload.len() / STL).min(array_truncate);
-                            let mut a = Vec::with_capacity(nn);
-                            let mut bb = &payload[..];
-                            for _ in 0..nn {
-                                let v = ST::from_be_bytes(bb[..STL].try_into()?);
-                                bb = &bb[STL..];
-                                a.push(v);
-                            }
-                            CaDataValue::Array(CaDataArrayValue::F64(a))
-                        }
-                        _ => {
-                            warn!("TODO handle array {ca_st:?}");
-                            return Err(Error::with_msg_no_trace(format!(
-                                "can not yet handle type array {ca_st:?}"
-                            )));
-                        }
-                    },
+                    Shape::Scalar => Self::ca_scalar_value(&ca_dbr_ty.scalar_type, valbuf)?,
+                    Shape::Wave(n) => {
+                        Self::ca_wave_value(&ca_dbr_ty.scalar_type, (n as usize).min(array_truncate), valbuf)?
+                    }
                     Shape::Image(_, _) => {
-                        error!("Can not get Image from CA");
+                        error!("Can not handle image from channel access");
                         err::todoval()
                     }
+                };
+                let ts = SEC * (ca_secs as u64 + EPICS_EPOCH_OFFSET) + ca_nanos as u64;
+                let value = CaEventValue {
+                    ts: NonZeroU64::new(ts),
+                    status: NonZeroU16::new(ca_status),
+                    severity: NonZeroU16::new(ca_severity),
+                    data: value,
                 };
                 let d = EventAddRes {
                     data_type: hi.data_type,

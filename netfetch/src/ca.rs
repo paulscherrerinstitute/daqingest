@@ -3,7 +3,6 @@ pub mod proto;
 pub mod search;
 pub mod store;
 
-use self::conn::FindIocStream;
 use self::store::DataStore;
 use crate::store::{CommonInsertItemQueue, QueryItem};
 use conn::CaConn;
@@ -15,20 +14,19 @@ use scylla::batch::Consistency;
 use serde::{Deserialize, Serialize};
 use stats::{CaConnStats, CaConnStatsAgg, CaConnStatsAggDiff};
 use std::collections::BTreeMap;
-use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
+use std::net::{Ipv4Addr, SocketAddrV4};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Once};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tokio::fs::OpenOptions;
 use tokio::io::AsyncReadExt;
-use tokio::net::TcpStream;
 use tokio_postgres::Client as PgClient;
 
 static mut METRICS: Option<Mutex<Option<CaConnStatsAgg>>> = None;
 static METRICS_ONCE: Once = Once::new();
 
-fn get_metrics() -> &'static mut Option<CaConnStatsAgg> {
+pub fn get_metrics() -> &'static mut Option<CaConnStatsAgg> {
     METRICS_ONCE.call_once(|| unsafe {
         METRICS = Some(Mutex::new(None));
     });
@@ -58,6 +56,7 @@ struct ChannelConfig {
     insert_queue_max: Option<usize>,
     insert_item_queue_cap: Option<usize>,
     api_bind: Option<String>,
+    local_epics_hostname: String,
 }
 
 pub struct ListenFromFileOpts {
@@ -70,16 +69,15 @@ pub async fn parse_config(config: PathBuf) -> Result<CaConnectOpts, Error> {
     file.read_to_end(&mut buf).await?;
     let mut conf: ChannelConfig =
         serde_yaml::from_slice(&buf).map_err(|e| Error::with_msg_no_trace(format!("{:?}", e)))?;
-    let re1 = regex::Regex::new(&conf.whitelist)?;
-    let re2 = regex::Regex::new(&conf.blacklist)?;
+    let re_p = regex::Regex::new(&conf.whitelist)?;
+    let re_n = regex::Regex::new(&conf.blacklist)?;
     conf.channels = conf
         .channels
         .into_iter()
         .filter(|ch| {
-            if let Some(_cs) = re1.captures(&ch) {
-                //let m = cs.get(1).unwrap();
+            if let Some(_cs) = re_p.captures(&ch) {
                 true
-            } else if re2.is_match(&ch) {
+            } else if re_n.is_match(&ch) {
                 false
             } else {
                 true
@@ -101,6 +99,7 @@ pub async fn parse_config(config: PathBuf) -> Result<CaConnectOpts, Error> {
         insert_queue_max: conf.insert_queue_max.unwrap_or(32),
         insert_item_queue_cap: conf.insert_item_queue_cap.unwrap_or(380000),
         api_bind: conf.api_bind.unwrap_or_else(|| "0.0.0.0:3011".into()),
+        local_epics_hostname: conf.local_epics_hostname,
     })
 }
 
@@ -119,6 +118,7 @@ pub struct CaConnectOpts {
     pub insert_queue_max: usize,
     pub insert_item_queue_cap: usize,
     pub api_bind: String,
+    pub local_epics_hostname: String,
 }
 
 async fn spawn_scylla_insert_workers(
@@ -235,7 +235,7 @@ pub async fn ca_connect(opts: ListenFromFileOpts) -> Result<(), Error> {
     let insert_ivl_min = Arc::new(AtomicU64::new(8800));
     let opts = parse_config(opts.config).await?;
     let scyconf = opts.scyconf.clone();
-    tokio::spawn(start_metrics_service(
+    tokio::spawn(crate::metrics::start_metrics_service(
         opts.api_bind.clone(),
         insert_frac.clone(),
         insert_ivl_min.clone(),
@@ -290,7 +290,7 @@ pub async fn ca_connect(opts: ListenFromFileOpts) -> Result<(), Error> {
                 ],
             )
             .await
-            .map_err(|e| Error::with_msg_no_trace(format!("PG error: {e:?}")))?;
+            .map_err(|e| Error::with_msg_no_trace(format!("pg lookup error: {e:?}")))?;
         if rows.is_empty() {
             error!("can not find any addresses of channels {:?}", chstmp);
         } else {
@@ -347,28 +347,11 @@ pub async fn ca_connect(opts: ListenFromFileOpts) -> Result<(), Error> {
     let mut conn_stats = vec![];
     info!("channels_by_host len {}", channels_by_host.len());
     for (host, channels) in channels_by_host {
-        if false && host.ip() != &"172.26.24.76".parse::<Ipv4Addr>().unwrap() {
-            continue;
-        }
         let data_store = data_store.clone();
-        //debug!("Create TCP connection to {:?}", (host.ip(), host.port()));
         let addr = SocketAddrV4::new(host.ip().clone(), host.port());
-        // TODO establish the connection in the future SM.
-        let tcp = match tokio::time::timeout(Duration::from_millis(500), TcpStream::connect(addr)).await {
-            Ok(Ok(k)) => k,
-            Ok(Err(e)) => {
-                error!("Can not connect to {addr:?} {e:?}");
-                continue;
-            }
-            Err(e) => {
-                error!("Can not connect to {addr:?} {e:?}");
-                continue;
-            }
-        };
-        local_stats.tcp_connected_inc();
         let mut conn = CaConn::new(
-            tcp,
             addr,
+            opts.local_epics_hostname.clone(),
             data_store.clone(),
             insert_item_queue.sender(),
             opts.array_truncate,
@@ -385,8 +368,6 @@ pub async fn ca_connect(opts: ListenFromFileOpts) -> Result<(), Error> {
                 match item {
                     Ok(_) => {
                         stats2.conn_item_count_inc();
-                        // TODO test if performance can be noticed:
-                        //trace!("CaConn gives item: {k:?}");
                     }
                     Err(e) => {
                         error!("CaConn gives error: {e:?}");
@@ -434,40 +415,4 @@ pub async fn ca_connect(opts: ListenFromFileOpts) -> Result<(), Error> {
         }
     }
     Ok(())
-}
-
-async fn start_metrics_service(bind_to: String, insert_frac: Arc<AtomicU64>, insert_ivl_min: Arc<AtomicU64>) {
-    let app = axum::Router::new()
-        .route(
-            "/metrics",
-            axum::routing::get(|| async {
-                let stats = get_metrics();
-                match stats {
-                    Some(s) => {
-                        trace!("Metrics");
-                        s.prometheus()
-                    }
-                    None => {
-                        trace!("Metrics empty");
-                        String::new()
-                    }
-                }
-            }),
-        )
-        .route(
-            "/insert_frac",
-            axum::routing::put(|v: axum::extract::Json<u64>| async move {
-                insert_frac.store(v.0, Ordering::Release);
-            }),
-        )
-        .route(
-            "/insert_ivl_min",
-            axum::routing::put(|v: axum::extract::Json<u64>| async move {
-                insert_ivl_min.store(v.0, Ordering::Release);
-            }),
-        );
-    axum::Server::bind(&bind_to.parse().unwrap())
-        .serve(app.into_make_service())
-        .await
-        .unwrap()
 }
