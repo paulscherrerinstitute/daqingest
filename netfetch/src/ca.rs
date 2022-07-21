@@ -4,7 +4,9 @@ pub mod search;
 pub mod store;
 
 use self::store::DataStore;
+use crate::ca::conn::ConnCommand;
 use crate::store::{CommonInsertItemQueue, QueryItem};
+use async_channel::Sender;
 use conn::CaConn;
 use err::Error;
 use futures_util::StreamExt;
@@ -13,7 +15,7 @@ use netpod::{Database, ScyllaConfig};
 use scylla::batch::Consistency;
 use serde::{Deserialize, Serialize};
 use stats::{CaConnStats, CaConnStatsAgg, CaConnStatsAggDiff};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::net::{Ipv4Addr, SocketAddrV4};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -229,16 +231,35 @@ async fn spawn_scylla_insert_workers(
     Ok(())
 }
 
+pub struct CommandQueueSet {
+    queues: tokio::sync::Mutex<VecDeque<Sender<ConnCommand>>>,
+}
+
+impl CommandQueueSet {
+    pub fn new() -> Self {
+        Self {
+            queues: tokio::sync::Mutex::new(VecDeque::<Sender<ConnCommand>>::new()),
+        }
+    }
+
+    pub fn queues(&self) -> &tokio::sync::Mutex<VecDeque<Sender<ConnCommand>>> {
+        &self.queues
+    }
+}
+
 pub async fn ca_connect(opts: ListenFromFileOpts) -> Result<(), Error> {
     let facility = "scylla";
     let insert_frac = Arc::new(AtomicU64::new(1000));
     let insert_ivl_min = Arc::new(AtomicU64::new(8800));
     let opts = parse_config(opts.config).await?;
     let scyconf = opts.scyconf.clone();
+
+    let command_queue_set = Arc::new(CommandQueueSet::new());
     tokio::spawn(crate::metrics::start_metrics_service(
         opts.api_bind.clone(),
         insert_frac.clone(),
         insert_ivl_min.clone(),
+        command_queue_set.clone(),
     ));
     let d = Database {
         name: opts.pgconf.name.clone(),
@@ -363,6 +384,8 @@ pub async fn ca_connect(opts: ListenFromFileOpts) -> Result<(), Error> {
             conn.channel_add(c);
         }
         let stats2 = conn.stats();
+        let conn_command_tx = conn.conn_command_tx();
+        command_queue_set.queues().lock().await.push_back(conn_command_tx);
         let conn_block = async move {
             while let Some(item) = conn.next().await {
                 match item {

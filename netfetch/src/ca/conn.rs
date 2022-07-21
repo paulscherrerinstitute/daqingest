@@ -5,6 +5,7 @@ use crate::ca::proto::{CreateChan, EventAdd, HeadInfo};
 use crate::ca::store::ChannelRegistry;
 use crate::series::{Existence, SeriesId};
 use crate::store::{CommonInsertItemQueueSender, InsertItem, IvlItem, MuteItem, QueryItem};
+use async_channel::Sender;
 use err::Error;
 use futures_util::stream::FuturesOrdered;
 use futures_util::{Future, FutureExt, Stream, StreamExt, TryFutureExt};
@@ -108,6 +109,26 @@ impl IdStore {
     }
 }
 
+#[derive(Debug)]
+pub enum ConnCommandKind {
+    FindChannel(String, Sender<(SocketAddrV4, Vec<String>)>),
+}
+
+#[derive(Debug)]
+pub struct ConnCommand {
+    kind: ConnCommandKind,
+}
+
+impl ConnCommand {
+    pub fn find_channel(pattern: String) -> (ConnCommand, async_channel::Receiver<(SocketAddrV4, Vec<String>)>) {
+        let (tx, rx) = async_channel::bounded(1);
+        let cmd = Self {
+            kind: ConnCommandKind::FindChannel(pattern, tx),
+        };
+        (cmd, rx)
+    }
+}
+
 #[allow(unused)]
 pub struct CaConn {
     state: CaConnState,
@@ -134,6 +155,8 @@ pub struct CaConn {
     stats: Arc<CaConnStats>,
     insert_queue_max: usize,
     insert_ivl_min: Arc<AtomicU64>,
+    conn_command_tx: async_channel::Sender<ConnCommand>,
+    conn_command_rx: async_channel::Receiver<ConnCommand>,
 }
 
 impl CaConn {
@@ -146,6 +169,7 @@ impl CaConn {
         insert_queue_max: usize,
         insert_ivl_min: Arc<AtomicU64>,
     ) -> Self {
+        let (cq_tx, cq_rx) = async_channel::bounded(32);
         Self {
             state: CaConnState::Unconnected,
             proto: None,
@@ -170,6 +194,45 @@ impl CaConn {
             stats: Arc::new(CaConnStats::new()),
             insert_queue_max,
             insert_ivl_min,
+            conn_command_tx: cq_tx,
+            conn_command_rx: cq_rx,
+        }
+    }
+
+    pub fn conn_command_tx(&self) -> async_channel::Sender<ConnCommand> {
+        self.conn_command_tx.clone()
+    }
+
+    fn handle_conn_command(&mut self, cx: &mut Context) {
+        // TODO if this loops for too long time, interrupt and make sure we get called waken up again.
+        use Poll::*;
+        loop {
+            match self.conn_command_rx.poll_next_unpin(cx) {
+                Ready(Some(a)) => match a.kind {
+                    ConnCommandKind::FindChannel(pattern, tx) => {
+                        info!("Search for {pattern:?}");
+                        let mut res = Vec::new();
+                        for name in self.name_by_cid.values() {
+                            if !pattern.is_empty() && name.contains(&pattern) {
+                                res.push(name.clone());
+                            }
+                        }
+                        let msg = (self.remote_addr_dbg.clone(), res);
+                        match tx.try_send(msg) {
+                            Ok(_) => {}
+                            Err(_) => {
+                                error!("response channel full or closed");
+                            }
+                        }
+                    }
+                },
+                Ready(None) => {
+                    error!("Command queue closed");
+                }
+                Pending => {
+                    break;
+                }
+            }
         }
     }
 
@@ -723,6 +786,7 @@ impl Stream for CaConn {
         self.poll_count += 1;
         // TODO factor out the inner loop:
         let ret = 'outer: loop {
+            self.handle_conn_command(cx);
             let q = self.handle_insert_futs(cx);
             let ts2 = Instant::now();
             self.stats

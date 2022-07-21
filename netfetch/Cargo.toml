@@ -28,6 +28,8 @@ hex = "0.4"
 libc = "0.2"
 regex = "1.5.5"
 axum = "0.5"
+http = "0.2"
+hyper = "0.14"
 log = { path = "../log" }
 stats = { path = "../stats" }
 err = { path = "../../daqbuffer/err" }
