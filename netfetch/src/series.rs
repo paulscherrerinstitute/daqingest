@@ -2,6 +2,7 @@ use crate::bsread::ChannelDescDecoded;
 use crate::errconv::ErrConv;
 use err::Error;
 use log::*;
+use serde::Serialize;
 use std::time::{Duration, Instant};
 use tokio_postgres::Client as PgClient;
 
@@ -11,7 +12,7 @@ pub enum Existence<T> {
     Existing(T),
 }
 
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Serialize)]
 pub struct SeriesId(u64);
 
 impl SeriesId {

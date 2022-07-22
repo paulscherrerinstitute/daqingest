@@ -13,6 +13,7 @@ use libc::c_int;
 use log::*;
 use netpod::timeunits::*;
 use netpod::{ScalarType, Shape};
+use serde::Serialize;
 use stats::{CaConnStats, IntervalEma};
 use std::collections::{BTreeMap, VecDeque};
 use std::net::{Ipv4Addr, SocketAddrV4};
@@ -24,18 +25,60 @@ use std::time::{Duration, Instant, SystemTime};
 use tokio::io::unix::AsyncFd;
 use tokio::net::TcpStream;
 
-#[derive(Debug)]
+#[derive(Clone, Debug, Serialize)]
+pub struct ChannelStateInfo {
+    pub name: String,
+    pub scalar_type: Option<ScalarType>,
+    pub shape: Option<Shape>,
+    // NOTE: this solution can yield to the same Instant serialize to different string representations.
+    #[serde(skip_serializing_if = "Option::is_none", serialize_with = "ser_instant")]
+    pub ts_created: Option<Instant>,
+    #[serde(skip_serializing_if = "Option::is_none", serialize_with = "ser_instant")]
+    pub ts_event_last: Option<Instant>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub item_recv_ivl_ema: Option<f32>,
+    pub interest_score: f32,
+}
+
+fn ser_instant<S: serde::Serializer>(val: &Option<Instant>, ser: S) -> Result<S::Ok, S::Error> {
+    match val {
+        Some(val) => {
+            let now = chrono::Utc::now();
+            let tsnow = Instant::now();
+            let t1 = if tsnow >= *val {
+                let dur = tsnow.duration_since(*val);
+                let dur2 = chrono::Duration::seconds(dur.as_secs() as i64)
+                    .checked_add(&chrono::Duration::microseconds(dur.subsec_micros() as i64))
+                    .unwrap();
+                now.checked_sub_signed(dur2).unwrap()
+            } else {
+                let dur = (*val).duration_since(tsnow);
+                let dur2 = chrono::Duration::seconds(dur.as_secs() as i64)
+                    .checked_sub(&chrono::Duration::microseconds(dur.subsec_micros() as i64))
+                    .unwrap();
+                now.checked_add_signed(dur2).unwrap()
+            };
+            //info!("formatting {:?}", t1);
+            let s = t1.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
+            //info!("final string {:?}", s);
+            ser.serialize_str(&s)
+        }
+        None => ser.serialize_none(),
+    }
+}
+
+#[derive(Clone, Debug)]
 enum ChannelError {
     #[allow(unused)]
     NoSuccess,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct EventedState {
     ts_last: Instant,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 enum MonitoringState {
     FetchSeriesId,
     AddingEvent(SeriesId),
@@ -49,7 +92,7 @@ enum MonitoringState {
     Muted,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct CreatedState {
     #[allow(unused)]
     cid: u32,
@@ -71,12 +114,57 @@ struct CreatedState {
 }
 
 #[allow(unused)]
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 enum ChannelState {
     Init,
     Creating { cid: u32, ts_beg: Instant },
     Created(CreatedState),
     Error(ChannelError),
+}
+
+impl ChannelState {
+    fn to_info(&self, name: String) -> ChannelStateInfo {
+        let scalar_type = match self {
+            ChannelState::Created(s) => Some(s.scalar_type.clone()),
+            _ => None,
+        };
+        let shape = match self {
+            ChannelState::Created(s) => Some(s.shape.clone()),
+            _ => None,
+        };
+        let ts_created = match self {
+            ChannelState::Created(s) => Some(s.ts_created.clone()),
+            _ => None,
+        };
+        let ts_event_last = match self {
+            ChannelState::Created(s) => match &s.state {
+                MonitoringState::Evented(_, s) => Some(s.ts_last),
+                _ => None,
+            },
+            _ => None,
+        };
+        let item_recv_ivl_ema = match self {
+            ChannelState::Created(s) => {
+                let ema = s.item_recv_ivl_ema.ema();
+                if ema.update_count() == 0 {
+                    None
+                } else {
+                    Some(ema.ema())
+                }
+            }
+            _ => None,
+        };
+        let interest_score = 1. / item_recv_ivl_ema.unwrap_or(1e10).max(1e-6).min(1e10);
+        ChannelStateInfo {
+            name,
+            scalar_type,
+            shape,
+            ts_created,
+            ts_event_last,
+            item_recv_ivl_ema,
+            interest_score,
+        }
+    }
 }
 
 enum CaConnState {
@@ -112,6 +200,10 @@ impl IdStore {
 #[derive(Debug)]
 pub enum ConnCommandKind {
     FindChannel(String, Sender<(SocketAddrV4, Vec<String>)>),
+    ChannelState(String, Sender<(SocketAddrV4, Option<ChannelStateInfo>)>),
+    ChannelStatesAll((), Sender<(SocketAddrV4, Vec<ChannelStateInfo>)>),
+    ChannelAdd(String, Sender<bool>),
+    ChannelRemove(String, Sender<bool>),
 }
 
 #[derive(Debug)]
@@ -127,6 +219,46 @@ impl ConnCommand {
         };
         (cmd, rx)
     }
+
+    pub fn channel_state(
+        name: String,
+    ) -> (
+        ConnCommand,
+        async_channel::Receiver<(SocketAddrV4, Option<ChannelStateInfo>)>,
+    ) {
+        let (tx, rx) = async_channel::bounded(1);
+        let cmd = Self {
+            kind: ConnCommandKind::ChannelState(name, tx),
+        };
+        (cmd, rx)
+    }
+
+    pub fn channel_states_all() -> (
+        ConnCommand,
+        async_channel::Receiver<(SocketAddrV4, Vec<ChannelStateInfo>)>,
+    ) {
+        let (tx, rx) = async_channel::bounded(1);
+        let cmd = Self {
+            kind: ConnCommandKind::ChannelStatesAll((), tx),
+        };
+        (cmd, rx)
+    }
+
+    pub fn channel_add(name: String) -> (ConnCommand, async_channel::Receiver<bool>) {
+        let (tx, rx) = async_channel::bounded(1);
+        let cmd = Self {
+            kind: ConnCommandKind::ChannelAdd(name, tx),
+        };
+        (cmd, rx)
+    }
+
+    pub fn channel_remove(name: String) -> (ConnCommand, async_channel::Receiver<bool>) {
+        let (tx, rx) = async_channel::bounded(1);
+        let cmd = Self {
+            kind: ConnCommandKind::ChannelRemove(name, tx),
+        };
+        (cmd, rx)
+    }
 }
 
 #[allow(unused)]
@@ -136,6 +268,7 @@ pub struct CaConn {
     cid_store: IdStore,
     ioid_store: IdStore,
     subid_store: IdStore,
+    // TODO use a Cid or so instead of u32.
     channels: BTreeMap<u32, ChannelState>,
     init_state_count: u64,
     cid_by_name: BTreeMap<String, u32>,
@@ -210,7 +343,7 @@ impl CaConn {
             match self.conn_command_rx.poll_next_unpin(cx) {
                 Ready(Some(a)) => match a.kind {
                     ConnCommandKind::FindChannel(pattern, tx) => {
-                        info!("Search for {pattern:?}");
+                        //info!("Search for {pattern:?}");
                         let mut res = Vec::new();
                         for name in self.name_by_cid.values() {
                             if !pattern.is_empty() && name.contains(&pattern) {
@@ -219,6 +352,65 @@ impl CaConn {
                         }
                         let msg = (self.remote_addr_dbg.clone(), res);
                         match tx.try_send(msg) {
+                            Ok(_) => {}
+                            Err(_) => {
+                                error!("response channel full or closed");
+                            }
+                        }
+                    }
+                    ConnCommandKind::ChannelState(name, tx) => {
+                        //info!("State for {name:?}");
+                        let res = match self.cid_by_name.get(&name) {
+                            Some(cid) => match self.channels.get(cid) {
+                                Some(state) => Some(state.to_info(name)),
+                                None => None,
+                            },
+                            None => None,
+                        };
+                        let msg = (self.remote_addr_dbg.clone(), res);
+                        if msg.1.is_some() {
+                            info!("Sending back {msg:?}");
+                        }
+                        match tx.try_send(msg) {
+                            Ok(_) => {}
+                            Err(_) => {
+                                error!("response channel full or closed");
+                            }
+                        }
+                    }
+                    ConnCommandKind::ChannelStatesAll((), tx) => {
+                        let res = self
+                            .channels
+                            .iter()
+                            .map(|(cid, state)| {
+                                let name = self
+                                    .name_by_cid
+                                    .get(cid)
+                                    .map_or("--unknown--".into(), |x| x.to_string());
+                                state.to_info(name)
+                            })
+                            .collect();
+                        let msg = (self.remote_addr_dbg.clone(), res);
+                        match tx.try_send(msg) {
+                            Ok(_) => {}
+                            Err(_) => {
+                                error!("response channel full or closed");
+                            }
+                        }
+                    }
+                    ConnCommandKind::ChannelAdd(name, tx) => {
+                        self.channel_add(name);
+                        match tx.try_send(true) {
+                            Ok(_) => {}
+                            Err(_) => {
+                                error!("response channel full or closed");
+                            }
+                        }
+                    }
+                    ConnCommandKind::ChannelRemove(name, tx) => {
+                        info!("remove {}", name);
+                        self.channel_remove(name);
+                        match tx.try_send(true) {
                             Ok(_) => {}
                             Err(_) => {
                                 error!("response channel full or closed");
@@ -247,6 +439,13 @@ impl CaConn {
             self.channels.insert(cid, ChannelState::Init);
             // TODO do not count, use separate queue for those channels.
             self.init_state_count += 1;
+        }
+    }
+
+    pub fn channel_remove(&mut self, channel: String) {
+        let cid = self.cid_by_name(&channel);
+        if self.channels.contains_key(&cid) {
+            warn!("TODO actually cause the channel to get closed and removed  {}", channel);
         }
     }
 
@@ -441,32 +640,25 @@ impl CaConn {
     fn handle_event_add_res(&mut self, ev: proto::EventAddRes, tsnow: Instant) -> Result<(), Error> {
         // TODO handle subid-not-found which can also be peer error:
         let cid = *self.cid_by_subid.get(&ev.subid).unwrap();
-        //let name = self.name_by_cid(cid).unwrap().to_string();
+        let _name = self.name_by_cid(cid).unwrap().to_string();
         // TODO get rid of the string clone when I don't want the log output any longer:
         // TODO handle not-found error:
         let mut series_2 = None;
         let ch_s = self.channels.get_mut(&cid).unwrap();
         match ch_s {
             ChannelState::Created(st) => {
-                st.item_recv_ivl_ema.tick(Instant::now());
+                st.item_recv_ivl_ema.tick(tsnow);
                 let scalar_type = st.scalar_type.clone();
                 let shape = st.shape.clone();
                 match st.state {
                     MonitoringState::AddingEvent(ref series) => {
                         let series = series.clone();
                         series_2 = Some(series.clone());
-                        // TODO get ts from faster common source:
-                        st.state = MonitoringState::Evented(
-                            series,
-                            EventedState {
-                                ts_last: Instant::now(),
-                            },
-                        );
+                        st.state = MonitoringState::Evented(series, EventedState { ts_last: tsnow });
                     }
                     MonitoringState::Evented(ref series, ref mut st) => {
                         series_2 = Some(series.clone());
-                        // TODO get ts from faster common source:
-                        st.ts_last = Instant::now();
+                        st.ts_last = tsnow;
                     }
                     _ => {
                         error!("unexpected state: EventAddRes while having {:?}", st.state);
@@ -811,11 +1003,13 @@ impl Stream for CaConn {
                             match tokio::time::timeout(Duration::from_millis(500), TcpStream::connect(addr)).await {
                                 Ok(Ok(k)) => Ok(k),
                                 Ok(Err(e)) => {
-                                    error!("Can not connect to {addr:?} {e:?}");
+                                    // TODO keep this in channel status field, or log when we have exponential backoff
+                                    trace!("Can not connect to {addr:?} {e:?}");
                                     Err(e.into())
                                 }
-                                Err(e) => {
-                                    error!("Can not connect to {addr:?} {e:?}");
+                                Err(_) => {
+                                    // TODO keep this in channel status field, or log when we have exponential backoff
+                                    trace!("Can not connect to {addr:?} timeout");
                                     Err(Error::with_msg_no_trace(format!("timeout")))
                                 }
                             }
@@ -832,7 +1026,8 @@ impl Stream for CaConn {
                                 continue 'outer;
                             }
                             Ready(Err(e)) => {
-                                error!("Connection error: {e:?}");
+                                // TODO keep this in channel status field, or log when we have exponential backoff
+                                trace!("Connection error: {e:?}");
                                 // We can not connect to the remote.
                                 // TODO do exponential backoff.
                                 self.state = CaConnState::Wait(wait_fut(10000));

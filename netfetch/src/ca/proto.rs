@@ -601,7 +601,28 @@ impl CaMsg {
                 let ca_secs = u32::from_be_bytes(payload[4..8].try_into()?);
                 let ca_nanos = u32::from_be_bytes(payload[8..12].try_into()?);
                 let ca_sh = Shape::from_ca_count(hi.data_count)?;
-                let valbuf = &payload[12..];
+                let meta_padding = match ca_dbr_ty.meta {
+                    CaDbrMetaType::Plain => 0,
+                    CaDbrMetaType::Status => match ca_dbr_ty.scalar_type {
+                        CaScalarType::I8 => 1,
+                        CaScalarType::I16 => 0,
+                        CaScalarType::I32 => 0,
+                        CaScalarType::F32 => 0,
+                        CaScalarType::F64 => 4,
+                        CaScalarType::Enum => 0,
+                        CaScalarType::String => 0,
+                    },
+                    CaDbrMetaType::Time => match ca_dbr_ty.scalar_type {
+                        CaScalarType::I8 => 3,
+                        CaScalarType::I16 => 2,
+                        CaScalarType::I32 => 0,
+                        CaScalarType::F32 => 0,
+                        CaScalarType::F64 => 4,
+                        CaScalarType::Enum => 2,
+                        CaScalarType::String => 0,
+                    },
+                };
+                let valbuf = &payload[12 + meta_padding..];
                 let value = match ca_sh {
                     Shape::Scalar => Self::ca_scalar_value(&ca_dbr_ty.scalar_type, valbuf)?,
                     Shape::Wave(n) => {

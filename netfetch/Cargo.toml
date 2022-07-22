@@ -29,7 +29,9 @@ libc = "0.2"
 regex = "1.5.5"
 axum = "0.5"
 http = "0.2"
+url = "2.2"
 hyper = "0.14"
+chrono = "0.4"
 log = { path = "../log" }
 stats = { path = "../stats" }
 err = { path = "../../daqbuffer/err" }

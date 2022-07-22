@@ -15,7 +15,7 @@ use netpod::{Database, ScyllaConfig};
 use scylla::batch::Consistency;
 use serde::{Deserialize, Serialize};
 use stats::{CaConnStats, CaConnStatsAgg, CaConnStatsAggDiff};
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::BTreeMap;
 use std::net::{Ipv4Addr, SocketAddrV4};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -23,6 +23,8 @@ use std::sync::{Arc, Mutex, Once};
 use std::time::Duration;
 use tokio::fs::OpenOptions;
 use tokio::io::AsyncReadExt;
+use tokio::sync::Mutex as TokMx;
+use tokio::task::JoinHandle;
 use tokio_postgres::Client as PgClient;
 
 static mut METRICS: Option<Mutex<Option<CaConnStatsAgg>>> = None;
@@ -40,6 +42,7 @@ pub fn get_metrics() -> &'static mut Option<CaConnStatsAgg> {
 
 #[derive(Debug, Serialize, Deserialize)]
 struct ChannelConfig {
+    backend: String,
     channels: Vec<String>,
     search: Vec<String>,
     addr_bind: Ipv4Addr,
@@ -87,6 +90,7 @@ pub async fn parse_config(config: PathBuf) -> Result<CaConnectOpts, Error> {
         })
         .collect();
     Ok(CaConnectOpts {
+        backend: conf.backend,
         channels: conf.channels,
         search: conf.search,
         addr_bind: conf.addr_bind,
@@ -106,6 +110,7 @@ pub async fn parse_config(config: PathBuf) -> Result<CaConnectOpts, Error> {
 }
 
 pub struct CaConnectOpts {
+    pub backend: String,
     pub channels: Vec<String>,
     pub search: Vec<String>,
     pub addr_bind: Ipv4Addr,
@@ -127,7 +132,7 @@ async fn spawn_scylla_insert_workers(
     scyconf: ScyllaConfig,
     insert_scylla_sessions: usize,
     insert_worker_count: usize,
-    insert_item_queue: &CommonInsertItemQueue,
+    insert_item_queue: Arc<CommonInsertItemQueue>,
     insert_frac: Arc<AtomicU64>,
     pg_client: Arc<PgClient>,
     store_stats: Arc<stats::CaConnStats>,
@@ -232,42 +237,135 @@ async fn spawn_scylla_insert_workers(
 }
 
 pub struct CommandQueueSet {
-    queues: tokio::sync::Mutex<VecDeque<Sender<ConnCommand>>>,
+    queues: tokio::sync::Mutex<BTreeMap<SocketAddrV4, Sender<ConnCommand>>>,
 }
 
 impl CommandQueueSet {
     pub fn new() -> Self {
         Self {
-            queues: tokio::sync::Mutex::new(VecDeque::<Sender<ConnCommand>>::new()),
+            queues: tokio::sync::Mutex::new(BTreeMap::<SocketAddrV4, Sender<ConnCommand>>::new()),
         }
     }
 
-    pub fn queues(&self) -> &tokio::sync::Mutex<VecDeque<Sender<ConnCommand>>> {
+    pub fn queues(&self) -> &tokio::sync::Mutex<BTreeMap<SocketAddrV4, Sender<ConnCommand>>> {
         &self.queues
     }
 }
 
+pub struct IngestCommons {
+    pub pgconf: Arc<Database>,
+    pub local_epics_hostname: String,
+    pub insert_item_queue: Arc<CommonInsertItemQueue>,
+    pub data_store: Arc<DataStore>,
+    pub insert_ivl_min: Arc<AtomicU64>,
+    pub conn_stats: Arc<TokMx<Vec<Arc<CaConnStats>>>>,
+    pub command_queue_set: Arc<CommandQueueSet>,
+}
+
+pub async fn find_channel_addr(
+    backend: String,
+    name: String,
+    pgconf: &Database,
+) -> Result<Option<SocketAddrV4>, Error> {
+    // TODO also here, provide a db pool.
+    let d = pgconf;
+    let (pg_client, pg_conn) = tokio_postgres::connect(
+        &format!("postgresql://{}:{}@{}:{}/{}", d.user, d.pass, d.host, d.port, d.name),
+        tokio_postgres::tls::NoTls,
+    )
+    .await
+    .unwrap();
+    // TODO allow clean shutdown on ctrl-c and join the pg_conn in the end:
+    tokio::spawn(pg_conn);
+    let pg_client = Arc::new(pg_client);
+    let qu_find_addr = pg_client
+        .prepare("with q1 as (select t1.facility, t1.channel, t1.addr from ioc_by_channel t1 where t1.facility = $1 and t1.channel in ($2) and t1.addr != '' order by t1.tsmod desc) select distinct on (q1.facility, q1.channel) q1.facility, q1.channel, q1.addr from q1")
+        .await
+        .map_err(|e| Error::with_msg_no_trace(format!("{e:?}")))?;
+    let rows = pg_client
+        .query(&qu_find_addr, &[&backend, &name])
+        .await
+        .map_err(|e| Error::with_msg_no_trace(format!("pg lookup error: {e:?}")))?;
+    if rows.is_empty() {
+        error!("can not find any addresses of channels {:?}", name);
+    } else {
+        for row in rows {
+            let addr: &str = row.get(2);
+            if addr == "" {
+                return Ok(None);
+            } else {
+                match addr.parse::<SocketAddrV4>() {
+                    Ok(addr) => return Ok(Some(addr)),
+                    Err(_) => return Ok(None),
+                }
+            }
+        }
+    }
+    Ok(None)
+}
+
+pub async fn create_ca_conn(
+    addr: SocketAddrV4,
+    local_epics_hostname: String,
+    array_truncate: usize,
+    insert_queue_max: usize,
+    insert_item_queue: Arc<CommonInsertItemQueue>,
+    data_store: Arc<DataStore>,
+    insert_ivl_min: Arc<AtomicU64>,
+    conn_stats: Arc<TokMx<Vec<Arc<CaConnStats>>>>,
+    command_queue_set: Arc<CommandQueueSet>,
+) -> Result<JoinHandle<Result<(), Error>>, Error> {
+    info!("create new CaConn  {:?}", addr);
+    let data_store = data_store.clone();
+    let conn = CaConn::new(
+        addr,
+        local_epics_hostname,
+        data_store.clone(),
+        insert_item_queue.sender(),
+        array_truncate,
+        insert_queue_max,
+        insert_ivl_min.clone(),
+    );
+    conn_stats.lock().await.push(conn.stats());
+    let stats2 = conn.stats();
+    let conn_command_tx = conn.conn_command_tx();
+    {
+        command_queue_set.queues().lock().await.insert(addr, conn_command_tx);
+    }
+    let conn_block = async move {
+        let mut conn = conn;
+        while let Some(item) = conn.next().await {
+            match item {
+                Ok(_) => {
+                    stats2.conn_item_count_inc();
+                }
+                Err(e) => {
+                    error!("CaConn gives error: {e:?}");
+                    break;
+                }
+            }
+        }
+        Ok::<_, Error>(())
+    };
+    let jh = tokio::spawn(conn_block);
+    Ok(jh)
+}
+
 pub async fn ca_connect(opts: ListenFromFileOpts) -> Result<(), Error> {
-    let facility = "scylla";
     let insert_frac = Arc::new(AtomicU64::new(1000));
     let insert_ivl_min = Arc::new(AtomicU64::new(8800));
     let opts = parse_config(opts.config).await?;
     let scyconf = opts.scyconf.clone();
 
-    let command_queue_set = Arc::new(CommandQueueSet::new());
-    tokio::spawn(crate::metrics::start_metrics_service(
-        opts.api_bind.clone(),
-        insert_frac.clone(),
-        insert_ivl_min.clone(),
-        command_queue_set.clone(),
-    ));
-    let d = Database {
+    let pgconf = Database {
         name: opts.pgconf.name.clone(),
         host: opts.pgconf.host.clone(),
         port: opts.pgconf.port.clone(),
         user: opts.pgconf.user.clone(),
         pass: opts.pgconf.pass.clone(),
     };
+
+    let d = &pgconf;
     let (pg_client, pg_conn) = tokio_postgres::connect(
         &format!("postgresql://{}:{}@{}:{}/{}", d.user, d.pass, d.host, d.port, d.name),
         tokio_postgres::tls::NoTls,
@@ -294,6 +392,74 @@ pub async fn ca_connect(opts: ListenFromFileOpts) -> Result<(), Error> {
         .await
         .map_err(|e| Error::with_msg_no_trace(format!("{e:?}")))?;
     let mut channels_by_host = BTreeMap::new();
+
+    let data_store = Arc::new(DataStore::new(pg_client.clone(), scy.clone()).await?);
+    let insert_item_queue = CommonInsertItemQueue::new(opts.insert_item_queue_cap);
+    let insert_item_queue = Arc::new(insert_item_queue);
+    // TODO use a new stats struct
+    let store_stats = Arc::new(CaConnStats::new());
+    spawn_scylla_insert_workers(
+        opts.scyconf.clone(),
+        opts.insert_scylla_sessions,
+        opts.insert_worker_count,
+        insert_item_queue.clone(),
+        insert_frac.clone(),
+        pg_client.clone(),
+        store_stats.clone(),
+    )
+    .await?;
+
+    let mut conn_jhs = vec![];
+    let conn_stats: Arc<TokMx<Vec<Arc<CaConnStats>>>> = Arc::new(TokMx::new(Vec::new()));
+    let command_queue_set = Arc::new(CommandQueueSet::new());
+
+    let ingest_commons = IngestCommons {
+        pgconf: Arc::new(pgconf.clone()),
+        local_epics_hostname: opts.local_epics_hostname.clone(),
+        insert_item_queue: insert_item_queue.clone(),
+        data_store: data_store.clone(),
+        insert_ivl_min: insert_ivl_min.clone(),
+        conn_stats: conn_stats.clone(),
+        command_queue_set: command_queue_set.clone(),
+    };
+    let ingest_commons = Arc::new(ingest_commons);
+
+    tokio::spawn(crate::metrics::start_metrics_service(
+        opts.api_bind.clone(),
+        insert_frac.clone(),
+        insert_ivl_min.clone(),
+        command_queue_set.clone(),
+        ingest_commons.clone(),
+    ));
+
+    let metrics_agg_fut = {
+        let conn_stats = conn_stats.clone();
+        let local_stats = local_stats.clone();
+        async move {
+            let mut agg_last = CaConnStatsAgg::new();
+            loop {
+                tokio::time::sleep(Duration::from_millis(671)).await;
+                let agg = CaConnStatsAgg::new();
+                agg.push(&local_stats);
+                agg.push(&store_stats);
+                for g in conn_stats.lock().await.iter() {
+                    agg.push(&g);
+                }
+                let m = get_metrics();
+                *m = Some(agg.clone());
+                if false {
+                    let diff = CaConnStatsAggDiff::diff_from(&agg_last, &agg);
+                    info!("{}", diff.display());
+                }
+                agg_last = agg;
+                if false {
+                    break;
+                }
+            }
+        }
+    };
+    let metrics_agg_jh = tokio::spawn(metrics_agg_fut);
+
     let mut chns_todo = &opts.channels[..];
     let mut chstmp = ["__NONE__"; 8];
     let mut ix = 0;
@@ -306,7 +472,14 @@ pub async fn ca_connect(opts: ListenFromFileOpts) -> Result<(), Error> {
             .query(
                 &qu_find_addr,
                 &[
-                    &facility, &chstmp[0], &chstmp[1], &chstmp[2], &chstmp[3], &chstmp[4], &chstmp[5], &chstmp[6],
+                    &opts.backend,
+                    &chstmp[0],
+                    &chstmp[1],
+                    &chstmp[2],
+                    &chstmp[3],
+                    &chstmp[4],
+                    &chstmp[5],
+                    &chstmp[6],
                     &chstmp[7],
                 ],
             )
@@ -340,90 +513,71 @@ pub async fn ca_connect(opts: ListenFromFileOpts) -> Result<(), Error> {
                     } else {
                         channels_by_host.get_mut(&addr).unwrap().push(ch.to_string());
                     }
+                    {
+                        let create_new = {
+                            let g = command_queue_set.queues().lock().await;
+                            if let Some(tx) = g.get(&addr) {
+                                let (cmd, rx) = ConnCommand::channel_add(ch.to_string());
+                                tx.send(cmd).await.unwrap();
+                                if !rx.recv().await.unwrap() {
+                                    error!("Could not add channel: {}", ch);
+                                }
+                                false
+                            } else {
+                                true
+                            }
+                        };
+                        if create_new {
+                            info!("create new CaConn  {:?}  {:?}", addr, ch);
+                            let data_store = data_store.clone();
+                            let conn = CaConn::new(
+                                addr,
+                                opts.local_epics_hostname.clone(),
+                                data_store.clone(),
+                                insert_item_queue.sender(),
+                                opts.array_truncate,
+                                opts.insert_queue_max,
+                                insert_ivl_min.clone(),
+                            );
+                            conn_stats.lock().await.push(conn.stats());
+                            let stats2 = conn.stats();
+                            let conn_command_tx = conn.conn_command_tx();
+                            let tx = conn_command_tx.clone();
+                            {
+                                command_queue_set.queues().lock().await.insert(addr, conn_command_tx);
+                            }
+                            let conn_block = async move {
+                                let mut conn = conn;
+                                while let Some(item) = conn.next().await {
+                                    match item {
+                                        Ok(_) => {
+                                            stats2.conn_item_count_inc();
+                                        }
+                                        Err(e) => {
+                                            error!("CaConn gives error: {e:?}");
+                                            break;
+                                        }
+                                    }
+                                }
+                                Ok::<_, Error>(())
+                            };
+                            let jh = tokio::spawn(conn_block);
+                            conn_jhs.push(jh);
+                            {
+                                let (cmd, rx) = ConnCommand::channel_add(ch.to_string());
+                                tx.send(cmd).await.unwrap();
+                                if !rx.recv().await.unwrap() {
+                                    error!("Could not add channel: {}", ch);
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
     }
-    if opts.abort_after_search == 1 {
-        return Ok(());
-    }
-    let data_store = Arc::new(DataStore::new(pg_client.clone(), scy.clone()).await?);
-    let insert_item_queue = CommonInsertItemQueue::new(opts.insert_item_queue_cap);
-
-    // TODO use a new stats struct
-    let store_stats = Arc::new(CaConnStats::new());
-
-    spawn_scylla_insert_workers(
-        opts.scyconf.clone(),
-        opts.insert_scylla_sessions,
-        opts.insert_worker_count,
-        &insert_item_queue,
-        insert_frac.clone(),
-        pg_client.clone(),
-        store_stats.clone(),
-    )
-    .await?;
-
-    let mut conn_jhs = vec![];
-    let mut conn_stats = vec![];
     info!("channels_by_host len {}", channels_by_host.len());
-    for (host, channels) in channels_by_host {
-        let data_store = data_store.clone();
-        let addr = SocketAddrV4::new(host.ip().clone(), host.port());
-        let mut conn = CaConn::new(
-            addr,
-            opts.local_epics_hostname.clone(),
-            data_store.clone(),
-            insert_item_queue.sender(),
-            opts.array_truncate,
-            opts.insert_queue_max,
-            insert_ivl_min.clone(),
-        );
-        conn_stats.push(conn.stats());
-        for c in channels {
-            conn.channel_add(c);
-        }
-        let stats2 = conn.stats();
-        let conn_command_tx = conn.conn_command_tx();
-        command_queue_set.queues().lock().await.push_back(conn_command_tx);
-        let conn_block = async move {
-            while let Some(item) = conn.next().await {
-                match item {
-                    Ok(_) => {
-                        stats2.conn_item_count_inc();
-                    }
-                    Err(e) => {
-                        error!("CaConn gives error: {e:?}");
-                        break;
-                    }
-                }
-            }
-            Ok::<_, Error>(())
-        };
-        let jh = tokio::spawn(conn_block);
-        conn_jhs.push(jh);
-    }
-    let mut agg_last = CaConnStatsAgg::new();
-    loop {
-        tokio::time::sleep(Duration::from_millis(671)).await;
-        let agg = CaConnStatsAgg::new();
-        agg.push(&local_stats);
-        agg.push(&store_stats);
-        for g in &conn_stats {
-            agg.push(&g);
-        }
-        let m = get_metrics();
-        *m = Some(agg.clone());
-        if false {
-            let diff = CaConnStatsAggDiff::diff_from(&agg_last, &agg);
-            info!("{}", diff.display());
-        }
-        for _s1 in &conn_stats {}
-        agg_last = agg;
-        if false {
-            break;
-        }
-    }
+
     for jh in conn_jhs {
         match jh.await {
             Ok(k) => match k {
@@ -437,5 +591,6 @@ pub async fn ca_connect(opts: ListenFromFileOpts) -> Result<(), Error> {
             }
         }
     }
+    metrics_agg_jh.await.unwrap();
     Ok(())
 }

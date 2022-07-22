@@ -24,6 +24,15 @@ impl EMA {
         }
     }
 
+    pub fn with_ema(ema: f32) -> Self {
+        Self {
+            ema,
+            emv: 0.0,
+            k: 0.05,
+            update_count: 0,
+        }
+    }
+
     pub fn default() -> Self {
         Self {
             ema: 0.0,
