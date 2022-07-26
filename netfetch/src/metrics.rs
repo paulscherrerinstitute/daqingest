@@ -1,19 +1,13 @@
 use crate::ca::conn::ConnCommand;
 use crate::ca::{CommandQueueSet, IngestCommons};
+use axum::extract::Query;
+use http::request::Parts;
 use log::*;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::net::SocketAddrV4;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-
-#[derive(Debug, Deserialize)]
-struct QueryForm {
-    query: String,
-    time: Option<f64>,
-    #[allow(unused)]
-    timeout: Option<String>,
-}
 
 #[allow(unused)]
 #[derive(Debug, Deserialize)]
@@ -146,6 +140,60 @@ async fn channel_remove(
     }
 }
 
+async fn prom_query(
+    Query(params): Query<HashMap<String, String>>,
+    parts: Parts,
+    body: bytes::Bytes,
+) -> axum::Json<serde_json::Value> {
+    use axum::Json;
+    info!("/api/v1/query  params {:?}  {:?}", params, parts);
+    let url = url::Url::parse(&format!("dummy://{}", &parts.uri));
+    info!("/api/v1/query  parsed url: {:?}", url);
+    let body_str = String::from_utf8_lossy(&body);
+    info!("/api/v1/query  body_str: {:?}", body_str);
+    let formurl = url::Url::parse(&format!("dummy:///?{}", body_str));
+    info!("/api/v1/query  formurl: {:?}", formurl);
+    let res = serde_json::json!({
+        "status": "success",
+        "data": {
+            "resultType": "scalar",
+            "result": [40, "2"]
+        }
+    });
+    Json(res)
+}
+
+async fn prom_query_range(
+    Query(params): Query<HashMap<String, String>>,
+    parts: Parts,
+    body: bytes::Bytes,
+) -> axum::Json<serde_json::Value> {
+    use axum::Json;
+    info!("/api/v1/query_range  {:?}   Query(params) {:?}", parts, params);
+    let url = url::Url::parse(&format!("dummy://{}", &parts.uri));
+    info!("/api/v1/query_range  parsed url: {:?}", url);
+    let body_str = String::from_utf8_lossy(&body);
+    info!("/api/v1/query_range  body_str: {:?}", body_str);
+    let formurl = url::Url::parse(&format!("dummy:///?{}", body_str));
+    info!("/api/v1/query_range  formurl: {:?}", formurl);
+    let res = serde_json::json!({
+        "status": "success",
+        "data": {
+            "resultType": "matrix",
+            "result": [
+                {
+                    "metric": {
+                        "__name__": "series1",
+                    },
+                    "values": [
+                    ]
+                }
+            ]
+        }
+    });
+    Json(res)
+}
+
 pub async fn start_metrics_service(
     bind_to: String,
     insert_frac: Arc<AtomicU64>,
@@ -153,11 +201,9 @@ pub async fn start_metrics_service(
     command_queue_set: Arc<CommandQueueSet>,
     ingest_commons: Arc<IngestCommons>,
 ) {
-    use axum::extract::Query;
     use axum::routing::{get, post, put};
     use axum::Form;
     use axum::{extract, Router};
-    use http::request::Parts;
     let app = Router::new()
         .route(
             "/metrics",
@@ -299,28 +345,8 @@ pub async fn start_metrics_service(
                 serde_json::to_string(&res).unwrap()
             }),
         )
-        .route(
-            "/api/v1/query",
-            post(
-                |Form(form): Form<QueryForm>, Query(params): Query<HashMap<String, String>>, parts: Parts| async move {
-                    info!("/api/v1/query  form {form:?}  params {params:?}  {parts:?}");
-                    let res = if form.query == "1+1" {
-                        serde_json::json!({
-                            "status": "success",
-                            "data": {
-                                "resultType": "scalar",
-                                "result": [form.time.unwrap_or(0.0), "2"]
-                            }
-                        })
-                    } else {
-                        serde_json::json!({
-                          "status": "success"
-                        })
-                    };
-                    serde_json::to_string(&res).unwrap()
-                },
-            ),
-        )
+        .route("/api/v1/query", post(prom_query))
+        .route("/api/v1/query_range", post(prom_query_range))
         .route(
             "/api/v1/labels",
             post(|Form(_form): Form<PromLabels>| async move {
