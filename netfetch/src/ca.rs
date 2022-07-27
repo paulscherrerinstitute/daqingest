@@ -45,16 +45,14 @@ struct ChannelConfig {
     backend: String,
     channels: Vec<String>,
     search: Vec<String>,
-    addr_bind: Ipv4Addr,
-    addr_conn: Ipv4Addr,
-    whitelist: String,
-    blacklist: String,
+    addr_bind: Option<Ipv4Addr>,
+    addr_conn: Option<Ipv4Addr>,
+    whitelist: Option<String>,
+    blacklist: Option<String>,
     max_simul: Option<usize>,
     timeout: Option<u64>,
-    #[serde(default)]
-    abort_after_search: u32,
-    pgconf: Database,
-    scyconf: ScyllaConfig,
+    postgresql: Database,
+    scylla: ScyllaConfig,
     array_truncate: Option<usize>,
     insert_worker_count: Option<usize>,
     insert_scylla_sessions: Option<usize>,
@@ -74,8 +72,8 @@ pub async fn parse_config(config: PathBuf) -> Result<CaConnectOpts, Error> {
     file.read_to_end(&mut buf).await?;
     let mut conf: ChannelConfig =
         serde_yaml::from_slice(&buf).map_err(|e| Error::with_msg_no_trace(format!("{:?}", e)))?;
-    let re_p = regex::Regex::new(&conf.whitelist)?;
-    let re_n = regex::Regex::new(&conf.blacklist)?;
+    let re_p = regex::Regex::new(&conf.whitelist.unwrap_or("--nothing-whitelisted--".into()))?;
+    let re_n = regex::Regex::new(&conf.blacklist.unwrap_or("--nothing-blacklisted--".into()))?;
     conf.channels = conf
         .channels
         .into_iter()
@@ -93,17 +91,16 @@ pub async fn parse_config(config: PathBuf) -> Result<CaConnectOpts, Error> {
         backend: conf.backend,
         channels: conf.channels,
         search: conf.search,
-        addr_bind: conf.addr_bind,
-        addr_conn: conf.addr_conn,
+        addr_bind: conf.addr_bind.unwrap_or(Ipv4Addr::new(0, 0, 0, 0)),
+        addr_conn: conf.addr_conn.unwrap_or(Ipv4Addr::new(255, 255, 255, 255)),
         timeout: conf.timeout.unwrap_or(2000),
-        abort_after_search: conf.abort_after_search,
-        pgconf: conf.pgconf,
-        scyconf: conf.scyconf,
+        pgconf: conf.postgresql,
+        scyconf: conf.scylla,
         array_truncate: conf.array_truncate.unwrap_or(512),
-        insert_worker_count: conf.insert_worker_count.unwrap_or(8),
+        insert_worker_count: conf.insert_worker_count.unwrap_or(800),
         insert_scylla_sessions: conf.insert_scylla_sessions.unwrap_or(1),
-        insert_queue_max: conf.insert_queue_max.unwrap_or(32),
-        insert_item_queue_cap: conf.insert_item_queue_cap.unwrap_or(380000),
+        insert_queue_max: conf.insert_queue_max.unwrap_or(64),
+        insert_item_queue_cap: conf.insert_item_queue_cap.unwrap_or(200000),
         api_bind: conf.api_bind.unwrap_or_else(|| "0.0.0.0:3011".into()),
         local_epics_hostname: conf.local_epics_hostname,
     })
@@ -116,7 +113,6 @@ pub struct CaConnectOpts {
     pub addr_bind: Ipv4Addr,
     pub addr_conn: Ipv4Addr,
     pub timeout: u64,
-    pub abort_after_search: u32,
     pub pgconf: Database,
     pub scyconf: ScyllaConfig,
     pub array_truncate: usize,

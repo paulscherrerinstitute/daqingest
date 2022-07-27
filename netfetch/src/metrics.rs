@@ -3,29 +3,10 @@ use crate::ca::{CommandQueueSet, IngestCommons};
 use axum::extract::Query;
 use http::request::Parts;
 use log::*;
-use serde::Deserialize;
 use std::collections::HashMap;
 use std::net::SocketAddrV4;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-
-#[allow(unused)]
-#[derive(Debug, Deserialize)]
-struct PromLabels {
-    start: Option<String>,
-    end: Option<String>,
-    //#[serde(rename = "match[]")]
-    //pattern: Option<Vec<String>>,
-}
-
-#[allow(unused)]
-#[derive(Debug, Deserialize)]
-struct PromLabelValues {
-    start: Option<String>,
-    end: Option<String>,
-    //#[serde(rename = "match[]")]
-    //pattern: Option<Vec<String>>,
-}
 
 async fn get_empty() -> String {
     format!("")
@@ -140,60 +121,6 @@ async fn channel_remove(
     }
 }
 
-async fn prom_query(
-    Query(params): Query<HashMap<String, String>>,
-    parts: Parts,
-    body: bytes::Bytes,
-) -> axum::Json<serde_json::Value> {
-    use axum::Json;
-    info!("/api/v1/query  params {:?}  {:?}", params, parts);
-    let url = url::Url::parse(&format!("dummy://{}", &parts.uri));
-    info!("/api/v1/query  parsed url: {:?}", url);
-    let body_str = String::from_utf8_lossy(&body);
-    info!("/api/v1/query  body_str: {:?}", body_str);
-    let formurl = url::Url::parse(&format!("dummy:///?{}", body_str));
-    info!("/api/v1/query  formurl: {:?}", formurl);
-    let res = serde_json::json!({
-        "status": "success",
-        "data": {
-            "resultType": "scalar",
-            "result": [40, "2"]
-        }
-    });
-    Json(res)
-}
-
-async fn prom_query_range(
-    Query(params): Query<HashMap<String, String>>,
-    parts: Parts,
-    body: bytes::Bytes,
-) -> axum::Json<serde_json::Value> {
-    use axum::Json;
-    info!("/api/v1/query_range  {:?}   Query(params) {:?}", parts, params);
-    let url = url::Url::parse(&format!("dummy://{}", &parts.uri));
-    info!("/api/v1/query_range  parsed url: {:?}", url);
-    let body_str = String::from_utf8_lossy(&body);
-    info!("/api/v1/query_range  body_str: {:?}", body_str);
-    let formurl = url::Url::parse(&format!("dummy:///?{}", body_str));
-    info!("/api/v1/query_range  formurl: {:?}", formurl);
-    let res = serde_json::json!({
-        "status": "success",
-        "data": {
-            "resultType": "matrix",
-            "result": [
-                {
-                    "metric": {
-                        "__name__": "series1",
-                    },
-                    "values": [
-                    ]
-                }
-            ]
-        }
-    });
-    Json(res)
-}
-
 pub async fn start_metrics_service(
     bind_to: String,
     insert_frac: Arc<AtomicU64>,
@@ -201,8 +128,7 @@ pub async fn start_metrics_service(
     command_queue_set: Arc<CommandQueueSet>,
     ingest_commons: Arc<IngestCommons>,
 ) {
-    use axum::routing::{get, post, put};
-    use axum::Form;
+    use axum::routing::{get, put};
     use axum::{extract, Router};
     let app = Router::new()
         .route(
@@ -326,97 +252,6 @@ pub async fn start_metrics_service(
             "/insert_ivl_min",
             put(|v: extract::Json<u64>| async move {
                 insert_ivl_min.store(v.0, Ordering::Release);
-            }),
-        )
-        .route(
-            "/api/v1/status/buildinfo",
-            get(|| async {
-                let res = serde_json::json!({
-                  "status": "success",
-                  "data": {
-                    "version": "2.37",
-                    "revision": "daqingest",
-                    "branch": "dev",
-                    "buildUser": "dominik.werder",
-                    "buildDate": "2022-07-21",
-                    "goVersion": "nogo"
-                  }
-                });
-                serde_json::to_string(&res).unwrap()
-            }),
-        )
-        .route("/api/v1/query", post(prom_query))
-        .route("/api/v1/query_range", post(prom_query_range))
-        .route(
-            "/api/v1/labels",
-            post(|Form(_form): Form<PromLabels>| async move {
-                let res = {
-                    serde_json::json!({
-                        "status": "success",
-                        "data": ["__name__", "instance"]
-                    })
-                };
-                serde_json::to_string(&res).unwrap()
-            }),
-        )
-        .route(
-            "/api/v1/label/__name__/values",
-            get(|| async move {
-                let res = {
-                    serde_json::json!({
-                        "status": "success",
-                        "data": ["series1", "series2"]
-                    })
-                };
-                serde_json::to_string(&res).unwrap()
-            }),
-        )
-        .route(
-            "/api/v1/label/instance/values",
-            get(|| async move {
-                let res = {
-                    serde_json::json!({
-                        "status": "success",
-                        "data": ["node1", "node2"]
-                    })
-                };
-                serde_json::to_string(&res).unwrap()
-            }),
-        )
-        .route(
-            "/api/v1/metadata",
-            get(|| async move {
-                let res = {
-                    serde_json::json!({
-                        "status": "success",
-                        "data": {}
-                    })
-                };
-                serde_json::to_string(&res).unwrap()
-            }),
-        )
-        .route(
-            "/api/v1/series",
-            post(|parts: Parts, body: bytes::Bytes| async move {
-                info!("Asked for series, form: {parts:?}");
-                let url = url::Url::parse(&format!("http://dummy{}", parts.uri))
-                    .unwrap_or_else(|_| url::Url::parse("http://a/").unwrap());
-                info!("PARSED SERIES URL {:?}", url);
-                let bodyparams = url::Url::parse(&String::from_utf8_lossy(&body));
-                info!("BODY PARAMS: {:?}", bodyparams);
-                let res = {
-                    serde_json::json!({
-                        "status": "success",
-                        "data": [
-                            {
-                                "__name__": "series1",
-                                "job": "daqingest",
-                                "instance": "node1"
-                            }
-                        ]
-                    })
-                };
-                serde_json::to_string(&res).unwrap()
             }),
         )
         .fallback(
