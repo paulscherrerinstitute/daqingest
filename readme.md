@@ -26,7 +26,7 @@ api_bind: "0.0.0.0:3011"
 local_epics_hostname: sf-daqsync-02.psi.ch
 # The backend name to use for the channels handled by this daqingest instance:
 backend: scylla
-# Hosts to use for channel access search:
+# Addresses to use for channel access search:
 search:
     - "172.26.0.255"
     - "172.26.2.255"
@@ -48,4 +48,16 @@ scylla:
 channels:
     - "SOME-CHANNEL:1"
     - "OTHER-CHANNEL:2"
+```
+
+
+## Access status and configuration of daqingest at runtime
+
+Status and configuration can be accessed at runtime via http at the address
+as configured by the `api_bind` parameter.
+
+### Check the state of a channel
+
+```txt
+http://<api_bind>/daqingest/channel/state?name=[...]
 ```

@@ -1,5 +1,5 @@
 use crate::ca::conn::ConnCommand;
-use crate::ca::{CommandQueueSet, IngestCommons};
+use crate::ca::IngestCommons;
 use axum::extract::Query;
 use http::request::Parts;
 use log::*;
@@ -9,7 +9,46 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 async fn get_empty() -> String {
-    format!("")
+    String::new()
+}
+
+async fn send_command<'a, IT, F, R>(it: &mut IT, cmdgen: F) -> Vec<async_channel::Receiver<R>>
+where
+    IT: Iterator<Item = (&'a SocketAddrV4, &'a async_channel::Sender<ConnCommand>)>,
+    F: Fn() -> (ConnCommand, async_channel::Receiver<R>),
+{
+    let mut rxs = Vec::new();
+    for (_, tx) in it {
+        let (cmd, rx) = cmdgen();
+        match tx.send(cmd).await {
+            Ok(()) => {
+                rxs.push(rx);
+            }
+            Err(e) => {
+                error!("can not send command {e:?}");
+            }
+        }
+    }
+    rxs
+}
+
+async fn find_channel(
+    params: HashMap<String, String>,
+    ingest_commons: Arc<IngestCommons>,
+) -> axum::Json<Vec<(String, Vec<String>)>> {
+    let pattern = params.get("pattern").map_or(String::new(), |x| x.clone()).to_string();
+    let g = ingest_commons.command_queue_set.queues().lock().await;
+    let mut it = g.iter();
+    let rxs = send_command(&mut it, || ConnCommand::find_channel(pattern.clone())).await;
+    let mut res = Vec::new();
+    for rx in rxs {
+        let item = rx.recv().await.unwrap();
+        if item.1.len() > 0 {
+            let item = (item.0.to_string(), item.1);
+            res.push(item);
+        }
+    }
+    axum::Json(res)
 }
 
 async fn channel_add(params: HashMap<String, String>, ingest_commons: Arc<IngestCommons>) -> String {
@@ -121,11 +160,65 @@ async fn channel_remove(
     }
 }
 
+async fn channel_state(params: HashMap<String, String>, ingest_commons: Arc<IngestCommons>) -> String {
+    let name = params.get("name").map_or(String::new(), |x| x.clone()).to_string();
+    let g = ingest_commons.command_queue_set.queues().lock().await;
+    let mut rxs = Vec::new();
+    for (_, tx) in g.iter() {
+        let (cmd, rx) = ConnCommand::channel_state(name.clone());
+        match tx.send(cmd).await {
+            Ok(()) => {
+                rxs.push(rx);
+            }
+            Err(e) => {
+                error!("can not send command {e:?}");
+            }
+        }
+    }
+    let mut res = Vec::new();
+    for rx in rxs {
+        let item = rx.recv().await.unwrap();
+        if let Some(st) = item.1 {
+            let item = (item.0.to_string(), st);
+            res.push(item);
+        }
+    }
+    serde_json::to_string(&res).unwrap()
+}
+
+async fn channel_states(
+    _params: HashMap<String, String>,
+    ingest_commons: Arc<IngestCommons>,
+) -> axum::Json<Vec<crate::ca::conn::ChannelStateInfo>> {
+    let g = ingest_commons.command_queue_set.queues().lock().await;
+    let mut rxs = Vec::new();
+    for (_, tx) in g.iter() {
+        let (cmd, rx) = ConnCommand::channel_states_all();
+        match tx.send(cmd).await {
+            Ok(()) => {
+                rxs.push(rx);
+            }
+            Err(e) => {
+                error!("can not send command {e:?}");
+            }
+        }
+    }
+    let mut res = Vec::new();
+    for rx in rxs {
+        let item = rx.recv().await.unwrap();
+        for h in item.1 {
+            res.push(h);
+        }
+    }
+    res.sort_unstable_by_key(|v| u32::MAX - v.interest_score as u32);
+    //let res: Vec<_> = res.into_iter().rev().take(10).collect();
+    axum::Json(res)
+}
+
 pub async fn start_metrics_service(
     bind_to: String,
     insert_frac: Arc<AtomicU64>,
     insert_ivl_min: Arc<AtomicU64>,
-    command_queue_set: Arc<CommandQueueSet>,
     ingest_commons: Arc<IngestCommons>,
 ) {
     use axum::routing::{get, put};
@@ -150,96 +243,36 @@ pub async fn start_metrics_service(
         .route(
             "/daqingest/find/channel",
             get({
-                let command_queue_set = command_queue_set.clone();
-                |Query(params): Query<HashMap<String, String>>| async move {
-                    let pattern = params.get("pattern").map_or(String::new(), |x| x.clone()).to_string();
-                    let g = command_queue_set.queues().lock().await;
-                    let mut rxs = Vec::new();
-                    for (_, tx) in g.iter() {
-                        let (cmd, rx) = ConnCommand::find_channel(pattern.clone());
-                        rxs.push(rx);
-                        if let Err(_) = tx.send(cmd).await {
-                            error!("can not send command");
-                        }
-                    }
-                    let mut res = Vec::new();
-                    for rx in rxs {
-                        let item = rx.recv().await.unwrap();
-                        if item.1.len() > 0 {
-                            let item = (item.0.to_string(), item.1);
-                            res.push(item);
-                        }
-                    }
-                    serde_json::to_string(&res).unwrap()
-                }
+                let ingest_commons = ingest_commons.clone();
+                |Query(params): Query<HashMap<String, String>>| find_channel(params, ingest_commons)
             }),
         )
         .route(
             "/daqingest/channel/state",
             get({
-                let command_queue_set = command_queue_set.clone();
-                |Query(params): Query<HashMap<String, String>>| async move {
-                    let name = params.get("name").map_or(String::new(), |x| x.clone()).to_string();
-                    let g = command_queue_set.queues().lock().await;
-                    let mut rxs = Vec::new();
-                    for (_, tx) in g.iter() {
-                        let (cmd, rx) = ConnCommand::channel_state(name.clone());
-                        rxs.push(rx);
-                        if let Err(_) = tx.send(cmd).await {
-                            error!("can not send command");
-                        }
-                    }
-                    let mut res = Vec::new();
-                    for rx in rxs {
-                        let item = rx.recv().await.unwrap();
-                        if let Some(st) = item.1 {
-                            let item = (item.0.to_string(), st);
-                            res.push(item);
-                        }
-                    }
-                    serde_json::to_string(&res).unwrap()
-                }
+                let ingest_commons = ingest_commons.clone();
+                |Query(params): Query<HashMap<String, String>>| channel_state(params, ingest_commons)
             }),
         )
         .route(
             "/daqingest/channel/states",
             get({
-                let command_queue_set = command_queue_set.clone();
-                |Query(_params): Query<HashMap<String, String>>| async move {
-                    let g = command_queue_set.queues().lock().await;
-                    let mut rxs = Vec::new();
-                    for (_, tx) in g.iter() {
-                        let (cmd, rx) = ConnCommand::channel_states_all();
-                        rxs.push(rx);
-                        if let Err(_) = tx.send(cmd).await {
-                            error!("can not send command");
-                        }
-                    }
-                    let mut res = Vec::new();
-                    for rx in rxs {
-                        let item = rx.recv().await.unwrap();
-                        for h in item.1 {
-                            res.push((item.0.clone(), h));
-                        }
-                    }
-                    res.sort_unstable_by_key(|(_, v)| v.interest_score as u32);
-                    let res: Vec<_> = res.into_iter().rev().take(10).collect();
-                    serde_json::to_string(&res).unwrap()
-                }
+                let ingest_commons = ingest_commons.clone();
+                |Query(params): Query<HashMap<String, String>>| channel_states(params, ingest_commons)
             }),
         )
         .route(
             "/daqingest/channel/add",
             get({
                 let ingest_commons = ingest_commons.clone();
-                |Query(params): Query<HashMap<String, String>>| async move { channel_add(params, ingest_commons).await }
+                |Query(params): Query<HashMap<String, String>>| channel_add(params, ingest_commons)
             }),
         )
         .route(
             "/daqingest/channel/remove",
             get({
                 let ingest_commons = ingest_commons.clone();
-                |Query(params): Query<HashMap<String, String>>| async move { channel_remove(params, ingest_commons).await }
+                |Query(params): Query<HashMap<String, String>>| channel_remove(params, ingest_commons)
             }),
         )
         .route(

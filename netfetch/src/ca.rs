@@ -1,4 +1,5 @@
 pub mod conn;
+pub mod findioc;
 pub mod proto;
 pub mod search;
 pub mod store;
@@ -155,6 +156,27 @@ async fn spawn_scylla_insert_workers(
             let mut i1 = 0;
             while let Ok(item) = recv.recv().await {
                 match item {
+                    QueryItem::ConnectionStatus(item) => {
+                        match crate::store::insert_connection_status(item, &data_store, &stats).await {
+                            Ok(_) => {
+                                stats.store_worker_item_insert_inc();
+                            }
+                            Err(e) => {
+                                stats.store_worker_item_error_inc();
+                                // TODO introduce more structured error variants.
+                                if e.msg().contains("WriteTimeout") {
+                                    tokio::time::sleep(Duration::from_millis(100)).await;
+                                } else {
+                                    // TODO back off but continue.
+                                    error!("insert worker sees error: {e:?}");
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    QueryItem::ChannelStatus(_item) => {
+                        // TODO
+                    }
                     QueryItem::Insert(item) => {
                         stats.store_worker_item_recv_inc();
                         let insert_frac = insert_frac.load(Ordering::Acquire);
@@ -424,7 +446,6 @@ pub async fn ca_connect(opts: ListenFromFileOpts) -> Result<(), Error> {
         opts.api_bind.clone(),
         insert_frac.clone(),
         insert_ivl_min.clone(),
-        command_queue_set.clone(),
         ingest_commons.clone(),
     ));
 

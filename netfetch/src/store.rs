@@ -10,10 +10,11 @@ use scylla::prepared_statement::PreparedStatement;
 use scylla::transport::errors::QueryError;
 use scylla::{QueryResult, Session as ScySession};
 use stats::CaConnStats;
+use std::net::SocketAddrV4;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
-use std::time::Instant;
+use std::time::{Instant, SystemTime};
 
 pub struct ScyInsertFut {
     #[allow(unused)]
@@ -84,6 +85,36 @@ impl Future for ScyInsertFut {
 }
 
 #[derive(Debug)]
+pub enum ConnectionStatus {
+    ConnectError = 1,
+    ConnectTimeout = 2,
+    Established = 3,
+    Closing = 4,
+    ClosedUnexpected = 5,
+}
+
+#[derive(Debug)]
+pub struct ConnectionStatusItem {
+    pub ts: SystemTime,
+    pub addr: SocketAddrV4,
+    pub status: ConnectionStatus,
+}
+
+#[derive(Debug)]
+pub enum ChannelStatus {
+    Opened = 1,
+    Closed = 2,
+    ClosedUnexpected = 3,
+}
+
+#[derive(Debug)]
+pub struct ChannelStatusItem {
+    pub ts: SystemTime,
+    pub series: u64,
+    pub status: ChannelStatus,
+}
+
+#[derive(Debug)]
 pub struct InsertItem {
     pub series: u64,
     pub ts_msp: u64,
@@ -114,6 +145,8 @@ pub struct IvlItem {
 
 #[derive(Debug)]
 pub enum QueryItem {
+    ConnectionStatus(ConnectionStatusItem),
+    ChannelStatus(ChannelStatusItem),
     Insert(InsertItem),
     Mute(MuteItem),
     Ivl(IvlItem),
@@ -264,5 +297,31 @@ pub async fn insert_item(item: InsertItem, data_store: &DataStore, stats: &CaCon
         }
     }
     stats.inserts_val_inc();
+    Ok(())
+}
+
+pub async fn insert_connection_status(
+    item: ConnectionStatusItem,
+    data_store: &DataStore,
+    _stats: &CaConnStats,
+) -> Result<(), Error> {
+    let tsunix = item.ts.duration_since(std::time::UNIX_EPOCH).unwrap();
+    let secs = tsunix.as_secs() * netpod::timeunits::SEC;
+    let nanos = tsunix.subsec_nanos() as u64;
+    let ts = secs + nanos;
+    let div = netpod::timeunits::SEC * 600;
+    let ts_msp = ts / div * div;
+    let ts_lsp = ts - ts_msp;
+    let kind = item.status as u32;
+    let addr = format!("{}", item.addr);
+    let params = (ts_msp as i64, ts_lsp as i64, kind as i32, addr);
+    data_store
+        .scy
+        .query(
+            "insert into connection_status (ts_msp, ts_lsp, kind, addr) values (?, ?, ?, ?)",
+            params,
+        )
+        .await
+        .err_conv()?;
     Ok(())
 }

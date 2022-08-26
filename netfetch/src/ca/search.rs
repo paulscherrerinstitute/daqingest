@@ -1,3 +1,4 @@
+use crate::ca::findioc::FindIocStream;
 use crate::ca::{parse_config, ListenFromFileOpts};
 use err::Error;
 use futures_util::StreamExt;
@@ -7,35 +8,49 @@ use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use super::conn::FindIocStream;
-
 async fn resolve_address(addr_str: &str) -> Result<SocketAddrV4, Error> {
     const PORT_DEFAULT: u16 = 5064;
     let ac = match addr_str.parse::<SocketAddrV4>() {
         Ok(k) => k,
-        Err(_) => match addr_str.parse::<Ipv4Addr>() {
-            Ok(k) => SocketAddrV4::new(k, PORT_DEFAULT),
-            Err(e) => match tokio::net::lookup_host(&addr_str).await {
-                Ok(k) => {
-                    let vs: Vec<_> = k
-                        .filter_map(|x| match x {
-                            SocketAddr::V4(k) => Some(k),
-                            SocketAddr::V6(_) => None,
-                        })
-                        .collect();
-                    if let Some(k) = vs.first() {
-                        *k
+        Err(_) => {
+            trace!("can not parse {addr_str} as SocketAddrV4");
+            match addr_str.parse::<Ipv4Addr>() {
+                Ok(k) => SocketAddrV4::new(k, PORT_DEFAULT),
+                Err(e) => {
+                    trace!("can not parse {addr_str} as Ipv4Addr");
+                    let (hostname, port) = if addr_str.contains(":") {
+                        let mut it = addr_str.split(":");
+                        (
+                            it.next().unwrap().to_string(),
+                            it.next().unwrap().parse::<u16>().unwrap(),
+                        )
                     } else {
-                        error!("Can not understand name for {:?}  {:?}", addr_str, vs);
-                        return Err(e.into());
+                        (addr_str.to_string(), PORT_DEFAULT)
+                    };
+                    match tokio::net::lookup_host(format!("{}:33", hostname.clone())).await {
+                        Ok(k) => {
+                            let vs: Vec<_> = k
+                                .filter_map(|x| match x {
+                                    SocketAddr::V4(k) => Some(k),
+                                    SocketAddr::V6(_) => {
+                                        error!("TODO ipv6 support");
+                                        None
+                                    }
+                                })
+                                .collect();
+                            if let Some(k) = vs.first() {
+                                let mut k = *k;
+                                k.set_port(port);
+                                k
+                            } else {
+                                return Err(e.into());
+                            }
+                        }
+                        Err(e) => return Err(e.into()),
                     }
                 }
-                Err(e) => {
-                    error!("{e:?}");
-                    return Err(e.into());
-                }
-            },
-        },
+            }
+        }
     };
     Ok(ac)
 }
@@ -79,9 +94,43 @@ pub async fn ca_search(opts: ListenFromFileOpts) -> Result<(), Error> {
         .unwrap();
     let mut addrs = vec![];
     for s in &opts.search {
-        let x = resolve_address(s).await?;
-        addrs.push(x);
+        match resolve_address(s).await {
+            Ok(addr) => {
+                info!("resolved {s} as {addr}");
+                addrs.push(addr);
+            }
+            Err(e) => {
+                error!("can not resolve {s} {e}");
+            }
+        }
     }
+    let gw_addrs = {
+        // Try to blacklist..
+        // TODO if it helps, add a config option for it.
+        let gateways = [
+            "sf-cagw",
+            "saresa-cagw",
+            "saresb-cagw",
+            "saresc-cagw",
+            "satesd-cagw",
+            "satese-cagw",
+            "satesf-cagw",
+        ];
+        let mut gw_addrs = vec![];
+        for s in gateways {
+            match resolve_address(s).await {
+                Ok(addr) => {
+                    info!("resolved {s} as {addr}");
+                    gw_addrs.push(addr);
+                }
+                Err(e) => {
+                    error!("can not resolve {s} {e}");
+                }
+            }
+        }
+        gw_addrs
+    };
+    info!("Blacklisting {} gateways", gw_addrs.len());
     let mut finder = FindIocStream::new(addrs);
     for ch in &opts.channels {
         finder.push(ch.into());
@@ -93,7 +142,7 @@ pub async fn ca_search(opts: ListenFromFileOpts) -> Result<(), Error> {
             ts_last = ts_now;
             info!("{}", finder.quick_state());
         }
-        let k = tokio::time::timeout(Duration::from_millis(200), finder.next()).await;
+        let k = tokio::time::timeout(Duration::from_millis(1500), finder.next()).await;
         let item = match k {
             Ok(Some(k)) => k,
             Ok(None) => {
@@ -112,24 +161,46 @@ pub async fn ca_search(opts: ListenFromFileOpts) -> Result<(), Error> {
             }
         };
         for item in item {
-            let searchaddr = item.src.to_string();
-            let addr = item.addr.map(|x| x.to_string()).unwrap_or(String::new());
-            let rows = pg_client
-                .query(&qu_select, &[&facility, &item.channel, &searchaddr])
-                .await
-                .unwrap();
-            if rows.is_empty() {
-                pg_client
-                    .execute(&qu_insert, &[&facility, &item.channel, &searchaddr, &addr])
+            let mut do_block = false;
+            for a2 in &gw_addrs {
+                if &item.src == a2 {
+                    do_block = true;
+                    warn!("gateways responded to search");
+                }
+            }
+            if let Some(a1) = item.addr.as_ref() {
+                for a2 in &gw_addrs {
+                    if a1 == a2 {
+                        do_block = true;
+                        warn!("do not use gateways as ioc address");
+                    }
+                }
+            }
+            if do_block {
+                info!("blocking {item:?}");
+            } else {
+                info!("using {item:?}");
+                let srcaddr = item.src.to_string();
+                let addr = item.addr.map(|x| x.to_string()).unwrap_or(String::new());
+                let rows = pg_client
+                    .query(&qu_select, &[&facility, &item.channel, &srcaddr])
                     .await
                     .unwrap();
-            } else {
-                let addr2: &str = rows[0].get(0);
-                if addr2 != addr {
+                if rows.is_empty() {
+                    info!("insert {item:?}");
                     pg_client
-                        .execute(&qu_update, &[&facility, &item.channel, &searchaddr, &addr])
+                        .execute(&qu_insert, &[&facility, &item.channel, &srcaddr, &addr])
                         .await
                         .unwrap();
+                } else {
+                    info!("update {item:?}");
+                    let addr2: &str = rows[0].get(0);
+                    if addr2 != addr {
+                        pg_client
+                            .execute(&qu_update, &[&facility, &item.channel, &srcaddr, &addr])
+                            .await
+                            .unwrap();
+                    }
                 }
             }
         }
