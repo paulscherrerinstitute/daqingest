@@ -723,6 +723,10 @@ impl HeadInfo {
         Ok(hi)
     }
 
+    pub fn cmdid(&self) -> u16 {
+        self.cmdid
+    }
+
     pub fn payload(&self) -> usize {
         self.payload_size as _
     }

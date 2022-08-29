@@ -44,8 +44,9 @@ struct SearchBatch {
 
 #[derive(Debug)]
 pub struct FindIocRes {
-    pub src: SocketAddrV4,
     pub channel: String,
+    pub query_addr: Option<SocketAddrV4>,
+    pub response_addr: Option<SocketAddrV4>,
     pub addr: Option<SocketAddrV4>,
 }
 
@@ -90,7 +91,7 @@ impl FindIocStream {
             bids_timed_out: BTreeMap::new(),
             sids_done: BTreeMap::new(),
             result_for_done_sid_count: 0,
-            in_flight_max: 40,
+            in_flight_max: 20,
             channels_per_batch: 10,
             batch_run_max: Duration::from_millis(2500),
         }
@@ -240,12 +241,6 @@ impl FindIocStream {
             let saddr2: libc::sockaddr_in = std::mem::transmute_copy(&saddr_mem);
             let src_addr = Ipv4Addr::from(saddr2.sin_addr.s_addr.to_ne_bytes());
             let src_port = u16::from_be(saddr2.sin_port);
-            trace!(
-                "received from  src_addr {:?}  src_port {}  ec {}",
-                src_addr,
-                src_port,
-                ec
-            );
             if false {
                 let mut s1 = String::new();
                 for i in 0..(ec as usize) {
@@ -257,10 +252,15 @@ impl FindIocStream {
                     String::from_utf8_lossy(buf[..ec as usize].into())
                 );
             }
-            // TODO handle if we get a too large answer.
+            if ec > 2048 {
+                // TODO handle if we get a too large answer.
+                error!("received packet too large");
+                panic!();
+            }
             let mut nb = crate::netbuf::NetBuf::new(2048);
             nb.put_slice(&buf[..ec as usize])?;
             let mut msgs = vec![];
+            let mut accounted = 0;
             loop {
                 let n = nb.data().len();
                 if n == 0 {
@@ -271,6 +271,11 @@ impl FindIocStream {
                     break;
                 }
                 let hi = HeadInfo::from_netbuf(&mut nb)?;
+                if hi.cmdid() == 0 && hi.payload() == 0 {
+                } else if hi.cmdid() == 6 && hi.payload() == 8 {
+                } else {
+                    info!("cmdid {}  payload {}", hi.cmdid(), hi.payload());
+                }
                 if nb.data().len() < hi.payload() {
                     error!("incomplete message, missing payload");
                     break;
@@ -278,6 +283,13 @@ impl FindIocStream {
                 let msg = CaMsg::from_proto_infos(&hi, nb.data(), 32)?;
                 nb.adv(hi.payload())?;
                 msgs.push(msg);
+                accounted += 16 + hi.payload();
+            }
+            if accounted != ec as usize {
+                info!("unaccounted data  ec {}  accounted {}", ec, accounted);
+            }
+            if msgs.len() != 2 {
+                info!("expect always 2 commands in the response, instead got {}", msgs.len());
             }
             let mut res = vec![];
             for msg in msgs.iter() {
@@ -286,7 +298,10 @@ impl FindIocStream {
                         let addr = SocketAddrV4::new(src_addr, k.tcp_port);
                         res.push((SearchId(k.id), addr));
                     }
-                    _ => {}
+                    CaMsgTy::VersionRes(13) => {}
+                    _ => {
+                        warn!("try_read: unknown message received  {:?}", msg.ty);
+                    }
                 }
             }
             Poll::Ready(Ok((SocketAddrV4::new(src_addr, src_port), res)))
@@ -344,14 +359,17 @@ impl FindIocStream {
                     sids_remove.push(sid.clone());
                     match self.in_flight.get_mut(bid) {
                         Some(batch) => {
+                            // TGT
                             for (i2, s2) in batch.sids.iter().enumerate() {
                                 if s2 == &sid {
                                     match batch.channels.get(i2) {
                                         Some(ch) => {
                                             let res = FindIocRes {
                                                 channel: ch.into(),
+                                                // TODO associate a batch with a specific query address.
+                                                query_addr: None,
+                                                response_addr: Some(src.clone()),
                                                 addr: Some(addr),
-                                                src: src.clone(),
                                             };
                                             self.out_queue.push_back(res);
                                         }
@@ -420,7 +438,8 @@ impl FindIocStream {
         }
         for (sid, ch) in sids.into_iter().zip(chns) {
             let res = FindIocRes {
-                src: SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), 0),
+                query_addr: None,
+                response_addr: None,
                 channel: ch,
                 addr: None,
             };

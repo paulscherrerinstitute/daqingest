@@ -6,6 +6,7 @@ pub mod store;
 
 use self::store::DataStore;
 use crate::ca::conn::ConnCommand;
+use crate::errconv::ErrConv;
 use crate::store::{CommonInsertItemQueue, QueryItem};
 use async_channel::Sender;
 use conn::CaConn;
@@ -46,6 +47,10 @@ struct ChannelConfig {
     backend: String,
     channels: Vec<String>,
     search: Vec<String>,
+    #[serde(default)]
+    search_blacklist: Vec<String>,
+    #[serde(default)]
+    tmp_remove: Vec<String>,
     addr_bind: Option<Ipv4Addr>,
     addr_conn: Option<Ipv4Addr>,
     whitelist: Option<String>,
@@ -92,6 +97,7 @@ pub async fn parse_config(config: PathBuf) -> Result<CaConnectOpts, Error> {
         backend: conf.backend,
         channels: conf.channels,
         search: conf.search,
+        search_blacklist: conf.search_blacklist,
         addr_bind: conf.addr_bind.unwrap_or(Ipv4Addr::new(0, 0, 0, 0)),
         addr_conn: conf.addr_conn.unwrap_or(Ipv4Addr::new(255, 255, 255, 255)),
         timeout: conf.timeout.unwrap_or(2000),
@@ -111,6 +117,7 @@ pub struct CaConnectOpts {
     pub backend: String,
     pub channels: Vec<String>,
     pub search: Vec<String>,
+    pub search_blacklist: Vec<String>,
     pub addr_bind: Ipv4Addr,
     pub addr_conn: Ipv4Addr,
     pub timeout: u64,
@@ -265,8 +272,22 @@ impl CommandQueueSet {
         }
     }
 
-    pub fn queues(&self) -> &tokio::sync::Mutex<BTreeMap<SocketAddrV4, Sender<ConnCommand>>> {
+    pub async fn queues(&self) -> &tokio::sync::Mutex<BTreeMap<SocketAddrV4, Sender<ConnCommand>>> {
         &self.queues
+    }
+
+    pub async fn queues_locked(&self) -> tokio::sync::MutexGuard<BTreeMap<SocketAddrV4, Sender<ConnCommand>>> {
+        let mut g = self.queues.lock().await;
+        let mut rm = Vec::new();
+        for (k, v) in g.iter() {
+            if v.is_closed() {
+                rm.push(*k);
+            }
+        }
+        for x in rm {
+            g.remove(&x);
+        }
+        g
     }
 }
 
@@ -297,29 +318,32 @@ pub async fn find_channel_addr(
     tokio::spawn(pg_conn);
     let pg_client = Arc::new(pg_client);
     let qu_find_addr = pg_client
-        .prepare("with q1 as (select t1.facility, t1.channel, t1.addr from ioc_by_channel t1 where t1.facility = $1 and t1.channel in ($2) and t1.addr != '' order by t1.tsmod desc) select distinct on (q1.facility, q1.channel) q1.facility, q1.channel, q1.addr from q1")
+        .prepare(
+            "select t1.facility, t1.channel, t1.addr from ioc_by_channel t1 where t1.facility = $1 and t1.channel = $2",
+        )
         .await
-        .map_err(|e| Error::with_msg_no_trace(format!("{e:?}")))?;
-    let rows = pg_client
-        .query(&qu_find_addr, &[&backend, &name])
-        .await
-        .map_err(|e| Error::with_msg_no_trace(format!("pg lookup error: {e:?}")))?;
+        .err_conv()?;
+    let rows = pg_client.query(&qu_find_addr, &[&backend, &name]).await.err_conv()?;
     if rows.is_empty() {
         error!("can not find any addresses of channels {:?}", name);
+        Err(Error::with_msg_no_trace(format!("no address for channel {}", name)))
     } else {
         for row in rows {
             let addr: &str = row.get(2);
             if addr == "" {
-                return Ok(None);
+                return Err(Error::with_msg_no_trace(format!("no address for channel {}", name)));
             } else {
                 match addr.parse::<SocketAddrV4>() {
                     Ok(addr) => return Ok(Some(addr)),
-                    Err(_) => return Ok(None),
+                    Err(e) => {
+                        error!("can not parse  {e:?}");
+                        return Err(Error::with_msg_no_trace(format!("no address for channel {}", name)));
+                    }
                 }
             }
         }
+        Ok(None)
     }
-    Ok(None)
 }
 
 pub async fn create_ca_conn(
@@ -348,7 +372,8 @@ pub async fn create_ca_conn(
     let stats2 = conn.stats();
     let conn_command_tx = conn.conn_command_tx();
     {
-        command_queue_set.queues().lock().await.insert(addr, conn_command_tx);
+        //command_queue_set.queues().lock().await.insert(addr, conn_command_tx);
+        command_queue_set.queues_locked().await.insert(addr, conn_command_tx);
     }
     let conn_block = async move {
         let mut conn = conn;
@@ -409,6 +434,22 @@ pub async fn ca_connect(opts: ListenFromFileOpts) -> Result<(), Error> {
         .prepare("with q1 as (select t1.facility, t1.channel, t1.addr from ioc_by_channel t1 where t1.facility = $1 and t1.channel in ($2, $3, $4, $5, $6, $7, $8, $9) and t1.addr != '' order by t1.tsmod desc) select distinct on (q1.facility, q1.channel) q1.facility, q1.channel, q1.addr from q1")
         .await
         .map_err(|e| Error::with_msg_no_trace(format!("{e:?}")))?;
+
+    // Fetch all addresses for all channels.
+    let rows = pg_client
+        .query("select channel, addr from ioc_by_channel", &[])
+        .await
+        .err_conv()?;
+    let mut phonebook = BTreeMap::new();
+    for row in rows {
+        let channel: String = row.get(0);
+        let addr: String = row.get(1);
+        let addr: SocketAddrV4 = addr
+            .parse()
+            .map_err(|_| Error::with_msg_no_trace(format!("can not parse address {addr}")))?;
+        phonebook.insert(channel, addr);
+    }
+
     let mut channels_by_host = BTreeMap::new();
 
     let data_store = Arc::new(DataStore::new(pg_client.clone(), scy.clone()).await?);
@@ -481,30 +522,28 @@ pub async fn ca_connect(opts: ListenFromFileOpts) -> Result<(), Error> {
     let mut chstmp = ["__NONE__"; 8];
     let mut ix = 0;
     while chns_todo.len() > 0 {
-        for (s1, s2) in chns_todo.iter().zip(chstmp.iter_mut()) {
-            *s2 = s1;
-        }
-        chns_todo = &chns_todo[chstmp.len().min(chns_todo.len())..];
-        let rows = pg_client
-            .query(
-                &qu_find_addr,
-                &[
-                    &opts.backend,
-                    &chstmp[0],
-                    &chstmp[1],
-                    &chstmp[2],
-                    &chstmp[3],
-                    &chstmp[4],
-                    &chstmp[5],
-                    &chstmp[6],
-                    &chstmp[7],
-                ],
-            )
-            .await
-            .map_err(|e| Error::with_msg_no_trace(format!("pg lookup error: {e:?}")))?;
-        if rows.is_empty() {
-            error!("can not find any addresses of channels {:?}", chstmp);
-        } else {
+        if false {
+            for (s1, s2) in chns_todo.iter().zip(chstmp.iter_mut()) {
+                *s2 = s1;
+            }
+            chns_todo = &chns_todo[chstmp.len().min(chns_todo.len())..];
+            let rows = pg_client
+                .query(
+                    &qu_find_addr,
+                    &[
+                        &opts.backend,
+                        &chstmp[0],
+                        &chstmp[1],
+                        &chstmp[2],
+                        &chstmp[3],
+                        &chstmp[4],
+                        &chstmp[5],
+                        &chstmp[6],
+                        &chstmp[7],
+                    ],
+                )
+                .await
+                .map_err(|e| Error::with_msg_no_trace(format!("pg lookup error: {e:?}")))?;
             for row in rows {
                 let ch: &str = row.get(1);
                 let addr: &str = row.get(2);
@@ -521,75 +560,83 @@ pub async fn ca_connect(opts: ListenFromFileOpts) -> Result<(), Error> {
                             continue;
                         }
                     };
-                    ix += 1;
-                    if ix % 1000 == 0 {
-                        info!("{} of {}   {}  {:?}", ix, opts.channels.len(), ch, addr);
-                    }
-                    if !channels_by_host.contains_key(&addr) {
-                        channels_by_host.insert(addr, vec![ch.to_string()]);
+                    let _ = addr;
+                }
+            }
+        }
+        if let Some(ch) = chns_todo.first() {
+            let ch = ch.clone();
+            chns_todo = &chns_todo[1..];
+            if let Some(addr) = phonebook.get(&ch) {
+                if !channels_by_host.contains_key(&addr) {
+                    channels_by_host.insert(addr, vec![ch.to_string()]);
+                } else {
+                    channels_by_host.get_mut(&addr).unwrap().push(ch.to_string());
+                }
+                let create_new = {
+                    let g = command_queue_set.queues_locked().await;
+                    if let Some(tx) = g.get(&addr) {
+                        let (cmd, rx) = ConnCommand::channel_add(ch.to_string());
+                        tx.send(cmd).await.unwrap();
+                        if !rx.recv().await.unwrap() {
+                            error!("Could not add channel: {}", ch);
+                        }
+                        false
                     } else {
-                        channels_by_host.get_mut(&addr).unwrap().push(ch.to_string());
+                        true
                     }
+                };
+                if create_new {
+                    info!("create new CaConn  {:?}  {:?}", addr, ch);
+                    let data_store = data_store.clone();
+                    let conn = CaConn::new(
+                        addr.clone(),
+                        opts.local_epics_hostname.clone(),
+                        data_store.clone(),
+                        insert_item_queue.sender(),
+                        opts.array_truncate,
+                        opts.insert_queue_max,
+                        insert_ivl_min.clone(),
+                    );
+                    conn_stats.lock().await.push(conn.stats());
+                    let stats2 = conn.stats();
+                    let conn_command_tx = conn.conn_command_tx();
+                    let tx = conn_command_tx.clone();
                     {
-                        let create_new = {
-                            let g = command_queue_set.queues().lock().await;
-                            if let Some(tx) = g.get(&addr) {
-                                let (cmd, rx) = ConnCommand::channel_add(ch.to_string());
-                                tx.send(cmd).await.unwrap();
-                                if !rx.recv().await.unwrap() {
-                                    error!("Could not add channel: {}", ch);
+                        command_queue_set
+                            .queues_locked()
+                            .await
+                            .insert(addr.clone(), conn_command_tx);
+                    }
+                    let conn_block = async move {
+                        let mut conn = conn;
+                        while let Some(item) = conn.next().await {
+                            match item {
+                                Ok(_) => {
+                                    stats2.conn_item_count_inc();
                                 }
-                                false
-                            } else {
-                                true
-                            }
-                        };
-                        if create_new {
-                            info!("create new CaConn  {:?}  {:?}", addr, ch);
-                            let data_store = data_store.clone();
-                            let conn = CaConn::new(
-                                addr,
-                                opts.local_epics_hostname.clone(),
-                                data_store.clone(),
-                                insert_item_queue.sender(),
-                                opts.array_truncate,
-                                opts.insert_queue_max,
-                                insert_ivl_min.clone(),
-                            );
-                            conn_stats.lock().await.push(conn.stats());
-                            let stats2 = conn.stats();
-                            let conn_command_tx = conn.conn_command_tx();
-                            let tx = conn_command_tx.clone();
-                            {
-                                command_queue_set.queues().lock().await.insert(addr, conn_command_tx);
-                            }
-                            let conn_block = async move {
-                                let mut conn = conn;
-                                while let Some(item) = conn.next().await {
-                                    match item {
-                                        Ok(_) => {
-                                            stats2.conn_item_count_inc();
-                                        }
-                                        Err(e) => {
-                                            error!("CaConn gives error: {e:?}");
-                                            break;
-                                        }
-                                    }
-                                }
-                                Ok::<_, Error>(())
-                            };
-                            let jh = tokio::spawn(conn_block);
-                            conn_jhs.push(jh);
-                            {
-                                let (cmd, rx) = ConnCommand::channel_add(ch.to_string());
-                                tx.send(cmd).await.unwrap();
-                                if !rx.recv().await.unwrap() {
-                                    error!("Could not add channel: {}", ch);
+                                Err(e) => {
+                                    error!("CaConn gives error: {e:?}");
+                                    break;
                                 }
                             }
                         }
+                        Ok::<_, Error>(())
+                    };
+                    let jh = tokio::spawn(conn_block);
+                    conn_jhs.push(jh);
+                    {
+                        let (cmd, rx) = ConnCommand::channel_add(ch.to_string());
+                        tx.send(cmd).await.unwrap();
+                        if !rx.recv().await.unwrap() {
+                            error!("Could not add channel: {}", ch);
+                        }
                     }
                 }
+            }
+            ix += 1;
+            if ix % 1000 == 0 {
+                info!("{} of {}   {}", ix, opts.channels.len(), ch);
             }
         }
     }

@@ -74,24 +74,16 @@ pub async fn ca_search(opts: ListenFromFileOpts) -> Result<(), Error> {
     // TODO join pg_conn in the end:
     tokio::spawn(pg_conn);
     let pg_client = Arc::new(pg_client);
-    let qu_select = pg_client
-        .prepare("select addr from ioc_by_channel where facility = $1 and channel = $2 and searchaddr = $3")
-        .await
-        .unwrap();
     let qu_insert = {
         const TEXT: tokio_postgres::types::Type = tokio_postgres::types::Type::TEXT;
         pg_client
             .prepare_typed(
-                "insert into ioc_by_channel (facility, channel, searchaddr, addr) values ($1, $2, $3, $4) on conflict do nothing",
-                &[TEXT, TEXT, TEXT, TEXT],
+                "insert into ioc_by_channel_log (facility, channel, queryaddr, responseaddr, addr) values ($1, $2, $3, $4, $5)",
+                &[TEXT, TEXT, TEXT, TEXT, TEXT],
             )
             .await
             .unwrap()
     };
-    let qu_update = pg_client
-        .prepare("update ioc_by_channel set addr = $4, tsmod = now(), modcount = modcount + 1 where facility = $1 and channel = $2 and searchaddr = $3")
-        .await
-        .unwrap();
     let mut addrs = vec![];
     for s in &opts.search {
         match resolve_address(s).await {
@@ -105,19 +97,8 @@ pub async fn ca_search(opts: ListenFromFileOpts) -> Result<(), Error> {
         }
     }
     let gw_addrs = {
-        // Try to blacklist..
-        // TODO if it helps, add a config option for it.
-        let gateways = [
-            "sf-cagw",
-            "saresa-cagw",
-            "saresb-cagw",
-            "saresc-cagw",
-            "satesd-cagw",
-            "satese-cagw",
-            "satesf-cagw",
-        ];
         let mut gw_addrs = vec![];
-        for s in gateways {
+        for s in &opts.search_blacklist {
             match resolve_address(s).await {
                 Ok(addr) => {
                     info!("resolved {s} as {addr}");
@@ -163,9 +144,11 @@ pub async fn ca_search(opts: ListenFromFileOpts) -> Result<(), Error> {
         for item in item {
             let mut do_block = false;
             for a2 in &gw_addrs {
-                if &item.src == a2 {
-                    do_block = true;
-                    warn!("gateways responded to search");
+                if let Some(response_addr) = &item.response_addr {
+                    if response_addr == a2 {
+                        do_block = true;
+                        warn!("gateways responded to search");
+                    }
                 }
             }
             if let Some(a1) = item.addr.as_ref() {
@@ -177,31 +160,41 @@ pub async fn ca_search(opts: ListenFromFileOpts) -> Result<(), Error> {
                 }
             }
             if do_block {
-                info!("blocking {item:?}");
+                info!("blacklisting {item:?}");
             } else {
-                info!("using {item:?}");
+                /*
                 let srcaddr = item.src.to_string();
                 let addr = item.addr.map(|x| x.to_string()).unwrap_or(String::new());
                 let rows = pg_client
                     .query(&qu_select, &[&facility, &item.channel, &srcaddr])
                     .await
                     .unwrap();
-                if rows.is_empty() {
-                    info!("insert {item:?}");
+                if true || rows.is_empty() {
+                    //info!("insert {item:?}");
                     pg_client
                         .execute(&qu_insert, &[&facility, &item.channel, &srcaddr, &addr])
                         .await
                         .unwrap();
                 } else {
-                    info!("update {item:?}");
+                    //info!("update {item:?}");
                     let addr2: &str = rows[0].get(0);
-                    if addr2 != addr {
-                        pg_client
-                            .execute(&qu_update, &[&facility, &item.channel, &srcaddr, &addr])
-                            .await
-                            .unwrap();
-                    }
+                    if addr2 != addr {}
+                    pg_client
+                        .execute(&qu_update, &[&facility, &item.channel, &srcaddr, &addr])
+                        .await
+                        .unwrap();
                 }
+                */
+                let queryaddr = item.query_addr.map(|x| x.to_string());
+                let responseaddr = item.response_addr.map(|x| x.to_string());
+                let addr = item.addr.map(|x| x.to_string());
+                pg_client
+                    .execute(
+                        &qu_insert,
+                        &[&facility, &item.channel, &queryaddr, &responseaddr, &addr],
+                    )
+                    .await
+                    .unwrap();
             }
         }
     }

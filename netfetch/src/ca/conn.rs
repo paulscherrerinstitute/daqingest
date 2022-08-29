@@ -852,12 +852,12 @@ impl CaConn {
                 },
                 Err(e) => {
                     error!("got error item from CaProto {e:?}");
-                    Ready(Some(Ok(())))
+                    Ready(Some(Err(e)))
                 }
             },
             Ready(None) => {
-                warn!("CaProto is done  {:?}", self.remote_addr_dbg);
-                self.state = CaConnState::Wait(wait_fut(10000));
+                warn!("handle_conn_listen CaProto is done  {:?}", self.remote_addr_dbg);
+                self.state = CaConnState::Wait(wait_fut(self.backoff_next()));
                 self.proto = None;
                 Ready(None)
             }
@@ -1014,8 +1014,8 @@ impl CaConn {
                 Ready(Some(Err(e)))
             }
             Ready(None) => {
-                warn!("CaProto is done");
-                self.state = CaConnState::Wait(wait_fut(10000));
+                warn!("handle_peer_ready CaProto is done  {:?}", self.remote_addr_dbg);
+                self.state = CaConnState::Wait(wait_fut(self.backoff_next()));
                 self.proto = None;
                 Ready(None)
             }
@@ -1028,6 +1028,8 @@ impl CaConn {
         }
         res
     }
+
+    //fn loop_inner(&mut self, cx: &mut Context)
 }
 
 impl Stream for CaConn {
@@ -1160,6 +1162,7 @@ impl Stream for CaConn {
                     },
                     CaConnState::PeerReady => {
                         {
+                            // TODO can I move this block somewhere else?
                             let _ = self.handle_get_series_futs(cx)?;
                             let ts2 = Instant::now();
                             self.stats
@@ -1180,10 +1183,7 @@ impl Stream for CaConn {
                                 }
                             }
                             Ready(Some(Err(e))) => Ready(Some(Err(e))),
-                            Ready(None) => {
-                                // TODO even though protocol is done, we might still have e.g. insert items to flush!
-                                Ready(None)
-                            }
+                            Ready(None) => continue 'outer,
                             Pending => Pending,
                         }
                     }

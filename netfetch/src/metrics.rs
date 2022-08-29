@@ -37,7 +37,7 @@ async fn find_channel(
     ingest_commons: Arc<IngestCommons>,
 ) -> axum::Json<Vec<(String, Vec<String>)>> {
     let pattern = params.get("pattern").map_or(String::new(), |x| x.clone()).to_string();
-    let g = ingest_commons.command_queue_set.queues().lock().await;
+    let g = ingest_commons.command_queue_set.queues_locked().await;
     let mut it = g.iter();
     let rxs = send_command(&mut it, || ConnCommand::find_channel(pattern.clone())).await;
     let mut res = Vec::new();
@@ -58,8 +58,7 @@ async fn channel_add(params: HashMap<String, String>, ingest_commons: Arc<Ingest
             Ok(Some(addr)) => {
                 if ingest_commons
                     .command_queue_set
-                    .queues()
-                    .lock()
+                    .queues_locked()
                     .await
                     .contains_key(&addr)
                 {
@@ -85,7 +84,7 @@ async fn channel_add(params: HashMap<String, String>, ingest_commons: Arc<Ingest
                         }
                     }
                 }
-                if let Some(tx) = ingest_commons.command_queue_set.queues().lock().await.get(&addr) {
+                if let Some(tx) = ingest_commons.command_queue_set.queues_locked().await.get(&addr) {
                     let (cmd, rx) = ConnCommand::channel_add(name.into());
                     if let Err(_) = tx.send(cmd).await {
                         error!("can not send command");
@@ -142,7 +141,7 @@ async fn channel_remove(
     } else {
         return Json(Value::Bool(false));
     };
-    if let Some(tx) = ingest_commons.command_queue_set.queues().lock().await.get(&addr) {
+    if let Some(tx) = ingest_commons.command_queue_set.queues_locked().await.get(&addr) {
         // TODO any need to check the backend here?
         let _ = backend;
         let (cmd, rx) = ConnCommand::channel_remove(name.into());
@@ -162,7 +161,7 @@ async fn channel_remove(
 
 async fn channel_state(params: HashMap<String, String>, ingest_commons: Arc<IngestCommons>) -> String {
     let name = params.get("name").map_or(String::new(), |x| x.clone()).to_string();
-    let g = ingest_commons.command_queue_set.queues().lock().await;
+    let g = ingest_commons.command_queue_set.queues_locked().await;
     let mut rxs = Vec::new();
     for (_, tx) in g.iter() {
         let (cmd, rx) = ConnCommand::channel_state(name.clone());
@@ -190,7 +189,7 @@ async fn channel_states(
     _params: HashMap<String, String>,
     ingest_commons: Arc<IngestCommons>,
 ) -> axum::Json<Vec<crate::ca::conn::ChannelStateInfo>> {
-    let g = ingest_commons.command_queue_set.queues().lock().await;
+    let g = ingest_commons.command_queue_set.queues_locked().await;
     let mut rxs = Vec::new();
     for (_, tx) in g.iter() {
         let (cmd, rx) = ConnCommand::channel_states_all();
