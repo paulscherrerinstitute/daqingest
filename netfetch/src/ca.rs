@@ -11,16 +11,20 @@ use crate::store::{CommonInsertItemQueue, QueryItem};
 use async_channel::Sender;
 use conn::CaConn;
 use err::Error;
-use futures_util::StreamExt;
+use futures_util::future::Fuse;
+use futures_util::stream::FuturesUnordered;
+use futures_util::{FutureExt, StreamExt};
 use log::*;
 use netpod::{Database, ScyllaConfig};
 use scylla::batch::Consistency;
 use serde::{Deserialize, Serialize};
 use stats::{CaConnStats, CaConnStatsAgg, CaConnStatsAggDiff};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
+use std::ffi::CStr;
+use std::mem::MaybeUninit;
 use std::net::{Ipv4Addr, SocketAddrV4};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Once};
 use std::time::Duration;
 use tokio::fs::OpenOptions;
@@ -140,8 +144,9 @@ async fn spawn_scylla_insert_workers(
     insert_frac: Arc<AtomicU64>,
     pg_client: Arc<PgClient>,
     store_stats: Arc<stats::CaConnStats>,
-) -> Result<(), Error> {
-    let mut data_stores = vec![];
+) -> Result<Vec<JoinHandle<()>>, Error> {
+    let mut jhs = Vec::new();
+    let mut data_stores = Vec::new();
     for _ in 0..insert_scylla_sessions {
         let scy = scylla::SessionBuilder::new()
             .known_nodes(&scyconf.hosts)
@@ -181,8 +186,23 @@ async fn spawn_scylla_insert_workers(
                             }
                         }
                     }
-                    QueryItem::ChannelStatus(_item) => {
-                        // TODO
+                    QueryItem::ChannelStatus(item) => {
+                        match crate::store::insert_channel_status(item, &data_store, &stats).await {
+                            Ok(_) => {
+                                stats.store_worker_item_insert_inc();
+                            }
+                            Err(e) => {
+                                stats.store_worker_item_error_inc();
+                                // TODO introduce more structured error variants.
+                                if e.msg().contains("WriteTimeout") {
+                                    tokio::time::sleep(Duration::from_millis(100)).await;
+                                } else {
+                                    // TODO back off but continue.
+                                    error!("insert worker sees error: {e:?}");
+                                    break;
+                                }
+                            }
+                        }
                     }
                     QueryItem::Insert(item) => {
                         stats.store_worker_item_recv_inc();
@@ -211,8 +231,8 @@ async fn spawn_scylla_insert_workers(
                     }
                     QueryItem::Mute(item) => {
                         let values = (
-                            (item.series & 0xff) as i32,
-                            item.series as i64,
+                            (item.series.id() & 0xff) as i32,
+                            item.series.id() as i64,
                             item.ts as i64,
                             item.ema,
                             item.emd,
@@ -233,8 +253,8 @@ async fn spawn_scylla_insert_workers(
                     }
                     QueryItem::Ivl(item) => {
                         let values = (
-                            (item.series & 0xff) as i32,
-                            item.series as i64,
+                            (item.series.id() & 0xff) as i32,
+                            item.series.id() as i64,
                             item.ts as i64,
                             item.ema,
                             item.emd,
@@ -255,10 +275,12 @@ async fn spawn_scylla_insert_workers(
                     }
                 }
             }
+            info!("insert worker has no more messages");
         };
-        tokio::spawn(fut);
+        let jh = tokio::spawn(fut);
+        jhs.push(jh);
     }
-    Ok(())
+    Ok(jhs)
 }
 
 pub struct CommandQueueSet {
@@ -394,7 +416,56 @@ pub async fn create_ca_conn(
     Ok(jh)
 }
 
+pub static SIGINT: AtomicU32 = AtomicU32::new(0);
+
+fn handler_sigaction(_a: libc::c_int, _b: *const libc::siginfo_t, _c: *const libc::c_void) {
+    SIGINT.store(1, Ordering::Release);
+    let _ = unset_signal_handler();
+}
+
+fn set_signal_handler() -> Result<(), Error> {
+    let mask: libc::sigset_t = unsafe { MaybeUninit::zeroed().assume_init() };
+    let handler: libc::sighandler_t = handler_sigaction as *const libc::c_void as _;
+    let act = libc::sigaction {
+        sa_sigaction: handler,
+        sa_mask: mask,
+        sa_flags: 0,
+        sa_restorer: None,
+    };
+    unsafe {
+        let ec = libc::sigaction(libc::SIGINT, &act, std::ptr::null_mut());
+        if ec != 0 {
+            let errno = *libc::__errno_location();
+            let msg = CStr::from_ptr(libc::strerror(errno));
+            error!("error: {:?}", msg);
+            return Err(Error::with_msg_no_trace(format!("can not set signal handler")));
+        }
+    }
+    Ok(())
+}
+
+fn unset_signal_handler() -> Result<(), Error> {
+    let mask: libc::sigset_t = unsafe { MaybeUninit::zeroed().assume_init() };
+    let act = libc::sigaction {
+        sa_sigaction: libc::SIG_DFL,
+        sa_mask: mask,
+        sa_flags: 0,
+        sa_restorer: None,
+    };
+    unsafe {
+        let ec = libc::sigaction(libc::SIGINT, &act, std::ptr::null_mut());
+        if ec != 0 {
+            let errno = *libc::__errno_location();
+            let msg = CStr::from_ptr(libc::strerror(errno));
+            error!("error: {:?}", msg);
+            return Err(Error::with_msg_no_trace(format!("can not set signal handler")));
+        }
+    }
+    Ok(())
+}
+
 pub async fn ca_connect(opts: ListenFromFileOpts) -> Result<(), Error> {
+    set_signal_handler()?;
     let insert_frac = Arc::new(AtomicU64::new(1000));
     let insert_ivl_min = Arc::new(AtomicU64::new(8800));
     let opts = parse_config(opts.config).await?;
@@ -457,7 +528,7 @@ pub async fn ca_connect(opts: ListenFromFileOpts) -> Result<(), Error> {
     let insert_item_queue = Arc::new(insert_item_queue);
     // TODO use a new stats struct
     let store_stats = Arc::new(CaConnStats::new());
-    spawn_scylla_insert_workers(
+    let jh_insert_workers = spawn_scylla_insert_workers(
         opts.scyconf.clone(),
         opts.insert_scylla_sessions,
         opts.insert_worker_count,
@@ -483,12 +554,14 @@ pub async fn ca_connect(opts: ListenFromFileOpts) -> Result<(), Error> {
     };
     let ingest_commons = Arc::new(ingest_commons);
 
-    tokio::spawn(crate::metrics::start_metrics_service(
-        opts.api_bind.clone(),
-        insert_frac.clone(),
-        insert_ivl_min.clone(),
-        ingest_commons.clone(),
-    ));
+    if true {
+        tokio::spawn(crate::metrics::start_metrics_service(
+            opts.api_bind.clone(),
+            insert_frac.clone(),
+            insert_ivl_min.clone(),
+            ingest_commons.clone(),
+        ));
+    }
 
     let metrics_agg_fut = {
         let conn_stats = conn_stats.clone();
@@ -521,7 +594,7 @@ pub async fn ca_connect(opts: ListenFromFileOpts) -> Result<(), Error> {
     let mut chns_todo = &opts.channels[..];
     let mut chstmp = ["__NONE__"; 8];
     let mut ix = 0;
-    while chns_todo.len() > 0 {
+    while chns_todo.len() > 0 && SIGINT.load(Ordering::Acquire) == 0 {
         if false {
             for (s1, s2) in chns_todo.iter().zip(chstmp.iter_mut()) {
                 *s2 = s1;
@@ -551,10 +624,7 @@ pub async fn ca_connect(opts: ListenFromFileOpts) -> Result<(), Error> {
                     // TODO the address was searched before but could not be found.
                 } else {
                     let addr: SocketAddrV4 = match addr.parse() {
-                        Ok(k) => {
-                            local_stats.ioc_lookup_inc();
-                            k
-                        }
+                        Ok(k) => k,
                         Err(e) => {
                             error!("can not parse {addr:?} for channel {ch:?}  {e:?}");
                             continue;
@@ -642,19 +712,77 @@ pub async fn ca_connect(opts: ListenFromFileOpts) -> Result<(), Error> {
     }
     info!("channels_by_host len {}", channels_by_host.len());
 
-    for jh in conn_jhs {
-        match jh.await {
-            Ok(k) => match k {
-                Ok(_) => {}
+    let mut conn_jhs: VecDeque<Fuse<JoinHandle<Result<(), Error>>>> =
+        conn_jhs.into_iter().map(|jh| jh.fuse()).collect();
+    let mut sent_stop_commands = false;
+    loop {
+        if SIGINT.load(Ordering::Acquire) != 0 {
+            let receiver = insert_item_queue.receiver();
+            info!(
+                "item queue AGAIN  senders {}  receivers {}",
+                receiver.sender_count(),
+                receiver.receiver_count()
+            );
+            info!("Stopping");
+            if !sent_stop_commands {
+                sent_stop_commands = true;
+                info!("sending stop command");
+                let queues = command_queue_set.queues_locked().await;
+                for q in queues.iter() {
+                    let (cmd, _rx) = ConnCommand::shutdown();
+                    let _ = q.1.send(cmd).await;
+                }
+            }
+        }
+        let mut jh = if let Some(x) = conn_jhs.pop_front() {
+            x
+        } else {
+            break;
+        };
+        futures_util::select! {
+            a = jh => match a {
+                Ok(k) => match k {
+                    Ok(_) => {
+                        info!("joined");
+                    }
+                    Err(e) => {
+                        error!("{e:?}");
+                    }
+                },
                 Err(e) => {
                     error!("{e:?}");
                 }
             },
+            _b = tokio::time::sleep(Duration::from_millis(1000)).fuse() => {
+                conn_jhs.push_back(jh);
+            }
+        };
+    }
+    info!("all connections done.");
+
+    drop(ingest_commons);
+    metrics_agg_jh.abort();
+    drop(metrics_agg_jh);
+
+    let receiver = insert_item_queue.receiver();
+    drop(insert_item_queue);
+    info!(
+        "item queue AGAIN  senders {}  receivers {}",
+        receiver.sender_count(),
+        receiver.receiver_count()
+    );
+
+    let mut futs = FuturesUnordered::from_iter(jh_insert_workers);
+    while let Some(x) = futs.next().await {
+        match x {
+            Ok(_) => {
+                info!("insert worker done");
+            }
             Err(e) => {
-                error!("{e:?}");
+                error!("error on shutdown: {e:?}");
             }
         }
     }
-    metrics_agg_jh.await.unwrap();
+    info!("all insert workers done.");
     Ok(())
 }

@@ -29,6 +29,13 @@ pub struct SearchRes {
 }
 
 #[derive(Debug)]
+pub struct ErrorCmd {
+    pub cid: u32,
+    pub eid: u32,
+    pub msg: String,
+}
+
+#[derive(Debug)]
 pub struct ClientNameRes {
     pub name: String,
 }
@@ -183,6 +190,7 @@ pub struct CaEventValue {
 pub enum CaMsgTy {
     Version,
     VersionRes(u16),
+    Error(ErrorCmd),
     ClientName,
     ClientNameRes(ClientNameRes),
     HostName(String),
@@ -204,6 +212,7 @@ impl CaMsgTy {
         match self {
             Version => 0,
             VersionRes(_) => 0,
+            Error(_) => 0x0b,
             ClientName => 0x14,
             ClientNameRes(_) => 0x14,
             HostName(_) => 0x15,
@@ -229,6 +238,7 @@ impl CaMsgTy {
         match self {
             Version => 0,
             VersionRes(_) => 0,
+            Error(x) => (16 + x.msg.len() + 1 + 7) / 8 * 8,
             ClientName => 0x10,
             ClientNameRes(x) => (x.name.len() + 1 + 7) / 8 * 8,
             HostName(_) => 0x18,
@@ -256,6 +266,7 @@ impl CaMsgTy {
         match self {
             Version => 0,
             VersionRes(n) => *n,
+            Error(_) => 0,
             ClientName => 0,
             ClientNameRes(_) => 0,
             HostName(_) => 0,
@@ -280,6 +291,7 @@ impl CaMsgTy {
         match self {
             Version => CA_PROTO_VERSION,
             VersionRes(_) => 0,
+            Error(_) => 0,
             ClientName => 0,
             ClientNameRes(_) => 0,
             HostName(_) => 0,
@@ -301,6 +313,7 @@ impl CaMsgTy {
         match self {
             Version => 0,
             VersionRes(_) => 0,
+            Error(_) => 0,
             ClientName => 0,
             ClientNameRes(_) => 0,
             HostName(_) => 0,
@@ -322,6 +335,7 @@ impl CaMsgTy {
         match self {
             Version => 0,
             VersionRes(_) => 0,
+            Error(_) => 0,
             ClientName => 0,
             ClientNameRes(_) => 0,
             HostName(_) => 0,
@@ -343,6 +357,8 @@ impl CaMsgTy {
         match self {
             Version => {}
             VersionRes(_) => {}
+            // Specs: error cmd only from server to client.
+            Error(_) => todo!(),
             ClientName => {
                 // TODO allow variable client name.
                 let s = "daqingest".as_bytes();
@@ -519,9 +535,23 @@ impl CaMsg {
 
     pub fn from_proto_infos(hi: &HeadInfo, payload: &[u8], array_truncate: usize) -> Result<Self, Error> {
         let msg = match hi.cmdid {
-            0 => CaMsg {
+            0x00 => CaMsg {
                 ty: CaMsgTy::VersionRes(hi.data_count),
             },
+            0x0b => {
+                let mut s = String::new();
+                s.extend(format!("{:?}", &payload[..payload.len().min(16)]).chars());
+                if payload.len() >= 17 {
+                    s.extend("  msg: ".chars());
+                    s.extend(String::from_utf8_lossy(&payload[17..payload.len() - 1]).chars());
+                }
+                let e = ErrorCmd {
+                    cid: hi.param1,
+                    eid: hi.param2,
+                    msg: s,
+                };
+                CaMsg { ty: CaMsgTy::Error(e) }
+            }
             20 => {
                 let name = std::ffi::CString::new(payload)
                     .map(|s| s.into_string().unwrap_or_else(|e| format!("{e:?}")))

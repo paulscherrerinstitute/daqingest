@@ -1,6 +1,7 @@
 use crate::ca::proto::{CaDataArrayValue, CaDataScalarValue, CaDataValue};
 use crate::ca::store::DataStore;
 use crate::errconv::ErrConv;
+use crate::series::SeriesId;
 use err::Error;
 use futures_util::{Future, FutureExt};
 use log::*;
@@ -102,21 +103,32 @@ pub struct ConnectionStatusItem {
 
 #[derive(Debug)]
 pub enum ChannelStatus {
-    Opened = 1,
-    Closed = 2,
-    ClosedUnexpected = 3,
+    Opened,
+    Closed,
+    ClosedUnexpected,
+}
+
+impl ChannelStatus {
+    pub fn kind(&self) -> u32 {
+        use ChannelStatus::*;
+        match self {
+            Opened => 1,
+            Closed => 2,
+            ClosedUnexpected => 3,
+        }
+    }
 }
 
 #[derive(Debug)]
 pub struct ChannelStatusItem {
     pub ts: SystemTime,
-    pub series: u64,
+    pub series: SeriesId,
     pub status: ChannelStatus,
 }
 
 #[derive(Debug)]
 pub struct InsertItem {
-    pub series: u64,
+    pub series: SeriesId,
     pub ts_msp: u64,
     pub ts_lsp: u64,
     pub msp_bump: bool,
@@ -129,7 +141,7 @@ pub struct InsertItem {
 
 #[derive(Debug)]
 pub struct MuteItem {
-    pub series: u64,
+    pub series: SeriesId,
     pub ts: u64,
     pub ema: f32,
     pub emd: f32,
@@ -137,7 +149,7 @@ pub struct MuteItem {
 
 #[derive(Debug)]
 pub struct IvlItem {
-    pub series: u64,
+    pub series: SeriesId,
     pub ts: u64,
     pub ema: f32,
     pub emd: f32,
@@ -191,6 +203,18 @@ impl CommonInsertItemQueue {
     pub fn receiver(&self) -> async_channel::Receiver<QueryItem> {
         self.recv.clone()
     }
+
+    pub fn sender_count(&self) -> usize {
+        self.sender.sender_count()
+    }
+
+    pub fn sender_count2(&self) -> usize {
+        self.recv.sender_count()
+    }
+
+    pub fn receiver_count(&self) -> usize {
+        self.recv.receiver_count()
+    }
 }
 
 struct InsParCom {
@@ -242,7 +266,7 @@ where
 
 pub async fn insert_item(item: InsertItem, data_store: &DataStore, stats: &CaConnStats) -> Result<(), Error> {
     if item.msp_bump {
-        let params = (item.series as i64, item.ts_msp as i64);
+        let params = (item.series.id() as i64, item.ts_msp as i64);
         data_store
             .scy
             .execute(&data_store.qu_insert_ts_msp, params)
@@ -252,11 +276,11 @@ pub async fn insert_item(item: InsertItem, data_store: &DataStore, stats: &CaCon
     }
     if let Some(ts_msp_grid) = item.ts_msp_grid {
         let params = (
-            (item.series as i32) & 0xff,
+            (item.series.id() as i32) & 0xff,
             ts_msp_grid as i32,
             if item.shape.to_scylla_vec().is_empty() { 0 } else { 1 } as i32,
             item.scalar_type.to_scylla_i32(),
-            item.series as i64,
+            item.series.id() as i64,
         );
         data_store
             .scy
@@ -266,7 +290,7 @@ pub async fn insert_item(item: InsertItem, data_store: &DataStore, stats: &CaCon
         stats.inserts_msp_grid_inc()
     }
     let par = InsParCom {
-        series: item.series,
+        series: item.series.id(),
         ts_msp: item.ts_msp,
         ts_lsp: item.ts_lsp,
         pulse: item.pulse,
@@ -319,6 +343,32 @@ pub async fn insert_connection_status(
         .scy
         .query(
             "insert into connection_status (ts_msp, ts_lsp, kind, addr) values (?, ?, ?, ?)",
+            params,
+        )
+        .await
+        .err_conv()?;
+    Ok(())
+}
+
+pub async fn insert_channel_status(
+    item: ChannelStatusItem,
+    data_store: &DataStore,
+    _stats: &CaConnStats,
+) -> Result<(), Error> {
+    let tsunix = item.ts.duration_since(std::time::UNIX_EPOCH).unwrap();
+    let secs = tsunix.as_secs() * netpod::timeunits::SEC;
+    let nanos = tsunix.subsec_nanos() as u64;
+    let ts = secs + nanos;
+    let div = netpod::timeunits::DAY;
+    let ts_msp = ts / div * div;
+    let ts_lsp = ts - ts_msp;
+    let kind = item.status.kind();
+    let series = item.series.id();
+    let params = (series as i64, ts_msp as i64, ts_lsp as i64, kind as i32);
+    data_store
+        .scy
+        .query(
+            "insert into channel_status (series, ts_msp, ts_lsp, kind) values (?, ?, ?, ?)",
             params,
         )
         .await

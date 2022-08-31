@@ -12,6 +12,16 @@ pub enum Existence<T> {
     Existing(T),
 }
 
+impl<T> Existence<T> {
+    pub fn into_inner(self) -> T {
+        use Existence::*;
+        match self {
+            Created(x) => x,
+            Existing(x) => x,
+        }
+    }
+}
+
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Serialize)]
 pub struct SeriesId(u64);
 
