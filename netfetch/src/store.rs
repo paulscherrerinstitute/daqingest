@@ -200,6 +200,10 @@ impl CommonInsertItemQueue {
         }
     }
 
+    pub fn sender_raw(&self) -> async_channel::Sender<QueryItem> {
+        self.sender.clone()
+    }
+
     pub fn receiver(&self) -> async_channel::Receiver<QueryItem> {
         self.recv.clone()
     }

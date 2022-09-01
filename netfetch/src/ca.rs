@@ -16,13 +16,12 @@ use futures_util::stream::FuturesUnordered;
 use futures_util::{FutureExt, StreamExt};
 use log::*;
 use netpod::{Database, ScyllaConfig};
-use scylla::batch::Consistency;
 use serde::{Deserialize, Serialize};
 use stats::{CaConnStats, CaConnStatsAgg, CaConnStatsAggDiff};
 use std::collections::{BTreeMap, VecDeque};
 use std::ffi::CStr;
 use std::mem::MaybeUninit;
-use std::net::{Ipv4Addr, SocketAddrV4};
+use std::net::{IpAddr, Ipv4Addr, SocketAddrV4};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Once};
@@ -55,8 +54,8 @@ struct ChannelConfig {
     search_blacklist: Vec<String>,
     #[serde(default)]
     tmp_remove: Vec<String>,
-    addr_bind: Option<Ipv4Addr>,
-    addr_conn: Option<Ipv4Addr>,
+    addr_bind: Option<IpAddr>,
+    addr_conn: Option<IpAddr>,
     whitelist: Option<String>,
     blacklist: Option<String>,
     max_simul: Option<usize>,
@@ -102,8 +101,8 @@ pub async fn parse_config(config: PathBuf) -> Result<CaConnectOpts, Error> {
         channels: conf.channels,
         search: conf.search,
         search_blacklist: conf.search_blacklist,
-        addr_bind: conf.addr_bind.unwrap_or(Ipv4Addr::new(0, 0, 0, 0)),
-        addr_conn: conf.addr_conn.unwrap_or(Ipv4Addr::new(255, 255, 255, 255)),
+        addr_bind: conf.addr_bind.unwrap_or(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0))),
+        addr_conn: conf.addr_conn.unwrap_or(IpAddr::V4(Ipv4Addr::new(255, 255, 255, 255))),
         timeout: conf.timeout.unwrap_or(2000),
         pgconf: conf.postgresql,
         scyconf: conf.scylla,
@@ -122,8 +121,8 @@ pub struct CaConnectOpts {
     pub channels: Vec<String>,
     pub search: Vec<String>,
     pub search_blacklist: Vec<String>,
-    pub addr_bind: Ipv4Addr,
-    pub addr_conn: Ipv4Addr,
+    pub addr_bind: IpAddr,
+    pub addr_conn: IpAddr,
     pub timeout: u64,
     pub pgconf: Database,
     pub scyconf: ScyllaConfig,
@@ -148,15 +147,7 @@ async fn spawn_scylla_insert_workers(
     let mut jhs = Vec::new();
     let mut data_stores = Vec::new();
     for _ in 0..insert_scylla_sessions {
-        let scy = scylla::SessionBuilder::new()
-            .known_nodes(&scyconf.hosts)
-            .default_consistency(Consistency::One)
-            .use_keyspace(&scyconf.keyspace, true)
-            .build()
-            .await
-            .map_err(|e| Error::with_msg_no_trace(format!("{e:?}")))?;
-        let scy = Arc::new(scy);
-        let data_store = Arc::new(DataStore::new(pg_client.clone(), scy.clone()).await?);
+        let data_store = Arc::new(DataStore::new(&scyconf, pg_client.clone()).await?);
         data_stores.push(data_store);
     }
     for i1 in 0..insert_worker_count {
@@ -490,14 +481,6 @@ pub async fn ca_connect(opts: ListenFromFileOpts) -> Result<(), Error> {
     tokio::spawn(pg_conn);
     let pg_client = Arc::new(pg_client);
 
-    let scy = scylla::SessionBuilder::new()
-        .known_nodes(&scyconf.hosts)
-        .default_consistency(Consistency::One)
-        .use_keyspace(scyconf.keyspace, true)
-        .build()
-        .await
-        .map_err(|e| Error::with_msg_no_trace(format!("{e:?}")))?;
-    let scy = Arc::new(scy);
     // TODO use new struct:
     let local_stats = Arc::new(CaConnStats::new());
     // TODO factor the find loop into a separate Stream.
@@ -523,7 +506,7 @@ pub async fn ca_connect(opts: ListenFromFileOpts) -> Result<(), Error> {
 
     let mut channels_by_host = BTreeMap::new();
 
-    let data_store = Arc::new(DataStore::new(pg_client.clone(), scy.clone()).await?);
+    let data_store = Arc::new(DataStore::new(&scyconf, pg_client.clone()).await?);
     let insert_item_queue = CommonInsertItemQueue::new(opts.insert_item_queue_cap);
     let insert_item_queue = Arc::new(insert_item_queue);
     // TODO use a new stats struct
@@ -717,13 +700,12 @@ pub async fn ca_connect(opts: ListenFromFileOpts) -> Result<(), Error> {
     let mut sent_stop_commands = false;
     loop {
         if SIGINT.load(Ordering::Acquire) != 0 {
-            let receiver = insert_item_queue.receiver();
-            info!(
-                "item queue AGAIN  senders {}  receivers {}",
-                receiver.sender_count(),
-                receiver.receiver_count()
-            );
-            info!("Stopping");
+            if false {
+                let receiver = insert_item_queue.receiver();
+                let sc = receiver.sender_count();
+                let rc = receiver.receiver_count();
+                info!("item queue  senders {}  receivers {}", sc, rc);
+            }
             if !sent_stop_commands {
                 sent_stop_commands = true;
                 info!("sending stop command");
@@ -743,7 +725,6 @@ pub async fn ca_connect(opts: ListenFromFileOpts) -> Result<(), Error> {
             a = jh => match a {
                 Ok(k) => match k {
                     Ok(_) => {
-                        info!("joined");
                     }
                     Err(e) => {
                         error!("{e:?}");
@@ -755,6 +736,9 @@ pub async fn ca_connect(opts: ListenFromFileOpts) -> Result<(), Error> {
             },
             _b = tokio::time::sleep(Duration::from_millis(1000)).fuse() => {
                 conn_jhs.push_back(jh);
+                if sent_stop_commands {
+                    info!("waiting for {} connections", conn_jhs.len());
+                }
             }
         };
     }
@@ -764,24 +748,47 @@ pub async fn ca_connect(opts: ListenFromFileOpts) -> Result<(), Error> {
     metrics_agg_jh.abort();
     drop(metrics_agg_jh);
 
+    if false {
+        let sender = insert_item_queue.sender_raw();
+        sender.close();
+        let receiver = insert_item_queue.receiver();
+        receiver.close();
+    }
+    if true {
+        let receiver = insert_item_queue.receiver();
+        let sc = receiver.sender_count();
+        let rc = receiver.receiver_count();
+        info!("item queue A  senders {}  receivers {}", sc, rc);
+    }
     let receiver = insert_item_queue.receiver();
     drop(insert_item_queue);
-    info!(
-        "item queue AGAIN  senders {}  receivers {}",
-        receiver.sender_count(),
-        receiver.receiver_count()
-    );
+    if true {
+        let sc = receiver.sender_count();
+        let rc = receiver.receiver_count();
+        info!("item queue B  senders {}  receivers {}", sc, rc);
+    }
 
     let mut futs = FuturesUnordered::from_iter(jh_insert_workers);
-    while let Some(x) = futs.next().await {
-        match x {
-            Ok(_) => {
-                info!("insert worker done");
+    loop {
+        futures_util::select!(
+            x = futs.next() => match x {
+                Some(Ok(_)) => {
+                    info!("waiting for {} inserts", futs.len());
+                }
+                Some(Err(e)) => {
+                    error!("error on shutdown: {e:?}");
+                }
+                None => break,
+            },
+            _ = tokio::time::sleep(Duration::from_millis(1000)).fuse() => {
+                info!("waiting for {} inserters", futs.len());
+                if true {
+                    let sc = receiver.sender_count();
+                    let rc = receiver.receiver_count();
+                    info!("item queue B  senders {}  receivers {}", sc, rc);
+                }
             }
-            Err(e) => {
-                error!("error on shutdown: {e:?}");
-            }
-        }
+        );
     }
     info!("all insert workers done.");
     Ok(())

@@ -18,7 +18,7 @@ use netpod::{ScalarType, Shape};
 use serde::Serialize;
 use stats::{CaConnStats, IntervalEma};
 use std::collections::{BTreeMap, VecDeque};
-use std::net::{Ipv4Addr, SocketAddrV4};
+use std::net::SocketAddrV4;
 use std::ops::ControlFlow;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -1205,13 +1205,8 @@ impl CaConn {
                                 self.proto = Some(proto);
                                 None
                             }
-                            Ok(Err(e)) => {
+                            Ok(Err(_e)) => {
                                 // TODO log with exponential backoff
-                                // 172.26.24.118:2072
-                                const ADDR2: Ipv4Addr = Ipv4Addr::new(172, 26, 24, 118);
-                                if addr.ip() == &ADDR2 && addr.port() == 2072 {
-                                    warn!("error during connect to {addr:?} {e:?}");
-                                }
                                 let addr = addr.clone();
                                 self.insert_item_queue
                                     .push_back(QueryItem::ConnectionStatus(ConnectionStatusItem {

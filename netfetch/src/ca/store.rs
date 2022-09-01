@@ -2,7 +2,9 @@ use crate::bsread::ChannelDescDecoded;
 use crate::series::{Existence, SeriesId};
 use async_channel::{Receiver, Sender};
 use err::Error;
+use netpod::ScyllaConfig;
 use scylla::prepared_statement::PreparedStatement;
+use scylla::statement::Consistency;
 use scylla::Session as ScySession;
 use std::sync::Arc;
 use tokio_postgres::Client as PgClient;
@@ -57,7 +59,15 @@ pub struct DataStore {
 }
 
 impl DataStore {
-    pub async fn new(pg_client: Arc<PgClient>, scy: Arc<ScySession>) -> Result<Self, Error> {
+    pub async fn new(scyconf: &ScyllaConfig, pg_client: Arc<PgClient>) -> Result<Self, Error> {
+        let scy = scylla::SessionBuilder::new()
+            .known_nodes(&scyconf.hosts)
+            .default_consistency(Consistency::One)
+            .use_keyspace(&scyconf.keyspace, true)
+            .build()
+            .await
+            .map_err(|e| Error::with_msg_no_trace(format!("{e:?}")))?;
+        let scy = Arc::new(scy);
         let q = scy
             .prepare("insert into ts_msp (series, ts_msp) values (?, ?)")
             .await

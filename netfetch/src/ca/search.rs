@@ -4,20 +4,20 @@ use err::Error;
 use futures_util::StreamExt;
 use log::*;
 use netpod::Database;
-use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-async fn resolve_address(addr_str: &str) -> Result<SocketAddrV4, Error> {
+async fn resolve_address(addr_str: &str) -> Result<SocketAddr, Error> {
     const PORT_DEFAULT: u16 = 5064;
-    let ac = match addr_str.parse::<SocketAddrV4>() {
+    let ac = match addr_str.parse::<SocketAddr>() {
         Ok(k) => k,
         Err(_) => {
-            trace!("can not parse {addr_str} as SocketAddrV4");
-            match addr_str.parse::<Ipv4Addr>() {
-                Ok(k) => SocketAddrV4::new(k, PORT_DEFAULT),
-                Err(e) => {
-                    trace!("can not parse {addr_str} as Ipv4Addr");
+            trace!("can not parse {addr_str} as SocketAddr");
+            match addr_str.parse::<IpAddr>() {
+                Ok(k) => SocketAddr::new(k, PORT_DEFAULT),
+                Err(_e) => {
+                    trace!("can not parse {addr_str} as IpAddr");
                     let (hostname, port) = if addr_str.contains(":") {
                         let mut it = addr_str.split(":");
                         (
@@ -27,23 +27,13 @@ async fn resolve_address(addr_str: &str) -> Result<SocketAddrV4, Error> {
                     } else {
                         (addr_str.to_string(), PORT_DEFAULT)
                     };
-                    match tokio::net::lookup_host(format!("{}:33", hostname.clone())).await {
-                        Ok(k) => {
-                            let vs: Vec<_> = k
-                                .filter_map(|x| match x {
-                                    SocketAddr::V4(k) => Some(k),
-                                    SocketAddr::V6(_) => {
-                                        error!("TODO ipv6 support");
-                                        None
-                                    }
-                                })
-                                .collect();
-                            if let Some(k) = vs.first() {
-                                let mut k = *k;
-                                k.set_port(port);
+                    let host = format!("{}:{}", hostname.clone(), port);
+                    match tokio::net::lookup_host(host.clone()).await {
+                        Ok(mut k) => {
+                            if let Some(k) = k.next() {
                                 k
                             } else {
-                                return Err(e.into());
+                                return Err(Error::with_msg_no_trace(format!("can not lookup host {host}")));
                             }
                         }
                         Err(e) => return Err(e.into()),
@@ -112,6 +102,16 @@ pub async fn ca_search(opts: ListenFromFileOpts) -> Result<(), Error> {
         gw_addrs
     };
     info!("Blacklisting {} gateways", gw_addrs.len());
+    let addrs = addrs
+        .into_iter()
+        .filter_map(|x| match x {
+            SocketAddr::V4(x) => Some(x),
+            SocketAddr::V6(_) => {
+                error!("TODO check ipv6 support for IOCs");
+                None
+            }
+        })
+        .collect();
     let mut finder = FindIocStream::new(addrs);
     for ch in &opts.channels {
         finder.push(ch.into());
@@ -145,7 +145,7 @@ pub async fn ca_search(opts: ListenFromFileOpts) -> Result<(), Error> {
             let mut do_block = false;
             for a2 in &gw_addrs {
                 if let Some(response_addr) = &item.response_addr {
-                    if response_addr == a2 {
+                    if &SocketAddr::V4(*response_addr) == a2 {
                         do_block = true;
                         warn!("gateways responded to search");
                     }
@@ -153,7 +153,7 @@ pub async fn ca_search(opts: ListenFromFileOpts) -> Result<(), Error> {
             }
             if let Some(a1) = item.addr.as_ref() {
                 for a2 in &gw_addrs {
-                    if a1 == a2 {
+                    if &SocketAddr::V4(*a1) == a2 {
                         do_block = true;
                         warn!("do not use gateways as ioc address");
                     }
