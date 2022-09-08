@@ -27,7 +27,7 @@ impl From<QueryError> for Error {
 pub async fn list_pkey() -> Result<(), Error> {
     let scy = SessionBuilder::new()
         .known_node("127.0.0.1:19042")
-        .default_consistency(Consistency::One)
+        .default_consistency(Consistency::LocalOne)
         .use_keyspace("ks1", true)
         .build()
         .await?;
@@ -68,7 +68,7 @@ pub async fn list_pkey() -> Result<(), Error> {
 pub async fn list_pulses() -> Result<(), Error> {
     let scy = SessionBuilder::new()
         .known_node("127.0.0.1:19042")
-        .default_consistency(Consistency::One)
+        .default_consistency(Consistency::LocalOne)
         .use_keyspace("ks1", true)
         .build()
         .await?;
@@ -108,7 +108,7 @@ pub async fn list_pulses() -> Result<(), Error> {
 pub async fn fetch_events(opts: FetchEvents) -> Result<(), Error> {
     let scy = SessionBuilder::new()
         .known_nodes(&opts.scylla)
-        .default_consistency(Consistency::One)
+        .default_consistency(Consistency::LocalOne)
         .use_keyspace("ks1", true)
         .build()
         .await?;

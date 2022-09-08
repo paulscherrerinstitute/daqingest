@@ -62,7 +62,7 @@ impl DataStore {
     pub async fn new(scyconf: &ScyllaConfig, pg_client: Arc<PgClient>) -> Result<Self, Error> {
         let scy = scylla::SessionBuilder::new()
             .known_nodes(&scyconf.hosts)
-            .default_consistency(Consistency::One)
+            .default_consistency(Consistency::LocalOne)
             .use_keyspace(&scyconf.keyspace, true)
             .build()
             .await

@@ -754,8 +754,9 @@ impl CaConn {
     ) -> Result<(), Error> {
         // TODO decide on better msp/lsp: random offset!
         // As long as one writer is active, the msp is arbitrary.
-        let (ts_msp, ts_msp_changed) = if inserted_in_ts_msp >= 20000 {
-            let ts_msp = ts / (10 * SEC) * (10 * SEC);
+        let (ts_msp, ts_msp_changed) = if inserted_in_ts_msp >= 64000 || st.ts_msp_last + HOUR <= ts {
+            let div = SEC * 10;
+            let ts_msp = ts / div * div;
             if ts_msp == st.ts_msp_last {
                 (ts_msp, false)
             } else {

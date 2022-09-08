@@ -68,11 +68,61 @@ struct ChannelConfig {
     insert_queue_max: Option<usize>,
     insert_item_queue_cap: Option<usize>,
     api_bind: Option<String>,
-    local_epics_hostname: String,
+    local_epics_hostname: Option<String>,
+}
+
+#[test]
+fn parse_config_minimal() {
+    let conf = r###"
+backend: scylla
+api_bind: 0.0.0.0:3011
+channels:
+    - CHANNEL-1:A
+    - CHANNEL-1:B
+    - CHANNEL-2:A
+search:
+    - 172.26.0.255
+    - 172.26.2.255
+postgresql:
+    host: host.example.com
+    port: 5432
+    user: USER
+    pass: PASS
+    name: NAME
+scylla:
+    hosts:
+        - sf-nube-11:19042
+        - sf-nube-12:19042
+    keyspace: ks1
+"###;
+    let res: Result<ChannelConfig, _> = serde_yaml::from_slice(conf.as_bytes());
+    assert_eq!(res.is_ok(), true);
+    let conf = res.unwrap();
+    assert_eq!(conf.api_bind, Some("0.0.0.0:3011".to_string()));
+    assert_eq!(conf.search.get(0), Some(&"172.26.0.255".to_string()));
+    assert_eq!(conf.scylla.hosts.get(1), Some(&"sf-nube-12:19042".to_string()));
 }
 
 pub struct ListenFromFileOpts {
     pub config: PathBuf,
+}
+
+fn local_hostname() -> String {
+    let mut buf = vec![0u8; 128];
+    let hostname = unsafe {
+        let ec = libc::gethostname(buf.as_mut_ptr() as _, buf.len() - 2);
+        if ec != 0 {
+            panic!();
+        }
+        let hostname = CStr::from_ptr(&buf[0] as *const _ as _);
+        hostname.to_str().unwrap()
+    };
+    hostname.into()
+}
+
+#[test]
+fn test_get_local_hostname() {
+    assert_ne!(local_hostname().len(), 0);
 }
 
 pub async fn parse_config(config: PathBuf) -> Result<CaConnectOpts, Error> {
@@ -103,7 +153,7 @@ pub async fn parse_config(config: PathBuf) -> Result<CaConnectOpts, Error> {
         search_blacklist: conf.search_blacklist,
         addr_bind: conf.addr_bind.unwrap_or(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0))),
         addr_conn: conf.addr_conn.unwrap_or(IpAddr::V4(Ipv4Addr::new(255, 255, 255, 255))),
-        timeout: conf.timeout.unwrap_or(2000),
+        timeout: conf.timeout.unwrap_or(1200),
         pgconf: conf.postgresql,
         scyconf: conf.scylla,
         array_truncate: conf.array_truncate.unwrap_or(512),
@@ -112,7 +162,7 @@ pub async fn parse_config(config: PathBuf) -> Result<CaConnectOpts, Error> {
         insert_queue_max: conf.insert_queue_max.unwrap_or(64),
         insert_item_queue_cap: conf.insert_item_queue_cap.unwrap_or(200000),
         api_bind: conf.api_bind.unwrap_or_else(|| "0.0.0.0:3011".into()),
-        local_epics_hostname: conf.local_epics_hostname,
+        local_epics_hostname: conf.local_epics_hostname.unwrap_or_else(local_hostname),
     })
 }
 
@@ -724,8 +774,7 @@ pub async fn ca_connect(opts: ListenFromFileOpts) -> Result<(), Error> {
         futures_util::select! {
             a = jh => match a {
                 Ok(k) => match k {
-                    Ok(_) => {
-                    }
+                    Ok(_) => {}
                     Err(e) => {
                         error!("{e:?}");
                     }
@@ -772,9 +821,7 @@ pub async fn ca_connect(opts: ListenFromFileOpts) -> Result<(), Error> {
     loop {
         futures_util::select!(
             x = futs.next() => match x {
-                Some(Ok(_)) => {
-                    info!("waiting for {} inserts", futs.len());
-                }
+                Some(Ok(_)) => {}
                 Some(Err(e)) => {
                     error!("error on shutdown: {e:?}");
                 }
