@@ -7,6 +7,7 @@ pub mod store;
 use self::store::DataStore;
 use crate::ca::conn::ConnCommand;
 use crate::errconv::ErrConv;
+use crate::linuxhelper::local_hostname;
 use crate::store::{CommonInsertItemQueue, QueryItem};
 use async_channel::Sender;
 use conn::CaConn;
@@ -19,12 +20,10 @@ use netpod::{Database, ScyllaConfig};
 use serde::{Deserialize, Serialize};
 use stats::{CaConnStats, CaConnStatsAgg, CaConnStatsAggDiff};
 use std::collections::{BTreeMap, VecDeque};
-use std::ffi::CStr;
-use std::mem::MaybeUninit;
 use std::net::{IpAddr, Ipv4Addr, SocketAddrV4};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, Once};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::fs::OpenOptions;
 use tokio::io::AsyncReadExt;
@@ -32,17 +31,10 @@ use tokio::sync::Mutex as TokMx;
 use tokio::task::JoinHandle;
 use tokio_postgres::Client as PgClient;
 
-static mut METRICS: Option<Mutex<Option<CaConnStatsAgg>>> = None;
-static METRICS_ONCE: Once = Once::new();
+pub static SIGINT: AtomicU32 = AtomicU32::new(0);
 
-pub fn get_metrics() -> &'static mut Option<CaConnStatsAgg> {
-    METRICS_ONCE.call_once(|| unsafe {
-        METRICS = Some(Mutex::new(None));
-    });
-    let mut g = unsafe { METRICS.as_mut().unwrap().lock().unwrap() };
-    let ret: &mut Option<CaConnStatsAgg> = &mut *g;
-    let ret = unsafe { &mut *(ret as *mut _) };
-    ret
+lazy_static::lazy_static! {
+    pub static ref METRICS: Mutex<Option<CaConnStatsAgg>> = Mutex::new(None);
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -105,24 +97,6 @@ scylla:
 
 pub struct ListenFromFileOpts {
     pub config: PathBuf,
-}
-
-fn local_hostname() -> String {
-    let mut buf = vec![0u8; 128];
-    let hostname = unsafe {
-        let ec = libc::gethostname(buf.as_mut_ptr() as _, buf.len() - 2);
-        if ec != 0 {
-            panic!();
-        }
-        let hostname = CStr::from_ptr(&buf[0] as *const _ as _);
-        hostname.to_str().unwrap()
-    };
-    hostname.into()
-}
-
-#[test]
-fn test_get_local_hostname() {
-    assert_ne!(local_hostname().len(), 0);
 }
 
 pub async fn parse_config(config: PathBuf) -> Result<CaConnectOpts, Error> {
@@ -457,56 +431,8 @@ pub async fn create_ca_conn(
     Ok(jh)
 }
 
-pub static SIGINT: AtomicU32 = AtomicU32::new(0);
-
-fn handler_sigaction(_a: libc::c_int, _b: *const libc::siginfo_t, _c: *const libc::c_void) {
-    SIGINT.store(1, Ordering::Release);
-    let _ = unset_signal_handler();
-}
-
-fn set_signal_handler() -> Result<(), Error> {
-    let mask: libc::sigset_t = unsafe { MaybeUninit::zeroed().assume_init() };
-    let handler: libc::sighandler_t = handler_sigaction as *const libc::c_void as _;
-    let act = libc::sigaction {
-        sa_sigaction: handler,
-        sa_mask: mask,
-        sa_flags: 0,
-        sa_restorer: None,
-    };
-    unsafe {
-        let ec = libc::sigaction(libc::SIGINT, &act, std::ptr::null_mut());
-        if ec != 0 {
-            let errno = *libc::__errno_location();
-            let msg = CStr::from_ptr(libc::strerror(errno));
-            error!("error: {:?}", msg);
-            return Err(Error::with_msg_no_trace(format!("can not set signal handler")));
-        }
-    }
-    Ok(())
-}
-
-fn unset_signal_handler() -> Result<(), Error> {
-    let mask: libc::sigset_t = unsafe { MaybeUninit::zeroed().assume_init() };
-    let act = libc::sigaction {
-        sa_sigaction: libc::SIG_DFL,
-        sa_mask: mask,
-        sa_flags: 0,
-        sa_restorer: None,
-    };
-    unsafe {
-        let ec = libc::sigaction(libc::SIGINT, &act, std::ptr::null_mut());
-        if ec != 0 {
-            let errno = *libc::__errno_location();
-            let msg = CStr::from_ptr(libc::strerror(errno));
-            error!("error: {:?}", msg);
-            return Err(Error::with_msg_no_trace(format!("can not set signal handler")));
-        }
-    }
-    Ok(())
-}
-
 pub async fn ca_connect(opts: ListenFromFileOpts) -> Result<(), Error> {
-    set_signal_handler()?;
+    crate::linuxhelper::set_signal_handler()?;
     let insert_frac = Arc::new(AtomicU64::new(1000));
     let insert_ivl_min = Arc::new(AtomicU64::new(8800));
     let opts = parse_config(opts.config).await?;
@@ -609,7 +535,7 @@ pub async fn ca_connect(opts: ListenFromFileOpts) -> Result<(), Error> {
                 for g in conn_stats.lock().await.iter() {
                     agg.push(&g);
                 }
-                let m = get_metrics();
+                let mut m = METRICS.lock().unwrap();
                 *m = Some(agg.clone());
                 if false {
                     let diff = CaConnStatsAggDiff::diff_from(&agg_last, &agg);

@@ -39,6 +39,7 @@ pub enum ChannelConnectedInfo {
 pub struct ChannelStateInfo {
     pub name: String,
     pub addr: SocketAddrV4,
+    pub series: Option<SeriesId>,
     pub channel_connected_info: ChannelConnectedInfo,
     pub scalar_type: Option<ScalarType>,
     pub shape: Option<Shape>,
@@ -169,10 +170,15 @@ impl ChannelState {
             }
             _ => None,
         };
+        let series = match self {
+            ChannelState::Created(s) => s.series.clone(),
+            _ => None,
+        };
         let interest_score = 1. / item_recv_ivl_ema.unwrap_or(1e10).max(1e-6).min(1e10);
         ChannelStateInfo {
             name,
             addr,
+            series,
             channel_connected_info,
             scalar_type,
             shape,

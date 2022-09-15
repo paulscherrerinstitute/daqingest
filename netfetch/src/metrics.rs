@@ -226,8 +226,8 @@ pub async fn start_metrics_service(
         .route(
             "/metrics",
             get(|| async {
-                let stats = crate::ca::get_metrics();
-                match stats {
+                let stats = crate::ca::METRICS.lock().unwrap();
+                match stats.as_ref() {
                     Some(s) => {
                         trace!("Metrics");
                         s.prometheus()

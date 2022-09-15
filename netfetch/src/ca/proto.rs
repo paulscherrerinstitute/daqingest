@@ -385,7 +385,7 @@ impl CaMsgTy {
                     error!("bad buffer given for search payload {} vs {}", buf.len(), d.len());
                     panic!();
                 }
-                unsafe { std::ptr::copy(&d[0] as _, &mut buf[0] as _, d.len()) };
+                buf[0..d.len()].copy_from_slice(&d[0..d.len()]);
             }
             SearchRes(_) => {
                 error!("should not attempt to write SearchRes");
@@ -400,7 +400,7 @@ impl CaMsgTy {
                     error!("bad buffer given for create chan payload {} vs {}", buf.len(), d.len());
                     panic!();
                 }
-                unsafe { std::ptr::copy(&d[0] as _, &mut buf[0] as _, d.len()) };
+                buf[0..d.len()].copy_from_slice(&d[0..d.len()]);
             }
             CreateChanRes(_) => {}
             CreateChanFail(_) => {}
@@ -438,7 +438,7 @@ macro_rules! convert_wave_value {
         const STL: usize = std::mem::size_of::<ST>();
         let nn = $n.min($buf.len() / STL);
         let mut a = Vec::with_capacity(nn);
-        // TODO optimize with unsafe?
+        // TODO should optimize?
         let mut bb = &$buf[..];
         for _ in 0..nn {
             let v = ST::from_be_bytes(bb[..STL].try_into()?);

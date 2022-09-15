@@ -38,3 +38,5 @@ err = { path = "../../daqbuffer/err" }
 netpod = { path = "../../daqbuffer/netpod" }
 taskrun = { path = "../../daqbuffer/taskrun" }
 bitshuffle = { path = "../../daqbuffer/bitshuffle" }
+pin-project = "1"
+lazy_static = "1"

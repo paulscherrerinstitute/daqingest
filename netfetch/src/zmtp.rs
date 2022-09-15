@@ -17,7 +17,6 @@ use scylla::{Session as ScySession, SessionBuilder};
 use serde_json::Value as JsVal;
 use stats::CheckEvery;
 use std::collections::BTreeMap;
-use std::ffi::CStr;
 use std::fmt;
 use std::mem;
 use std::pin::Pin;
@@ -166,7 +165,7 @@ impl BsreadClient {
     pub async fn run(&mut self) -> Result<(), Error> {
         let mut conn = tokio::net::TcpStream::connect(&self.source_addr).await?;
         if let Some(v) = self.rcvbuf {
-            set_rcv_sock_opts(&mut conn, v as u32)?;
+            crate::linuxhelper::set_rcv_sock_opts(&mut conn, v as u32)?;
         }
         let mut zmtp = Zmtp::new(conn, SocketType::PULL);
         let mut i1 = 0u64;
@@ -290,11 +289,15 @@ impl BsreadClient {
                                         series_ids[i1].1 = series;
                                     }
                                     let series = series_ids[i1].1;
-                                    if let Some(cw) = self.channel_writers.get_mut(&series) {
-                                        let res = cw.write_msg(ts, pulse, fr)?.await?;
+                                    if let Some(_cw) = self.channel_writers.get_mut(&series) {
+                                        let _ = ts;
+                                        let _ = fr;
+                                        // TODO hand off item to a writer item queue.
+                                        err::todo();
+                                        /*let res = cw.write_msg(ts, pulse, fr)?.await?;
                                         rows_inserted += res.nrows;
                                         time_spent_inserting = time_spent_inserting + res.dt;
-                                        bytes_payload += fr.data().len() as u64;
+                                        bytes_payload += fr.data().len() as u64;*/
                                     } else {
                                         // TODO check for missing writers.
                                         warn!("no writer for {}", chn.name);
@@ -523,53 +526,6 @@ pub async fn zmtp_client(opts: ZmtpClientOpts) -> Result<(), Error> {
         jhs.push(jh);
     }
     futures_util::future::join_all(jhs).await;
-    Ok(())
-}
-
-fn set_rcv_sock_opts(conn: &mut TcpStream, rcvbuf: u32) -> Result<(), Error> {
-    use std::mem::size_of;
-    use std::os::unix::prelude::AsRawFd;
-    let fd = conn.as_raw_fd();
-    unsafe {
-        type N = libc::c_int;
-        let n: N = rcvbuf as _;
-        let ec = libc::setsockopt(
-            fd,
-            libc::SOL_SOCKET,
-            libc::SO_RCVBUF,
-            &n as *const N as _,
-            size_of::<N>() as _,
-        );
-        if ec != 0 {
-            error!("ec {ec}");
-            if ec != 0 {
-                return Err(Error::with_msg_no_trace(format!("can not set socket option")));
-            }
-        }
-    }
-    unsafe {
-        type N = libc::c_int;
-        let mut n: N = -1;
-        let mut l = size_of::<N>() as libc::socklen_t;
-        let ec = libc::getsockopt(
-            fd,
-            libc::SOL_SOCKET,
-            libc::SO_RCVBUF,
-            &mut n as *mut N as _,
-            &mut l as _,
-        );
-        if ec != 0 {
-            let errno = *libc::__errno_location();
-            let es = CStr::from_ptr(libc::strerror(errno));
-            error!("can not query socket option  ec {ec}  errno {errno}  es {es:?}");
-        } else {
-            if (n as u32) < rcvbuf * 5 / 6 {
-                warn!("SO_RCVBUF {n}  smaller than requested {rcvbuf}");
-            } else {
-                info!("SO_RCVBUF {n}");
-            }
-        }
-    }
     Ok(())
 }
 

@@ -13,36 +13,27 @@ use scylla::{QueryResult, Session as ScySession};
 use stats::CaConnStats;
 use std::net::SocketAddrV4;
 use std::pin::Pin;
-use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::{Instant, SystemTime};
 
-pub struct ScyInsertFut {
-    #[allow(unused)]
-    scy: Arc<ScySession>,
-    #[allow(unused)]
-    query: Arc<PreparedStatement>,
-    fut: Pin<Box<dyn Future<Output = Result<QueryResult, QueryError>> + Send>>,
+pub struct ScyInsertFut<'a> {
+    fut: Pin<Box<dyn Future<Output = Result<QueryResult, QueryError>> + Send + 'a>>,
     polled: usize,
     ts_create: Instant,
     ts_poll_first: Instant,
 }
 
-impl ScyInsertFut {
+impl<'a> ScyInsertFut<'a> {
     const NAME: &'static str = "ScyInsertFut";
 
-    pub fn new<V>(scy: Arc<ScySession>, query: Arc<PreparedStatement>, values: V) -> Self
+    pub fn new<V>(scy: &'a ScySession, query: &'a PreparedStatement, values: V) -> Self
     where
         V: ValueList + Send + 'static,
     {
-        let scy_ref: &ScySession = unsafe { &*(scy.as_ref() as &_ as *const _) };
-        let query_ref = unsafe { &*(query.as_ref() as &_ as *const _) };
-        let fut = scy_ref.execute(query_ref, values);
+        let fut = scy.execute(query, values);
         let fut = Box::pin(fut) as _;
         let tsnow = Instant::now();
         Self {
-            scy,
-            query,
             fut,
             polled: 0,
             ts_create: tsnow,
@@ -51,7 +42,7 @@ impl ScyInsertFut {
     }
 }
 
-impl Future for ScyInsertFut {
+impl<'a> Future for ScyInsertFut<'a> {
     type Output = Result<(), Error>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
