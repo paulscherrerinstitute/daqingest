@@ -159,6 +159,17 @@ pub struct CaConnectOpts {
     pub local_epics_hostname: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExtraInsertsConf {
+    pub copies: Vec<(u64, u64)>,
+}
+
+impl ExtraInsertsConf {
+    pub fn new() -> Self {
+        Self { copies: Vec::new() }
+    }
+}
+
 async fn spawn_scylla_insert_workers(
     scyconf: ScyllaConfig,
     insert_scylla_sessions: usize,
@@ -333,7 +344,9 @@ pub struct IngestCommons {
     pub local_epics_hostname: String,
     pub insert_item_queue: Arc<CommonInsertItemQueue>,
     pub data_store: Arc<DataStore>,
+    pub insert_frac: Arc<AtomicU64>,
     pub insert_ivl_min: Arc<AtomicU64>,
+    pub extra_inserts_conf: Mutex<ExtraInsertsConf>,
     pub conn_stats: Arc<TokMx<Vec<Arc<CaConnStats>>>>,
     pub command_queue_set: Arc<CommandQueueSet>,
 }
@@ -393,6 +406,7 @@ pub async fn create_ca_conn(
     insert_ivl_min: Arc<AtomicU64>,
     conn_stats: Arc<TokMx<Vec<Arc<CaConnStats>>>>,
     command_queue_set: Arc<CommandQueueSet>,
+    ingest_commons: Arc<IngestCommons>,
 ) -> Result<JoinHandle<Result<(), Error>>, Error> {
     info!("create new CaConn  {:?}", addr);
     let data_store = data_store.clone();
@@ -404,6 +418,7 @@ pub async fn create_ca_conn(
         array_truncate,
         insert_queue_max,
         insert_ivl_min.clone(),
+        ingest_commons.clone(),
     );
     conn_stats.lock().await.push(conn.stats());
     let stats2 = conn.stats();
@@ -434,6 +449,7 @@ pub async fn create_ca_conn(
 pub async fn ca_connect(opts: ListenFromFileOpts) -> Result<(), Error> {
     crate::linuxhelper::set_signal_handler()?;
     let insert_frac = Arc::new(AtomicU64::new(1000));
+    let extra_inserts_conf = Mutex::new(ExtraInsertsConf { copies: Vec::new() });
     let insert_ivl_min = Arc::new(AtomicU64::new(8800));
     let opts = parse_config(opts.config).await?;
     let scyconf = opts.scyconf.clone();
@@ -510,14 +526,14 @@ pub async fn ca_connect(opts: ListenFromFileOpts) -> Result<(), Error> {
         insert_ivl_min: insert_ivl_min.clone(),
         conn_stats: conn_stats.clone(),
         command_queue_set: command_queue_set.clone(),
+        insert_frac,
+        extra_inserts_conf,
     };
     let ingest_commons = Arc::new(ingest_commons);
 
     if true {
         tokio::spawn(crate::metrics::start_metrics_service(
             opts.api_bind.clone(),
-            insert_frac.clone(),
-            insert_ivl_min.clone(),
             ingest_commons.clone(),
         ));
     }
@@ -626,6 +642,7 @@ pub async fn ca_connect(opts: ListenFromFileOpts) -> Result<(), Error> {
                         opts.array_truncate,
                         opts.insert_queue_max,
                         insert_ivl_min.clone(),
+                        ingest_commons.clone(),
                     );
                     conn_stats.lock().await.push(conn.stats());
                     let stats2 = conn.stats();

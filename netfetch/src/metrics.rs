@@ -1,11 +1,11 @@
 use crate::ca::conn::ConnCommand;
-use crate::ca::IngestCommons;
+use crate::ca::{ExtraInsertsConf, IngestCommons};
 use axum::extract::Query;
 use http::request::Parts;
 use log::*;
 use std::collections::HashMap;
 use std::net::SocketAddrV4;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 async fn get_empty() -> String {
@@ -73,6 +73,7 @@ async fn channel_add(params: HashMap<String, String>, ingest_commons: Arc<Ingest
                         ingest_commons.insert_ivl_min.clone(),
                         ingest_commons.conn_stats.clone(),
                         ingest_commons.command_queue_set.clone(),
+                        ingest_commons.clone(),
                     )
                     .await
                     {
@@ -214,12 +215,18 @@ async fn channel_states(
     axum::Json(res)
 }
 
-pub async fn start_metrics_service(
-    bind_to: String,
-    insert_frac: Arc<AtomicU64>,
-    insert_ivl_min: Arc<AtomicU64>,
-    ingest_commons: Arc<IngestCommons>,
-) {
+async fn extra_inserts_conf_set(v: ExtraInsertsConf, ingest_commons: Arc<IngestCommons>) -> axum::Json<bool> {
+    *ingest_commons.extra_inserts_conf.lock().unwrap() = v.clone();
+    let g = ingest_commons.command_queue_set.queues_locked().await;
+    let mut it = g.iter();
+    let rxs = send_command(&mut it, || ConnCommand::extra_inserts_conf_set(v.clone())).await;
+    for rx in rxs {
+        let _item = rx.recv().await.unwrap();
+    }
+    axum::Json(true)
+}
+
+pub async fn start_metrics_service(bind_to: String, ingest_commons: Arc<IngestCommons>) {
     use axum::routing::{get, put};
     use axum::{extract, Router};
     let app = Router::new()
@@ -276,14 +283,27 @@ pub async fn start_metrics_service(
         )
         .route(
             "/insert_frac",
-            get(get_empty).put(|v: extract::Json<u64>| async move {
-                insert_frac.store(v.0, Ordering::Release);
+            get(get_empty).put({
+                let insert_frac = ingest_commons.insert_frac.clone();
+                |v: extract::Json<u64>| async move {
+                    insert_frac.store(v.0, Ordering::Release);
+                }
             }),
         )
         .route(
             "/insert_ivl_min",
-            put(|v: extract::Json<u64>| async move {
-                insert_ivl_min.store(v.0, Ordering::Release);
+            put({
+                let insert_ivl_min = ingest_commons.insert_ivl_min.clone();
+                |v: extract::Json<u64>| async move {
+                    insert_ivl_min.store(v.0, Ordering::Release);
+                }
+            }),
+        )
+        .route(
+            "/extra_inserts_conf",
+            put({
+                let ingest_commons = ingest_commons.clone();
+                |v: extract::Json<ExtraInsertsConf>| extra_inserts_conf_set(v.0, ingest_commons)
             }),
         )
         .fallback(

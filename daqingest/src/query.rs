@@ -106,6 +106,8 @@ pub async fn list_pulses() -> Result<(), Error> {
 }
 
 pub async fn fetch_events(opts: FetchEvents) -> Result<(), Error> {
+    // TODO use the keyspace from commandline.
+    err::todo();
     let scy = SessionBuilder::new()
         .known_nodes(&opts.scylla)
         .default_consistency(Consistency::LocalOne)

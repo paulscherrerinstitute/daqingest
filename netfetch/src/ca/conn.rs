@@ -1,5 +1,6 @@
 use super::proto::{self, CaItem, CaMsg, CaMsgTy, CaProto};
 use super::store::DataStore;
+use super::{ExtraInsertsConf, IngestCommons};
 use crate::bsread::ChannelDescDecoded;
 use crate::ca::proto::{CreateChan, EventAdd};
 use crate::ca::store::ChannelRegistry;
@@ -253,6 +254,7 @@ pub enum ConnCommandKind {
     ChannelAdd(String, Sender<bool>),
     ChannelRemove(String, Sender<bool>),
     Shutdown(Sender<bool>),
+    ExtraInsertsConf(ExtraInsertsConf, Sender<bool>),
 }
 
 #[derive(Debug)]
@@ -316,6 +318,14 @@ impl ConnCommand {
         };
         (cmd, rx)
     }
+
+    pub fn extra_inserts_conf_set(k: ExtraInsertsConf) -> (ConnCommand, async_channel::Receiver<bool>) {
+        let (tx, rx) = async_channel::bounded(1);
+        let cmd = Self {
+            kind: ConnCommandKind::ExtraInsertsConf(k, tx),
+        };
+        (cmd, rx)
+    }
 }
 
 pub struct CaConn {
@@ -346,6 +356,10 @@ pub struct CaConn {
     conn_command_rx: async_channel::Receiver<ConnCommand>,
     conn_backoff: f32,
     conn_backoff_beg: f32,
+    inserts_counter: u64,
+    #[allow(unused)]
+    ingest_commons: Arc<IngestCommons>,
+    extra_inserts_conf: ExtraInsertsConf,
 }
 
 impl CaConn {
@@ -357,6 +371,7 @@ impl CaConn {
         array_truncate: usize,
         insert_queue_max: usize,
         insert_ivl_min: Arc<AtomicU64>,
+        ingest_commons: Arc<IngestCommons>,
     ) -> Self {
         let (cq_tx, cq_rx) = async_channel::bounded(32);
         Self {
@@ -386,6 +401,9 @@ impl CaConn {
             conn_command_rx: cq_rx,
             conn_backoff: 0.02,
             conn_backoff_beg: 0.02,
+            inserts_counter: 0,
+            ingest_commons,
+            extra_inserts_conf: ExtraInsertsConf::new(),
         }
     }
 
@@ -479,6 +497,15 @@ impl CaConn {
                         let _ = self.before_reset_of_channel_state();
                         self.state = CaConnState::Shutdown;
                         self.proto = None;
+                        match tx.try_send(true) {
+                            Ok(_) => {}
+                            Err(_) => {
+                                //error!("response channel full or closed");
+                            }
+                        }
+                    }
+                    ConnCommandKind::ExtraInsertsConf(k, tx) => {
+                        self.extra_inserts_conf = k;
                         match tx.try_send(true) {
                             Ok(_) => {}
                             Err(_) => {
@@ -802,6 +829,8 @@ impl CaConn {
         item_queue: &mut VecDeque<QueryItem>,
         insert_ivl_min: Arc<AtomicU64>,
         stats: Arc<CaConnStats>,
+        inserts_counter: &mut u64,
+        extra_inserts_conf: &ExtraInsertsConf,
     ) -> Result<(), Error> {
         st.muted_before = 0;
         st.insert_item_ivl_ema.tick(tsnow);
@@ -823,6 +852,23 @@ impl CaConn {
         } else {
             None
         };
+        for &(m, l) in extra_inserts_conf.copies.iter() {
+            if *inserts_counter % m == l {
+                Self::event_add_insert(
+                    st,
+                    series.clone(),
+                    scalar_type.clone(),
+                    shape.clone(),
+                    ts - 2,
+                    ev.clone(),
+                    item_queue,
+                    ts_msp_last,
+                    inserted_in_ts_msp,
+                    ts_msp_grid,
+                    stats.clone(),
+                )?;
+            }
+        }
         Self::event_add_insert(
             st,
             series,
@@ -836,6 +882,7 @@ impl CaConn {
             ts_msp_grid,
             stats,
         )?;
+        *inserts_counter += 1;
         Ok(())
     }
 
@@ -895,6 +942,8 @@ impl CaConn {
                 if tsnow >= st.insert_next_earliest {
                     //let channel_state = self.channels.get_mut(&cid).unwrap();
                     let item_queue = &mut self.insert_item_queue;
+                    let inserts_counter = &mut self.inserts_counter;
+                    let extra_inserts_conf = &self.extra_inserts_conf;
                     Self::do_event_insert(
                         st,
                         series,
@@ -906,6 +955,8 @@ impl CaConn {
                         item_queue,
                         self.insert_ivl_min.clone(),
                         self.stats.clone(),
+                        inserts_counter,
+                        extra_inserts_conf,
                     )?;
                 } else {
                     self.stats.channel_fast_item_drop_inc();

@@ -73,7 +73,8 @@ pub struct EventAdd {
     pub subid: u32,
 }
 
-#[derive(Debug)]
+// TODO Clone is only used for testing purposes and should get removed later.
+#[derive(Debug, Clone)]
 pub struct EventAddRes {
     pub data_type: u16,
     pub data_count: u16,

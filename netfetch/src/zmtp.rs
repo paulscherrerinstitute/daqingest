@@ -433,6 +433,8 @@ pub async fn zmtp_client(opts: ZmtpClientOpts) -> Result<(), Error> {
     for a in &opts.scylla {
         scy = scy.known_node(a);
     }
+    // TODO use keyspace from configuration.
+    err::todo();
     let scy = scy
         .use_keyspace("ks1", false)
         .build()
