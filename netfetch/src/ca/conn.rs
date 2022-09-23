@@ -22,7 +22,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::net::SocketAddrV4;
 use std::ops::ControlFlow;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant, SystemTime};
@@ -350,7 +350,7 @@ pub struct CaConn {
     array_truncate: usize,
     stats: Arc<CaConnStats>,
     insert_queue_max: usize,
-    insert_ivl_min: Arc<AtomicU64>,
+    insert_ivl_min_mus: u64,
     ts_channel_alive_check_last: Instant,
     conn_command_tx: async_channel::Sender<ConnCommand>,
     conn_command_rx: async_channel::Receiver<ConnCommand>,
@@ -370,7 +370,6 @@ impl CaConn {
         insert_item_sender: CommonInsertItemQueueSender,
         array_truncate: usize,
         insert_queue_max: usize,
-        insert_ivl_min: Arc<AtomicU64>,
         ingest_commons: Arc<IngestCommons>,
     ) -> Self {
         let (cq_tx, cq_rx) = async_channel::bounded(32);
@@ -395,7 +394,7 @@ impl CaConn {
             array_truncate,
             stats: Arc::new(CaConnStats::new()),
             insert_queue_max,
-            insert_ivl_min,
+            insert_ivl_min_mus: 1000 * 1000 * 6,
             ts_channel_alive_check_last: Instant::now(),
             conn_command_tx: cq_tx,
             conn_command_rx: cq_rx,
@@ -529,8 +528,12 @@ impl CaConn {
     }
 
     pub fn channel_add(&mut self, channel: String) {
+        if self.cid_by_name.contains_key(&channel) {
+            return;
+        }
         let cid = self.cid_by_name(&channel);
         if self.channels.contains_key(&cid) {
+            error!("logic error");
         } else {
             self.channels.insert(cid, ChannelState::Init);
             // TODO do not count, use separate queue for those channels.
@@ -827,7 +830,7 @@ impl CaConn {
         ev: proto::EventAddRes,
         tsnow: Instant,
         item_queue: &mut VecDeque<QueryItem>,
-        insert_ivl_min: Arc<AtomicU64>,
+        insert_ivl_min_mus: u64,
         stats: Arc<CaConnStats>,
         inserts_counter: &mut u64,
         extra_inserts_conf: &ExtraInsertsConf,
@@ -836,8 +839,7 @@ impl CaConn {
         st.insert_item_ivl_ema.tick(tsnow);
         let em = st.insert_item_ivl_ema.ema();
         let ema = em.ema();
-        let ivl_min = insert_ivl_min.load(Ordering::Acquire);
-        let ivl_min = (ivl_min as f32) * 1e-6;
+        let ivl_min = (insert_ivl_min_mus as f32) * 1e-6;
         let dt = (ivl_min - ema).max(0.) / em.k();
         st.insert_next_earliest = tsnow
             .checked_add(Duration::from_micros((dt * 1e6) as u64))
@@ -852,14 +854,14 @@ impl CaConn {
         } else {
             None
         };
-        for &(m, l) in extra_inserts_conf.copies.iter() {
+        for (i, &(m, l)) in extra_inserts_conf.copies.iter().enumerate().rev() {
             if *inserts_counter % m == l {
                 Self::event_add_insert(
                     st,
                     series.clone(),
                     scalar_type.clone(),
                     shape.clone(),
-                    ts - 2,
+                    ts - 1 - i as u64,
                     ev.clone(),
                     item_queue,
                     ts_msp_last,
@@ -953,7 +955,7 @@ impl CaConn {
                         ev,
                         tsnow,
                         item_queue,
-                        self.insert_ivl_min.clone(),
+                        self.insert_ivl_min_mus,
                         self.stats.clone(),
                         inserts_counter,
                         extra_inserts_conf,

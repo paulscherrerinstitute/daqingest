@@ -1,10 +1,11 @@
 use crate::ca::conn::ConnCommand;
 use crate::ca::{ExtraInsertsConf, IngestCommons};
 use axum::extract::Query;
+use err::Error;
 use http::request::Parts;
 use log::*;
 use std::collections::HashMap;
-use std::net::SocketAddrV4;
+use std::net::{SocketAddr, SocketAddrV4};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
@@ -12,6 +13,7 @@ async fn get_empty() -> String {
     String::new()
 }
 
+#[allow(unused)]
 async fn send_command<'a, IT, F, R>(it: &mut IT, cmdgen: F) -> Vec<async_channel::Receiver<R>>
 where
     IT: Iterator<Item = (&'a SocketAddrV4, &'a async_channel::Sender<ConnCommand>)>,
@@ -37,84 +39,42 @@ async fn find_channel(
     ingest_commons: Arc<IngestCommons>,
 ) -> axum::Json<Vec<(String, Vec<String>)>> {
     let pattern = params.get("pattern").map_or(String::new(), |x| x.clone()).to_string();
-    let g = ingest_commons.command_queue_set.queues_locked().await;
-    let mut it = g.iter();
-    let rxs = send_command(&mut it, || ConnCommand::find_channel(pattern.clone())).await;
-    let mut res = Vec::new();
-    for rx in rxs {
-        let item = rx.recv().await.unwrap();
-        if item.1.len() > 0 {
-            let item = (item.0.to_string(), item.1);
-            res.push(item);
-        }
-    }
+    // TODO allow usage of `?` in handler:
+    let res = ingest_commons
+        .ca_conn_set
+        .send_command_to_all(|| ConnCommand::find_channel(pattern.clone()))
+        .await
+        .unwrap();
+    let res = res.into_iter().map(|x| (x.0.to_string(), x.1)).collect();
     axum::Json(res)
 }
 
-async fn channel_add(params: HashMap<String, String>, ingest_commons: Arc<IngestCommons>) -> String {
+async fn channel_add_inner(params: HashMap<String, String>, ingest_commons: Arc<IngestCommons>) -> Result<(), Error> {
     if let (Some(backend), Some(name)) = (params.get("backend"), params.get("name")) {
-        // TODO look up the address.
         match crate::ca::find_channel_addr(backend.into(), name.into(), &ingest_commons.pgconf).await {
             Ok(Some(addr)) => {
-                if ingest_commons
-                    .command_queue_set
-                    .queues_locked()
-                    .await
-                    .contains_key(&addr)
-                {
-                } else {
-                    match crate::ca::create_ca_conn(
-                        addr,
-                        ingest_commons.local_epics_hostname.clone(),
-                        256,
-                        32,
-                        ingest_commons.insert_item_queue.clone(),
-                        ingest_commons.data_store.clone(),
-                        ingest_commons.insert_ivl_min.clone(),
-                        ingest_commons.conn_stats.clone(),
-                        ingest_commons.command_queue_set.clone(),
-                        ingest_commons.clone(),
-                    )
-                    .await
-                    {
-                        Ok(_) => {
-                            // TODO keep the join handle.
-                        }
-                        Err(_) => {
-                            error!("can not create CaConn");
-                        }
-                    }
-                }
-                if let Some(tx) = ingest_commons.command_queue_set.queues_locked().await.get(&addr) {
-                    let (cmd, rx) = ConnCommand::channel_add(name.into());
-                    if let Err(_) = tx.send(cmd).await {
-                        error!("can not send command");
-                        "false".into()
-                    } else {
-                        match rx.recv().await {
-                            Ok(x) => {
-                                if x {
-                                    "true".into()
-                                } else {
-                                    "false".into()
-                                }
-                            }
-                            Err(_) => "false".into(),
-                        }
-                    }
-                } else {
-                    error!("Even after create, can not locate the connection.");
-                    "false".into()
-                }
+                ingest_commons
+                    .ca_conn_set
+                    .add_channel_to_addr(SocketAddr::V4(addr), name.into(), ingest_commons.clone())
+                    .await?;
+                Ok(())
             }
             _ => {
                 error!("can not find addr for channel");
-                "false".into()
+                Err(Error::with_msg_no_trace(format!("can not find addr for channel")))
             }
         }
     } else {
-        "false".into()
+        Err(Error::with_msg_no_trace(format!("wrong parameters given")))
     }
+}
+
+async fn channel_add(params: HashMap<String, String>, ingest_commons: Arc<IngestCommons>) -> axum::Json<bool> {
+    let ret = match channel_add_inner(params, ingest_commons).await {
+        Ok(_) => true,
+        Err(_) => false,
+    };
+    axum::Json(ret)
 }
 
 async fn channel_remove(
@@ -132,7 +92,7 @@ async fn channel_remove(
     } else {
         return Json(Value::Bool(false));
     };
-    let backend = if let Some(x) = params.get("backend") {
+    let _backend = if let Some(x) = params.get("backend") {
         x
     } else {
         return Json(Value::Bool(false));
@@ -142,87 +102,70 @@ async fn channel_remove(
     } else {
         return Json(Value::Bool(false));
     };
-    if let Some(tx) = ingest_commons.command_queue_set.queues_locked().await.get(&addr) {
-        // TODO any need to check the backend here?
-        let _ = backend;
-        let (cmd, rx) = ConnCommand::channel_remove(name.into());
-        if let Err(_) = tx.send(cmd).await {
-            error!("can not send command");
+    match ingest_commons
+        .ca_conn_set
+        .send_command_to_addr(&SocketAddr::V4(addr), || ConnCommand::channel_remove(name.into()))
+        .await
+    {
+        Ok(k) => Json(Value::Bool(k)),
+        Err(e) => {
+            error!("{e:?}");
             Json(Value::Bool(false))
-        } else {
-            match rx.recv().await {
-                Ok(x) => Json(Value::Bool(x)),
-                Err(_) => Json(Value::Bool(false)),
-            }
         }
-    } else {
-        Json(Value::Bool(false))
     }
 }
 
 async fn channel_state(params: HashMap<String, String>, ingest_commons: Arc<IngestCommons>) -> String {
     let name = params.get("name").map_or(String::new(), |x| x.clone()).to_string();
-    let g = ingest_commons.command_queue_set.queues_locked().await;
-    let mut rxs = Vec::new();
-    for (_, tx) in g.iter() {
-        let (cmd, rx) = ConnCommand::channel_state(name.clone());
-        match tx.send(cmd).await {
-            Ok(()) => {
-                rxs.push(rx);
-            }
-            Err(e) => {
-                error!("can not send command {e:?}");
-            }
+    match ingest_commons
+        .ca_conn_set
+        .send_command_to_all(|| ConnCommand::channel_state(name.clone()))
+        .await
+    {
+        Ok(k) => {
+            let a: Vec<_> = k.into_iter().map(|(a, b)| (a.to_string(), b)).collect();
+            serde_json::to_string(&a).unwrap()
+        }
+        Err(e) => {
+            error!("{e:?}");
+            return format!("null");
         }
     }
-    let mut res = Vec::new();
-    for rx in rxs {
-        let item = rx.recv().await.unwrap();
-        if let Some(st) = item.1 {
-            let item = (item.0.to_string(), st);
-            res.push(item);
-        }
-    }
-    serde_json::to_string(&res).unwrap()
 }
 
 async fn channel_states(
     _params: HashMap<String, String>,
     ingest_commons: Arc<IngestCommons>,
 ) -> axum::Json<Vec<crate::ca::conn::ChannelStateInfo>> {
-    let g = ingest_commons.command_queue_set.queues_locked().await;
-    let mut rxs = Vec::new();
-    for (_, tx) in g.iter() {
-        let (cmd, rx) = ConnCommand::channel_states_all();
-        match tx.send(cmd).await {
-            Ok(()) => {
-                rxs.push(rx);
-            }
-            Err(e) => {
-                error!("can not send command {e:?}");
-            }
-        }
-    }
+    let vals = ingest_commons
+        .ca_conn_set
+        .send_command_to_all(|| ConnCommand::channel_states_all())
+        .await
+        .unwrap();
     let mut res = Vec::new();
-    for rx in rxs {
-        let item = rx.recv().await.unwrap();
-        for h in item.1 {
-            res.push(h);
+    for h in vals {
+        for j in h.1 {
+            res.push(j);
         }
     }
     res.sort_unstable_by_key(|v| u32::MAX - v.interest_score as u32);
-    //let res: Vec<_> = res.into_iter().rev().take(10).collect();
+    let res = if true {
+        res.into_iter().rev().take(10).collect()
+    } else {
+        res
+    };
     axum::Json(res)
 }
 
 async fn extra_inserts_conf_set(v: ExtraInsertsConf, ingest_commons: Arc<IngestCommons>) -> axum::Json<bool> {
+    // TODO ingest_commons is the authorative value. Should have common function outside of this metrics which
+    // can update everything to a given value.
     *ingest_commons.extra_inserts_conf.lock().unwrap() = v.clone();
-    let g = ingest_commons.command_queue_set.queues_locked().await;
-    let mut it = g.iter();
-    let rxs = send_command(&mut it, || ConnCommand::extra_inserts_conf_set(v.clone())).await;
-    for rx in rxs {
-        let _item = rx.recv().await.unwrap();
-    }
+    ingest_commons
+        .ca_conn_set
+        .send_command_to_all(|| ConnCommand::extra_inserts_conf_set(v.clone()))
+        .await
+        .unwrap();
     axum::Json(true)
 }
 
