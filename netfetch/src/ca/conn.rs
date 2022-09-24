@@ -394,7 +394,7 @@ impl CaConn {
             array_truncate,
             stats: Arc::new(CaConnStats::new()),
             insert_queue_max,
-            insert_ivl_min_mus: 1000 * 1000 * 6,
+            insert_ivl_min_mus: 1000 * 6,
             ts_channel_alive_check_last: Instant::now(),
             conn_command_tx: cq_tx,
             conn_command_rx: cq_rx,

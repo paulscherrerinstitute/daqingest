@@ -514,7 +514,7 @@ impl CaConnSet {
                 }
             };
         }
-        err::todoval()
+        Ok(())
     }
 
     pub async fn add_channel_to_addr(
@@ -526,6 +526,7 @@ impl CaConnSet {
         let g = self.ca_conn_ress.lock().await;
         match g.get(&addr) {
             Some(ca_conn) => {
+                //info!("try to add to existing... {addr} {channel_name}");
                 let (cmd, rx) = ConnCommand::channel_add(channel_name);
                 ca_conn.sender.send(cmd).await.err_conv()?;
                 let a = rx.recv().await.err_conv()?;
@@ -536,6 +537,8 @@ impl CaConnSet {
                 }
             }
             None => {
+                //info!("create new {addr} {channel_name}");
+                drop(g);
                 let addr = if let SocketAddr::V4(x) = addr {
                     x
                 } else {
