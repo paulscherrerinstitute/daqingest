@@ -2,19 +2,68 @@ use crate::ca::proto::{CaDataArrayValue, CaDataScalarValue, CaDataValue};
 use crate::ca::store::DataStore;
 use crate::errconv::ErrConv;
 use crate::series::SeriesId;
-use err::Error;
 use futures_util::{Future, FutureExt};
 use log::*;
 use netpod::{ScalarType, Shape};
 use scylla::frame::value::ValueList;
 use scylla::prepared_statement::PreparedStatement;
-use scylla::transport::errors::QueryError;
+use scylla::transport::errors::{DbError, QueryError};
 use scylla::{QueryResult, Session as ScySession};
 use stats::CaConnStats;
 use std::net::SocketAddrV4;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::{Instant, SystemTime};
+use tokio::sync::Mutex as TokMx;
+
+pub const CONNECTION_STATUS_DIV: u64 = netpod::timeunits::DAY;
+
+#[derive(Debug)]
+pub enum Error {
+    DbUnavailable,
+    DbOverload,
+    DbTimeout,
+    DbError(String),
+}
+
+impl From<Error> for err::Error {
+    fn from(e: Error) -> Self {
+        err::Error::with_msg_no_trace(format!("{e:?}"))
+    }
+}
+
+pub trait IntoSimplerError {
+    fn into_simpler(self) -> Error;
+}
+
+impl IntoSimplerError for QueryError {
+    fn into_simpler(self) -> Error {
+        let e = self;
+        match e {
+            QueryError::DbError(e, msg) => match e {
+                DbError::Unavailable { .. } => Error::DbUnavailable,
+                DbError::Overloaded => Error::DbOverload,
+                DbError::IsBootstrapping => Error::DbUnavailable,
+                DbError::ReadTimeout { .. } => Error::DbTimeout,
+                DbError::WriteTimeout { .. } => Error::DbTimeout,
+                _ => Error::DbError(format!("{e} {msg}")),
+            },
+            QueryError::BadQuery(e) => Error::DbError(e.to_string()),
+            QueryError::IoError(e) => Error::DbError(e.to_string()),
+            QueryError::ProtocolError(e) => Error::DbError(e.to_string()),
+            QueryError::InvalidMessage(e) => Error::DbError(e.to_string()),
+            QueryError::TimeoutError => Error::DbTimeout,
+            QueryError::TooManyOrphanedStreamIds(e) => Error::DbError(e.to_string()),
+            QueryError::UnableToAllocStreamId => Error::DbError(e.to_string()),
+        }
+    }
+}
+
+impl<T: IntoSimplerError> From<T> for Error {
+    fn from(e: T) -> Self {
+        e.into_simpler()
+    }
+}
 
 pub struct ScyInsertFut<'a> {
     fut: Pin<Box<dyn Future<Output = Result<QueryResult, QueryError>> + Send + 'a>>,
@@ -43,7 +92,7 @@ impl<'a> ScyInsertFut<'a> {
 }
 
 impl<'a> Future for ScyInsertFut<'a> {
-    type Output = Result<(), Error>;
+    type Output = Result<(), err::Error>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
         use Poll::*;
@@ -147,12 +196,22 @@ pub struct IvlItem {
 }
 
 #[derive(Debug)]
+pub struct ChannelInfoItem {
+    pub ts_msp: u32,
+    pub series: SeriesId,
+    pub ivl: f32,
+    pub interest: f32,
+    pub evsize: u32,
+}
+
+#[derive(Debug)]
 pub enum QueryItem {
     ConnectionStatus(ConnectionStatusItem),
     ChannelStatus(ChannelStatusItem),
     Insert(InsertItem),
     Mute(MuteItem),
     Ivl(IvlItem),
+    ChannelInfo(ChannelInfoItem),
 }
 
 pub struct CommonInsertItemQueueSender {
@@ -172,7 +231,7 @@ impl CommonInsertItemQueueSender {
 }
 
 pub struct CommonInsertItemQueue {
-    sender: async_channel::Sender<QueryItem>,
+    sender: TokMx<async_channel::Sender<QueryItem>>,
     recv: async_channel::Receiver<QueryItem>,
 }
 
@@ -180,27 +239,27 @@ impl CommonInsertItemQueue {
     pub fn new(cap: usize) -> Self {
         let (tx, rx) = async_channel::bounded(cap);
         Self {
-            sender: tx.clone(),
+            sender: TokMx::new(tx.clone()),
             recv: rx,
         }
     }
 
-    pub fn sender(&self) -> CommonInsertItemQueueSender {
+    pub async fn sender(&self) -> CommonInsertItemQueueSender {
         CommonInsertItemQueueSender {
-            sender: self.sender.clone(),
+            sender: self.sender.lock().await.clone(),
         }
     }
 
-    pub fn sender_raw(&self) -> async_channel::Sender<QueryItem> {
-        self.sender.clone()
+    pub async fn sender_raw(&self) -> async_channel::Sender<QueryItem> {
+        self.sender.lock().await.clone()
     }
 
     pub fn receiver(&self) -> async_channel::Receiver<QueryItem> {
         self.recv.clone()
     }
 
-    pub fn sender_count(&self) -> usize {
-        self.sender.sender_count()
+    pub async fn sender_count(&self) -> usize {
+        self.sender.lock().await.sender_count()
     }
 
     pub fn sender_count2(&self) -> usize {
@@ -209,6 +268,12 @@ impl CommonInsertItemQueue {
 
     pub fn receiver_count(&self) -> usize {
         self.recv.receiver_count()
+    }
+
+    // TODO should mark this such that a future call to sender() will fail
+    pub async fn drop_sender(&self) {
+        let x = std::mem::replace(&mut *self.sender.lock().await, async_channel::bounded(1).0);
+        drop(x);
     }
 }
 
@@ -235,8 +300,18 @@ where
         par.pulse as i64,
         val,
     );
-    data_store.scy.execute(qu, params).await.err_conv()?;
-    Ok(())
+    let y = data_store.scy.execute(qu, params).await;
+    match y {
+        Ok(_) => Ok(()),
+        Err(e) => match e {
+            QueryError::TimeoutError => Err(Error::DbTimeout),
+            QueryError::DbError(e, msg) => match e {
+                DbError::Overloaded => Err(Error::DbOverload),
+                _ => Err(Error::DbError(format!("{e} {msg}"))),
+            },
+            _ => Err(Error::DbError(format!("{e}"))),
+        },
+    }
 }
 
 async fn insert_array_gen<ST>(
@@ -255,19 +330,15 @@ where
         par.pulse as i64,
         val,
     );
-    data_store.scy.execute(qu, params).await.err_conv()?;
+    data_store.scy.execute(qu, params).await?;
     Ok(())
 }
 
 pub async fn insert_item(item: InsertItem, data_store: &DataStore, stats: &CaConnStats) -> Result<(), Error> {
     if item.msp_bump {
         let params = (item.series.id() as i64, item.ts_msp as i64);
-        data_store
-            .scy
-            .execute(&data_store.qu_insert_ts_msp, params)
-            .await
-            .err_conv()?;
-        stats.inserts_msp_inc()
+        data_store.scy.execute(&data_store.qu_insert_ts_msp, params).await?;
+        stats.inserts_msp_inc();
     }
     if let Some(ts_msp_grid) = item.ts_msp_grid {
         let params = (
@@ -280,9 +351,8 @@ pub async fn insert_item(item: InsertItem, data_store: &DataStore, stats: &CaCon
         data_store
             .scy
             .execute(&data_store.qu_insert_series_by_ts_msp, params)
-            .await
-            .err_conv()?;
-        stats.inserts_msp_grid_inc()
+            .await?;
+        stats.inserts_msp_grid_inc();
     }
     let par = InsParCom {
         series: item.series.id(),
@@ -328,20 +398,15 @@ pub async fn insert_connection_status(
     let secs = tsunix.as_secs() * netpod::timeunits::SEC;
     let nanos = tsunix.subsec_nanos() as u64;
     let ts = secs + nanos;
-    let div = netpod::timeunits::SEC * 600;
-    let ts_msp = ts / div * div;
+    let ts_msp = ts / CONNECTION_STATUS_DIV * CONNECTION_STATUS_DIV;
     let ts_lsp = ts - ts_msp;
     let kind = item.status as u32;
     let addr = format!("{}", item.addr);
     let params = (ts_msp as i64, ts_lsp as i64, kind as i32, addr);
     data_store
         .scy
-        .query(
-            "insert into connection_status (ts_msp, ts_lsp, kind, addr) values (?, ?, ?, ?)",
-            params,
-        )
-        .await
-        .err_conv()?;
+        .execute(&data_store.qu_insert_connection_status, params)
+        .await?;
     Ok(())
 }
 
@@ -354,19 +419,19 @@ pub async fn insert_channel_status(
     let secs = tsunix.as_secs() * netpod::timeunits::SEC;
     let nanos = tsunix.subsec_nanos() as u64;
     let ts = secs + nanos;
-    let div = netpod::timeunits::DAY;
-    let ts_msp = ts / div * div;
+    let ts_msp = ts / CONNECTION_STATUS_DIV * CONNECTION_STATUS_DIV;
     let ts_lsp = ts - ts_msp;
     let kind = item.status.kind();
     let series = item.series.id();
     let params = (series as i64, ts_msp as i64, ts_lsp as i64, kind as i32);
     data_store
         .scy
-        .query(
-            "insert into channel_status (series, ts_msp, ts_lsp, kind) values (?, ?, ?, ?)",
-            params,
-        )
-        .await
-        .err_conv()?;
+        .execute(&data_store.qu_insert_channel_status, params)
+        .await?;
+    let params = (ts_msp as i64, ts_lsp as i64, series as i64, kind as i32);
+    data_store
+        .scy
+        .execute(&data_store.qu_insert_channel_status_by_ts_msp, params)
+        .await?;
     Ok(())
 }

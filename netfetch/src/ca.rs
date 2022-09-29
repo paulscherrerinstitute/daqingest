@@ -8,7 +8,7 @@ use self::store::DataStore;
 use crate::ca::conn::ConnCommand;
 use crate::errconv::ErrConv;
 use crate::linuxhelper::local_hostname;
-use crate::store::{CommonInsertItemQueue, CommonInsertItemQueueSender, QueryItem};
+use crate::store::{CommonInsertItemQueue, CommonInsertItemQueueSender, IntoSimplerError, QueryItem};
 use async_channel::Sender;
 use conn::CaConn;
 use err::Error;
@@ -169,6 +169,37 @@ impl ExtraInsertsConf {
     }
 }
 
+fn stats_inc_for_err(stats: &stats::CaConnStats, err: &crate::store::Error) {
+    use crate::store::Error;
+    match err {
+        Error::DbOverload => {
+            stats.store_worker_insert_overload_inc();
+        }
+        Error::DbTimeout => {
+            stats.store_worker_insert_timeout_inc();
+        }
+        Error::DbUnavailable => {
+            stats.store_worker_insert_unavailable_inc();
+        }
+        Error::DbError(_) => {
+            stats.store_worker_insert_error_inc();
+        }
+    }
+}
+
+fn back_off_next(backoff_dt: &mut Duration) {
+    *backoff_dt = *backoff_dt + (*backoff_dt) * 3 / 2;
+    let dtmax = Duration::from_millis(4000);
+    if *backoff_dt > dtmax {
+        *backoff_dt = dtmax;
+    }
+}
+
+async fn back_off_sleep(backoff_dt: &mut Duration) {
+    back_off_next(backoff_dt);
+    tokio::time::sleep(*backoff_dt).await;
+}
+
 async fn spawn_scylla_insert_workers(
     scyconf: ScyllaConfig,
     insert_scylla_sessions: usize,
@@ -190,63 +221,47 @@ async fn spawn_scylla_insert_workers(
         let recv = insert_item_queue.receiver();
         let insert_frac = insert_frac.clone();
         let fut = async move {
+            let backoff_0 = Duration::from_millis(10);
+            let mut backoff = backoff_0.clone();
             let mut i1 = 0;
             while let Ok(item) = recv.recv().await {
+                stats.store_worker_item_recv_inc();
                 match item {
                     QueryItem::ConnectionStatus(item) => {
                         match crate::store::insert_connection_status(item, &data_store, &stats).await {
                             Ok(_) => {
-                                stats.store_worker_item_insert_inc();
+                                stats.store_worker_insert_done_inc();
+                                backoff = backoff_0;
                             }
                             Err(e) => {
-                                stats.store_worker_item_error_inc();
-                                // TODO introduce more structured error variants.
-                                if e.msg().contains("WriteTimeout") {
-                                    tokio::time::sleep(Duration::from_millis(100)).await;
-                                } else {
-                                    // TODO back off but continue.
-                                    error!("insert worker sees error: {e:?}");
-                                    break;
-                                }
+                                stats_inc_for_err(&stats, &e);
+                                back_off_sleep(&mut backoff).await;
                             }
                         }
                     }
                     QueryItem::ChannelStatus(item) => {
                         match crate::store::insert_channel_status(item, &data_store, &stats).await {
                             Ok(_) => {
-                                stats.store_worker_item_insert_inc();
+                                stats.store_worker_insert_done_inc();
+                                backoff = backoff_0;
                             }
                             Err(e) => {
-                                stats.store_worker_item_error_inc();
-                                // TODO introduce more structured error variants.
-                                if e.msg().contains("WriteTimeout") {
-                                    tokio::time::sleep(Duration::from_millis(100)).await;
-                                } else {
-                                    // TODO back off but continue.
-                                    error!("insert worker sees error: {e:?}");
-                                    break;
-                                }
+                                stats_inc_for_err(&stats, &e);
+                                back_off_sleep(&mut backoff).await;
                             }
                         }
                     }
                     QueryItem::Insert(item) => {
-                        stats.store_worker_item_recv_inc();
                         let insert_frac = insert_frac.load(Ordering::Acquire);
                         if i1 % 1000 < insert_frac {
                             match crate::store::insert_item(item, &data_store, &stats).await {
                                 Ok(_) => {
-                                    stats.store_worker_item_insert_inc();
+                                    stats.store_worker_insert_done_inc();
+                                    backoff = backoff_0;
                                 }
                                 Err(e) => {
-                                    stats.store_worker_item_error_inc();
-                                    // TODO introduce more structured error variants.
-                                    if e.msg().contains("WriteTimeout") {
-                                        tokio::time::sleep(Duration::from_millis(100)).await;
-                                    } else {
-                                        // TODO back off but continue.
-                                        error!("insert worker sees error: {e:?}");
-                                        break;
-                                    }
+                                    stats_inc_for_err(&stats, &e);
+                                    back_off_sleep(&mut backoff).await;
                                 }
                             }
                         } else {
@@ -262,17 +277,16 @@ async fn spawn_scylla_insert_workers(
                             item.ema,
                             item.emd,
                         );
-                        let qres = data_store
-                            .scy
-                            .query(
-                                "insert into muted (part, series, ts, ema, emd) values (?, ?, ?, ?, ?)",
-                                values,
-                            )
-                            .await;
+                        let qres = data_store.scy.execute(&data_store.qu_insert_muted, values).await;
                         match qres {
-                            Ok(_) => {}
-                            Err(_) => {
-                                stats.store_worker_item_error_inc();
+                            Ok(_) => {
+                                stats.store_worker_insert_done_inc();
+                                backoff = backoff_0;
+                            }
+                            Err(e) => {
+                                let e = e.into_simpler();
+                                stats_inc_for_err(&stats, &e);
+                                back_off_sleep(&mut backoff).await;
                             }
                         }
                     }
@@ -286,21 +300,44 @@ async fn spawn_scylla_insert_workers(
                         );
                         let qres = data_store
                             .scy
-                            .query(
-                                "insert into item_recv_ivl (part, series, ts, ema, emd) values (?, ?, ?, ?, ?)",
-                                values,
-                            )
+                            .execute(&data_store.qu_insert_item_recv_ivl, values)
                             .await;
                         match qres {
-                            Ok(_) => {}
-                            Err(_) => {
-                                stats.store_worker_item_error_inc();
+                            Ok(_) => {
+                                stats.store_worker_insert_done_inc();
+                                backoff = backoff_0;
+                            }
+                            Err(e) => {
+                                let e = e.into_simpler();
+                                stats_inc_for_err(&stats, &e);
+                                back_off_sleep(&mut backoff).await;
+                            }
+                        }
+                    }
+                    QueryItem::ChannelInfo(item) => {
+                        let params = (
+                            item.ts_msp as i32,
+                            item.series.id() as i64,
+                            item.ivl,
+                            item.interest,
+                            item.evsize as i32,
+                        );
+                        let qres = data_store.scy.execute(&data_store.qu_insert_channel_ping, params).await;
+                        match qres {
+                            Ok(_) => {
+                                stats.store_worker_insert_done_inc();
+                                backoff = backoff_0;
+                            }
+                            Err(e) => {
+                                let e = e.into_simpler();
+                                stats_inc_for_err(&stats, &e);
+                                back_off_sleep(&mut backoff).await;
                             }
                         }
                     }
                 }
             }
-            info!("insert worker has no more messages");
+            trace!("insert worker has no more messages");
         };
         let jh = tokio::spawn(fut);
         jhs.push(jh);
@@ -550,7 +587,7 @@ impl CaConnSet {
                     ingest_commons.local_epics_hostname.clone(),
                     512,
                     200,
-                    ingest_commons.insert_item_queue.sender(),
+                    ingest_commons.insert_item_queue.sender().await,
                     ingest_commons.data_store.clone(),
                     ingest_commons.clone(),
                     vec![channel_name],
@@ -567,12 +604,11 @@ impl CaConnSet {
         self.ca_conn_ress.lock().await.contains_key(addr)
     }
 
-    pub async fn add_channel_or_create_conn() -> Result<(), Error> {
-        // TODO fix race:
-        // Must not drop mutex in-between calls.
-        // Pass mutex on?
-
-        Ok(())
+    pub async fn addr_nth_mod(&self, n: usize) -> Option<SocketAddr> {
+        let g = self.ca_conn_ress.lock().await;
+        let u = g.len();
+        let n = n % u;
+        g.keys().take(n).last().map(Clone::clone)
     }
 }
 
@@ -816,6 +852,27 @@ pub async fn ca_connect(opts: ListenFromFileOpts) -> Result<(), Error> {
     }
     info!("channels_by_host len {}", channels_by_host.len());
 
+    // Periodic tasks triggered by commands:
+    let mut iper = 0;
+    loop {
+        if SIGINT.load(Ordering::Acquire) != 0 {
+            break;
+        }
+        let addr = ingest_commons.ca_conn_set.addr_nth_mod(iper).await;
+        if let Some(addr) = addr {
+            fn cmdgen() -> (ConnCommand, async_channel::Receiver<bool>) {
+                ConnCommand::check_channels_alive()
+            }
+            // TODO race between getting nth address and command send, so ignore error so far.
+            let _res = ingest_commons.ca_conn_set.send_command_to_addr(&addr, cmdgen).await;
+            let cmdgen = || ConnCommand::save_conn_info();
+            // TODO race between getting nth address and command send, so ignore error so far.
+            let _res = ingest_commons.ca_conn_set.send_command_to_addr(&addr, cmdgen).await;
+        }
+        iper += 1;
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
     loop {
         if SIGINT.load(Ordering::Acquire) != 0 {
             if false {
@@ -833,12 +890,14 @@ pub async fn ca_connect(opts: ListenFromFileOpts) -> Result<(), Error> {
     ingest_commons.ca_conn_set.wait_stopped().await?;
     info!("all connections done.");
 
+    insert_item_queue.drop_sender().await;
+
     drop(ingest_commons);
     metrics_agg_jh.abort();
     drop(metrics_agg_jh);
 
     if false {
-        let sender = insert_item_queue.sender_raw();
+        let sender = insert_item_queue.sender_raw().await;
         sender.close();
         let receiver = insert_item_queue.receiver();
         receiver.close();
@@ -856,6 +915,7 @@ pub async fn ca_connect(opts: ListenFromFileOpts) -> Result<(), Error> {
         let rc = receiver.receiver_count();
         info!("item queue B  senders {}  receivers {}", sc, rc);
     }
+    receiver.close();
 
     let mut futs = FuturesUnordered::from_iter(jh_insert_workers);
     loop {
@@ -868,11 +928,10 @@ pub async fn ca_connect(opts: ListenFromFileOpts) -> Result<(), Error> {
                 None => break,
             },
             _ = tokio::time::sleep(Duration::from_millis(1000)).fuse() => {
-                info!("waiting for {} inserters", futs.len());
                 if true {
                     let sc = receiver.sender_count();
                     let rc = receiver.receiver_count();
-                    info!("item queue B  senders {}  receivers {}", sc, rc);
+                    info!("waiting  inserters {}  items {}  senders {}  receivers {}", futs.len(), receiver.len(), sc, rc);
                 }
             }
         );

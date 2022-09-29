@@ -6,8 +6,8 @@ use crate::ca::proto::{CreateChan, EventAdd};
 use crate::ca::store::ChannelRegistry;
 use crate::series::{Existence, SeriesId};
 use crate::store::{
-    ChannelStatus, ChannelStatusItem, CommonInsertItemQueueSender, ConnectionStatus, ConnectionStatusItem, InsertItem,
-    IvlItem, MuteItem, QueryItem,
+    ChannelInfoItem, ChannelStatus, ChannelStatusItem, CommonInsertItemQueueSender, ConnectionStatus,
+    ConnectionStatusItem, InsertItem, IvlItem, MuteItem, QueryItem,
 };
 use async_channel::Sender;
 use err::Error;
@@ -122,6 +122,7 @@ struct CreatedState {
     insert_next_earliest: Instant,
     muted_before: u32,
     series: Option<SeriesId>,
+    info_store_msp_last: u32,
 }
 
 #[allow(unused)]
@@ -246,6 +247,11 @@ impl SubidStore {
     }
 }
 
+fn info_store_msp_from_time(ts: SystemTime) -> u32 {
+    let dt = ts.duration_since(SystemTime::UNIX_EPOCH).unwrap_or(Duration::ZERO);
+    (dt.as_secs() / MIN * MIN / SEC) as u32
+}
+
 #[derive(Debug)]
 pub enum ConnCommandKind {
     FindChannel(String, Sender<(SocketAddrV4, Vec<String>)>),
@@ -255,6 +261,8 @@ pub enum ConnCommandKind {
     ChannelRemove(String, Sender<bool>),
     Shutdown(Sender<bool>),
     ExtraInsertsConf(ExtraInsertsConf, Sender<bool>),
+    CheckChannelsAlive(Sender<bool>),
+    SaveConnInfo(Sender<bool>),
 }
 
 #[derive(Debug)]
@@ -326,6 +334,22 @@ impl ConnCommand {
         };
         (cmd, rx)
     }
+
+    pub fn check_channels_alive() -> (ConnCommand, async_channel::Receiver<bool>) {
+        let (tx, rx) = async_channel::bounded(1);
+        let cmd = Self {
+            kind: ConnCommandKind::CheckChannelsAlive(tx),
+        };
+        (cmd, rx)
+    }
+
+    pub fn save_conn_info() -> (ConnCommand, async_channel::Receiver<bool>) {
+        let (tx, rx) = async_channel::bounded(1);
+        let cmd = Self {
+            kind: ConnCommandKind::SaveConnInfo(tx),
+        };
+        (cmd, rx)
+    }
 }
 
 pub struct CaConn {
@@ -351,7 +375,6 @@ pub struct CaConn {
     stats: Arc<CaConnStats>,
     insert_queue_max: usize,
     insert_ivl_min_mus: u64,
-    ts_channel_alive_check_last: Instant,
     conn_command_tx: async_channel::Sender<ConnCommand>,
     conn_command_rx: async_channel::Receiver<ConnCommand>,
     conn_backoff: f32,
@@ -395,7 +418,6 @@ impl CaConn {
             stats: Arc::new(CaConnStats::new()),
             insert_queue_max,
             insert_ivl_min_mus: 1000 * 6,
-            ts_channel_alive_check_last: Instant::now(),
             conn_command_tx: cq_tx,
             conn_command_rx: cq_rx,
             conn_backoff: 0.02,
@@ -418,23 +440,24 @@ impl CaConn {
             match self.conn_command_rx.poll_next_unpin(cx) {
                 Ready(Some(a)) => match a.kind {
                     ConnCommandKind::FindChannel(pattern, tx) => {
-                        //info!("Search for {pattern:?}");
-                        let mut res = Vec::new();
-                        for name in self.name_by_cid.values() {
-                            if !pattern.is_empty() && name.contains(&pattern) {
-                                res.push(name.clone());
-                            }
-                        }
+                        let res = if let Ok(re) = regex::Regex::new(&pattern) {
+                            self.name_by_cid
+                                .values()
+                                .filter(|x| re.is_match(x))
+                                .map(ToString::to_string)
+                                .collect()
+                        } else {
+                            Vec::new()
+                        };
                         let msg = (self.remote_addr_dbg.clone(), res);
                         match tx.try_send(msg) {
                             Ok(_) => {}
                             Err(_) => {
-                                error!("response channel full or closed");
+                                self.stats.caconn_command_can_not_reply_inc();
                             }
                         }
                     }
                     ConnCommandKind::ChannelState(name, tx) => {
-                        //info!("State for {name:?}");
                         let res = match self.cid_by_name.get(&name) {
                             Some(cid) => match self.channels.get(cid) {
                                 Some(state) => Some(state.to_info(name, self.remote_addr_dbg.clone())),
@@ -449,7 +472,7 @@ impl CaConn {
                         match tx.try_send(msg) {
                             Ok(_) => {}
                             Err(_) => {
-                                error!("response channel full or closed");
+                                self.stats.caconn_command_can_not_reply_inc();
                             }
                         }
                     }
@@ -469,7 +492,7 @@ impl CaConn {
                         match tx.try_send(msg) {
                             Ok(_) => {}
                             Err(_) => {
-                                error!("response channel full or closed");
+                                self.stats.caconn_command_can_not_reply_inc();
                             }
                         }
                     }
@@ -478,7 +501,7 @@ impl CaConn {
                         match tx.try_send(true) {
                             Ok(_) => {}
                             Err(_) => {
-                                error!("response channel full or closed");
+                                self.stats.caconn_command_can_not_reply_inc();
                             }
                         }
                     }
@@ -487,19 +510,19 @@ impl CaConn {
                         match tx.try_send(true) {
                             Ok(_) => {}
                             Err(_) => {
-                                error!("response channel full or closed");
+                                self.stats.caconn_command_can_not_reply_inc();
                             }
                         }
                     }
                     ConnCommandKind::Shutdown(tx) => {
                         self.shutdown = true;
-                        let _ = self.before_reset_of_channel_state();
+                        let res = self.before_reset_of_channel_state();
                         self.state = CaConnState::Shutdown;
                         self.proto = None;
-                        match tx.try_send(true) {
+                        match tx.try_send(res.is_ok()) {
                             Ok(_) => {}
                             Err(_) => {
-                                //error!("response channel full or closed");
+                                self.stats.caconn_command_can_not_reply_inc();
                             }
                         }
                     }
@@ -508,7 +531,27 @@ impl CaConn {
                         match tx.try_send(true) {
                             Ok(_) => {}
                             Err(_) => {
-                                //error!("response channel full or closed");
+                                self.stats.caconn_command_can_not_reply_inc();
+                            }
+                        }
+                    }
+                    ConnCommandKind::CheckChannelsAlive(tx) => {
+                        let res = self.check_channels_alive();
+                        let res = res.is_ok();
+                        match tx.try_send(res) {
+                            Ok(_) => {}
+                            Err(_) => {
+                                self.stats.caconn_command_can_not_reply_inc();
+                            }
+                        }
+                    }
+                    ConnCommandKind::SaveConnInfo(tx) => {
+                        let res = self.save_conn_info();
+                        let res = res.is_ok();
+                        match tx.try_send(res) {
+                            Ok(_) => {}
+                            Err(_) => {
+                                self.stats.caconn_command_can_not_reply_inc();
                             }
                         }
                     }
@@ -574,8 +617,9 @@ impl CaConn {
     }
 
     fn before_reset_of_channel_state(&mut self) -> Result<(), Error> {
-        warn!("before_reset_of_channel_state  channels {}", self.channels.len());
+        trace!("before_reset_of_channel_state  channels {}", self.channels.len());
         let mut created = 0;
+        let mut warn_max = 0;
         for (_cid, chst) in &self.channels {
             match chst {
                 ChannelState::Created(st) => {
@@ -585,13 +629,14 @@ impl CaConn {
                             series: series.clone(),
                             status: ChannelStatus::Closed,
                         });
-                        if created < 20 {
-                            //info!("store {:?}", item);
+                        if created < 10 {
+                            trace!("store {:?}", item);
                         }
                         self.insert_item_queue.push_back(item);
                     } else {
-                        if created < 20 {
-                            //info!("no series for cid {:?}", st.cid);
+                        if warn_max < 10 {
+                            warn!("no series for cid {:?}", st.cid);
+                            warn_max += 1;
                         }
                     }
                     created += 1;
@@ -674,6 +719,38 @@ impl CaConn {
         Ok(())
     }
 
+    fn save_conn_info(&mut self) -> Result<(), Error> {
+        let timenow = SystemTime::now();
+        for (_, st) in &mut self.channels {
+            match st {
+                ChannelState::Init => {
+                    // TODO need last-save-ts for this state.
+                }
+                ChannelState::Creating { cid: _, ts_beg: _ } => {
+                    // TODO need last-save-ts for this state.
+                }
+                ChannelState::Created(st) => {
+                    let msp = info_store_msp_from_time(timenow.clone());
+                    if msp != st.info_store_msp_last {
+                        st.info_store_msp_last = msp;
+                        let item = QueryItem::ChannelInfo(ChannelInfoItem {
+                            ts_msp: msp,
+                            series: st.series.clone().unwrap_or(SeriesId::new(0)),
+                            ivl: st.item_recv_ivl_ema.ema().ema(),
+                            interest: 0.,
+                            evsize: 0,
+                        });
+                        self.insert_item_queue.push_back(item);
+                    }
+                }
+                ChannelState::Error(_) => {
+                    // TODO need last-save-ts for this state.
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn channel_to_evented(
         &mut self,
         cid: Cid,
@@ -730,6 +807,7 @@ impl CaConn {
             insert_next_earliest: tsnow,
             muted_before: 0,
             series: Some(series),
+            info_store_msp_last: info_store_msp_from_time(SystemTime::now()),
         });
         let scalar_type = ScalarType::from_ca_id(data_type)?;
         let shape = Shape::from_ca_count(data_count)?;
@@ -1149,6 +1227,7 @@ impl CaConn {
                                     insert_next_earliest: tsnow,
                                     muted_before: 0,
                                     series: None,
+                                    info_store_msp_last: info_store_msp_from_time(SystemTime::now()),
                                 });
                                 // TODO handle error in different way. Should most likely not abort.
                                 let cd = ChannelDescDecoded {
@@ -1375,13 +1454,6 @@ impl Stream for CaConn {
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
         use Poll::*;
         self.stats.caconn_poll_count_inc();
-        let tsnow = Instant::now();
-        if tsnow.duration_since(self.ts_channel_alive_check_last) >= Duration::from_millis(4000) {
-            self.ts_channel_alive_check_last = tsnow;
-            if let Err(e) = self.check_channels_alive() {
-                error!("check_dead_channels {e:?}");
-            }
-        }
         if self.shutdown {
             info!("CaConn poll");
         }
@@ -1400,7 +1472,7 @@ impl Stream for CaConn {
             }
             if self.shutdown {
                 if self.insert_item_queue.len() == 0 {
-                    info!("no more items to flush");
+                    trace!("no more items to flush");
                     break Ready(Ok(()));
                 } else {
                     info!("more items {}", self.insert_item_queue.len());

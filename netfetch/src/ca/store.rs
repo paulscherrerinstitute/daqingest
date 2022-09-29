@@ -55,6 +55,12 @@ pub struct DataStore {
     pub qu_insert_array_i32: Arc<PreparedStatement>,
     pub qu_insert_array_f32: Arc<PreparedStatement>,
     pub qu_insert_array_f64: Arc<PreparedStatement>,
+    pub qu_insert_muted: Arc<PreparedStatement>,
+    pub qu_insert_item_recv_ivl: Arc<PreparedStatement>,
+    pub qu_insert_connection_status: Arc<PreparedStatement>,
+    pub qu_insert_channel_status: Arc<PreparedStatement>,
+    pub qu_insert_channel_status_by_ts_msp: Arc<PreparedStatement>,
+    pub qu_insert_channel_ping: Arc<PreparedStatement>,
     pub chan_reg: Arc<ChannelRegistry>,
 }
 
@@ -137,6 +143,38 @@ impl DataStore {
             .await
             .map_err(|e| Error::with_msg_no_trace(format!("{e:?}")))?;
         let qu_insert_array_f64 = Arc::new(q);
+        // Others:
+        let q = scy
+            .prepare("insert into muted (part, series, ts, ema, emd) values (?, ?, ?, ?, ?)")
+            .await
+            .map_err(|e| Error::with_msg_no_trace(format!("{e:?}")))?;
+        let qu_insert_muted = Arc::new(q);
+        let q = scy
+            .prepare("insert into item_recv_ivl (part, series, ts, ema, emd) values (?, ?, ?, ?, ?)")
+            .await
+            .map_err(|e| Error::with_msg_no_trace(format!("{e:?}")))?;
+        let qu_insert_item_recv_ivl = Arc::new(q);
+        // Connection status:
+        let q = scy
+            .prepare("insert into connection_status (ts_msp, ts_lsp, kind, addr) values (?, ?, ?, ?)")
+            .await
+            .map_err(|e| Error::with_msg_no_trace(format!("{e:?}")))?;
+        let qu_insert_connection_status = Arc::new(q);
+        let q = scy
+            .prepare("insert into channel_status (series, ts_msp, ts_lsp, kind) values (?, ?, ?, ?)")
+            .await
+            .map_err(|e| Error::with_msg_no_trace(format!("{e:?}")))?;
+        let qu_insert_channel_status = Arc::new(q);
+        let q = scy
+            .prepare("insert into channel_status_by_ts_msp (ts_msp, ts_lsp, series, kind) values (?, ?, ?, ?)")
+            .await
+            .map_err(|e| Error::with_msg_no_trace(format!("{e:?}")))?;
+        let qu_insert_channel_status_by_ts_msp = Arc::new(q);
+        let q = scy
+            .prepare("insert into channel_ping (ts_msp, series, ivl, interest, evsize) values (?, ?, ?, ?, ?)")
+            .await
+            .map_err(|e| Error::with_msg_no_trace(format!("{e:?}")))?;
+        let qu_insert_channel_ping = Arc::new(q);
         let ret = Self {
             chan_reg: Arc::new(ChannelRegistry::new(pg_client)),
             scy,
@@ -153,6 +191,12 @@ impl DataStore {
             qu_insert_array_i32,
             qu_insert_array_f32,
             qu_insert_array_f64,
+            qu_insert_muted,
+            qu_insert_item_recv_ivl,
+            qu_insert_connection_status,
+            qu_insert_channel_status,
+            qu_insert_channel_status_by_ts_msp,
+            qu_insert_channel_ping,
         };
         Ok(ret)
     }
