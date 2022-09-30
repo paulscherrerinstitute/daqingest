@@ -12,6 +12,7 @@ use crate::errconv::ErrConv;
 use crate::insertworker::spawn_scylla_insert_workers;
 use crate::linuxhelper::local_hostname;
 use crate::metrics::metrics_agg_task;
+use crate::rt::TokMx;
 use crate::store::CommonInsertItemQueue;
 use err::Error;
 use futures_util::stream::FuturesUnordered;
@@ -61,6 +62,7 @@ struct ChannelConfig {
     api_bind: Option<String>,
     local_epics_hostname: Option<String>,
     store_workers_rate: Option<u64>,
+    insert_frac: Option<u64>,
 }
 
 #[test]
@@ -138,6 +140,7 @@ pub async fn parse_config(config: PathBuf) -> Result<CaConnectOpts, Error> {
         api_bind: conf.api_bind.unwrap_or_else(|| "0.0.0.0:3011".into()),
         local_epics_hostname: conf.local_epics_hostname.unwrap_or_else(local_hostname),
         store_workers_rate: conf.store_workers_rate.unwrap_or(10000),
+        insert_frac: conf.insert_frac.unwrap_or(1000),
     })
 }
 
@@ -159,6 +162,7 @@ pub struct CaConnectOpts {
     pub api_bind: String,
     pub local_epics_hostname: String,
     pub store_workers_rate: u64,
+    pub insert_frac: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -177,9 +181,9 @@ pub struct IngestCommons {
     pub local_epics_hostname: String,
     pub insert_item_queue: Arc<CommonInsertItemQueue>,
     pub data_store: Arc<DataStore>,
-    pub insert_frac: Arc<AtomicU64>,
     pub insert_ivl_min: Arc<AtomicU64>,
-    pub extra_inserts_conf: Mutex<ExtraInsertsConf>,
+    pub extra_inserts_conf: TokMx<ExtraInsertsConf>,
+    pub insert_frac: AtomicU64,
     pub store_workers_rate: AtomicU64,
     pub ca_conn_set: CaConnSet,
 }
@@ -277,8 +281,7 @@ async fn query_addr_multiple(pg_client: &PgClient) -> Result<(), Error> {
 
 pub async fn ca_connect(opts: ListenFromFileOpts) -> Result<(), Error> {
     crate::linuxhelper::set_signal_handler()?;
-    let insert_frac = Arc::new(AtomicU64::new(1000));
-    let extra_inserts_conf = Mutex::new(ExtraInsertsConf { copies: Vec::new() });
+    let extra_inserts_conf = TokMx::new(ExtraInsertsConf { copies: Vec::new() });
     let insert_ivl_min = Arc::new(AtomicU64::new(8800));
     let opts = parse_config(opts.config).await?;
     let scyconf = opts.scyconf.clone();
@@ -332,9 +335,9 @@ pub async fn ca_connect(opts: ListenFromFileOpts) -> Result<(), Error> {
         insert_item_queue: insert_item_queue.clone(),
         data_store: data_store.clone(),
         insert_ivl_min: insert_ivl_min.clone(),
-        insert_frac: insert_frac.clone(),
         extra_inserts_conf,
         store_workers_rate: AtomicU64::new(opts.store_workers_rate),
+        insert_frac: AtomicU64::new(opts.insert_frac),
         ca_conn_set: CaConnSet::new(),
     };
     let ingest_commons = Arc::new(ingest_commons);
@@ -346,7 +349,6 @@ pub async fn ca_connect(opts: ListenFromFileOpts) -> Result<(), Error> {
         opts.insert_scylla_sessions,
         opts.insert_worker_count,
         insert_item_queue.clone(),
-        insert_frac.clone(),
         ingest_commons.clone(),
         pg_client.clone(),
         store_stats.clone(),

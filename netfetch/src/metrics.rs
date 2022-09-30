@@ -11,10 +11,6 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
-async fn get_empty() -> String {
-    String::new()
-}
-
 async fn find_channel(
     params: HashMap<String, String>,
     ingest_commons: Arc<IngestCommons>,
@@ -141,7 +137,7 @@ async fn channel_states(
 async fn extra_inserts_conf_set(v: ExtraInsertsConf, ingest_commons: Arc<IngestCommons>) -> axum::Json<bool> {
     // TODO ingest_commons is the authorative value. Should have common function outside of this metrics which
     // can update everything to a given value.
-    *ingest_commons.extra_inserts_conf.lock().unwrap() = v.clone();
+    *ingest_commons.extra_inserts_conf.lock().await = v.clone();
     ingest_commons
         .ca_conn_set
         .send_command_to_all(|| ConnCommand::extra_inserts_conf_set(v.clone()))
@@ -206,12 +202,43 @@ pub async fn start_metrics_service(bind_to: String, ingest_commons: Arc<IngestCo
             }),
         )
         .route(
-            "/insert_frac",
-            get(get_empty).put({
-                let insert_frac = ingest_commons.insert_frac.clone();
+            "/store_workers_rate",
+            get({
+                let c = ingest_commons.clone();
+                || async move { axum::Json(c.store_workers_rate.load(Ordering::Acquire)) }
+            })
+            .put({
+                let c = ingest_commons.clone();
                 |v: extract::Json<u64>| async move {
-                    insert_frac.store(v.0, Ordering::Release);
+                    c.store_workers_rate.store(v.0, Ordering::Release);
                 }
+            }),
+        )
+        .route(
+            "/insert_frac",
+            get({
+                let c = ingest_commons.clone();
+                || async move { axum::Json(c.insert_frac.load(Ordering::Acquire)) }
+            })
+            .put({
+                let c = ingest_commons.clone();
+                |v: extract::Json<u64>| async move {
+                    c.insert_frac.store(v.0, Ordering::Release);
+                }
+            }),
+        )
+        .route(
+            "/extra_inserts_conf",
+            get({
+                let c = ingest_commons.clone();
+                || async move {
+                    let res = c.extra_inserts_conf.lock().await;
+                    axum::Json(serde_json::to_value(&*res).unwrap())
+                }
+            })
+            .put({
+                let ingest_commons = ingest_commons.clone();
+                |v: extract::Json<ExtraInsertsConf>| extra_inserts_conf_set(v.0, ingest_commons)
             }),
         )
         .route(
@@ -221,13 +248,6 @@ pub async fn start_metrics_service(bind_to: String, ingest_commons: Arc<IngestCo
                 |v: extract::Json<u64>| async move {
                     insert_ivl_min.store(v.0, Ordering::Release);
                 }
-            }),
-        )
-        .route(
-            "/extra_inserts_conf",
-            put({
-                let ingest_commons = ingest_commons.clone();
-                |v: extract::Json<ExtraInsertsConf>| extra_inserts_conf_set(v.0, ingest_commons)
             }),
         )
         .fallback(

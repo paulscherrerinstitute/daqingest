@@ -155,7 +155,8 @@ stats_proc::stats_struct!((
             store_worker_recv_queue_len,
             store_worker_item_recv,
             // TODO rename to make clear that this drop is voluntary because of user config choice:
-            store_worker_item_drop,
+            store_worker_fraction_drop,
+            store_worker_ratelimit_drop,
             store_worker_insert_done,
             store_worker_insert_overload,
             store_worker_insert_timeout,
