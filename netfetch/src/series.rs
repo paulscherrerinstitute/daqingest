@@ -66,12 +66,12 @@ pub async fn get_series_id(pg_client: &PgClient, cd: &ChannelDescDecoded) -> Res
         for _ in 0..200 {
             h.update(tsbeg.elapsed().subsec_nanos().to_ne_bytes());
             let f = h.clone().finalize();
-            let mut series = u64::from_le_bytes(f.as_slice()[0..8].try_into().unwrap());
+            let series = u64::from_le_bytes(f.as_slice()[0..8].try_into().unwrap());
             if series > i64::MAX as u64 {
-                series &= 0x7fffffffffffffff;
+                continue;
             }
             if series == 0 {
-                series = 1;
+                continue;
             }
             if series <= 0 || series > i64::MAX as u64 {
                 return Err(Error::with_msg_no_trace(format!(

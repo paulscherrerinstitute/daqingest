@@ -2,6 +2,7 @@ pub mod bsread;
 pub mod ca;
 pub mod channelwriter;
 pub mod errconv;
+pub mod insertworker;
 pub mod linuxhelper;
 pub mod metrics;
 pub mod netbuf;
