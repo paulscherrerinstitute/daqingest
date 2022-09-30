@@ -171,7 +171,7 @@ impl DataStore {
             .map_err(|e| Error::with_msg_no_trace(format!("{e:?}")))?;
         let qu_insert_channel_status_by_ts_msp = Arc::new(q);
         let q = scy
-            .prepare("insert into channel_ping (ts_msp, series, ivl, interest, evsize) values (?, ?, ?, ?, ?)")
+            .prepare("insert into channel_ping (part, ts_msp, series, ivl, interest, evsize) values (?, ?, ?, ?, ?, ?)")
             .await
             .map_err(|e| Error::with_msg_no_trace(format!("{e:?}")))?;
         let qu_insert_channel_ping = Arc::new(q);

@@ -249,7 +249,7 @@ impl SubidStore {
 
 fn info_store_msp_from_time(ts: SystemTime) -> u32 {
     let dt = ts.duration_since(SystemTime::UNIX_EPOCH).unwrap_or(Duration::ZERO);
-    (dt.as_secs() / MIN * MIN / SEC) as u32
+    (dt.as_secs() / 60 * 60) as u32
 }
 
 #[derive(Debug)]
@@ -635,7 +635,7 @@ impl CaConn {
                         self.insert_item_queue.push_back(item);
                     } else {
                         if warn_max < 10 {
-                            warn!("no series for cid {:?}", st.cid);
+                            debug!("no series for cid {:?}", st.cid);
                             warn_max += 1;
                         }
                     }

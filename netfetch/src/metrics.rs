@@ -1,37 +1,18 @@
 use crate::ca::conn::ConnCommand;
-use crate::ca::{ExtraInsertsConf, IngestCommons};
+use crate::ca::{ExtraInsertsConf, IngestCommons, METRICS};
 use axum::extract::Query;
 use err::Error;
 use http::request::Parts;
 use log::*;
+use stats::{CaConnStats, CaConnStatsAgg, CaConnStatsAggDiff};
 use std::collections::HashMap;
 use std::net::{SocketAddr, SocketAddrV4};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::time::Duration;
 
 async fn get_empty() -> String {
     String::new()
-}
-
-#[allow(unused)]
-async fn send_command<'a, IT, F, R>(it: &mut IT, cmdgen: F) -> Vec<async_channel::Receiver<R>>
-where
-    IT: Iterator<Item = (&'a SocketAddrV4, &'a async_channel::Sender<ConnCommand>)>,
-    F: Fn() -> (ConnCommand, async_channel::Receiver<R>),
-{
-    let mut rxs = Vec::new();
-    for (_, tx) in it {
-        let (cmd, rx) = cmdgen();
-        match tx.send(cmd).await {
-            Ok(()) => {
-                rxs.push(rx);
-            }
-            Err(e) => {
-                error!("can not send command {e:?}");
-            }
-        }
-    }
-    rxs
 }
 
 async fn find_channel(
@@ -275,4 +256,35 @@ pub async fn start_metrics_service(bind_to: String, ingest_commons: Arc<IngestCo
         .serve(app.into_make_service())
         .await
         .unwrap()
+}
+
+pub async fn metrics_agg_task(
+    ingest_commons: Arc<IngestCommons>,
+    local_stats: Arc<CaConnStats>,
+    store_stats: Arc<CaConnStats>,
+) -> Result<(), Error> {
+    let mut agg_last = CaConnStatsAgg::new();
+    loop {
+        tokio::time::sleep(Duration::from_millis(671)).await;
+        let agg = CaConnStatsAgg::new();
+        agg.push(&local_stats);
+        agg.push(&store_stats);
+        {
+            let conn_stats_guard = ingest_commons.ca_conn_set.ca_conn_ress().lock().await;
+            for (_, g) in conn_stats_guard.iter() {
+                agg.push(g.stats());
+            }
+        }
+        {
+            let val = ingest_commons.insert_item_queue.receiver().len() as u64;
+            agg.store_worker_recv_queue_len.store(val, Ordering::Release);
+        }
+        let mut m = METRICS.lock().unwrap();
+        *m = Some(agg.clone());
+        if false {
+            let diff = CaConnStatsAggDiff::diff_from(&agg_last, &agg);
+            info!("{}", diff.display());
+        }
+        agg_last = agg;
+    }
 }

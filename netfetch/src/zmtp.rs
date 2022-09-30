@@ -441,6 +441,9 @@ pub async fn zmtp_client(opts: ZmtpClientOpts) -> Result<(), Error> {
         .await
         .map_err(|e| Error::with_msg_no_trace(format!("{e:?}")))?;
     let scy = Arc::new(scy);
+
+    error!("TODO redo the pulse mapping");
+    err::todo();
     let qu1 = scy
         .prepare("insert into pulse_pkey (a, pulse_a) values (?, ?)")
         .await
