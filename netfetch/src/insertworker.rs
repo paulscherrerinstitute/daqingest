@@ -4,6 +4,7 @@ use crate::rt::JoinHandle;
 use crate::store::{CommonInsertItemQueue, IntoSimplerError, QueryItem};
 use err::Error;
 use log::*;
+use netpod::timeunits::{MS, SEC};
 use netpod::ScyllaConfig;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -56,33 +57,45 @@ pub async fn spawn_scylla_insert_workers(
         let ingest_commons = ingest_commons.clone();
         let stats = store_stats.clone();
         let recv = insert_item_queue.receiver();
-        let mut ts_recv_last = Instant::now();
+        let store_stats = store_stats.clone();
         let fut = async move {
+            let mut ts_forward_last = Instant::now();
+            let mut ivl_ema = stats::Ema64::with_k(0.00001);
             loop {
                 let item = if let Ok(x) = recv.recv().await {
                     x
                 } else {
                     break;
                 };
+                let ts_received = Instant::now();
                 let allowed_to_drop = match &item {
                     QueryItem::Insert(_) => true,
                     _ => false,
                 };
                 let dt_min = {
                     let rate = ingest_commons.store_workers_rate.load(Ordering::Acquire);
-                    Duration::from_nanos(1000000000 / rate)
+                    Duration::from_nanos(SEC / rate)
                 };
-                let tsnow = Instant::now();
-                let dt = tsnow.duration_since(ts_recv_last);
-                ts_recv_last = tsnow;
-                if allowed_to_drop && dt < dt_min {
+                let mut ema2 = ivl_ema.clone();
+                {
+                    let dt = ts_received.duration_since(ts_forward_last);
+                    let dt_ns = SEC * dt.as_secs() + dt.subsec_nanos() as u64;
+                    ema2.update(dt_ns.min(MS * 100) as f32);
+                }
+                let ivl2 = Duration::from_nanos(ema2.ema() as u64);
+                if allowed_to_drop && ivl2 < dt_min {
                     //tokio::time::sleep_until(ts_recv_last.checked_add(dt_min).unwrap().into()).await;
                     stats.store_worker_ratelimit_drop_inc();
                 } else {
                     if q2_tx.send(item).await.is_err() {
                         break;
                     } else {
-                        stats.store_worker_item_recv_inc();
+                        let tsnow = Instant::now();
+                        let dt = tsnow.duration_since(ts_forward_last);
+                        let dt_ns = SEC * dt.as_secs() + dt.subsec_nanos() as u64;
+                        ivl_ema.update(dt_ns.min(MS * 100) as f32);
+                        ts_forward_last = tsnow;
+                        store_stats.inter_ivl_ema.store(ivl_ema.ema() as u64, Ordering::Release);
                     }
                 }
             }
@@ -100,8 +113,11 @@ pub async fn spawn_scylla_insert_workers(
     for i1 in 0..insert_worker_count {
         let data_store = data_stores[i1 * data_stores.len() / insert_worker_count].clone();
         let stats = store_stats.clone();
-        //let recv = insert_item_queue.receiver();
-        let recv = q2_rx.clone();
+        let recv = if true {
+            q2_rx.clone()
+        } else {
+            insert_item_queue.receiver()
+        };
         let ingest_commons = ingest_commons.clone();
         let fut = async move {
             let backoff_0 = Duration::from_millis(10);
@@ -109,6 +125,7 @@ pub async fn spawn_scylla_insert_workers(
             let mut i1 = 0;
             loop {
                 let item = if let Ok(item) = recv.recv().await {
+                    stats.store_worker_item_recv_inc();
                     item
                 } else {
                     break;

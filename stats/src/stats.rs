@@ -6,15 +6,17 @@ const US: u64 = 1000;
 const MS: u64 = US * 1000;
 const SEC: u64 = MS * 1000;
 
+pub type EMA = Ema32;
+
 #[derive(Clone, Debug)]
-pub struct EMA {
+pub struct Ema32 {
     ema: f32,
     emv: f32,
     k: f32,
     update_count: u64,
 }
 
-impl EMA {
+impl Ema32 {
     pub fn with_k(k: f32) -> Self {
         Self {
             ema: 0.0,
@@ -67,6 +69,71 @@ impl EMA {
     }
 
     pub fn k(&self) -> f32 {
+        self.k
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct Ema64 {
+    ema: f64,
+    emv: f64,
+    k: f64,
+    update_count: u64,
+}
+
+impl Ema64 {
+    pub fn with_k(k: f64) -> Self {
+        Self {
+            ema: 0.0,
+            emv: 0.0,
+            k,
+            update_count: 0,
+        }
+    }
+
+    pub fn with_ema(ema: f64, k: f64) -> Self {
+        Self {
+            ema,
+            emv: 0.0,
+            k,
+            update_count: 0,
+        }
+    }
+
+    pub fn default() -> Self {
+        Self {
+            ema: 0.0,
+            emv: 0.0,
+            k: 0.05,
+            update_count: 0,
+        }
+    }
+
+    #[inline(always)]
+    pub fn update<V>(&mut self, v: V)
+    where
+        V: Into<f64>,
+    {
+        self.update_count += 1;
+        let k = self.k;
+        let dv = v.into() - self.ema;
+        self.ema += k * dv;
+        self.emv = (1f64 - k) * (self.emv + k * dv * dv);
+    }
+
+    pub fn update_count(&self) -> u64 {
+        self.update_count
+    }
+
+    pub fn ema(&self) -> f64 {
+        self.ema
+    }
+
+    pub fn emv(&self) -> f64 {
+        self.emv
+    }
+
+    pub fn k(&self) -> f64 {
         self.k
     }
 }
@@ -153,6 +220,7 @@ stats_proc::stats_struct!((
             inserts_queue_drop,
             channel_fast_item_drop,
             store_worker_recv_queue_len,
+            // TODO maybe rename: this is now only the recv of the intermediate queue:
             store_worker_item_recv,
             // TODO rename to make clear that this drop is voluntary because of user config choice:
             store_worker_fraction_drop,
@@ -173,6 +241,7 @@ stats_proc::stats_struct!((
             caconn_loop3_count,
             caconn_loop4_count,
             caconn_command_can_not_reply,
+            caconn_recv_data,
             time_handle_conn_listen,
             time_handle_peer_ready,
             time_check_channels_state_init,
@@ -189,6 +258,7 @@ stats_proc::stats_struct!((
             ca_ts_off_2,
             ca_ts_off_3,
             ca_ts_off_4,
+            inter_ivl_ema,
         ),
     ),
     agg(name(CaConnStatsAgg), parent(CaConnStats)),

@@ -1250,6 +1250,7 @@ impl CaConn {
                                 do_wake_again = true;
                             }
                             CaMsgTy::EventAddRes(k) => {
+                                self.stats.caconn_recv_data_inc();
                                 let res = Self::handle_event_add_res(self, k, tsnow);
                                 let ts2 = Instant::now();
                                 self.stats
