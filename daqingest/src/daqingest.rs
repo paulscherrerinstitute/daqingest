@@ -1,20 +1,21 @@
 pub mod query;
 
+use clap::ArgAction::Count;
 use clap::Parser;
 use netfetch::ca::ListenFromFileOpts;
 use netfetch::zmtp::ZmtpClientOpts;
 
 #[derive(Debug, Parser)]
 //#[clap(name = "daqingest", version)]
-#[clap(version)]
+#[command(author, version, about)]
 pub struct DaqIngestOpts {
-    #[clap(long, parse(from_occurrences))]
+    #[arg(long, action(Count))]
     pub verbose: u32,
     #[clap(long)]
     pub tag: Option<String>,
-    #[clap(subcommand)]
+    #[command(subcommand)]
     pub subcmd: SubCmd,
-    #[clap(long)]
+    #[arg(long)]
     pub nworkers: Option<usize>,
 }
 
@@ -25,25 +26,25 @@ pub enum SubCmd {
     ListPulses,
     FetchEvents(FetchEvents),
     BsreadDump(BsreadDump),
-    #[clap(subcommand)]
+    #[command(subcommand)]
     ChannelAccess(ChannelAccess),
 }
 
 #[derive(Debug, Parser)]
 pub struct Bsread {
-    #[clap(long)]
+    #[arg(long)]
     pub scylla: Vec<String>,
-    #[clap(long)]
+    #[arg(long)]
     pub source: Vec<String>,
-    #[clap(long)]
+    #[arg(long)]
     pub rcvbuf: Option<usize>,
-    #[clap(long)]
+    #[arg(long)]
     pub array_truncate: Option<usize>,
-    #[clap(long)]
+    #[arg(long)]
     pub do_pulse_id: bool,
-    #[clap(long)]
+    #[arg(long)]
     pub skip_insert: bool,
-    #[clap(long)]
+    #[arg(long)]
     pub process_channel_count_limit: Option<usize>,
 }
 
@@ -63,9 +64,9 @@ impl From<Bsread> for ZmtpClientOpts {
 
 #[derive(Debug, Parser)]
 pub struct FetchEvents {
-    #[clap(long, min_values(1))]
+    #[arg(long, num_args(1..))]
     pub scylla: Vec<String>,
-    #[clap(long)]
+    #[arg(long)]
     pub channel: String,
 }
 
