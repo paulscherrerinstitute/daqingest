@@ -282,6 +282,7 @@ struct InsParCom {
     ts_msp: u64,
     ts_lsp: u64,
     pulse: u64,
+    ttl: u32,
 }
 
 async fn insert_scalar_gen<ST>(
@@ -299,6 +300,7 @@ where
         par.ts_lsp as i64,
         par.pulse as i64,
         val,
+        par.ttl as i32,
     );
     let y = data_store.scy.execute(qu, params).await;
     match y {
@@ -334,9 +336,16 @@ where
     Ok(())
 }
 
-pub async fn insert_item(item: InsertItem, data_store: &DataStore, stats: &CaConnStats) -> Result<(), Error> {
+pub async fn insert_item(
+    item: InsertItem,
+    ttl_msp: u32,
+    ttl_0d: u32,
+    ttl_1d: u32,
+    data_store: &DataStore,
+    stats: &CaConnStats,
+) -> Result<(), Error> {
     if item.msp_bump {
-        let params = (item.series.id() as i64, item.ts_msp as i64);
+        let params = (item.series.id() as i64, item.ts_msp as i64, ttl_msp as i32);
         data_store.scy.execute(&data_store.qu_insert_ts_msp, params).await?;
         stats.inserts_msp_inc();
     }
@@ -354,15 +363,16 @@ pub async fn insert_item(item: InsertItem, data_store: &DataStore, stats: &CaCon
             .await?;
         stats.inserts_msp_grid_inc();
     }
-    let par = InsParCom {
-        series: item.series.id(),
-        ts_msp: item.ts_msp,
-        ts_lsp: item.ts_lsp,
-        pulse: item.pulse,
-    };
     use CaDataValue::*;
     match item.val {
         Scalar(val) => {
+            let par = InsParCom {
+                series: item.series.id(),
+                ts_msp: item.ts_msp,
+                ts_lsp: item.ts_lsp,
+                pulse: item.pulse,
+                ttl: ttl_0d,
+            };
             use CaDataScalarValue::*;
             match val {
                 I8(val) => insert_scalar_gen(par, val, &data_store.qu_insert_scalar_i8, &data_store).await?,
@@ -375,6 +385,13 @@ pub async fn insert_item(item: InsertItem, data_store: &DataStore, stats: &CaCon
             }
         }
         Array(val) => {
+            let par = InsParCom {
+                series: item.series.id(),
+                ts_msp: item.ts_msp,
+                ts_lsp: item.ts_lsp,
+                pulse: item.pulse,
+                ttl: ttl_1d,
+            };
             use CaDataArrayValue::*;
             match val {
                 I8(val) => insert_array_gen(par, val, &data_store.qu_insert_array_i8, &data_store).await?,

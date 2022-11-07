@@ -119,6 +119,9 @@ pub async fn spawn_scylla_insert_workers(
             insert_item_queue.receiver()
         };
         let ingest_commons = ingest_commons.clone();
+        let ttl_msp = 60 * 60 * 24 * 4;
+        let ttl_0d = 60 * 60 * 24 * 2;
+        let ttl_1d = 60 * 60 * 12;
         let fut = async move {
             let backoff_0 = Duration::from_millis(10);
             let mut backoff = backoff_0.clone();
@@ -158,7 +161,7 @@ pub async fn spawn_scylla_insert_workers(
                     QueryItem::Insert(item) => {
                         let insert_frac = ingest_commons.insert_frac.load(Ordering::Acquire);
                         if i1 % 1000 < insert_frac {
-                            match crate::store::insert_item(item, &data_store, &stats).await {
+                            match crate::store::insert_item(item, ttl_msp, ttl_0d, ttl_1d, &data_store, &stats).await {
                                 Ok(_) => {
                                     stats.store_worker_insert_done_inc();
                                     backoff = backoff_0;

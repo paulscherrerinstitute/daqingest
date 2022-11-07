@@ -75,7 +75,7 @@ impl DataStore {
             .map_err(|e| Error::with_msg_no_trace(format!("{e:?}")))?;
         let scy = Arc::new(scy);
         let q = scy
-            .prepare("insert into ts_msp (series, ts_msp) values (?, ?)")
+            .prepare("insert into ts_msp (series, ts_msp) values (?, ?) using ttl ?")
             .await
             .map_err(|e| Error::with_msg_no_trace(format!("{e:?}")))?;
         let qu_insert_ts_msp = Arc::new(q);
@@ -86,37 +86,39 @@ impl DataStore {
             .await
             .map_err(|e| Error::with_msg_no_trace(format!("{e:?}")))?;
         let qu_insert_series_by_ts_msp = Arc::new(q);
+
         // scalar:
         let q = scy
-            .prepare("insert into events_scalar_i8 (series, ts_msp, ts_lsp, pulse, value) values (?, ?, ?, ?, ?)")
+            .prepare("insert into events_scalar_i8 (series, ts_msp, ts_lsp, pulse, value) values (?, ?, ?, ?, ?) using ttl ?")
             .await
             .map_err(|e| Error::with_msg_no_trace(format!("{e:?}")))?;
         let qu_insert_scalar_i8 = Arc::new(q);
         let q = scy
-            .prepare("insert into events_scalar_i16 (series, ts_msp, ts_lsp, pulse, value) values (?, ?, ?, ?, ?)")
+            .prepare("insert into events_scalar_i16 (series, ts_msp, ts_lsp, pulse, value) values (?, ?, ?, ?, ?) using ttl ?")
             .await
             .map_err(|e| Error::with_msg_no_trace(format!("{e:?}")))?;
         let qu_insert_scalar_i16 = Arc::new(q);
         let q = scy
-            .prepare("insert into events_scalar_i32 (series, ts_msp, ts_lsp, pulse, value) values (?, ?, ?, ?, ?)")
+            .prepare("insert into events_scalar_i32 (series, ts_msp, ts_lsp, pulse, value) values (?, ?, ?, ?, ?) using ttl ?")
             .await
             .map_err(|e| Error::with_msg_no_trace(format!("{e:?}")))?;
         let qu_insert_scalar_i32 = Arc::new(q);
         let q = scy
-            .prepare("insert into events_scalar_f32 (series, ts_msp, ts_lsp, pulse, value) values (?, ?, ?, ?, ?)")
+            .prepare("insert into events_scalar_f32 (series, ts_msp, ts_lsp, pulse, value) values (?, ?, ?, ?, ?) using ttl ?")
             .await
             .map_err(|e| Error::with_msg_no_trace(format!("{e:?}")))?;
         let qu_insert_scalar_f32 = Arc::new(q);
         let q = scy
-            .prepare("insert into events_scalar_f64 (series, ts_msp, ts_lsp, pulse, value) values (?, ?, ?, ?, ?)")
+            .prepare("insert into events_scalar_f64 (series, ts_msp, ts_lsp, pulse, value) values (?, ?, ?, ?, ?) using ttl ?")
             .await
             .map_err(|e| Error::with_msg_no_trace(format!("{e:?}")))?;
         let qu_insert_scalar_f64 = Arc::new(q);
         let q = scy
-            .prepare("insert into events_scalar_string (series, ts_msp, ts_lsp, pulse, value) values (?, ?, ?, ?, ?)")
+            .prepare("insert into events_scalar_string (series, ts_msp, ts_lsp, pulse, value) values (?, ?, ?, ?, ?) using ttl ?")
             .await
             .map_err(|e| Error::with_msg_no_trace(format!("{e:?}")))?;
         let qu_insert_scalar_string = Arc::new(q);
+
         // array
         let q = scy
             .prepare("insert into events_array_i8 (series, ts_msp, ts_lsp, pulse, value) values (?, ?, ?, ?, ?)")
