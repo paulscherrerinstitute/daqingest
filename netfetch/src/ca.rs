@@ -63,6 +63,7 @@ struct ChannelConfig {
     local_epics_hostname: Option<String>,
     store_workers_rate: Option<u64>,
     insert_frac: Option<u64>,
+    use_rate_limit_queue: Option<bool>,
 }
 
 #[test]
@@ -103,7 +104,7 @@ pub struct ListenFromFileOpts {
 
 pub async fn parse_config(config: PathBuf) -> Result<CaConnectOpts, Error> {
     let mut file = OpenOptions::new().read(true).open(config).await?;
-    let mut buf = vec![];
+    let mut buf = Vec::new();
     file.read_to_end(&mut buf).await?;
     let mut conf: ChannelConfig =
         serde_yaml::from_slice(&buf).map_err(|e| Error::with_msg_no_trace(format!("{:?}", e)))?;
@@ -141,6 +142,7 @@ pub async fn parse_config(config: PathBuf) -> Result<CaConnectOpts, Error> {
         local_epics_hostname: conf.local_epics_hostname.unwrap_or_else(local_hostname),
         store_workers_rate: conf.store_workers_rate.unwrap_or(10000),
         insert_frac: conf.insert_frac.unwrap_or(1000),
+        use_rate_limit_queue: conf.use_rate_limit_queue.unwrap_or(false),
     })
 }
 
@@ -163,6 +165,7 @@ pub struct CaConnectOpts {
     pub local_epics_hostname: String,
     pub store_workers_rate: u64,
     pub insert_frac: u64,
+    pub use_rate_limit_queue: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -209,7 +212,7 @@ pub async fn find_channel_addr(
     let pg_client = Arc::new(pg_client);
     let qu_find_addr = pg_client
         .prepare(
-            "select t1.facility, t1.channel, t1.addr from ioc_by_channel t1 where t1.facility = $1 and t1.channel = $2",
+            "select t1.facility, t1.channel, t1.addr from ioc_by_channel_log t1 where t1.facility = $1 and t1.channel = $2 and addr is not null order by tsmod desc limit 1",
         )
         .await
         .err_conv()?;
@@ -219,16 +222,16 @@ pub async fn find_channel_addr(
         Err(Error::with_msg_no_trace(format!("no address for channel {}", name)))
     } else {
         for row in rows {
-            let addr: &str = row.get(2);
-            if addr == "" {
-                return Err(Error::with_msg_no_trace(format!("no address for channel {}", name)));
-            } else {
-                match addr.parse::<SocketAddrV4>() {
+            match row.try_get::<_, &str>(2) {
+                Ok(addr) => match addr.parse::<SocketAddrV4>() {
                     Ok(addr) => return Ok(Some(addr)),
                     Err(e) => {
                         error!("can not parse  {e:?}");
                         return Err(Error::with_msg_no_trace(format!("no address for channel {}", name)));
                     }
+                },
+                Err(e) => {
+                    error!("can not find addr for {name}  {e:?}");
                 }
             }
         }
@@ -241,7 +244,7 @@ async fn query_addr_multiple(pg_client: &PgClient) -> Result<(), Error> {
     let backend: &String = err::todoval();
     // TODO factor the find loop into a separate Stream.
     let qu_find_addr = pg_client
-        .prepare("with q1 as (select t1.facility, t1.channel, t1.addr from ioc_by_channel t1 where t1.facility = $1 and t1.channel in ($2, $3, $4, $5, $6, $7, $8, $9) and t1.addr != '' order by t1.tsmod desc) select distinct on (q1.facility, q1.channel) q1.facility, q1.channel, q1.addr from q1")
+        .prepare("with q1 as (select t1.facility, t1.channel, t1.addr from ioc_by_channel_log t1 where t1.facility = $1 and t1.channel in ($2, $3, $4, $5, $6, $7, $8, $9) and t1.addr is not null order by t1.tsmod desc) select distinct on (q1.facility, q1.channel) q1.facility, q1.channel, q1.addr from q1")
         .await
         .map_err(|e| Error::with_msg_no_trace(format!("{e:?}")))?;
     let mut chns_todo: &[String] = err::todoval();
@@ -308,9 +311,13 @@ pub async fn ca_connect(opts: ListenFromFileOpts) -> Result<(), Error> {
     // TODO use a new type:
     let local_stats = Arc::new(CaConnStats::new());
 
+    info!("fetch phonebook begin");
     // Fetch all addresses for all channels.
     let rows = pg_client
-        .query("select channel, addr from ioc_by_channel", &[])
+        .query(
+            "select distinct on (facility, channel) channel, addr from ioc_by_channel_log where channel is not null and addr is not null order by facility, channel, tsmod desc",
+            &[],
+        )
         .await
         .err_conv()?;
     let mut phonebook = BTreeMap::new();
@@ -322,6 +329,7 @@ pub async fn ca_connect(opts: ListenFromFileOpts) -> Result<(), Error> {
             .map_err(|_| Error::with_msg_no_trace(format!("can not parse address {addr}")))?;
         phonebook.insert(channel, addr);
     }
+    info!("fetch phonebook done");
 
     let mut channels_by_host = BTreeMap::new();
 
@@ -352,6 +360,7 @@ pub async fn ca_connect(opts: ListenFromFileOpts) -> Result<(), Error> {
         ingest_commons.clone(),
         pg_client.clone(),
         store_stats.clone(),
+        opts.use_rate_limit_queue,
     )
     .await?;
 

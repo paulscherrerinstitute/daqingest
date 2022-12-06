@@ -259,7 +259,7 @@ impl FindIocStream {
             }
             let mut nb = crate::netbuf::NetBuf::new(2048);
             nb.put_slice(&buf[..ec as usize])?;
-            let mut msgs = vec![];
+            let mut msgs = Vec::new();
             let mut accounted = 0;
             loop {
                 let n = nb.data().len();
@@ -291,10 +291,14 @@ impl FindIocStream {
             if msgs.len() != 2 {
                 info!("expect always 2 commands in the response, instead got {}", msgs.len());
             }
-            let mut res = vec![];
+            for m in &msgs {
+                debug!("m: {m:?}");
+            }
+            let mut res = Vec::new();
             for msg in msgs.iter() {
                 match &msg.ty {
                     CaMsgTy::SearchRes(k) => {
+                        info!("SearchRes: {k:?}");
                         let addr = SocketAddrV4::new(src_addr, k.tcp_port);
                         res.push((SearchId(k.id), addr));
                     }
@@ -330,8 +334,8 @@ impl FindIocStream {
     fn create_in_flight(&mut self) {
         let bid = BATCH_ID.fetch_add(1, Ordering::AcqRel);
         let bid = BatchId(bid as u32);
-        let mut sids = vec![];
-        let mut chs = vec![];
+        let mut sids = Vec::new();
+        let mut chs = Vec::new();
         while chs.len() < self.channels_per_batch && self.channels_input.len() > 0 {
             let sid = SEARCH_ID2.fetch_add(1, Ordering::AcqRel);
             let sid = SearchId(sid as u32);
@@ -344,14 +348,14 @@ impl FindIocStream {
             channels: chs,
             tgts: self.tgts.iter().enumerate().map(|x| x.0).collect(),
             sids,
-            done: vec![],
+            done: Vec::new(),
         };
         self.in_flight.insert(bid.clone(), batch);
         self.batch_send_queue.push_back(bid);
     }
 
     fn handle_result(&mut self, src: SocketAddrV4, res: Vec<(SearchId, SocketAddrV4)>) {
-        let mut sids_remove = vec![];
+        let mut sids_remove = Vec::new();
         for (sid, addr) in res {
             self.sids_done.insert(sid.clone(), ());
             match self.bid_by_sid.get(&sid) {
@@ -420,9 +424,9 @@ impl FindIocStream {
 
     fn clear_timed_out(&mut self) {
         let now = Instant::now();
-        let mut bids = vec![];
-        let mut sids = vec![];
-        let mut chns = vec![];
+        let mut bids = Vec::new();
+        let mut sids = Vec::new();
+        let mut chns = Vec::new();
         for (bid, batch) in &mut self.in_flight {
             if now.duration_since(batch.ts_beg) > self.batch_run_max {
                 self.bids_timed_out.insert(bid.clone(), ());

@@ -5,8 +5,10 @@ use log::*;
 
 pub fn main() -> Result<(), Error> {
     let opts = DaqIngestOpts::parse();
-    info!("daqingest version {}", clap::crate_version!());
+    // TODO offer again function to get runtime and configure tracing in one call
     let runtime = taskrun::get_runtime_opts(opts.nworkers.unwrap_or(12), 32);
+    taskrun::tracing_init().unwrap();
+    info!("daqingest version {}", clap::crate_version!());
     let res = runtime.block_on(async move {
         match opts.subcmd {
             SubCmd::Bsread(k) => netfetch::zmtp::zmtp_client(k.into()).await?,

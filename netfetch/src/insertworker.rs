@@ -51,6 +51,7 @@ pub async fn spawn_scylla_insert_workers(
     ingest_commons: Arc<IngestCommons>,
     pg_client: Arc<PgClient>,
     store_stats: Arc<stats::CaConnStats>,
+    use_rate_limit_queue: bool,
 ) -> Result<Vec<JoinHandle<()>>, Error> {
     let (q2_tx, q2_rx) = async_channel::bounded(insert_item_queue.receiver().capacity().unwrap_or(20000));
     {
@@ -59,6 +60,9 @@ pub async fn spawn_scylla_insert_workers(
         let recv = insert_item_queue.receiver();
         let store_stats = store_stats.clone();
         let fut = async move {
+            if !use_rate_limit_queue {
+                return;
+            }
             let mut ts_forward_last = Instant::now();
             let mut ivl_ema = stats::Ema64::with_k(0.00001);
             loop {
@@ -113,7 +117,7 @@ pub async fn spawn_scylla_insert_workers(
     for i1 in 0..insert_worker_count {
         let data_store = data_stores[i1 * data_stores.len() / insert_worker_count].clone();
         let stats = store_stats.clone();
-        let recv = if true {
+        let recv = if use_rate_limit_queue {
             q2_rx.clone()
         } else {
             insert_item_queue.receiver()

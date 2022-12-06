@@ -46,6 +46,7 @@ async fn resolve_address(addr_str: &str) -> Result<SocketAddr, Error> {
 }
 
 pub async fn ca_search(opts: ListenFromFileOpts) -> Result<(), Error> {
+    info!("ca_search begin");
     let facility = "scylla";
     let opts = parse_config(opts.config).await?;
     let d = Database {
@@ -74,7 +75,7 @@ pub async fn ca_search(opts: ListenFromFileOpts) -> Result<(), Error> {
             .await
             .unwrap()
     };
-    let mut addrs = vec![];
+    let mut addrs = Vec::new();
     for s in &opts.search {
         match resolve_address(s).await {
             Ok(addr) => {
@@ -87,7 +88,7 @@ pub async fn ca_search(opts: ListenFromFileOpts) -> Result<(), Error> {
         }
     }
     let gw_addrs = {
-        let mut gw_addrs = vec![];
+        let mut gw_addrs = Vec::new();
         for s in &opts.search_blacklist {
             match resolve_address(s).await {
                 Ok(addr) => {
