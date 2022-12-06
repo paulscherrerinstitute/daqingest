@@ -817,7 +817,7 @@ impl CaConn {
             shape,
             agg_kind: netpod::AggKind::Plain,
             // TODO these play no role in series id:
-            byte_order: netpod::ByteOrder::LE,
+            byte_order: netpod::ByteOrder::Little,
             compression: None,
         };
         cx.waker().wake_by_ref();
@@ -1236,7 +1236,7 @@ impl CaConn {
                                     shape,
                                     agg_kind: netpod::AggKind::Plain,
                                     // TODO these play no role in series id:
-                                    byte_order: netpod::ByteOrder::LE,
+                                    byte_order: netpod::ByteOrder::Little,
                                     compression: None,
                                 };
                                 let z = unsafe {

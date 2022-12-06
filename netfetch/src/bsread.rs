@@ -80,9 +80,9 @@ impl TryFrom<&ChannelDesc> for ChannelDescDecoded {
                 },
             },
             byte_order: match cd.encoding.as_str() {
-                "little" => ByteOrder::LE,
-                "big" => ByteOrder::BE,
-                _ => ByteOrder::LE,
+                "little" => ByteOrder::Little,
+                "big" => ByteOrder::Big,
+                _ => ByteOrder::Little,
             },
             agg_kind: AggKind::Plain,
         };
@@ -209,7 +209,7 @@ impl Parser {
                 let shape = Shape::from_bsread_jsval(&ch.shape)?;
                 match sty {
                     ScalarType::I64 => match &bo {
-                        ByteOrder::LE => match &shape {
+                        ByteOrder::Little => match &shape {
                             Shape::Scalar => {
                                 assert_eq!(fr.data().len(), 8);
                                 let _v = i64::from_le_bytes(fr.data().try_into()?);

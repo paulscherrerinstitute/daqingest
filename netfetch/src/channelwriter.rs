@@ -620,61 +620,61 @@ impl ChannelWriterAll {
         let (ts_msp_lsp, acc): (fn(u64, u64) -> (u64, u64), Box<dyn MsgAcceptor + Send>) = match &shape {
             Shape::Scalar => match &scalar_type {
                 ScalarType::U16 => match &byte_order {
-                    ByteOrder::LE => {
+                    ByteOrder::Little => {
                         let acc = MsgAcceptorScalarU16LE::new(series as i64, opts);
                         (ts_msp_lsp_1, Box::new(acc) as _)
                     }
-                    ByteOrder::BE => {
+                    ByteOrder::Big => {
                         let acc = MsgAcceptorScalarU16BE::new(series as i64, opts);
                         (ts_msp_lsp_1, Box::new(acc) as _)
                     }
                 },
                 ScalarType::U32 => match &byte_order {
-                    ByteOrder::LE => {
+                    ByteOrder::Little => {
                         let acc = MsgAcceptorScalarU32LE::new(series as i64, opts);
                         (ts_msp_lsp_1, Box::new(acc) as _)
                     }
-                    ByteOrder::BE => {
+                    ByteOrder::Big => {
                         let acc = MsgAcceptorScalarU32BE::new(series as i64, opts);
                         (ts_msp_lsp_1, Box::new(acc) as _)
                     }
                 },
                 ScalarType::I16 => match &byte_order {
-                    ByteOrder::LE => {
+                    ByteOrder::Little => {
                         let acc = MsgAcceptorScalarI16LE::new(series as i64, opts);
                         (ts_msp_lsp_1, Box::new(acc) as _)
                     }
-                    ByteOrder::BE => {
+                    ByteOrder::Big => {
                         let acc = MsgAcceptorScalarI16BE::new(series as i64, opts);
                         (ts_msp_lsp_1, Box::new(acc) as _)
                     }
                 },
                 ScalarType::I32 => match &byte_order {
-                    ByteOrder::LE => {
+                    ByteOrder::Little => {
                         let acc = MsgAcceptorScalarI32LE::new(series as i64, opts);
                         (ts_msp_lsp_1, Box::new(acc) as _)
                     }
-                    ByteOrder::BE => {
+                    ByteOrder::Big => {
                         let acc = MsgAcceptorScalarI32BE::new(series as i64, opts);
                         (ts_msp_lsp_1, Box::new(acc) as _)
                     }
                 },
                 ScalarType::F32 => match &byte_order {
-                    ByteOrder::LE => {
+                    ByteOrder::Little => {
                         let acc = MsgAcceptorScalarF32LE::new(series as i64, opts);
                         (ts_msp_lsp_1, Box::new(acc) as _)
                     }
-                    ByteOrder::BE => {
+                    ByteOrder::Big => {
                         let acc = MsgAcceptorScalarF32BE::new(series as i64, opts);
                         (ts_msp_lsp_1, Box::new(acc) as _)
                     }
                 },
                 ScalarType::F64 => match &byte_order {
-                    ByteOrder::LE => {
+                    ByteOrder::Little => {
                         let acc = MsgAcceptorScalarF64LE::new(series as i64, opts);
                         (ts_msp_lsp_1, Box::new(acc) as _)
                     }
-                    ByteOrder::BE => {
+                    ByteOrder::Big => {
                         let acc = MsgAcceptorScalarF64BE::new(series as i64, opts);
                         (ts_msp_lsp_1, Box::new(acc) as _)
                     }
@@ -696,51 +696,51 @@ impl ChannelWriterAll {
                         }
                     },
                     ScalarType::U16 => match &byte_order {
-                        ByteOrder::LE => {
+                        ByteOrder::Little => {
                             let acc = MsgAcceptorArrayU16LE::new(series as i64, opts);
                             (ts_msp_lsp_2, Box::new(acc) as _)
                         }
-                        ByteOrder::BE => {
+                        ByteOrder::Big => {
                             let acc = MsgAcceptorArrayU16BE::new(series as i64, opts);
                             (ts_msp_lsp_2, Box::new(acc) as _)
                         }
                     },
                     ScalarType::I16 => match &byte_order {
-                        ByteOrder::LE => {
+                        ByteOrder::Little => {
                             let acc = MsgAcceptorArrayI16LE::new(series as i64, opts);
                             (ts_msp_lsp_2, Box::new(acc) as _)
                         }
-                        ByteOrder::BE => {
+                        ByteOrder::Big => {
                             let acc = MsgAcceptorArrayI16BE::new(series as i64, opts);
                             (ts_msp_lsp_2, Box::new(acc) as _)
                         }
                     },
                     ScalarType::I32 => match &byte_order {
-                        ByteOrder::LE => {
+                        ByteOrder::Little => {
                             let acc = MsgAcceptorArrayI32LE::new(series as i64, opts);
                             (ts_msp_lsp_2, Box::new(acc) as _)
                         }
-                        ByteOrder::BE => {
+                        ByteOrder::Big => {
                             let acc = MsgAcceptorArrayI32BE::new(series as i64, opts);
                             (ts_msp_lsp_2, Box::new(acc) as _)
                         }
                     },
                     ScalarType::F32 => match &byte_order {
-                        ByteOrder::LE => {
+                        ByteOrder::Little => {
                             let acc = MsgAcceptorArrayF32LE::new(series as i64, opts);
                             (ts_msp_lsp_2, Box::new(acc) as _)
                         }
-                        ByteOrder::BE => {
+                        ByteOrder::Big => {
                             let acc = MsgAcceptorArrayF32BE::new(series as i64, opts);
                             (ts_msp_lsp_2, Box::new(acc) as _)
                         }
                     },
                     ScalarType::F64 => match &byte_order {
-                        ByteOrder::LE => {
+                        ByteOrder::Little => {
                             let acc = MsgAcceptorArrayF64LE::new(series as i64, opts);
                             (ts_msp_lsp_2, Box::new(acc) as _)
                         }
-                        ByteOrder::BE => {
+                        ByteOrder::Big => {
                             let acc = MsgAcceptorArrayF64BE::new(series as i64, opts);
                             (ts_msp_lsp_2, Box::new(acc) as _)
                         }

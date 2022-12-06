@@ -286,8 +286,11 @@ impl CaConnSet {
 
     pub async fn addr_nth_mod(&self, n: usize) -> Option<SocketAddr> {
         let g = self.ca_conn_ress.lock().await;
-        let u = g.len();
-        let n = n % u;
+        let len = g.len();
+        if len < 1 {
+            return None;
+        }
+        let n = n % len;
         g.keys().take(n).last().map(Clone::clone)
     }
 }

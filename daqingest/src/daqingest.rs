@@ -6,7 +6,6 @@ use netfetch::ca::ListenFromFileOpts;
 use netfetch::zmtp::ZmtpClientOpts;
 
 #[derive(Debug, Parser)]
-//#[clap(name = "daqingest", version)]
 #[command(author, version, about)]
 pub struct DaqIngestOpts {
     #[arg(long, action(Count))]
