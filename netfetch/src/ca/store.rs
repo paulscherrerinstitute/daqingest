@@ -35,8 +35,8 @@ impl ChannelRegistry {
         Self { pg_client }
     }
 
-    pub async fn get_series_id(&self, cd: ChannelDescDecoded) -> Result<Existence<SeriesId>, Error> {
-        crate::series::get_series_id(&self.pg_client, &cd).await
+    pub async fn get_series_id(&self, cd: ChannelDescDecoded, backend: String) -> Result<Existence<SeriesId>, Error> {
+        crate::series::get_series_id(&self.pg_client, &cd, backend).await
     }
 }
 

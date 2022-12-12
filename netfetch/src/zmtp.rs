@@ -94,6 +94,7 @@ pub struct CommonQueries {
 
 #[derive(Clone)]
 pub struct ZmtpClientOpts {
+    pub backend: String,
     pub scylla: Vec<String>,
     pub sources: Vec<String>,
     pub do_pulse_id: bool,
@@ -375,7 +376,7 @@ impl BsreadClient {
             self.scy
             .query(
                 "insert into series_by_channel (facility, channel_name, series, scalar_type, shape_dims) values (?, ?, ?, ?, ?) if not exists",
-                ("scylla", &cd.name, series as i64, cd.scalar_type.to_scylla_i32(), &shape_dims),
+                (&self.opts.backend, &cd.name, series as i64, cd.scalar_type.to_scylla_i32(), &shape_dims),
             )
             .await
             .err_conv()?;

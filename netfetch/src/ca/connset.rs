@@ -82,6 +82,7 @@ impl CaConnSet {
 
     pub async fn create_ca_conn(
         &self,
+        backend: String,
         addr: SocketAddrV4,
         local_epics_hostname: String,
         array_truncate: usize,
@@ -94,6 +95,7 @@ impl CaConnSet {
         info!("create new CaConn  {:?}", addr);
         let addr2 = SocketAddr::V4(addr.clone());
         let mut conn = CaConn::new(
+            backend.clone(),
             addr,
             local_epics_hostname,
             data_store.clone(),
@@ -236,6 +238,7 @@ impl CaConnSet {
 
     pub async fn add_channel_to_addr(
         &self,
+        backend: String,
         addr: SocketAddr,
         channel_name: String,
         ingest_commons: Arc<IngestCommons>,
@@ -263,6 +266,7 @@ impl CaConnSet {
                 };
                 // TODO use parameters:
                 self.create_ca_conn(
+                    backend.clone(),
                     addr,
                     ingest_commons.local_epics_hostname.clone(),
                     512,

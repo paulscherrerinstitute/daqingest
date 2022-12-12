@@ -13,7 +13,7 @@ use stats::CaConnStats;
 use std::net::SocketAddrV4;
 use std::pin::Pin;
 use std::task::{Context, Poll};
-use std::time::{Instant, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 use tokio::sync::Mutex as TokMx;
 
 pub const CONNECTION_STATUS_DIV: u64 = netpod::timeunits::DAY;
@@ -338,14 +338,14 @@ where
 
 pub async fn insert_item(
     item: InsertItem,
-    ttl_msp: u32,
-    ttl_0d: u32,
-    ttl_1d: u32,
+    ttl_index: Duration,
+    ttl_0d: Duration,
+    ttl_1d: Duration,
     data_store: &DataStore,
     stats: &CaConnStats,
 ) -> Result<(), Error> {
     if item.msp_bump {
-        let params = (item.series.id() as i64, item.ts_msp as i64, ttl_msp as i32);
+        let params = (item.series.id() as i64, item.ts_msp as i64, ttl_index.as_secs() as i32);
         data_store.scy.execute(&data_store.qu_insert_ts_msp, params).await?;
         stats.inserts_msp_inc();
     }
@@ -371,7 +371,7 @@ pub async fn insert_item(
                 ts_msp: item.ts_msp,
                 ts_lsp: item.ts_lsp,
                 pulse: item.pulse,
-                ttl: ttl_0d,
+                ttl: ttl_0d.as_secs() as _,
             };
             use CaDataScalarValue::*;
             match val {
@@ -390,7 +390,7 @@ pub async fn insert_item(
                 ts_msp: item.ts_msp,
                 ts_lsp: item.ts_lsp,
                 pulse: item.pulse,
-                ttl: ttl_1d,
+                ttl: ttl_1d.as_secs() as _,
             };
             use CaDataArrayValue::*;
             match val {

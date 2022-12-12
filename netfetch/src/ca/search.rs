@@ -47,7 +47,6 @@ async fn resolve_address(addr_str: &str) -> Result<SocketAddr, Error> {
 
 pub async fn ca_search(opts: ListenFromFileOpts) -> Result<(), Error> {
     info!("ca_search begin");
-    let facility = "scylla";
     let opts = parse_config(opts.config).await?;
     let d = Database {
         name: opts.pgconf.name.clone(),
@@ -192,7 +191,7 @@ pub async fn ca_search(opts: ListenFromFileOpts) -> Result<(), Error> {
                 pg_client
                     .execute(
                         &qu_insert,
-                        &[&facility, &item.channel, &queryaddr, &responseaddr, &addr],
+                        &[&opts.backend, &item.channel, &queryaddr, &responseaddr, &addr],
                     )
                     .await
                     .unwrap();

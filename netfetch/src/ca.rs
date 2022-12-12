@@ -51,7 +51,8 @@ struct ChannelConfig {
     whitelist: Option<String>,
     blacklist: Option<String>,
     max_simul: Option<usize>,
-    timeout: Option<u64>,
+    #[serde(with = "humantime_serde")]
+    timeout: Option<Duration>,
     postgresql: Database,
     scylla: ScyllaConfig,
     array_truncate: Option<usize>,
@@ -64,31 +65,38 @@ struct ChannelConfig {
     store_workers_rate: Option<u64>,
     insert_frac: Option<u64>,
     use_rate_limit_queue: Option<bool>,
+    #[serde(with = "humantime_serde")]
+    ttl_index: Option<Duration>,
+    #[serde(with = "humantime_serde")]
+    ttl_d0: Option<Duration>,
+    #[serde(with = "humantime_serde")]
+    ttl_d1: Option<Duration>,
 }
 
 #[test]
 fn parse_config_minimal() {
     let conf = r###"
 backend: scylla
-api_bind: 0.0.0.0:3011
+ttl_d1: 10m 3s
+api_bind: "0.0.0.0:3011"
 channels:
-    - CHANNEL-1:A
-    - CHANNEL-1:B
-    - CHANNEL-2:A
+  - CHANNEL-1:A
+  - CHANNEL-1:B
+  - CHANNEL-2:A
 search:
-    - 172.26.0.255
-    - 172.26.2.255
+  - 172.26.0.255
+  - 172.26.2.255
 postgresql:
-    host: host.example.com
-    port: 5432
-    user: USER
-    pass: PASS
-    name: NAME
+  host: host.example.com
+  port: 5432
+  user: USER
+  pass: PASS
+  name: NAME
 scylla:
-    hosts:
-        - sf-nube-11:19042
-        - sf-nube-12:19042
-    keyspace: ks1
+  hosts:
+    - sf-nube-11:19042
+    - sf-nube-12:19042
+  keyspace: ks1
 "###;
     let res: Result<ChannelConfig, _> = serde_yaml::from_slice(conf.as_bytes());
     assert_eq!(res.is_ok(), true);
@@ -96,6 +104,28 @@ scylla:
     assert_eq!(conf.api_bind, Some("0.0.0.0:3011".to_string()));
     assert_eq!(conf.search.get(0), Some(&"172.26.0.255".to_string()));
     assert_eq!(conf.scylla.hosts.get(1), Some(&"sf-nube-12:19042".to_string()));
+    assert_eq!(conf.ttl_d1, Some(Duration::from_millis(1000 * (60 * 10 + 3) + 45)));
+}
+
+#[test]
+fn test_duration_parse() {
+    #[derive(Serialize, Deserialize)]
+    struct A {
+        #[serde(with = "humantime_serde")]
+        dur: Duration,
+    }
+    let a = A {
+        dur: Duration::from_millis(12000),
+    };
+    let s = serde_json::to_string(&a).unwrap();
+    assert_eq!(s, r#"{"dur":"12s"}"#);
+    let a = A {
+        dur: Duration::from_millis(12012),
+    };
+    let s = serde_json::to_string(&a).unwrap();
+    assert_eq!(s, r#"{"dur":"12s 12ms"}"#);
+    let a: A = serde_json::from_str(r#"{"dur":"3s170ms"}"#).unwrap();
+    assert_eq!(a.dur, Duration::from_millis(3170));
 }
 
 pub struct ListenFromFileOpts {
@@ -130,7 +160,7 @@ pub async fn parse_config(config: PathBuf) -> Result<CaConnectOpts, Error> {
         search_blacklist: conf.search_blacklist,
         addr_bind: conf.addr_bind.unwrap_or(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0))),
         addr_conn: conf.addr_conn.unwrap_or(IpAddr::V4(Ipv4Addr::new(255, 255, 255, 255))),
-        timeout: conf.timeout.unwrap_or(1200),
+        timeout: conf.timeout.unwrap_or(Duration::from_millis(1200)),
         pgconf: conf.postgresql,
         scyconf: conf.scylla,
         array_truncate: conf.array_truncate.unwrap_or(512),
@@ -143,9 +173,14 @@ pub async fn parse_config(config: PathBuf) -> Result<CaConnectOpts, Error> {
         store_workers_rate: conf.store_workers_rate.unwrap_or(10000),
         insert_frac: conf.insert_frac.unwrap_or(1000),
         use_rate_limit_queue: conf.use_rate_limit_queue.unwrap_or(false),
+        ttl_index: conf.ttl_index.unwrap_or(Duration::from_secs(60 * 60 * 24 * 3)),
+        ttl_d0: conf.ttl_d0.unwrap_or(Duration::from_secs(60 * 60 * 24 * 1)),
+        ttl_d1: conf.ttl_d1.unwrap_or(Duration::from_secs(60 * 60 * 12)),
     })
 }
 
+// TODO (low-prio) could remove usage of clone to avoid clone of large channel list.
+#[derive(Clone)]
 pub struct CaConnectOpts {
     pub backend: String,
     pub channels: Vec<String>,
@@ -153,7 +188,7 @@ pub struct CaConnectOpts {
     pub search_blacklist: Vec<String>,
     pub addr_bind: IpAddr,
     pub addr_conn: IpAddr,
-    pub timeout: u64,
+    pub timeout: Duration,
     pub pgconf: Database,
     pub scyconf: ScyllaConfig,
     pub array_truncate: usize,
@@ -166,6 +201,9 @@ pub struct CaConnectOpts {
     pub store_workers_rate: u64,
     pub insert_frac: u64,
     pub use_rate_limit_queue: bool,
+    pub ttl_index: Duration,
+    pub ttl_d0: Duration,
+    pub ttl_d1: Duration,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -181,6 +219,7 @@ impl ExtraInsertsConf {
 
 pub struct IngestCommons {
     pub pgconf: Arc<Database>,
+    pub backend: String,
     pub local_epics_hostname: String,
     pub insert_item_queue: Arc<CommonInsertItemQueue>,
     pub data_store: Arc<DataStore>,
@@ -288,22 +327,14 @@ pub async fn ca_connect(opts: ListenFromFileOpts) -> Result<(), Error> {
     let insert_ivl_min = Arc::new(AtomicU64::new(8800));
     let opts = parse_config(opts.config).await?;
     let scyconf = opts.scyconf.clone();
-
-    let pgconf = Database {
-        name: opts.pgconf.name.clone(),
-        host: opts.pgconf.host.clone(),
-        port: opts.pgconf.port.clone(),
-        user: opts.pgconf.user.clone(),
-        pass: opts.pgconf.pass.clone(),
-    };
-
+    let pgconf = opts.pgconf.clone();
     let d = &pgconf;
     let (pg_client, pg_conn) = tokio_postgres::connect(
         &format!("postgresql://{}:{}@{}:{}/{}", d.user, d.pass, d.host, d.port, d.name),
         tokio_postgres::tls::NoTls,
     )
     .await
-    .unwrap();
+    .err_conv()?;
     // TODO allow clean shutdown on ctrl-c and join the pg_conn in the end:
     tokio::spawn(pg_conn);
     let pg_client = Arc::new(pg_client);
@@ -339,6 +370,7 @@ pub async fn ca_connect(opts: ListenFromFileOpts) -> Result<(), Error> {
 
     let ingest_commons = IngestCommons {
         pgconf: Arc::new(pgconf.clone()),
+        backend: opts.backend.clone(),
         local_epics_hostname: opts.local_epics_hostname.clone(),
         insert_item_queue: insert_item_queue.clone(),
         data_store: data_store.clone(),
@@ -361,6 +393,7 @@ pub async fn ca_connect(opts: ListenFromFileOpts) -> Result<(), Error> {
         pg_client.clone(),
         store_stats.clone(),
         opts.use_rate_limit_queue,
+        opts.clone(),
     )
     .await?;
 
@@ -390,7 +423,12 @@ pub async fn ca_connect(opts: ListenFromFileOpts) -> Result<(), Error> {
             }
             ingest_commons
                 .ca_conn_set
-                .add_channel_to_addr(SocketAddr::V4(addr.clone()), ch.clone(), ingest_commons.clone())
+                .add_channel_to_addr(
+                    opts.backend.clone(),
+                    SocketAddr::V4(addr.clone()),
+                    ch.clone(),
+                    ingest_commons.clone(),
+                )
                 .await?;
         }
         ix += 1;

@@ -1,5 +1,5 @@
 use crate::ca::store::DataStore;
-use crate::ca::IngestCommons;
+use crate::ca::{CaConnectOpts, IngestCommons};
 use crate::rt::JoinHandle;
 use crate::store::{CommonInsertItemQueue, IntoSimplerError, QueryItem};
 use err::Error;
@@ -52,6 +52,7 @@ pub async fn spawn_scylla_insert_workers(
     pg_client: Arc<PgClient>,
     store_stats: Arc<stats::CaConnStats>,
     use_rate_limit_queue: bool,
+    opts: CaConnectOpts,
 ) -> Result<Vec<JoinHandle<()>>, Error> {
     let (q2_tx, q2_rx) = async_channel::bounded(insert_item_queue.receiver().capacity().unwrap_or(20000));
     {
@@ -123,9 +124,9 @@ pub async fn spawn_scylla_insert_workers(
             insert_item_queue.receiver()
         };
         let ingest_commons = ingest_commons.clone();
-        let ttl_msp = 60 * 60 * 24 * 4;
-        let ttl_0d = 60 * 60 * 24 * 2;
-        let ttl_1d = 60 * 60 * 12;
+        let ttl_msp = opts.ttl_index;
+        let ttl_0d = opts.ttl_d0;
+        let ttl_1d = opts.ttl_d1;
         let fut = async move {
             let backoff_0 = Duration::from_millis(10);
             let mut backoff = backoff_0.clone();

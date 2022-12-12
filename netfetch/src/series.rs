@@ -36,15 +36,18 @@ impl SeriesId {
 }
 
 // TODO don't need byte_order or compression from ChannelDescDecoded for channel registration.
-pub async fn get_series_id(pg_client: &PgClient, cd: &ChannelDescDecoded) -> Result<Existence<SeriesId>, Error> {
-    let facility = "scylla";
+pub async fn get_series_id(
+    pg_client: &PgClient,
+    cd: &ChannelDescDecoded,
+    backend: String,
+) -> Result<Existence<SeriesId>, Error> {
     let channel_name = &cd.name;
     let scalar_type = cd.scalar_type.to_scylla_i32();
     let shape = cd.shape.to_scylla_vec();
     let res = pg_client
         .query(
             "select series from series_by_channel where facility = $1 and channel = $2 and scalar_type = $3 and shape_dims = $4 and agg_kind = 0",
-            &[&facility, channel_name, &scalar_type, &shape],
+            &[&backend, channel_name, &scalar_type, &shape],
         )
         .await
         .err_conv()?;
@@ -59,7 +62,7 @@ pub async fn get_series_id(pg_client: &PgClient, cd: &ChannelDescDecoded) -> Res
     if rn == 0 {
         use md5::Digest;
         let mut h = md5::Md5::new();
-        h.update(facility.as_bytes());
+        h.update(backend.as_bytes());
         h.update(channel_name.as_bytes());
         h.update(format!("{:?}", scalar_type).as_bytes());
         h.update(format!("{:?}", shape).as_bytes());
@@ -85,7 +88,7 @@ pub async fn get_series_id(pg_client: &PgClient, cd: &ChannelDescDecoded) -> Res
                         " (series, facility, channel, scalar_type, shape_dims, agg_kind)",
                         " values ($1, $2, $3, $4, $5, 0) on conflict do nothing"
                     ),
-                    &[&(series as i64), &facility, channel_name, &scalar_type, &shape],
+                    &[&(series as i64), &backend, channel_name, &scalar_type, &shape],
                 )
                 .await
                 .unwrap();
@@ -94,17 +97,17 @@ pub async fn get_series_id(pg_client: &PgClient, cd: &ChannelDescDecoded) -> Res
                 return Ok(series);
             } else {
                 warn!(
-                    "tried to insert {series:?} for {facility} {channel_name} {scalar_type:?} {shape:?} trying again..."
+                    "tried to insert {series:?} for {backend:?} {channel_name:?} {scalar_type:?} {shape:?} trying again..."
                 );
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        error!("tried to insert new series id for {facility} {channel_name} {scalar_type:?} {shape:?} but failed");
-        Err(Error::with_msg_no_trace(format!("get_series_id  can not create and insert series id  {facility:?}  {channel_name:?}  {scalar_type:?}  {shape:?}")))
+        error!("tried to insert new series id for {backend:?} {channel_name:?} {scalar_type:?} {shape:?} but failed");
+        Err(Error::with_msg_no_trace(format!("get_series_id  can not create and insert series id  {backend:?}  {channel_name:?}  {scalar_type:?}  {shape:?}")))
     } else {
         let series = all[0] as u64;
         let series = Existence::Existing(SeriesId(series));
-        debug!("get_series_id  {facility:?}  {channel_name:?}  {scalar_type:?}  {shape:?}  {series:?}");
+        debug!("get_series_id  {backend:?}  {channel_name:?}  {scalar_type:?}  {shape:?}  {series:?}");
         Ok(series)
     }
 }

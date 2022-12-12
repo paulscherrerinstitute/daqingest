@@ -32,7 +32,12 @@ async fn channel_add_inner(params: HashMap<String, String>, ingest_commons: Arc<
             Ok(Some(addr)) => {
                 ingest_commons
                     .ca_conn_set
-                    .add_channel_to_addr(SocketAddr::V4(addr), name.into(), ingest_commons.clone())
+                    .add_channel_to_addr(
+                        ingest_commons.backend.clone(),
+                        SocketAddr::V4(addr),
+                        name.into(),
+                        ingest_commons.clone(),
+                    )
                     .await?;
                 Ok(())
             }

@@ -32,6 +32,8 @@ pub enum SubCmd {
 #[derive(Debug, Parser)]
 pub struct Bsread {
     #[arg(long)]
+    pub backend: String,
+    #[arg(long)]
     pub scylla: Vec<String>,
     #[arg(long)]
     pub source: Vec<String>,
@@ -50,6 +52,7 @@ pub struct Bsread {
 impl From<Bsread> for ZmtpClientOpts {
     fn from(k: Bsread) -> Self {
         Self {
+            backend: k.backend,
             scylla: k.scylla,
             sources: k.source,
             rcvbuf: k.rcvbuf,
@@ -67,6 +70,8 @@ pub struct FetchEvents {
     pub scylla: Vec<String>,
     #[arg(long)]
     pub channel: String,
+    #[arg(long)]
+    pub backend: String,
 }
 
 #[derive(Debug, Parser)]

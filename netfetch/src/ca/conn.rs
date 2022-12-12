@@ -369,6 +369,7 @@ pub struct CaConn {
     insert_item_send_fut: Option<async_channel::Send<'static, QueryItem>>,
     fut_get_series:
         FuturesOrdered<Pin<Box<dyn Future<Output = Result<(Cid, u32, u16, u16, Existence<SeriesId>), Error>> + Send>>>,
+    backend: String,
     remote_addr_dbg: SocketAddrV4,
     local_epics_hostname: String,
     array_truncate: usize,
@@ -387,6 +388,7 @@ pub struct CaConn {
 
 impl CaConn {
     pub fn new(
+        backend: String,
         remote_addr_dbg: SocketAddrV4,
         local_epics_hostname: String,
         data_store: Arc<DataStore>,
@@ -412,6 +414,7 @@ impl CaConn {
             insert_item_sender,
             insert_item_send_fut: None,
             fut_get_series: FuturesOrdered::new(),
+            backend,
             remote_addr_dbg,
             local_epics_hostname,
             array_truncate,
@@ -730,6 +733,8 @@ impl CaConn {
                     // TODO need last-save-ts for this state.
                 }
                 ChannelState::Created(st) => {
+                    // TODO if we don't wave a series id yet, dont' save? write-ampl.
+
                     let msp = info_store_msp_from_time(timenow.clone());
                     if msp != st.info_store_msp_last {
                         st.info_store_msp_last = msp;
@@ -1243,7 +1248,7 @@ impl CaConn {
                                     &*(&self.data_store.chan_reg as &ChannelRegistry as *const ChannelRegistry)
                                 };
                                 let fut = z
-                                    .get_series_id(cd)
+                                    .get_series_id(cd, self.backend.clone())
                                     .map_ok(move |series| (cid, k.sid, k.data_type, k.data_count, series));
                                 // TODO throttle execution rate:
                                 self.fut_get_series.push_back(Box::pin(fut) as _);

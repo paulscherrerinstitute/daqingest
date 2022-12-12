@@ -119,7 +119,7 @@ pub async fn fetch_events(opts: FetchEvents) -> Result<(), Error> {
             "select series, scalar_type, shape_dims from series_by_channel where facility = ? and channel_name = ?",
         )
         .await?;
-    let qres = scy.execute(&qu_series, ("scylla", &opts.channel)).await?;
+    let qres = scy.execute(&qu_series, (&opts.backend, &opts.channel)).await?;
     if let Some(rows) = qres.rows {
         info!("Found {} matching series", rows.len());
         for r in &rows {
