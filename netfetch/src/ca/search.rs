@@ -1,9 +1,8 @@
 use crate::ca::findioc::FindIocStream;
-use crate::ca::{parse_config, ListenFromFileOpts};
+use crate::conf::CaIngestOpts;
 use err::Error;
 use futures_util::StreamExt;
 use log::*;
-use netpod::Database;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -45,16 +44,9 @@ async fn resolve_address(addr_str: &str) -> Result<SocketAddr, Error> {
     Ok(ac)
 }
 
-pub async fn ca_search(opts: ListenFromFileOpts) -> Result<(), Error> {
+pub async fn ca_search(opts: CaIngestOpts, channels: &Vec<String>) -> Result<(), Error> {
     info!("ca_search begin");
-    let opts = parse_config(opts.config).await?;
-    let d = Database {
-        name: opts.pgconf.name.clone(),
-        host: opts.pgconf.host.clone(),
-        port: opts.pgconf.port.clone(),
-        user: opts.pgconf.user.clone(),
-        pass: opts.pgconf.pass.clone(),
-    };
+    let d = opts.postgresql().clone();
     let (pg_client, pg_conn) = tokio_postgres::connect(
         &format!("postgresql://{}:{}@{}:{}/{}", d.user, d.pass, d.host, d.port, d.name),
         tokio_postgres::tls::NoTls,
@@ -75,7 +67,7 @@ pub async fn ca_search(opts: ListenFromFileOpts) -> Result<(), Error> {
             .unwrap()
     };
     let mut addrs = Vec::new();
-    for s in &opts.search {
+    for s in opts.search() {
         match resolve_address(s).await {
             Ok(addr) => {
                 info!("resolved {s} as {addr}");
@@ -88,7 +80,7 @@ pub async fn ca_search(opts: ListenFromFileOpts) -> Result<(), Error> {
     }
     let gw_addrs = {
         let mut gw_addrs = Vec::new();
-        for s in &opts.search_blacklist {
+        for s in opts.search_blacklist() {
             match resolve_address(s).await {
                 Ok(addr) => {
                     info!("resolved {s} as {addr}");
@@ -113,7 +105,7 @@ pub async fn ca_search(opts: ListenFromFileOpts) -> Result<(), Error> {
         })
         .collect();
     let mut finder = FindIocStream::new(addrs);
-    for ch in &opts.channels {
+    for ch in channels.iter() {
         finder.push(ch.into());
     }
     let mut ts_last = Instant::now();
@@ -191,7 +183,7 @@ pub async fn ca_search(opts: ListenFromFileOpts) -> Result<(), Error> {
                 pg_client
                     .execute(
                         &qu_insert,
-                        &[&opts.backend, &item.channel, &queryaddr, &responseaddr, &addr],
+                        &[&opts.backend(), &item.channel, &queryaddr, &responseaddr, &addr],
                     )
                     .await
                     .unwrap();

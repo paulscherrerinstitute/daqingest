@@ -8,213 +8,29 @@ pub mod store;
 use self::store::DataStore;
 use crate::ca::conn::ConnCommand;
 use crate::ca::connset::CaConnSet;
+use crate::conf::CaIngestOpts;
 use crate::errconv::ErrConv;
 use crate::insertworker::spawn_scylla_insert_workers;
-use crate::linuxhelper::local_hostname;
-use crate::metrics::metrics_agg_task;
+use crate::metrics::{metrics_agg_task, ExtraInsertsConf};
 use crate::rt::TokMx;
 use crate::store::CommonInsertItemQueue;
 use err::Error;
 use futures_util::stream::FuturesUnordered;
 use futures_util::{FutureExt, StreamExt};
 use log::*;
-use netpod::{Database, ScyllaConfig};
-use serde::{Deserialize, Serialize};
+use netpod::Database;
 use stats::{CaConnStats, CaConnStatsAgg};
 use std::collections::BTreeMap;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4};
-use std::path::PathBuf;
+use std::net::{SocketAddr, SocketAddrV4};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::fs::OpenOptions;
-use tokio::io::AsyncReadExt;
 use tokio_postgres::Client as PgClient;
 
 pub static SIGINT: AtomicU32 = AtomicU32::new(0);
 
 lazy_static::lazy_static! {
     pub static ref METRICS: Mutex<Option<CaConnStatsAgg>> = Mutex::new(None);
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct ChannelConfig {
-    backend: String,
-    channels: Vec<String>,
-    search: Vec<String>,
-    #[serde(default)]
-    search_blacklist: Vec<String>,
-    #[serde(default)]
-    tmp_remove: Vec<String>,
-    addr_bind: Option<IpAddr>,
-    addr_conn: Option<IpAddr>,
-    whitelist: Option<String>,
-    blacklist: Option<String>,
-    max_simul: Option<usize>,
-    #[serde(with = "humantime_serde")]
-    timeout: Option<Duration>,
-    postgresql: Database,
-    scylla: ScyllaConfig,
-    array_truncate: Option<usize>,
-    insert_worker_count: Option<usize>,
-    insert_scylla_sessions: Option<usize>,
-    insert_queue_max: Option<usize>,
-    insert_item_queue_cap: Option<usize>,
-    api_bind: Option<String>,
-    local_epics_hostname: Option<String>,
-    store_workers_rate: Option<u64>,
-    insert_frac: Option<u64>,
-    use_rate_limit_queue: Option<bool>,
-    #[serde(with = "humantime_serde")]
-    ttl_index: Option<Duration>,
-    #[serde(with = "humantime_serde")]
-    ttl_d0: Option<Duration>,
-    #[serde(with = "humantime_serde")]
-    ttl_d1: Option<Duration>,
-}
-
-#[test]
-fn parse_config_minimal() {
-    let conf = r###"
-backend: scylla
-ttl_d1: 10m 3s
-api_bind: "0.0.0.0:3011"
-channels:
-  - CHANNEL-1:A
-  - CHANNEL-1:B
-  - CHANNEL-2:A
-search:
-  - 172.26.0.255
-  - 172.26.2.255
-postgresql:
-  host: host.example.com
-  port: 5432
-  user: USER
-  pass: PASS
-  name: NAME
-scylla:
-  hosts:
-    - sf-nube-11:19042
-    - sf-nube-12:19042
-  keyspace: ks1
-"###;
-    let res: Result<ChannelConfig, _> = serde_yaml::from_slice(conf.as_bytes());
-    assert_eq!(res.is_ok(), true);
-    let conf = res.unwrap();
-    assert_eq!(conf.api_bind, Some("0.0.0.0:3011".to_string()));
-    assert_eq!(conf.search.get(0), Some(&"172.26.0.255".to_string()));
-    assert_eq!(conf.scylla.hosts.get(1), Some(&"sf-nube-12:19042".to_string()));
-    assert_eq!(conf.ttl_d1, Some(Duration::from_millis(1000 * (60 * 10 + 3) + 45)));
-}
-
-#[test]
-fn test_duration_parse() {
-    #[derive(Serialize, Deserialize)]
-    struct A {
-        #[serde(with = "humantime_serde")]
-        dur: Duration,
-    }
-    let a = A {
-        dur: Duration::from_millis(12000),
-    };
-    let s = serde_json::to_string(&a).unwrap();
-    assert_eq!(s, r#"{"dur":"12s"}"#);
-    let a = A {
-        dur: Duration::from_millis(12012),
-    };
-    let s = serde_json::to_string(&a).unwrap();
-    assert_eq!(s, r#"{"dur":"12s 12ms"}"#);
-    let a: A = serde_json::from_str(r#"{"dur":"3s170ms"}"#).unwrap();
-    assert_eq!(a.dur, Duration::from_millis(3170));
-}
-
-pub struct ListenFromFileOpts {
-    pub config: PathBuf,
-}
-
-pub async fn parse_config(config: PathBuf) -> Result<CaConnectOpts, Error> {
-    let mut file = OpenOptions::new().read(true).open(config).await?;
-    let mut buf = Vec::new();
-    file.read_to_end(&mut buf).await?;
-    let mut conf: ChannelConfig =
-        serde_yaml::from_slice(&buf).map_err(|e| Error::with_msg_no_trace(format!("{:?}", e)))?;
-    let re_p = regex::Regex::new(&conf.whitelist.unwrap_or("--nothing-whitelisted--".into()))?;
-    let re_n = regex::Regex::new(&conf.blacklist.unwrap_or("--nothing-blacklisted--".into()))?;
-    conf.channels = conf
-        .channels
-        .into_iter()
-        .filter(|ch| {
-            if let Some(_cs) = re_p.captures(&ch) {
-                true
-            } else if re_n.is_match(&ch) {
-                false
-            } else {
-                true
-            }
-        })
-        .collect();
-    Ok(CaConnectOpts {
-        backend: conf.backend,
-        channels: conf.channels,
-        search: conf.search,
-        search_blacklist: conf.search_blacklist,
-        addr_bind: conf.addr_bind.unwrap_or(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0))),
-        addr_conn: conf.addr_conn.unwrap_or(IpAddr::V4(Ipv4Addr::new(255, 255, 255, 255))),
-        timeout: conf.timeout.unwrap_or(Duration::from_millis(1200)),
-        pgconf: conf.postgresql,
-        scyconf: conf.scylla,
-        array_truncate: conf.array_truncate.unwrap_or(512),
-        insert_worker_count: conf.insert_worker_count.unwrap_or(800),
-        insert_scylla_sessions: conf.insert_scylla_sessions.unwrap_or(1),
-        insert_queue_max: conf.insert_queue_max.unwrap_or(64),
-        insert_item_queue_cap: conf.insert_item_queue_cap.unwrap_or(200000),
-        api_bind: conf.api_bind.unwrap_or_else(|| "0.0.0.0:3011".into()),
-        local_epics_hostname: conf.local_epics_hostname.unwrap_or_else(local_hostname),
-        store_workers_rate: conf.store_workers_rate.unwrap_or(10000),
-        insert_frac: conf.insert_frac.unwrap_or(1000),
-        use_rate_limit_queue: conf.use_rate_limit_queue.unwrap_or(false),
-        ttl_index: conf.ttl_index.unwrap_or(Duration::from_secs(60 * 60 * 24 * 3)),
-        ttl_d0: conf.ttl_d0.unwrap_or(Duration::from_secs(60 * 60 * 24 * 1)),
-        ttl_d1: conf.ttl_d1.unwrap_or(Duration::from_secs(60 * 60 * 12)),
-    })
-}
-
-// TODO (low-prio) could remove usage of clone to avoid clone of large channel list.
-#[derive(Clone)]
-pub struct CaConnectOpts {
-    pub backend: String,
-    pub channels: Vec<String>,
-    pub search: Vec<String>,
-    pub search_blacklist: Vec<String>,
-    pub addr_bind: IpAddr,
-    pub addr_conn: IpAddr,
-    pub timeout: Duration,
-    pub pgconf: Database,
-    pub scyconf: ScyllaConfig,
-    pub array_truncate: usize,
-    pub insert_worker_count: usize,
-    pub insert_scylla_sessions: usize,
-    pub insert_queue_max: usize,
-    pub insert_item_queue_cap: usize,
-    pub api_bind: String,
-    pub local_epics_hostname: String,
-    pub store_workers_rate: u64,
-    pub insert_frac: u64,
-    pub use_rate_limit_queue: bool,
-    pub ttl_index: Duration,
-    pub ttl_d0: Duration,
-    pub ttl_d1: Duration,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ExtraInsertsConf {
-    pub copies: Vec<(u64, u64)>,
-}
-
-impl ExtraInsertsConf {
-    pub fn new() -> Self {
-        Self { copies: Vec::new() }
-    }
 }
 
 pub struct IngestCommons {
@@ -321,13 +137,12 @@ async fn query_addr_multiple(pg_client: &PgClient) -> Result<(), Error> {
     Ok(())
 }
 
-pub async fn ca_connect(opts: ListenFromFileOpts) -> Result<(), Error> {
+pub async fn ca_connect(opts: CaIngestOpts, channels: &Vec<String>) -> Result<(), Error> {
     crate::linuxhelper::set_signal_handler()?;
     let extra_inserts_conf = TokMx::new(ExtraInsertsConf { copies: Vec::new() });
     let insert_ivl_min = Arc::new(AtomicU64::new(8800));
-    let opts = parse_config(opts.config).await?;
-    let scyconf = opts.scyconf.clone();
-    let pgconf = opts.pgconf.clone();
+    let scyconf = opts.scylla().clone();
+    let pgconf = opts.postgresql().clone();
     let d = &pgconf;
     let (pg_client, pg_conn) = tokio_postgres::connect(
         &format!("postgresql://{}:{}@{}:{}/{}", d.user, d.pass, d.host, d.port, d.name),
@@ -365,19 +180,19 @@ pub async fn ca_connect(opts: ListenFromFileOpts) -> Result<(), Error> {
     let mut channels_by_host = BTreeMap::new();
 
     let data_store = Arc::new(DataStore::new(&scyconf, pg_client.clone()).await?);
-    let insert_item_queue = CommonInsertItemQueue::new(opts.insert_item_queue_cap);
+    let insert_item_queue = CommonInsertItemQueue::new(opts.insert_item_queue_cap());
     let insert_item_queue = Arc::new(insert_item_queue);
 
     let ingest_commons = IngestCommons {
         pgconf: Arc::new(pgconf.clone()),
-        backend: opts.backend.clone(),
-        local_epics_hostname: opts.local_epics_hostname.clone(),
+        backend: opts.backend().into(),
+        local_epics_hostname: opts.local_epics_hostname().clone(),
         insert_item_queue: insert_item_queue.clone(),
         data_store: data_store.clone(),
         insert_ivl_min: insert_ivl_min.clone(),
         extra_inserts_conf,
-        store_workers_rate: AtomicU64::new(opts.store_workers_rate),
-        insert_frac: AtomicU64::new(opts.insert_frac),
+        store_workers_rate: AtomicU64::new(opts.store_workers_rate()),
+        insert_frac: AtomicU64::new(opts.insert_frac()),
         ca_conn_set: CaConnSet::new(),
     };
     let ingest_commons = Arc::new(ingest_commons);
@@ -385,21 +200,21 @@ pub async fn ca_connect(opts: ListenFromFileOpts) -> Result<(), Error> {
     // TODO use a new stats type:
     let store_stats = Arc::new(CaConnStats::new());
     let jh_insert_workers = spawn_scylla_insert_workers(
-        opts.scyconf.clone(),
-        opts.insert_scylla_sessions,
-        opts.insert_worker_count,
+        opts.scylla().clone(),
+        opts.insert_scylla_sessions(),
+        opts.insert_worker_count(),
         insert_item_queue.clone(),
         ingest_commons.clone(),
         pg_client.clone(),
         store_stats.clone(),
-        opts.use_rate_limit_queue,
+        opts.use_rate_limit_queue(),
         opts.clone(),
     )
     .await?;
 
     if true {
         tokio::spawn(crate::metrics::start_metrics_service(
-            opts.api_bind.clone(),
+            opts.api_bind().clone(),
             ingest_commons.clone(),
         ));
     }
@@ -407,7 +222,7 @@ pub async fn ca_connect(opts: ListenFromFileOpts) -> Result<(), Error> {
     let metrics_agg_fut = metrics_agg_task(ingest_commons.clone(), local_stats.clone(), store_stats.clone());
     let metrics_agg_jh = tokio::spawn(metrics_agg_fut);
 
-    let mut chns_todo = &opts.channels[..];
+    let mut chns_todo = &channels[..];
     let mut ix = 0;
     for ch in chns_todo {
         if SIGINT.load(Ordering::Acquire) != 0 {
@@ -424,7 +239,7 @@ pub async fn ca_connect(opts: ListenFromFileOpts) -> Result<(), Error> {
             ingest_commons
                 .ca_conn_set
                 .add_channel_to_addr(
-                    opts.backend.clone(),
+                    opts.backend().into(),
                     SocketAddr::V4(addr.clone()),
                     ch.clone(),
                     ingest_commons.clone(),
@@ -433,7 +248,7 @@ pub async fn ca_connect(opts: ListenFromFileOpts) -> Result<(), Error> {
         }
         ix += 1;
         if ix % 1000 == 0 {
-            info!("{} of {}   {}", ix, opts.channels.len(), ch);
+            info!("{} of {}   {}", ix, channels.len(), ch);
         }
     }
     info!("channels_by_host len {}", channels_by_host.len());

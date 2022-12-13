@@ -1,8 +1,7 @@
 use crate::errconv::ErrConv;
 use crate::zmtp::{CommonQueries, ZmtpFrame};
 use err::Error;
-use futures_core::Future;
-use futures_util::FutureExt;
+use futures_util::{Future, FutureExt};
 use log::*;
 use netpod::timeunits::SEC;
 use netpod::{ByteOrder, ScalarType, Shape};

@@ -2,6 +2,7 @@ use clap::Parser;
 use daqingest::{ChannelAccess, DaqIngestOpts, SubCmd};
 use err::Error;
 use log::*;
+use netfetch::conf::parse_config;
 
 pub fn main() -> Result<(), Error> {
     let opts = DaqIngestOpts::parse();
@@ -21,10 +22,13 @@ pub fn main() -> Result<(), Error> {
             }
             SubCmd::ChannelAccess(k) => match k {
                 ChannelAccess::CaSearch(k) => {
-                    let opts = daqingest::CaConfig { config: k.config }.into();
-                    netfetch::ca::search::ca_search(opts).await?
+                    let (conf, channels) = parse_config(k.config.into()).await?;
+                    netfetch::ca::search::ca_search(conf, &channels).await?
                 }
-                ChannelAccess::CaIngest(k) => netfetch::ca::ca_connect(k.into()).await?,
+                ChannelAccess::CaIngest(k) => {
+                    let (conf, channels) = parse_config(k.config.into()).await?;
+                    netfetch::ca::ca_connect(conf, &channels).await?
+                }
             },
         }
         Ok(())

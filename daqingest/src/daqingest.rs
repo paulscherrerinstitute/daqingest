@@ -2,7 +2,6 @@ pub mod query;
 
 use clap::ArgAction::Count;
 use clap::Parser;
-use netfetch::ca::ListenFromFileOpts;
 use netfetch::zmtp::ZmtpClientOpts;
 
 #[derive(Debug, Parser)]
@@ -93,12 +92,4 @@ pub struct CaSearch {
 #[derive(Debug, Parser)]
 pub struct CaConfig {
     pub config: String,
-}
-
-impl From<CaConfig> for ListenFromFileOpts {
-    fn from(k: CaConfig) -> Self {
-        Self {
-            config: k.config.into(),
-        }
-    }
 }

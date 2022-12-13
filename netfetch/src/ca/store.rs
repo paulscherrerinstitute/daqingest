@@ -81,7 +81,7 @@ impl DataStore {
         let qu_insert_ts_msp = Arc::new(q);
         let q = scy
             .prepare(
-                "insert into series_by_ts_msp (part, ts_msp, shape_kind, scalar_type, series) values (?, ?, ?, ?, ?)",
+                "insert into series_by_ts_msp (part, ts_msp, shape_kind, scalar_type, series) values (?, ?, ?, ?, ?) using ttl ?",
             )
             .await
             .map_err(|e| Error::with_msg_no_trace(format!("{e:?}")))?;
@@ -121,59 +121,63 @@ impl DataStore {
 
         // array
         let q = scy
-            .prepare("insert into events_array_i8 (series, ts_msp, ts_lsp, pulse, value) values (?, ?, ?, ?, ?)")
+            .prepare(
+                "insert into events_array_i8 (series, ts_msp, ts_lsp, pulse, value) values (?, ?, ?, ?, ?) using ttl ?",
+            )
             .await
             .map_err(|e| Error::with_msg_no_trace(format!("{e:?}")))?;
         let qu_insert_array_i8 = Arc::new(q);
         let q = scy
-            .prepare("insert into events_array_i16 (series, ts_msp, ts_lsp, pulse, value) values (?, ?, ?, ?, ?)")
+            .prepare("insert into events_array_i16 (series, ts_msp, ts_lsp, pulse, value) values (?, ?, ?, ?, ?) using ttl ?")
             .await
             .map_err(|e| Error::with_msg_no_trace(format!("{e:?}")))?;
         let qu_insert_array_i16 = Arc::new(q);
         let q = scy
-            .prepare("insert into events_array_i32 (series, ts_msp, ts_lsp, pulse, value) values (?, ?, ?, ?, ?)")
+            .prepare("insert into events_array_i32 (series, ts_msp, ts_lsp, pulse, value) values (?, ?, ?, ?, ?) using ttl ?")
             .await
             .map_err(|e| Error::with_msg_no_trace(format!("{e:?}")))?;
         let qu_insert_array_i32 = Arc::new(q);
         let q = scy
-            .prepare("insert into events_array_f32 (series, ts_msp, ts_lsp, pulse, value) values (?, ?, ?, ?, ?)")
+            .prepare("insert into events_array_f32 (series, ts_msp, ts_lsp, pulse, value) values (?, ?, ?, ?, ?) using ttl ?")
             .await
             .map_err(|e| Error::with_msg_no_trace(format!("{e:?}")))?;
         let qu_insert_array_f32 = Arc::new(q);
         let q = scy
-            .prepare("insert into events_array_f64 (series, ts_msp, ts_lsp, pulse, value) values (?, ?, ?, ?, ?)")
+            .prepare("insert into events_array_f64 (series, ts_msp, ts_lsp, pulse, value) values (?, ?, ?, ?, ?) using ttl ?")
             .await
             .map_err(|e| Error::with_msg_no_trace(format!("{e:?}")))?;
         let qu_insert_array_f64 = Arc::new(q);
         // Others:
         let q = scy
-            .prepare("insert into muted (part, series, ts, ema, emd) values (?, ?, ?, ?, ?)")
+            .prepare("insert into muted (part, series, ts, ema, emd) values (?, ?, ?, ?, ?) using ttl ?")
             .await
             .map_err(|e| Error::with_msg_no_trace(format!("{e:?}")))?;
         let qu_insert_muted = Arc::new(q);
         let q = scy
-            .prepare("insert into item_recv_ivl (part, series, ts, ema, emd) values (?, ?, ?, ?, ?)")
+            .prepare("insert into item_recv_ivl (part, series, ts, ema, emd) values (?, ?, ?, ?, ?) using ttl ?")
             .await
             .map_err(|e| Error::with_msg_no_trace(format!("{e:?}")))?;
         let qu_insert_item_recv_ivl = Arc::new(q);
         // Connection status:
         let q = scy
-            .prepare("insert into connection_status (ts_msp, ts_lsp, kind, addr) values (?, ?, ?, ?)")
+            .prepare("insert into connection_status (ts_msp, ts_lsp, kind, addr) values (?, ?, ?, ?) using ttl ?")
             .await
             .map_err(|e| Error::with_msg_no_trace(format!("{e:?}")))?;
         let qu_insert_connection_status = Arc::new(q);
         let q = scy
-            .prepare("insert into channel_status (series, ts_msp, ts_lsp, kind) values (?, ?, ?, ?)")
+            .prepare("insert into channel_status (series, ts_msp, ts_lsp, kind) values (?, ?, ?, ?) using ttl ?")
             .await
             .map_err(|e| Error::with_msg_no_trace(format!("{e:?}")))?;
         let qu_insert_channel_status = Arc::new(q);
         let q = scy
-            .prepare("insert into channel_status_by_ts_msp (ts_msp, ts_lsp, series, kind) values (?, ?, ?, ?)")
+            .prepare(
+                "insert into channel_status_by_ts_msp (ts_msp, ts_lsp, series, kind) values (?, ?, ?, ?) using ttl ?",
+            )
             .await
             .map_err(|e| Error::with_msg_no_trace(format!("{e:?}")))?;
         let qu_insert_channel_status_by_ts_msp = Arc::new(q);
         let q = scy
-            .prepare("insert into channel_ping (part, ts_msp, series, ivl, interest, evsize) values (?, ?, ?, ?, ?, ?)")
+            .prepare("insert into channel_ping (part, ts_msp, series, ivl, interest, evsize) values (?, ?, ?, ?, ?, ?) using ttl ?")
             .await
             .map_err(|e| Error::with_msg_no_trace(format!("{e:?}")))?;
         let qu_insert_channel_ping = Arc::new(q);

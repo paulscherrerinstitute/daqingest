@@ -7,8 +7,7 @@ use async_channel::{Receiver, Sender};
 #[allow(unused)]
 use bytes::BufMut;
 use err::Error;
-use futures_core::{Future, Stream};
-use futures_util::{pin_mut, FutureExt, StreamExt};
+use futures_util::{pin_mut, Future, FutureExt, Stream, StreamExt};
 use log::*;
 use netpod::timeunits::*;
 use scylla::batch::{Batch, BatchType, Consistency};

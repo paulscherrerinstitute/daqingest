@@ -331,6 +331,7 @@ where
         par.ts_lsp as i64,
         par.pulse as i64,
         val,
+        par.ttl as i32,
     );
     data_store.scy.execute(qu, params).await?;
     Ok(())
@@ -356,6 +357,7 @@ pub async fn insert_item(
             if item.shape.to_scylla_vec().is_empty() { 0 } else { 1 } as i32,
             item.scalar_type.to_scylla_i32(),
             item.series.id() as i64,
+            ttl_index.as_secs() as i32,
         );
         data_store
             .scy
@@ -408,6 +410,7 @@ pub async fn insert_item(
 
 pub async fn insert_connection_status(
     item: ConnectionStatusItem,
+    ttl: Duration,
     data_store: &DataStore,
     _stats: &CaConnStats,
 ) -> Result<(), Error> {
@@ -419,7 +422,7 @@ pub async fn insert_connection_status(
     let ts_lsp = ts - ts_msp;
     let kind = item.status as u32;
     let addr = format!("{}", item.addr);
-    let params = (ts_msp as i64, ts_lsp as i64, kind as i32, addr);
+    let params = (ts_msp as i64, ts_lsp as i64, kind as i32, addr, ttl.as_secs() as i32);
     data_store
         .scy
         .execute(&data_store.qu_insert_connection_status, params)
@@ -429,6 +432,7 @@ pub async fn insert_connection_status(
 
 pub async fn insert_channel_status(
     item: ChannelStatusItem,
+    ttl: Duration,
     data_store: &DataStore,
     _stats: &CaConnStats,
 ) -> Result<(), Error> {
@@ -440,12 +444,24 @@ pub async fn insert_channel_status(
     let ts_lsp = ts - ts_msp;
     let kind = item.status.kind();
     let series = item.series.id();
-    let params = (series as i64, ts_msp as i64, ts_lsp as i64, kind as i32);
+    let params = (
+        series as i64,
+        ts_msp as i64,
+        ts_lsp as i64,
+        kind as i32,
+        ttl.as_secs() as i32,
+    );
     data_store
         .scy
         .execute(&data_store.qu_insert_channel_status, params)
         .await?;
-    let params = (ts_msp as i64, ts_lsp as i64, series as i64, kind as i32);
+    let params = (
+        ts_msp as i64,
+        ts_lsp as i64,
+        series as i64,
+        kind as i32,
+        ttl.as_secs() as i32,
+    );
     data_store
         .scy
         .execute(&data_store.qu_insert_channel_status_by_ts_msp, params)

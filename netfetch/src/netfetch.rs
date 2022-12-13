@@ -1,6 +1,7 @@
 pub mod bsread;
 pub mod ca;
 pub mod channelwriter;
+pub mod conf;
 pub mod errconv;
 pub mod insertworker;
 pub mod linuxhelper;

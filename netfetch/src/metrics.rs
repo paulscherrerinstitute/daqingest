@@ -1,15 +1,28 @@
 use crate::ca::conn::ConnCommand;
-use crate::ca::{ExtraInsertsConf, IngestCommons, METRICS};
+use crate::ca::IngestCommons;
+use crate::ca::METRICS;
 use axum::extract::Query;
 use err::Error;
 use http::request::Parts;
 use log::*;
+use serde::{Deserialize, Serialize};
 use stats::{CaConnStats, CaConnStatsAgg, CaConnStatsAggDiff};
 use std::collections::HashMap;
 use std::net::{SocketAddr, SocketAddrV4};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExtraInsertsConf {
+    pub copies: Vec<(u64, u64)>,
+}
+
+impl ExtraInsertsConf {
+    pub fn new() -> Self {
+        Self { copies: Vec::new() }
+    }
+}
 
 async fn find_channel(
     params: HashMap<String, String>,
