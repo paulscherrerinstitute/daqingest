@@ -1,20 +1,31 @@
-use super::proto::{self, CaItem, CaMsg, CaMsgTy, CaProto};
+use super::proto;
+use super::proto::CaItem;
+use super::proto::CaMsg;
+use super::proto::CaMsgTy;
+use super::proto::CaProto;
 use super::store::DataStore;
-use super::{ExtraInsertsConf, IngestCommons};
+use super::ExtraInsertsConf;
+use super::IngestCommons;
 use crate::bsread::ChannelDescDecoded;
-use crate::ca::proto::{CreateChan, EventAdd};
+use crate::ca::proto::CreateChan;
+use crate::ca::proto::EventAdd;
 use crate::ca::store::ChannelRegistry;
 use crate::series::{Existence, SeriesId};
-use crate::store::{
-    ChannelInfoItem, ChannelStatus, ChannelStatusItem, CommonInsertItemQueueSender, ConnectionStatus,
-    ConnectionStatusItem, InsertItem, IvlItem, MuteItem, QueryItem,
-};
+use crate::store::ChannelInfoItem;
+use crate::store::ChannelStatus;
+use crate::store::ChannelStatusItem;
+use crate::store::CommonInsertItemQueueSender;
+use crate::store::ConnectionStatus;
+use crate::store::ConnectionStatusItem;
+use crate::store::{InsertItem, IvlItem, MuteItem, QueryItem};
 use async_channel::Sender;
 use err::Error;
 use futures_util::stream::FuturesOrdered;
 use futures_util::{Future, FutureExt, Stream, StreamExt, TryFutureExt};
 use log::*;
 use netpod::timeunits::*;
+use netpod::TS_MSP_GRID_SPACING;
+use netpod::TS_MSP_GRID_UNIT;
 use netpod::{ScalarType, Shape};
 use serde::Serialize;
 use stats::{CaConnStats, IntervalEma};
@@ -930,7 +941,7 @@ impl CaConn {
         let ts_msp_last = st.ts_msp_last;
         let inserted_in_ts_msp = st.inserted_in_ts_msp;
         // TODO get event timestamp from channel access field
-        let ts_msp_grid = (ts / (SEC * 10 * 6 * 2)) as u32 * (6 * 2);
+        let ts_msp_grid = (ts / TS_MSP_GRID_UNIT / TS_MSP_GRID_SPACING * TS_MSP_GRID_SPACING) as u32;
         let ts_msp_grid = if st.ts_msp_grid_last != ts_msp_grid {
             st.ts_msp_grid_last = ts_msp_grid;
             Some(ts_msp_grid)

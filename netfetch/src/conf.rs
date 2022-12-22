@@ -208,14 +208,8 @@ pub async fn parse_config(config: PathBuf) -> Result<(CaIngestOpts, Vec<String>)
     file.read_to_end(&mut buf).await?;
     let lines = buf.split(|&x| x == 0x0a);
     let mut channels = Vec::new();
-    let mut i = 0;
     for line in lines {
         let line = String::from_utf8_lossy(line);
-        if i < 50 {
-            eprintln!("line has {}", line.len());
-            eprintln!("parse line {line}");
-        }
-        i += 1;
         let use_line = if let Some(_cs) = re_p.captures(&line) {
             true
         } else if re_n.is_match(&line) {

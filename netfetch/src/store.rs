@@ -16,7 +16,7 @@ use std::task::{Context, Poll};
 use std::time::{Duration, Instant, SystemTime};
 use tokio::sync::Mutex as TokMx;
 
-pub const CONNECTION_STATUS_DIV: u64 = netpod::timeunits::DAY;
+pub use netpod::CONNECTION_STATUS_DIV;
 
 #[derive(Debug)]
 pub enum Error {
