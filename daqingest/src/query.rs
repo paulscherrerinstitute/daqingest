@@ -1,7 +1,8 @@
-use crate::FetchEvents;
+use crate::opts::FetchEvents;
 use log::*;
 use scylla::batch::Consistency;
-use scylla::transport::errors::{NewSessionError, QueryError};
+use scylla::transport::errors::NewSessionError;
+use scylla::transport::errors::QueryError;
 use scylla::SessionBuilder;
 
 pub struct Error(err::Error);

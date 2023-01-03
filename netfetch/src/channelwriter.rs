@@ -9,7 +9,7 @@ use scylla::batch::{Batch, BatchType};
 use scylla::frame::value::{BatchValues, ValueList};
 use scylla::prepared_statement::PreparedStatement;
 use scylla::transport::errors::QueryError;
-use scylla::{BatchResult, QueryResult, Session as ScySession};
+use scylla::{QueryResult, Session as ScySession};
 use std::mem;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -46,7 +46,7 @@ impl<'a> Future for ScyQueryFut<'a> {
 }
 
 pub struct ScyBatchFut<'a> {
-    fut: Pin<Box<dyn Future<Output = Result<BatchResult, QueryError>> + 'a>>,
+    fut: Pin<Box<dyn Future<Output = Result<QueryResult, QueryError>> + 'a>>,
     polled: usize,
     ts_create: Instant,
     ts_poll_start: Instant,
@@ -101,7 +101,7 @@ impl<'a> Future for ScyBatchFut<'a> {
 }
 
 pub struct ScyBatchFutGen<'a> {
-    fut: Pin<Box<dyn Future<Output = Result<BatchResult, QueryError>> + Send + 'a>>,
+    fut: Pin<Box<dyn Future<Output = Result<QueryResult, QueryError>> + Send + 'a>>,
     polled: usize,
     ts_create: Instant,
     ts_poll_start: Instant,

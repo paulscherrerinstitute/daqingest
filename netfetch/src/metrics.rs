@@ -3,12 +3,13 @@ use crate::ca::IngestCommons;
 use crate::ca::METRICS;
 use axum::extract::Query;
 use err::Error;
-use http::request::Parts;
+use http::Request;
 use log::*;
 use serde::{Deserialize, Serialize};
 use stats::{CaConnStats, CaConnStatsAgg, CaConnStatsAggDiff};
 use std::collections::HashMap;
-use std::net::{SocketAddr, SocketAddrV4};
+use std::net::SocketAddr;
+use std::net::SocketAddrV4;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
@@ -129,9 +130,10 @@ async fn channel_state(params: HashMap<String, String>, ingest_commons: Arc<Inge
 }
 
 async fn channel_states(
-    _params: HashMap<String, String>,
+    params: HashMap<String, String>,
     ingest_commons: Arc<IngestCommons>,
 ) -> axum::Json<Vec<crate::ca::conn::ChannelStateInfo>> {
+    let limit = params.get("limit").map(|x| x.parse()).unwrap_or(Ok(40)).unwrap_or(40);
     let vals = ingest_commons
         .ca_conn_set
         .send_command_to_all(|| ConnCommand::channel_states_all())
@@ -144,11 +146,7 @@ async fn channel_states(
         }
     }
     res.sort_unstable_by_key(|v| u32::MAX - v.interest_score as u32);
-    let res = if true {
-        res.into_iter().rev().take(10).collect()
-    } else {
-        res
-    };
+    res.truncate(limit);
     axum::Json(res)
 }
 
@@ -164,10 +162,33 @@ async fn extra_inserts_conf_set(v: ExtraInsertsConf, ingest_commons: Arc<IngestC
     axum::Json(true)
 }
 
+#[allow(unused)]
+#[derive(Debug, Deserialize)]
+struct DummyQuery {
+    name: String,
+    surname: Option<String>,
+    age: usize,
+}
+
 pub async fn start_metrics_service(bind_to: String, ingest_commons: Arc<IngestCommons>) {
+    use axum::extract;
+    use axum::http::StatusCode;
     use axum::routing::{get, put};
-    use axum::{extract, Router};
+    use axum::Router;
     let app = Router::new()
+        .fallback(|req: Request<axum::body::Body>| async move {
+            info!("Fallback for {} {}", req.method(), req.uri());
+            StatusCode::NOT_FOUND
+        })
+        .nest(
+            "/some",
+            Router::new()
+                .route("/path1", get(|| async { (StatusCode::OK, format!("Hello there!")) }))
+                .route(
+                    "/path2",
+                    get(|qu: Query<DummyQuery>| async move { (StatusCode::OK, format!("{qu:?}")) }),
+                ),
+        )
         .route(
             "/metrics",
             get(|| async {
@@ -266,28 +287,6 @@ pub async fn start_metrics_service(bind_to: String, ingest_commons: Arc<IngestCo
                 |v: extract::Json<u64>| async move {
                     insert_ivl_min.store(v.0, Ordering::Release);
                 }
-            }),
-        )
-        .fallback(
-            get(|parts: Parts, body: extract::RawBody<hyper::Body>| async move {
-                let bytes = hyper::body::to_bytes(body.0).await.unwrap();
-                let s = String::from_utf8_lossy(&bytes);
-                info!("GET  {parts:?}  body: {s:?}");
-            })
-            .post(|parts: Parts, body: extract::RawBody<hyper::Body>| async move {
-                let bytes = hyper::body::to_bytes(body.0).await.unwrap();
-                let s = String::from_utf8_lossy(&bytes);
-                info!("POST  {parts:?}  body: {s:?}");
-            })
-            .put(|parts: Parts, body: extract::RawBody<hyper::Body>| async move {
-                let bytes = hyper::body::to_bytes(body.0).await.unwrap();
-                let s = String::from_utf8_lossy(&bytes);
-                info!("PUT  {parts:?}  body: {s:?}");
-            })
-            .delete(|parts: Parts, body: extract::RawBody<hyper::Body>| async move {
-                let bytes = hyper::body::to_bytes(body.0).await.unwrap();
-                let s = String::from_utf8_lossy(&bytes);
-                info!("DELETE  {parts:?}  body: {s:?}");
             }),
         );
     axum::Server::bind(&bind_to.parse().unwrap())

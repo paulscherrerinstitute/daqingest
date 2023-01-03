@@ -55,6 +55,7 @@ impl IntoSimplerError for QueryError {
             QueryError::TimeoutError => Error::DbTimeout,
             QueryError::TooManyOrphanedStreamIds(e) => Error::DbError(e.to_string()),
             QueryError::UnableToAllocStreamId => Error::DbError(e.to_string()),
+            QueryError::RequestTimeout(e) => Error::DbError(e.to_string()),
         }
     }
 }

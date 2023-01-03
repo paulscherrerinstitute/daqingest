@@ -109,6 +109,10 @@ impl FindIocStream {
         )
     }
 
+    pub fn job_queue_len(&self) -> usize {
+        self.channels_input.len()
+    }
+
     pub fn push(&mut self, x: String) {
         self.channels_input.push_back(x);
     }
@@ -578,5 +582,11 @@ impl Stream for FindIocStream {
                 }
             };
         }
+    }
+}
+
+impl futures_util::stream::FusedStream for FindIocStream {
+    fn is_terminated(&self) -> bool {
+        false
     }
 }

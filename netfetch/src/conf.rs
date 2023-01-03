@@ -5,8 +5,6 @@ use netpod::Database;
 use netpod::ScyllaConfig;
 use serde::Deserialize;
 use serde::Serialize;
-use std::net::IpAddr;
-use std::net::Ipv4Addr;
 use std::path::PathBuf;
 use std::time::Duration;
 use tokio::fs::OpenOptions;
@@ -20,10 +18,6 @@ pub struct CaIngestOpts {
     search: Vec<String>,
     #[serde(default)]
     search_blacklist: Vec<String>,
-    #[serde(default)]
-    tmp_remove: Vec<String>,
-    addr_bind: Option<IpAddr>,
-    addr_conn: Option<IpAddr>,
     whitelist: Option<String>,
     blacklist: Option<String>,
     max_simul: Option<usize>,
@@ -51,18 +45,6 @@ pub struct CaIngestOpts {
 impl CaIngestOpts {
     pub fn backend(&self) -> &str {
         &self.backend
-    }
-
-    pub fn addr_bind(&self) -> IpAddr {
-        self.addr_bind
-            .clone()
-            .unwrap_or_else(|| IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)))
-    }
-
-    pub fn addr_conn(&self) -> IpAddr {
-        self.addr_conn
-            .clone()
-            .unwrap_or_else(|| IpAddr::V4(Ipv4Addr::new(255, 255, 255, 255)))
     }
 
     pub fn api_bind(&self) -> String {
@@ -210,7 +192,10 @@ pub async fn parse_config(config: PathBuf) -> Result<(CaIngestOpts, Vec<String>)
     let mut channels = Vec::new();
     for line in lines {
         let line = String::from_utf8_lossy(line);
-        let use_line = if let Some(_cs) = re_p.captures(&line) {
+        let line = line.trim();
+        let use_line = if line.is_empty() {
+            false
+        } else if let Some(_cs) = re_p.captures(&line) {
             true
         } else if re_n.is_match(&line) {
             false

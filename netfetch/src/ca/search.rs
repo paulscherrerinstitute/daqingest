@@ -154,29 +154,6 @@ pub async fn ca_search(opts: CaIngestOpts, channels: &Vec<String>) -> Result<(),
             if do_block {
                 info!("blacklisting {item:?}");
             } else {
-                /*
-                let srcaddr = item.src.to_string();
-                let addr = item.addr.map(|x| x.to_string()).unwrap_or(String::new());
-                let rows = pg_client
-                    .query(&qu_select, &[&facility, &item.channel, &srcaddr])
-                    .await
-                    .unwrap();
-                if true || rows.is_empty() {
-                    //info!("insert {item:?}");
-                    pg_client
-                        .execute(&qu_insert, &[&facility, &item.channel, &srcaddr, &addr])
-                        .await
-                        .unwrap();
-                } else {
-                    //info!("update {item:?}");
-                    let addr2: &str = rows[0].get(0);
-                    if addr2 != addr {}
-                    pg_client
-                        .execute(&qu_update, &[&facility, &item.channel, &srcaddr, &addr])
-                        .await
-                        .unwrap();
-                }
-                */
                 let queryaddr = item.query_addr.map(|x| x.to_string());
                 let responseaddr = item.response_addr.map(|x| x.to_string());
                 let addr = item.addr.map(|x| x.to_string());
