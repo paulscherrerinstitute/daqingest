@@ -1,6 +1,6 @@
 use crate::ca::proto::{CaMsg, CaMsgTy, HeadInfo};
 use err::Error;
-use futures_util::{FutureExt, Stream};
+use futures_util::{Future, FutureExt, Stream};
 use libc::c_int;
 use log::*;
 use std::collections::{BTreeMap, VecDeque};
@@ -69,6 +69,7 @@ pub struct FindIocStream {
     bids_timed_out: BTreeMap<BatchId, ()>,
     sids_done: BTreeMap<SearchId, ()>,
     result_for_done_sid_count: u64,
+    sleeper: Pin<Box<dyn Future<Output = ()> + Send>>,
 }
 
 impl FindIocStream {
@@ -94,6 +95,7 @@ impl FindIocStream {
             in_flight_max: 20,
             channels_per_batch: 10,
             batch_run_max: Duration::from_millis(2500),
+            sleeper: Box::pin(tokio::time::sleep(Duration::from_millis(500))),
         }
     }
 
@@ -574,7 +576,13 @@ impl Stream for FindIocStream {
                         continue;
                     } else {
                         if self.channels_input.is_empty() && self.in_flight.is_empty() && self.out_queue.is_empty() {
-                            Ready(None)
+                            match self.sleeper.poll_unpin(cx) {
+                                Ready(_) => {
+                                    self.sleeper = Box::pin(tokio::time::sleep(Duration::from_millis(500)));
+                                    continue;
+                                }
+                                Pending => Pending,
+                            }
                         } else {
                             Pending
                         }

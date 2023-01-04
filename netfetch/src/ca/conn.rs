@@ -5,7 +5,6 @@ use super::proto::CaMsgTy;
 use super::proto::CaProto;
 use super::store::DataStore;
 use super::ExtraInsertsConf;
-use super::IngestCommons;
 use crate::bsread::ChannelDescDecoded;
 use crate::ca::proto::CreateChan;
 use crate::ca::proto::EventAdd;
@@ -392,8 +391,6 @@ pub struct CaConn {
     conn_backoff: f32,
     conn_backoff_beg: f32,
     inserts_counter: u64,
-    #[allow(unused)]
-    ingest_commons: Arc<IngestCommons>,
     extra_inserts_conf: ExtraInsertsConf,
 }
 
@@ -406,7 +403,6 @@ impl CaConn {
         insert_item_sender: CommonInsertItemQueueSender,
         array_truncate: usize,
         insert_queue_max: usize,
-        ingest_commons: Arc<IngestCommons>,
     ) -> Self {
         let (cq_tx, cq_rx) = async_channel::bounded(32);
         Self {
@@ -437,7 +433,6 @@ impl CaConn {
             conn_backoff: 0.02,
             conn_backoff_beg: 0.02,
             inserts_counter: 0,
-            ingest_commons,
             extra_inserts_conf: ExtraInsertsConf::new(),
         }
     }
@@ -671,7 +666,11 @@ impl CaConn {
                         self.stats.inserts_queue_push_inc();
                         self.insert_item_send_fut = None;
                     }
-                    Ready(Err(_)) => break Ready(Err(Error::with_msg_no_trace(format!("can not send the item")))),
+                    Ready(Err(e)) => {
+                        self.insert_item_send_fut = None;
+                        error!("handle_insert_futs can not send item {e}");
+                        break Ready(Err(Error::with_msg_no_trace(format!("can not send the item"))));
+                    }
                     Pending => {
                         if false {
                             // TODO test this case.
@@ -985,7 +984,10 @@ impl CaConn {
     fn handle_event_add_res(&mut self, ev: proto::EventAddRes, tsnow: Instant) -> Result<(), Error> {
         // TODO handle subid-not-found which can also be peer error:
         let cid = *self.cid_by_subid.get(&ev.subid).unwrap();
-        // TODO get rid of the string clone when I don't want the log output any longer:
+        if true {
+            let name = self.name_by_cid(cid);
+            info!("event {name:?} {ev:?}");
+        }
         // TODO handle not-found error:
         let mut series_2 = None;
         let ch_s = self.channels.get_mut(&cid).unwrap();

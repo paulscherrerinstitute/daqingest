@@ -89,7 +89,6 @@ impl CaConnSet {
         insert_queue_max: usize,
         insert_item_queue_sender: CommonInsertItemQueueSender,
         data_store: Arc<DataStore>,
-        ingest_commons: Arc<IngestCommons>,
         with_channels: Vec<String>,
     ) -> Result<(), Error> {
         info!("create new CaConn  {:?}", addr);
@@ -102,7 +101,6 @@ impl CaConnSet {
             insert_item_queue_sender,
             array_truncate,
             insert_queue_max,
-            ingest_commons,
         );
         for ch in with_channels {
             conn.channel_add(ch);
@@ -273,7 +271,6 @@ impl CaConnSet {
                     200,
                     ingest_commons.insert_item_queue.sender().await,
                     ingest_commons.data_store.clone(),
-                    ingest_commons.clone(),
                     vec![channel_name],
                 )
                 .await?;
