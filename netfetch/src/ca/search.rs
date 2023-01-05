@@ -104,7 +104,7 @@ pub async fn ca_search(opts: CaIngestOpts, channels: &Vec<String>) -> Result<(),
             }
         })
         .collect();
-    let mut finder = FindIocStream::new(addrs);
+    let mut finder = FindIocStream::new(addrs, Duration::from_millis(1000), 20, 1);
     for ch in channels.iter() {
         finder.push(ch.into());
     }

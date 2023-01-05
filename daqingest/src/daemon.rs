@@ -12,6 +12,7 @@ use netfetch::ca::findioc::FindIocStream;
 use netfetch::ca::store::DataStore;
 use netfetch::conf::CaIngestOpts;
 use netfetch::errconv::ErrConv;
+use netfetch::metrics::ExtraInsertsConf;
 use netfetch::store::CommonInsertItemQueue;
 use netpod::Database;
 use netpod::ScyllaConfig;
@@ -21,12 +22,22 @@ use std::collections::VecDeque;
 use std::fmt;
 use std::net::SocketAddrV4;
 use std::pin::Pin;
+use std::sync::atomic;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 use std::time::Duration;
 use std::time::SystemTime;
 use tokio_postgres::Client as PgClient;
 
-const CHECK_CHANS_PER_TICK: usize = 50000;
+const CHECK_CHANS_PER_TICK: usize = 10000;
+const FINDER_TIMEOUT: usize = 100;
+const FINDER_JOB_QUEUE_LEN_MAX: usize = 20;
+const FINDER_IN_FLIGHT_MAX: usize = 200;
+const FINDER_BATCH_SIZE: usize = 8;
+const CURRENT_SEARCH_PENDING_MAX: usize = 220;
+const SEARCH_PENDING_TIMEOUT: usize = 10000;
+const TIMEOUT_WARN_FACTOR: usize = 10;
 
 #[derive(Clone, Debug, Serialize, PartialEq, PartialOrd, Eq, Ord)]
 pub struct Channel {
@@ -179,25 +190,49 @@ pub struct Daemon {
     search_tx: Sender<String>,
     ioc_finder_jh: tokio::task::JoinHandle<()>,
     datastore: Arc<DataStore>,
-    common_insert_item_queue: CommonInsertItemQueue,
+    common_insert_item_queue: Arc<CommonInsertItemQueue>,
+    insert_queue_counter: Arc<AtomicUsize>,
+    count_unknown_address: usize,
+    count_search_pending: usize,
+    count_no_address: usize,
+    count_unassigned: usize,
+    count_assigned: usize,
+    last_status_print: SystemTime,
 }
 
 impl Daemon {
     pub async fn new(opts: DaemonOpts) -> Result<Self, Error> {
-        let pg_client = make_pg_client(&opts.pgconf).await?;
-        let pg_client = Arc::new(pg_client);
+        let pg_client = Arc::new(make_pg_client(&opts.pgconf).await?);
         let datastore = DataStore::new(&opts.scyconf, pg_client).await?;
         let datastore = Arc::new(datastore);
         let (tx, rx) = async_channel::bounded(32);
         let tgts = opts.search_tgts.clone();
         let (search_tx, ioc_finder_jh) = Self::start_finder(tx.clone(), tgts);
-        let common_insert_item_queue = CommonInsertItemQueue::new(opts.insert_item_queue_cap);
+        let common_insert_item_queue = Arc::new(CommonInsertItemQueue::new(opts.insert_item_queue_cap));
+        let insert_queue_counter = Arc::new(AtomicUsize::new(0));
+
+        let ingest_commons = netfetch::ca::IngestCommons {
+            pgconf: Arc::new(opts.pgconf.clone()),
+            backend: opts.backend().into(),
+            local_epics_hostname: opts.local_epics_hostname.clone(),
+            insert_item_queue: common_insert_item_queue.clone(),
+            data_store: datastore.clone(),
+            insert_ivl_min: Arc::new(AtomicU64::new(0)),
+            extra_inserts_conf: tokio::sync::Mutex::new(ExtraInsertsConf::new()),
+            store_workers_rate: AtomicU64::new(20000),
+            insert_frac: AtomicU64::new(1000),
+            ca_conn_set: netfetch::ca::connset::CaConnSet::new(),
+        };
+        let _ingest_commons = Arc::new(ingest_commons);
+
         // TODO hook up with insert worker
         tokio::spawn({
             let rx = common_insert_item_queue.receiver();
+            let insert_queue_counter = insert_queue_counter.clone();
             async move {
                 while let Ok(item) = rx.recv().await {
-                    info!("insert queue item {item:?}");
+                    insert_queue_counter.fetch_add(1, atomic::Ordering::AcqRel);
+                    trace!("insert queue item {item:?}");
                 }
             }
         });
@@ -212,6 +247,13 @@ impl Daemon {
             ioc_finder_jh,
             datastore,
             common_insert_item_queue,
+            insert_queue_counter,
+            count_unknown_address: 0,
+            count_search_pending: 0,
+            count_no_address: 0,
+            count_unassigned: 0,
+            count_assigned: 0,
+            last_status_print: SystemTime::now(),
         };
         Ok(ret)
     }
@@ -220,24 +262,29 @@ impl Daemon {
         let (qtx, qrx) = async_channel::bounded(32);
         let (atx, arx) = async_channel::bounded(32);
         let ioc_finder_fut = async move {
-            const FINDER_JOB_QUEUE_LEN_MAX: usize = 1;
-            let mut finder = FindIocStream::new(tgts);
+            let mut finder = FindIocStream::new(
+                tgts,
+                Duration::from_millis(FINDER_TIMEOUT as u64),
+                FINDER_IN_FLIGHT_MAX,
+                FINDER_BATCH_SIZE,
+            );
+            let fut_tick_dur = Duration::from_millis(100);
             let mut finder_more = true;
-            let mut fut1 = OptFut::new(finder.next());
-            let mut fut2 = OptFut::new(qrx.recv());
+            let mut finder_fut = OptFut::new(finder.next());
+            let mut qrx_fut = OptFut::new(qrx.recv());
             let mut qrx_more = true;
-            let mut fut_tick = Box::pin(tokio::time::sleep(Duration::from_millis(500)));
+            let mut fut_tick = Box::pin(tokio::time::sleep(fut_tick_dur));
             let mut asend = OptFut::empty();
             loop {
-                tokio::time::sleep(Duration::from_millis(10)).await;
+                //tokio::time::sleep(Duration::from_millis(1)).await;
                 tokio::select! {
                     _ = &mut asend, if asend.is_enabled() => {
                         //info!("finder asend done");
                         asend = OptFut::empty();
                     }
-                    r1 = &mut fut1, if fut1.is_enabled() => {
+                    r1 = &mut finder_fut, if finder_fut.is_enabled() => {
                         //info!("finder fut1");
-                        fut1 = OptFut::empty();
+                        finder_fut = OptFut::empty();
                         match r1 {
                             Some(item) => {
                                 asend = OptFut::new(atx.send(item));
@@ -250,16 +297,16 @@ impl Daemon {
                         }
                         //info!("finder.job_queue_len()  {}", finder.job_queue_len());
                         if qrx_more && finder.job_queue_len() < FINDER_JOB_QUEUE_LEN_MAX {
-                            fut2 = OptFut::new(qrx.recv());
+                            qrx_fut = OptFut::new(qrx.recv());
                         }
                         if finder_more {
-                            fut1 = OptFut::new(finder.next());
+                            finder_fut = OptFut::new(finder.next());
                         }
-                        fut_tick = Box::pin(tokio::time::sleep(Duration::from_millis(2000)));
+                        fut_tick = Box::pin(tokio::time::sleep(fut_tick_dur));
                     }
-                    r2 = &mut fut2, if fut2.is_enabled() => {
+                    r2 = &mut qrx_fut, if qrx_fut.is_enabled() => {
                         //info!("finder fut2");
-                        fut2 = OptFut::empty();
+                        qrx_fut = OptFut::empty();
                         match r2 {
                             Ok(item) => {
                                 //info!("Push to finder: {item:?}");
@@ -273,26 +320,26 @@ impl Daemon {
                         }
                         //info!("finder.job_queue_len()  {}", finder.job_queue_len());
                         if qrx_more && finder.job_queue_len() < FINDER_JOB_QUEUE_LEN_MAX {
-                            fut2 = OptFut::new(qrx.recv());
+                            qrx_fut = OptFut::new(qrx.recv());
                         }
                         if finder_more {
-                            fut1 = OptFut::new(finder.next());
+                            finder_fut = OptFut::new(finder.next());
                         } else {
-                            fut1 = OptFut::empty();
+                            finder_fut = OptFut::empty();
                         }
-                        fut_tick = Box::pin(tokio::time::sleep(Duration::from_millis(2000)));
+                        fut_tick = Box::pin(tokio::time::sleep(fut_tick_dur));
                     }
                     _ = &mut fut_tick => {
                         //info!("finder fut_tick finder.job_queue_len()  {}", finder.job_queue_len());
                         if qrx_more && finder.job_queue_len() < FINDER_JOB_QUEUE_LEN_MAX {
-                            fut2 = OptFut::new(qrx.recv());
+                            qrx_fut = OptFut::new(qrx.recv());
                         }
                         if finder_more {
-                            fut1 = OptFut::new(finder.next());
+                            finder_fut = OptFut::new(finder.next());
                         } else {
-                            fut1 = OptFut::empty();
+                            finder_fut = OptFut::empty();
                         }
-                        fut_tick = Box::pin(tokio::time::sleep(Duration::from_millis(2000)));
+                        fut_tick = Box::pin(tokio::time::sleep(fut_tick_dur));
                     }
                     else => {
                         error!("all branches are disabled");
@@ -322,11 +369,13 @@ impl Daemon {
     async fn check_chans(&mut self) -> Result<(), Error> {
         let tsnow = SystemTime::now();
         let k = self.chan_check_next.take();
-        info!("------------   check_chans  start at {:?}", k);
+        trace!("------------   check_chans  start at {:?}", k);
         let mut currently_search_pending = 0;
-        for (_ch, st) in &self.channel_states {
-            if let ChannelStateValue::Active(ActiveChannelState::SearchPending { .. }) = &st.value {
-                currently_search_pending += 1;
+        {
+            for (_ch, st) in &self.channel_states {
+                if let ChannelStateValue::Active(ActiveChannelState::SearchPending { .. }) = &st.value {
+                    currently_search_pending += 1;
+                }
             }
         }
         let it = if let Some(last) = k {
@@ -334,11 +383,6 @@ impl Daemon {
         } else {
             self.channel_states.range_mut(..)
         };
-        let mut count_unknown_address = 0;
-        let mut count_search_pending = 0;
-        let mut count_no_address = 0;
-        let mut count_unassigned = 0;
-        let mut count_assigned = 0;
         for (i, (ch, st)) in it.enumerate() {
             use ActiveChannelState::*;
             use ChannelStateValue::*;
@@ -346,8 +390,7 @@ impl Daemon {
                 Active(st2) => match st2 {
                     UnknownAddress => {
                         //info!("UnknownAddress {} {:?}", i, ch);
-                        count_unknown_address += 1;
-                        if currently_search_pending < 10 {
+                        if currently_search_pending < CURRENT_SEARCH_PENDING_MAX {
                             currently_search_pending += 1;
                             if st.pending_op.is_none() {
                                 st.pending_op = Some(ChanOp::Finder(ch.id().to_string(), tsnow));
@@ -357,12 +400,11 @@ impl Daemon {
                     }
                     SearchPending { since } => {
                         //info!("SearchPending {} {:?}", i, ch);
-                        count_search_pending += 1;
                         // TODO handle Err
                         match tsnow.duration_since(*since) {
                             Ok(dt) => {
-                                if dt >= Duration::from_millis(10000) {
-                                    warn!("Search timeout for {ch:?}");
+                                if dt >= Duration::from_millis(SEARCH_PENDING_TIMEOUT as u64) {
+                                    debug!("Search timeout for {ch:?}");
                                     st.value = Active(ActiveChannelState::NoAddress);
                                     currently_search_pending -= 1;
                                 }
@@ -377,11 +419,10 @@ impl Daemon {
                         use WithAddressState::*;
                         match state {
                             Unassigned { assign_at } => {
-                                count_unassigned += 1;
                                 if *assign_at <= tsnow {
                                     if st.pending_op.is_none() {
                                         if !self.conns.contains_key(addr) {
-                                            info!("====================   create CaConn for {ch:?}");
+                                            debug!("====================   create CaConn for {ch:?}");
                                             let backend = self.opts.backend().into();
                                             let local_epics_hostname = self.opts.local_epics_hostname.clone();
                                             let array_truncate = self.opts.array_truncate;
@@ -406,7 +447,10 @@ impl Daemon {
                                             let fut = async move {
                                                 tx.send(cmd).await?;
                                                 let res = rx.recv().await?;
-                                                info!("answer from CaConn: {res:?}");
+                                                debug!("answer from CaConn: {res:?}");
+                                                if res != true {
+                                                    warn!("problem from CaConn");
+                                                }
                                                 Ok(())
                                             };
                                             st.pending_op = Some(ChanOp::ConnCmd(Box::pin(fut)));
@@ -423,14 +467,12 @@ impl Daemon {
                             }
                             Assigned(_) => {
                                 // TODO check if channel is healthy and alive
-                                count_assigned += 1;
                             }
                         }
                     }
                     NoAddress => {
                         // TODO try to find address again after some randomized timeout
                         //info!("NoAddress {} {:?}", i, ch);
-                        count_no_address += 1;
                     }
                 },
                 ToRemove { .. } => {
@@ -442,19 +484,15 @@ impl Daemon {
                 break;
             }
         }
-        info!(
-            "{:8} {:8} {:8} {:8} {:8}",
-            count_unknown_address, count_search_pending, count_unassigned, count_assigned, count_no_address
-        );
-        for (_ch, st) in &mut self.channel_states {
+        for (ch, st) in &mut self.channel_states {
             match &mut st.pending_op {
                 Some(op) => match op {
                     ChanOp::Finder(s, start) => {
                         if *start + Duration::from_millis(10000) >= tsnow {
                             match self.search_tx.try_send(s.clone()) {
                                 Ok(_) => {
+                                    *start = tsnow;
                                     st.pending_op = None;
-                                    info!("OK, sent msg to Finder");
                                 }
                                 Err(e) => match e {
                                     async_channel::TrySendError::Full(_) => {
@@ -468,7 +506,11 @@ impl Daemon {
                             }
                         } else {
                             st.pending_op = None;
-                            warn!("ChanOp::Finder timeout");
+                            warn!("ChanOp::Finder send timeout for {ch:?}");
+                            *st = ChannelState {
+                                value: ChannelStateValue::Active(ActiveChannelState::UnknownAddress),
+                                pending_op: None,
+                            };
                         }
                     }
                     ChanOp::ConnCmd(fut) => {
@@ -478,7 +520,7 @@ impl Daemon {
                                 st.pending_op = None;
                                 match res {
                                     Ok(_) => {
-                                        info!("ChanOp::ConnCmd completed fine");
+                                        debug!("ChanOp::ConnCmd completed fine");
                                     }
                                     Err(e) => {
                                         error!("ChanOp::ConnCmd {e}");
@@ -492,11 +534,55 @@ impl Daemon {
                 None => {}
             }
         }
+        {
+            self.count_unknown_address = 0;
+            self.count_search_pending = 0;
+            self.count_no_address = 0;
+            self.count_unassigned = 0;
+            self.count_assigned = 0;
+            for (_ch, st) in &self.channel_states {
+                match &st.value {
+                    ChannelStateValue::Active(st) => match st {
+                        ActiveChannelState::UnknownAddress => {
+                            self.count_unknown_address += 1;
+                        }
+                        ActiveChannelState::SearchPending { .. } => {
+                            self.count_search_pending += 1;
+                        }
+                        ActiveChannelState::WithAddress { state, .. } => match state {
+                            WithAddressState::Unassigned { .. } => {
+                                self.count_unassigned += 1;
+                            }
+                            WithAddressState::Assigned(_) => {
+                                self.count_assigned += 1;
+                            }
+                        },
+                        ActiveChannelState::NoAddress => {
+                            self.count_no_address += 1;
+                        }
+                    },
+                    ChannelStateValue::ToRemove { .. } => {}
+                }
+            }
+        }
         Ok(())
     }
 
     async fn handle_timer_tick(&mut self) -> Result<(), Error> {
+        let tsnow = SystemTime::now();
         self.check_chans().await?;
+        if tsnow.duration_since(self.last_status_print).unwrap_or(Duration::ZERO) >= Duration::from_millis(1000) {
+            self.last_status_print = tsnow;
+            info!(
+                "{:8} {:8} {:8} : {:8} {:8} : {:10}",
+                self.count_unknown_address,
+                self.count_search_pending,
+                self.count_no_address,
+                self.count_unassigned,
+                self.count_assigned,
+                self.insert_queue_counter.load(atomic::Ordering::Acquire),
+            );
+        }
         Ok(())
     }
 
@@ -536,48 +622,77 @@ impl Daemon {
         Ok(())
     }
 
+    fn handle_search_done(&mut self, item: Result<VecDeque<FindIocRes>, Error>) -> Result<(), Error> {
+        //debug!("handle SearchDone: {res:?}");
+        match item {
+            Ok(a) => {
+                for res in a {
+                    if let Some(addr) = &res.addr {
+                        let addr = addr.clone();
+                        let ch = Channel::new(res.channel);
+                        if let Some(st) = self.channel_states.get_mut(&ch) {
+                            if let ChannelStateValue::Active(ActiveChannelState::SearchPending { since }) = &st.value {
+                                let dt = SystemTime::now().duration_since(*since).unwrap();
+                                if dt > Duration::from_millis(FINDER_TIMEOUT as u64 * TIMEOUT_WARN_FACTOR as u64) {
+                                    warn!(
+                                        "    FOUND {:5.0}  {:5.0}  {addr}",
+                                        1e3 * dt.as_secs_f32(),
+                                        1e3 * res.dt.as_secs_f32()
+                                    );
+                                }
+                                let stnew = ChannelStateValue::Active(ActiveChannelState::WithAddress {
+                                    addr,
+                                    state: WithAddressState::Unassigned {
+                                        assign_at: SystemTime::now(),
+                                    },
+                                });
+                                st.value = stnew;
+                            } else {
+                                warn!(
+                                    "address found, but state for {ch:?} is not SearchPending: {:?}",
+                                    st.value
+                                );
+                            }
+                        } else {
+                            warn!("can not find channel state for {ch:?}");
+                        }
+                    } else {
+                        //debug!("no addr from search in {res:?}");
+                        let ch = Channel::new(res.channel);
+                        if let Some(st) = self.channel_states.get_mut(&ch) {
+                            if let ChannelStateValue::Active(ActiveChannelState::SearchPending { since }) = &st.value {
+                                let dt = SystemTime::now().duration_since(*since).unwrap();
+                                if dt > Duration::from_millis(FINDER_TIMEOUT as u64 * TIMEOUT_WARN_FACTOR as u64) {
+                                    warn!(
+                                        "NOT FOUND {:5.0}  {:5.0}",
+                                        1e3 * dt.as_secs_f32(),
+                                        1e3 * res.dt.as_secs_f32()
+                                    );
+                                }
+                                st.value = ChannelStateValue::Active(ActiveChannelState::NoAddress);
+                            } else {
+                                warn!("no address, but state for {ch:?} is not SearchPending: {:?}", st.value);
+                            }
+                        } else {
+                            warn!("can not find channel state for {ch:?}");
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                error!("error from search: {e}");
+            }
+        }
+        Ok(())
+    }
+
     async fn handle_event(&mut self, item: DaemonEvent) -> Result<(), Error> {
         use DaemonEvent::*;
         match item {
             TimerTick => self.handle_timer_tick().await,
             ChannelAdd(ch) => self.handle_channel_add(ch),
             ChannelRemove(ch) => self.handle_channel_remove(ch),
-            SearchDone(res) => {
-                info!("handle SearchDone: {res:?}");
-                match res {
-                    Ok(a) => {
-                        for res in a {
-                            if let Some(addr) = &res.addr {
-                                let addr = addr.clone();
-                                let ch = Channel::new(res.channel);
-                                if let Some(st) = self.channel_states.get_mut(&ch) {
-                                    if let ChannelStateValue::Active(ActiveChannelState::SearchPending { .. }) =
-                                        &st.value
-                                    {
-                                        let stnew = ChannelStateValue::Active(ActiveChannelState::WithAddress {
-                                            addr,
-                                            state: WithAddressState::Unassigned {
-                                                assign_at: SystemTime::now(),
-                                            },
-                                        });
-                                        st.value = stnew;
-                                    } else {
-                                        warn!("state for {ch:?} is not SearchPending");
-                                    }
-                                } else {
-                                    warn!("can not find channel state for {ch:?}");
-                                }
-                            } else {
-                                warn!("no addr from search in {res:?}");
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        error!("error from search: {e}");
-                    }
-                }
-                Ok(())
-            }
+            SearchDone(item) => self.handle_search_done(item),
         }
     }
 
@@ -585,7 +700,7 @@ impl Daemon {
         let ticker = {
             let tx = self.tx.clone();
             async move {
-                let mut ticker = tokio::time::interval(Duration::from_millis(1500));
+                let mut ticker = tokio::time::interval(Duration::from_millis(100));
                 ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                 loop {
                     ticker.tick().await;
@@ -599,16 +714,13 @@ impl Daemon {
         taskrun::spawn(ticker);
         loop {
             match self.rx.recv().await {
-                Ok(item) => {
-                    info!("got daemon event {item:?}");
-                    match self.handle_event(item).await {
-                        Ok(_) => {}
-                        Err(e) => {
-                            error!("daemon: {e}");
-                            break;
-                        }
+                Ok(item) => match self.handle_event(item).await {
+                    Ok(_) => {}
+                    Err(e) => {
+                        error!("daemon: {e}");
+                        break;
                     }
-                }
+                },
                 Err(e) => {
                     error!("{e}");
                     break;

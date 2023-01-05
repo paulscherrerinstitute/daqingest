@@ -524,6 +524,7 @@ impl CaMsg {
             CaScalarType::I32 => convert_wave_value!(i32, I32, n, buf),
             CaScalarType::F32 => convert_wave_value!(f32, F32, n, buf),
             CaScalarType::F64 => convert_wave_value!(f64, F64, n, buf),
+            CaScalarType::String => CaDataValue::Scalar(CaDataScalarValue::String("todo-array-string".into())),
             _ => {
                 warn!("TODO conversion array {scalar_type:?}");
                 return Err(Error::with_msg_no_trace(format!(

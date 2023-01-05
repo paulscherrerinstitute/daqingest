@@ -984,7 +984,7 @@ impl CaConn {
     fn handle_event_add_res(&mut self, ev: proto::EventAddRes, tsnow: Instant) -> Result<(), Error> {
         // TODO handle subid-not-found which can also be peer error:
         let cid = *self.cid_by_subid.get(&ev.subid).unwrap();
-        if true {
+        if false {
             let name = self.name_by_cid(cid);
             info!("event {name:?} {ev:?}");
         }

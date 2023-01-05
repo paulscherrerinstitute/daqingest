@@ -39,7 +39,7 @@ struct SearchBatch {
     tgts: VecDeque<usize>,
     channels: Vec<String>,
     sids: Vec<SearchId>,
-    done: Vec<SearchId>,
+    done: Vec<bool>,
 }
 
 #[derive(Debug)]
@@ -48,6 +48,7 @@ pub struct FindIocRes {
     pub query_addr: Option<SocketAddrV4>,
     pub response_addr: Option<SocketAddrV4>,
     pub addr: Option<SocketAddrV4>,
+    pub dt: Duration,
 }
 
 pub struct FindIocStream {
@@ -73,7 +74,7 @@ pub struct FindIocStream {
 }
 
 impl FindIocStream {
-    pub fn new(tgts: Vec<SocketAddrV4>) -> Self {
+    pub fn new(tgts: Vec<SocketAddrV4>, batch_run_max: Duration, in_flight_max: usize, batch_size: usize) -> Self {
         let sock = unsafe { Self::create_socket() }.unwrap();
         let afd = AsyncFd::new(sock.0).unwrap();
         Self {
@@ -92,9 +93,9 @@ impl FindIocStream {
             bids_timed_out: BTreeMap::new(),
             sids_done: BTreeMap::new(),
             result_for_done_sid_count: 0,
-            in_flight_max: 20,
-            channels_per_batch: 10,
-            batch_run_max: Duration::from_millis(2500),
+            in_flight_max,
+            channels_per_batch: batch_size,
+            batch_run_max,
             sleeper: Box::pin(tokio::time::sleep(Duration::from_millis(500))),
         }
     }
@@ -294,23 +295,35 @@ impl FindIocStream {
             if accounted != ec as usize {
                 info!("unaccounted data  ec {}  accounted {}", ec, accounted);
             }
-            if msgs.len() != 2 {
-                info!("expect always 2 commands in the response, instead got {}", msgs.len());
+            if msgs.len() < 1 {
+                warn!("received answer without messages");
             }
-            for m in &msgs {
-                debug!("m: {m:?}");
+            if msgs.len() == 1 {
+                warn!("received answer with single message: {msgs:?}");
+            }
+            let mut good = true;
+            if let CaMsgTy::VersionRes(v) = msgs[0].ty {
+                if v != 13 {
+                    warn!("bad version: {msgs:?}");
+                    good = false;
+                }
+            } else {
+                debug!("first message is not a version: {:?}", msgs[0].ty);
+                // Seems like a bug in many IOCs
+                //good = false;
             }
             let mut res = Vec::new();
-            for msg in msgs.iter() {
-                match &msg.ty {
-                    CaMsgTy::SearchRes(k) => {
-                        info!("SearchRes: {k:?}");
-                        let addr = SocketAddrV4::new(src_addr, k.tcp_port);
-                        res.push((SearchId(k.id), addr));
-                    }
-                    CaMsgTy::VersionRes(13) => {}
-                    _ => {
-                        warn!("try_read: unknown message received  {:?}", msg.ty);
+            if good {
+                for msg in &msgs[1..] {
+                    match &msg.ty {
+                        CaMsgTy::SearchRes(k) => {
+                            let addr = SocketAddrV4::new(src_addr, k.tcp_port);
+                            res.push((SearchId(k.id), addr));
+                        }
+                        //CaMsgTy::VersionRes(13) => {}
+                        _ => {
+                            warn!("try_read: unknown message received  {:?}", msg.ty);
+                        }
                     }
                 }
             }
@@ -338,29 +351,29 @@ impl FindIocStream {
     }
 
     fn create_in_flight(&mut self) {
-        let bid = BATCH_ID.fetch_add(1, Ordering::AcqRel);
-        let bid = BatchId(bid as u32);
+        let bid = BatchId(BATCH_ID.fetch_add(1, Ordering::AcqRel) as u32);
         let mut sids = Vec::new();
         let mut chs = Vec::new();
         while chs.len() < self.channels_per_batch && self.channels_input.len() > 0 {
-            let sid = SEARCH_ID2.fetch_add(1, Ordering::AcqRel);
-            let sid = SearchId(sid as u32);
+            let sid = SearchId(SEARCH_ID2.fetch_add(1, Ordering::AcqRel) as u32);
             self.bid_by_sid.insert(sid.clone(), bid.clone());
             sids.push(sid);
             chs.push(self.channels_input.pop_front().unwrap());
         }
+        let n = chs.len();
         let batch = SearchBatch {
             ts_beg: Instant::now(),
             channels: chs,
             tgts: self.tgts.iter().enumerate().map(|x| x.0).collect(),
             sids,
-            done: Vec::new(),
+            done: vec![false; n],
         };
         self.in_flight.insert(bid.clone(), batch);
         self.batch_send_queue.push_back(bid);
     }
 
     fn handle_result(&mut self, src: SocketAddrV4, res: Vec<(SearchId, SocketAddrV4)>) {
+        let tsnow = Instant::now();
         let mut sids_remove = Vec::new();
         for (sid, addr) in res {
             self.sids_done.insert(sid.clone(), ());
@@ -369,39 +382,38 @@ impl FindIocStream {
                     sids_remove.push(sid.clone());
                     match self.in_flight.get_mut(bid) {
                         Some(batch) => {
-                            // TGT
+                            let mut found_sid = false;
                             for (i2, s2) in batch.sids.iter().enumerate() {
                                 if s2 == &sid {
+                                    found_sid = true;
+                                    batch.done[i2] = true;
                                     match batch.channels.get(i2) {
                                         Some(ch) => {
+                                            let dt = tsnow.saturating_duration_since(batch.ts_beg);
                                             let res = FindIocRes {
                                                 channel: ch.into(),
                                                 // TODO associate a batch with a specific query address.
                                                 query_addr: None,
                                                 response_addr: Some(src.clone()),
                                                 addr: Some(addr),
+                                                dt,
                                             };
                                             self.out_queue.push_back(res);
                                         }
                                         None => {
-                                            error!("no matching channel for {sid:?}");
+                                            error!(
+                                                "logic error  batch sids / channels lens:  {} vs {}",
+                                                batch.sids.len(),
+                                                batch.channels.len()
+                                            );
                                         }
                                     }
                                 }
                             }
-                            // Book keeping:
-                            batch.done.push(sid);
-                            let mut all_done = true;
-                            if batch.done.len() >= batch.sids.len() {
-                                for s1 in &batch.sids {
-                                    if !batch.done.contains(s1) {
-                                        all_done = false;
-                                        break;
-                                    }
-                                }
-                            } else {
-                                all_done = false;
+                            if !found_sid {
+                                error!("can not find sid {sid:?} in batch {bid:?}");
                             }
+                            let all_done = batch.done.iter().all(|x| *x);
                             if all_done {
                                 self.bids_all_done.insert(bid.clone(), ());
                                 self.in_flight.remove(bid);
@@ -429,29 +441,33 @@ impl FindIocStream {
     }
 
     fn clear_timed_out(&mut self) {
-        let now = Instant::now();
+        let tsnow = Instant::now();
         let mut bids = Vec::new();
         let mut sids = Vec::new();
         let mut chns = Vec::new();
+        let mut dts = Vec::new();
         for (bid, batch) in &mut self.in_flight {
-            if now.duration_since(batch.ts_beg) > self.batch_run_max {
+            let dt = tsnow.saturating_duration_since(batch.ts_beg);
+            if dt > self.batch_run_max {
                 self.bids_timed_out.insert(bid.clone(), ());
                 for (i2, sid) in batch.sids.iter().enumerate() {
-                    if batch.done.contains(sid) == false {
+                    if batch.done[i2] == false {
                         debug!("Timeout: {bid:?} {}", batch.channels[i2]);
+                        sids.push(sid.clone());
+                        chns.push(batch.channels[i2].clone());
+                        dts.push(dt);
                     }
-                    sids.push(sid.clone());
-                    chns.push(batch.channels[i2].clone());
                 }
                 bids.push(bid.clone());
             }
         }
-        for (sid, ch) in sids.into_iter().zip(chns) {
+        for ((sid, ch), dt) in sids.into_iter().zip(chns).zip(dts) {
             let res = FindIocRes {
                 query_addr: None,
                 response_addr: None,
                 channel: ch,
                 addr: None,
+                dt,
             };
             self.out_queue.push_back(res);
             self.bid_by_sid.remove(&sid);
@@ -536,9 +552,10 @@ impl Stream for FindIocStream {
                             }
                             None => {
                                 if self.bids_all_done.contains_key(&bid) {
-                                    // TODO count events
+                                    // Already answered from another target
+                                    //trace!("bid {bid:?} from batch send queue not in flight  AND  all done");
                                 } else {
-                                    info!("Batch {bid:?} seems already done");
+                                    warn!("bid {bid:?} from batch send queue not in flight  NOT done");
                                 }
                                 loop_again = true;
                             }
