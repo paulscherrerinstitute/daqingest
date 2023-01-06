@@ -60,8 +60,8 @@ pub async fn ca_search(opts: CaIngestOpts, channels: &Vec<String>) -> Result<(),
         const TEXT: tokio_postgres::types::Type = tokio_postgres::types::Type::TEXT;
         pg_client
             .prepare_typed(
-                "insert into ioc_by_channel_log (facility, channel, queryaddr, responseaddr, addr) values ($1, $2, $3, $4, $5)",
-                &[TEXT, TEXT, TEXT, TEXT, TEXT],
+                "insert into ioc_by_channel_log (facility, channel, responseaddr, addr) values ($1, $2, $3, $4)",
+                &[TEXT, TEXT, TEXT, TEXT],
             )
             .await
             .unwrap()
@@ -154,14 +154,10 @@ pub async fn ca_search(opts: CaIngestOpts, channels: &Vec<String>) -> Result<(),
             if do_block {
                 info!("blacklisting {item:?}");
             } else {
-                let queryaddr = item.query_addr.map(|x| x.to_string());
                 let responseaddr = item.response_addr.map(|x| x.to_string());
                 let addr = item.addr.map(|x| x.to_string());
                 pg_client
-                    .execute(
-                        &qu_insert,
-                        &[&opts.backend(), &item.channel, &queryaddr, &responseaddr, &addr],
-                    )
+                    .execute(&qu_insert, &[&opts.backend(), &item.channel, &responseaddr, &addr])
                     .await
                     .unwrap();
             }

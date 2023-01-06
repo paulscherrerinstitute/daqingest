@@ -199,6 +199,11 @@ pub async fn ca_connect(opts: CaIngestOpts, channels: &Vec<String>) -> Result<()
 
     // TODO use a new stats type:
     let store_stats = Arc::new(CaConnStats::new());
+    let ttls = crate::insertworker::Ttls {
+        index: opts.ttl_index(),
+        d0: opts.ttl_d0(),
+        d1: opts.ttl_d1(),
+    };
     let jh_insert_workers = spawn_scylla_insert_workers(
         opts.scylla().clone(),
         opts.insert_scylla_sessions(),
@@ -208,7 +213,7 @@ pub async fn ca_connect(opts: CaIngestOpts, channels: &Vec<String>) -> Result<()
         pg_client.clone(),
         store_stats.clone(),
         opts.use_rate_limit_queue(),
-        opts.clone(),
+        ttls,
     )
     .await?;
 

@@ -45,7 +45,6 @@ struct SearchBatch {
 #[derive(Debug)]
 pub struct FindIocRes {
     pub channel: String,
-    pub query_addr: Option<SocketAddrV4>,
     pub response_addr: Option<SocketAddrV4>,
     pub addr: Option<SocketAddrV4>,
     pub dt: Duration,
@@ -392,8 +391,6 @@ impl FindIocStream {
                                             let dt = tsnow.saturating_duration_since(batch.ts_beg);
                                             let res = FindIocRes {
                                                 channel: ch.into(),
-                                                // TODO associate a batch with a specific query address.
-                                                query_addr: None,
                                                 response_addr: Some(src.clone()),
                                                 addr: Some(addr),
                                                 dt,
@@ -463,7 +460,6 @@ impl FindIocStream {
         }
         for ((sid, ch), dt) in sids.into_iter().zip(chns).zip(dts) {
             let res = FindIocRes {
-                query_addr: None,
                 response_addr: None,
                 channel: ch,
                 addr: None,

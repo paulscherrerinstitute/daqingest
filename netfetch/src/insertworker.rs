@@ -1,6 +1,5 @@
 use crate::ca::store::DataStore;
 use crate::ca::IngestCommons;
-use crate::conf::CaIngestOpts;
 use crate::rt::JoinHandle;
 use crate::store::{CommonInsertItemQueue, IntoSimplerError, QueryItem};
 use err::Error;
@@ -44,6 +43,12 @@ async fn back_off_sleep(backoff_dt: &mut Duration) {
     tokio::time::sleep(*backoff_dt).await;
 }
 
+pub struct Ttls {
+    pub index: Duration,
+    pub d0: Duration,
+    pub d1: Duration,
+}
+
 pub async fn spawn_scylla_insert_workers(
     scyconf: ScyllaConfig,
     insert_scylla_sessions: usize,
@@ -53,7 +58,7 @@ pub async fn spawn_scylla_insert_workers(
     pg_client: Arc<PgClient>,
     store_stats: Arc<stats::CaConnStats>,
     use_rate_limit_queue: bool,
-    opts: CaIngestOpts,
+    ttls: Ttls,
 ) -> Result<Vec<JoinHandle<()>>, Error> {
     let (q2_tx, q2_rx) = async_channel::bounded(insert_item_queue.receiver().capacity().unwrap_or(20000));
     {
@@ -125,9 +130,9 @@ pub async fn spawn_scylla_insert_workers(
             insert_item_queue.receiver()
         };
         let ingest_commons = ingest_commons.clone();
-        let ttl_msp = opts.ttl_index();
-        let ttl_0d = opts.ttl_d0();
-        let ttl_1d = opts.ttl_d1();
+        let ttl_msp = ttls.index;
+        let ttl_0d = ttls.d0;
+        let ttl_1d = ttls.d1;
         let fut = async move {
             let backoff_0 = Duration::from_millis(10);
             let mut backoff = backoff_0.clone();
