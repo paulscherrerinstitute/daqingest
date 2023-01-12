@@ -1,11 +1,11 @@
-use super::conn::ConnCommand;
+use super::conn::{CaConnEvent, ConnCommand};
 use super::store::DataStore;
 use super::IngestCommons;
 use crate::ca::conn::CaConn;
 use crate::errconv::ErrConv;
 use crate::rt::{JoinHandle, TokMx};
 use crate::store::CommonInsertItemQueueSender;
-use async_channel::Sender;
+use async_channel::{Receiver, Sender};
 use err::Error;
 use futures_util::{FutureExt, StreamExt};
 use netpod::log::*;
@@ -67,13 +67,22 @@ impl CaConnRess {
 // There, make spawning part of this function?
 pub struct CaConnSet {
     ca_conn_ress: TokMx<BTreeMap<SocketAddr, CaConnRess>>,
+    conn_item_tx: Sender<CaConnEvent>,
+    conn_item_rx: Receiver<CaConnEvent>,
 }
 
 impl CaConnSet {
     pub fn new() -> Self {
+        let (conn_item_tx, conn_item_rx) = async_channel::bounded(10000);
         Self {
             ca_conn_ress: Default::default(),
+            conn_item_tx,
+            conn_item_rx,
         }
+    }
+
+    pub fn conn_item_rx(&self) -> Receiver<CaConnEvent> {
+        self.conn_item_rx.clone()
     }
 
     pub fn ca_conn_ress(&self) -> &TokMx<BTreeMap<SocketAddr, CaConnRess>> {
@@ -108,21 +117,23 @@ impl CaConnSet {
         let conn = conn;
         let conn_tx = conn.conn_command_tx();
         let conn_stats = conn.stats();
+        let conn_item_tx = self.conn_item_tx.clone();
         let conn_fut = async move {
             let stats = conn.stats();
             let mut conn = conn;
             while let Some(item) = conn.next().await {
                 match item {
-                    Ok(_) => {
+                    Ok(item) => {
                         stats.conn_item_count_inc();
+                        conn_item_tx.send(item).await?;
                     }
                     Err(e) => {
                         error!("CaConn gives error: {e:?}");
-                        break;
+                        return Err(e);
                     }
                 }
             }
-            Ok::<_, Error>(())
+            Ok(())
         };
         let jh = tokio::spawn(conn_fut);
         let ca_conn_ress = CaConnRess {
@@ -234,6 +245,7 @@ impl CaConnSet {
         Ok(())
     }
 
+    /// Add channel, or create a new CaConn and add the channel.
     pub async fn add_channel_to_addr(
         &self,
         backend: String,

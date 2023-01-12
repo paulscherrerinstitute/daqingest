@@ -43,6 +43,7 @@ async fn back_off_sleep(backoff_dt: &mut Duration) {
     tokio::time::sleep(*backoff_dt).await;
 }
 
+#[derive(Debug, Clone)]
 pub struct Ttls {
     pub index: Duration,
     pub d0: Duration,
@@ -130,9 +131,6 @@ pub async fn spawn_scylla_insert_workers(
             insert_item_queue.receiver()
         };
         let ingest_commons = ingest_commons.clone();
-        let ttl_msp = ttls.index;
-        let ttl_0d = ttls.d0;
-        let ttl_1d = ttls.d1;
         let fut = async move {
             let backoff_0 = Duration::from_millis(10);
             let mut backoff = backoff_0.clone();
@@ -146,7 +144,7 @@ pub async fn spawn_scylla_insert_workers(
                 };
                 match item {
                     QueryItem::ConnectionStatus(item) => {
-                        match crate::store::insert_connection_status(item, ttl_msp, &data_store, &stats).await {
+                        match crate::store::insert_connection_status(item, ttls.index, &data_store, &stats).await {
                             Ok(_) => {
                                 stats.connection_status_insert_done_inc();
                                 backoff = backoff_0;
@@ -158,7 +156,7 @@ pub async fn spawn_scylla_insert_workers(
                         }
                     }
                     QueryItem::ChannelStatus(item) => {
-                        match crate::store::insert_channel_status(item, ttl_msp, &data_store, &stats).await {
+                        match crate::store::insert_channel_status(item, ttls.index, &data_store, &stats).await {
                             Ok(_) => {
                                 stats.channel_status_insert_done_inc();
                                 backoff = backoff_0;
@@ -172,7 +170,9 @@ pub async fn spawn_scylla_insert_workers(
                     QueryItem::Insert(item) => {
                         let insert_frac = ingest_commons.insert_frac.load(Ordering::Acquire);
                         if i1 % 1000 < insert_frac {
-                            match crate::store::insert_item(item, ttl_msp, ttl_0d, ttl_1d, &data_store, &stats).await {
+                            match crate::store::insert_item(item, ttls.index, ttls.d0, ttls.d1, &data_store, &stats)
+                                .await
+                            {
                                 Ok(_) => {
                                     stats.store_worker_insert_done_inc();
                                     backoff = backoff_0;
@@ -194,7 +194,7 @@ pub async fn spawn_scylla_insert_workers(
                             item.ts as i64,
                             item.ema,
                             item.emd,
-                            ttl_msp.as_secs() as i32,
+                            ttls.index.as_secs() as i32,
                         );
                         let qres = data_store.scy.execute(&data_store.qu_insert_muted, values).await;
                         match qres {
@@ -216,7 +216,7 @@ pub async fn spawn_scylla_insert_workers(
                             item.ts as i64,
                             item.ema,
                             item.emd,
-                            ttl_msp.as_secs() as i32,
+                            ttls.index.as_secs() as i32,
                         );
                         let qres = data_store
                             .scy
@@ -242,7 +242,7 @@ pub async fn spawn_scylla_insert_workers(
                             item.ivl,
                             item.interest,
                             item.evsize as i32,
-                            ttl_msp.as_secs() as i32,
+                            ttls.index.as_secs() as i32,
                         );
                         let qres = data_store.scy.execute(&data_store.qu_insert_channel_ping, params).await;
                         match qres {

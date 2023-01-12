@@ -362,6 +362,18 @@ impl ConnCommand {
     }
 }
 
+#[derive(Debug)]
+pub enum CaConnEventValue {
+    None,
+    EchoTimeout,
+}
+
+#[derive(Debug)]
+pub struct CaConnEvent {
+    pub ts: Instant,
+    pub value: CaConnEventValue,
+}
+
 pub struct CaConn {
     state: CaConnState,
     shutdown: bool,
@@ -392,6 +404,8 @@ pub struct CaConn {
     conn_backoff_beg: f32,
     inserts_counter: u64,
     extra_inserts_conf: ExtraInsertsConf,
+    ioc_ping_last: Instant,
+    ioc_ping_start: Option<Instant>,
 }
 
 impl CaConn {
@@ -434,6 +448,8 @@ impl CaConn {
             conn_backoff_beg: 0.02,
             inserts_counter: 0,
             extra_inserts_conf: ExtraInsertsConf::new(),
+            ioc_ping_last: Instant::now(),
+            ioc_ping_start: None,
         }
     }
 
@@ -700,6 +716,25 @@ impl CaConn {
 
     fn check_channels_alive(&mut self) -> Result<(), Error> {
         let tsnow = Instant::now();
+        trace!("CheckChannelsAlive  {addr:?}", addr = &self.remote_addr_dbg);
+        if self.ioc_ping_last.elapsed() > Duration::from_millis(20000) {
+            if let Some(started) = self.ioc_ping_start {
+                if started.elapsed() > Duration::from_millis(4000) {
+                    warn!("Echo timeout {addr:?}", addr = self.remote_addr_dbg);
+                    self.shutdown = true;
+                }
+            } else {
+                self.ioc_ping_start = Some(Instant::now());
+                if let Some(proto) = &mut self.proto {
+                    trace!("push echo to {}", self.remote_addr_dbg);
+                    let msg = CaMsg { ty: CaMsgTy::Echo };
+                    proto.push_out(msg);
+                } else {
+                    warn!("can not push echo, no proto");
+                    self.shutdown = true;
+                }
+            }
+        }
         let mut alive_count = 0;
         let mut not_alive_count = 0;
         for (_, st) in &self.channels {
@@ -1283,12 +1318,27 @@ impl CaConn {
                                 warn!("channel access error message {e:?}");
                             }
                             CaMsgTy::AccessRightsRes(_) => {}
-                            k => {
-                                warn!("unexpected ca cmd {k:?}");
+                            CaMsgTy::Echo => {
+                                let addr = &self.remote_addr_dbg;
+                                if let Some(started) = self.ioc_ping_start {
+                                    let dt = started.elapsed().as_secs_f32() * 1e3;
+                                    if dt > 50. {
+                                        info!("Received Echo  {dt:10.0}ms  {addr:?}");
+                                    } else if dt > 500. {
+                                        warn!("Received Echo  {dt:10.0}ms  {addr:?}");
+                                    }
+                                } else {
+                                    info!("Received Echo even though we didn't asked for it  {addr:?}");
+                                }
+                                self.ioc_ping_last = Instant::now();
+                                self.ioc_ping_start = None;
+                            }
+                            _ => {
+                                warn!("Received unexpected protocol message {:?}", k);
                             }
                         }
                     }
-                    _ => {}
+                    CaItem::Empty => {}
                 }
                 Ready(Some(Ok(())))
             }
@@ -1342,7 +1392,7 @@ impl CaConn {
             CaConnState::Unconnected => {
                 let addr = self.remote_addr_dbg.clone();
                 trace!("create tcp connection to {:?}", (addr.ip(), addr.port()));
-                let fut = tokio::time::timeout(Duration::from_millis(500), TcpStream::connect(addr));
+                let fut = tokio::time::timeout(Duration::from_millis(1000), TcpStream::connect(addr));
                 self.state = CaConnState::Connecting(addr, Box::pin(fut));
                 None
             }
@@ -1469,17 +1519,19 @@ impl CaConn {
 }
 
 impl Stream for CaConn {
-    type Item = Result<(), Error>;
+    type Item = Result<CaConnEvent, Error>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
         use Poll::*;
         self.stats.caconn_poll_count_inc();
         if self.shutdown {
-            info!("CaConn poll");
+            info!("CaConn poll in shutdown");
         }
+        let mut i1 = 0;
         let ret = loop {
+            i1 += 1;
             if self.shutdown {
-                info!("CaConn loop 1");
+                info!("CaConn in shutdown loop 1");
             }
             self.stats.caconn_loop1_count_inc();
             if !self.shutdown {
@@ -1493,9 +1545,11 @@ impl Stream for CaConn {
             if self.shutdown {
                 if self.insert_item_queue.len() == 0 {
                     trace!("no more items to flush");
-                    break Ready(Ok(()));
+                    if i1 >= 10 {
+                        break Ready(Ok(()));
+                    }
                 } else {
-                    info!("more items {}", self.insert_item_queue.len());
+                    //info!("more items {}", self.insert_item_queue.len());
                 }
             }
             if self.insert_item_queue.len() >= self.insert_queue_max {
@@ -1503,7 +1557,9 @@ impl Stream for CaConn {
             }
             if !self.shutdown {
                 if let Some(v) = self.loop_inner(cx) {
-                    break v;
+                    if i1 >= 10 {
+                        break v;
+                    }
                 }
             }
         };
@@ -1515,7 +1571,14 @@ impl Stream for CaConn {
             return Ready(None);
         }
         match ret {
-            Ready(x) => Ready(Some(x)),
+            Ready(Ok(())) => {
+                let item = CaConnEvent {
+                    ts: Instant::now(),
+                    value: CaConnEventValue::None,
+                };
+                Ready(Some(Ok(item)))
+            }
+            Ready(Err(e)) => Ready(Some(Err(e))),
             Pending => Pending,
         }
     }

@@ -197,6 +197,11 @@ pub async fn ca_connect(opts: CaIngestOpts, channels: &Vec<String>) -> Result<()
     };
     let ingest_commons = Arc::new(ingest_commons);
 
+    tokio::spawn({
+        let rx = ingest_commons.ca_conn_set.conn_item_rx();
+        async move { while let Ok(_item) = rx.recv().await {} }
+    });
+
     // TODO use a new stats type:
     let store_stats = Arc::new(CaConnStats::new());
     let ttls = crate::insertworker::Ttls {

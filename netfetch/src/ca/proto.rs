@@ -205,6 +205,7 @@ pub enum CaMsgTy {
     EventAddRes(EventAddRes),
     ReadNotify(ReadNotify),
     ReadNotifyRes(ReadNotifyRes),
+    Echo,
 }
 
 impl CaMsgTy {
@@ -227,6 +228,7 @@ impl CaMsgTy {
             EventAddRes(_) => 0x01,
             ReadNotify(_) => 0x0f,
             ReadNotifyRes(_) => 0x0f,
+            Echo => 0x17,
         }
     }
 
@@ -259,6 +261,7 @@ impl CaMsgTy {
                 error!("should not attempt to serialize the response again");
                 panic!();
             }
+            Echo => 0,
         }
     }
 
@@ -284,6 +287,7 @@ impl CaMsgTy {
             EventAddRes(x) => x.data_type,
             ReadNotify(x) => x.data_type,
             ReadNotifyRes(x) => x.data_type,
+            Echo => 0,
         }
     }
 
@@ -306,6 +310,7 @@ impl CaMsgTy {
             EventAddRes(x) => x.data_count,
             ReadNotify(x) => x.data_count,
             ReadNotifyRes(x) => x.data_count,
+            Echo => 0,
         }
     }
 
@@ -328,6 +333,7 @@ impl CaMsgTy {
             EventAddRes(x) => x.status,
             ReadNotify(x) => x.sid,
             ReadNotifyRes(x) => x.sid,
+            Echo => 0,
         }
     }
 
@@ -350,6 +356,7 @@ impl CaMsgTy {
             EventAddRes(x) => x.subid,
             ReadNotify(x) => x.ioid,
             ReadNotifyRes(x) => x.ioid,
+            Echo => 0,
         }
     }
 
@@ -413,6 +420,7 @@ impl CaMsgTy {
             EventAddRes(_) => {}
             ReadNotify(_) => {}
             ReadNotifyRes(_) => {}
+            Echo => {}
         }
     }
 }
@@ -708,6 +716,7 @@ impl CaMsg {
                     }),
                 }
             }
+            0x17 => CaMsg { ty: CaMsgTy::Echo },
             x => return Err(Error::with_msg_no_trace(format!("unsupported ca command {}", x))),
         };
         Ok(msg)

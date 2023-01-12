@@ -3,6 +3,7 @@ use crate::bsread::{ChannelDesc, GlobalTimestamp, HeadA, HeadB};
 use crate::channelwriter::{ChannelWriter, ChannelWriterAll};
 use crate::errconv::ErrConv;
 use crate::netbuf::NetBuf;
+use crate::store::CommonInsertItemQueueSender;
 use async_channel::{Receiver, Sender};
 #[allow(unused)]
 use bytes::BufMut;
@@ -133,6 +134,7 @@ struct BsreadClient {
     do_pulse_id: bool,
     rcvbuf: Option<usize>,
     tmp_vals_pulse_map: Vec<(i64, i32, i64, i32)>,
+    insert_item_sender: CommonInsertItemQueueSender,
     scy: Arc<ScySession>,
     channel_writers: BTreeMap<u64, Box<dyn ChannelWriter + Send>>,
     common_queries: Arc<CommonQueries>,
@@ -144,6 +146,7 @@ impl BsreadClient {
     pub async fn new(
         opts: ZmtpClientOpts,
         source_addr: String,
+        insert_item_sender: CommonInsertItemQueueSender,
         scy: Arc<ScySession>,
         common_queries: Arc<CommonQueries>,
     ) -> Result<Self, Error> {
@@ -152,7 +155,8 @@ impl BsreadClient {
             do_pulse_id: opts.do_pulse_id,
             rcvbuf: opts.rcvbuf,
             opts,
-            tmp_vals_pulse_map: vec![],
+            tmp_vals_pulse_map: Vec::new(),
+            insert_item_sender,
             scy,
             channel_writers: Default::default(),
             common_queries,
@@ -524,7 +528,14 @@ pub async fn zmtp_client(opts: ZmtpClientOpts) -> Result<(), Error> {
     let common_queries = Arc::new(common_queries);
     let mut jhs = vec![];
     for source_addr in &opts.sources {
-        let client = BsreadClient::new(opts.clone(), source_addr.into(), scy.clone(), common_queries.clone()).await?;
+        let client = BsreadClient::new(
+            opts.clone(),
+            source_addr.into(),
+            todo!(),
+            scy.clone(),
+            common_queries.clone(),
+        )
+        .await?;
         let fut = ClientRun::new(client);
         //clients.push(fut);
         let jh = tokio::spawn(fut);

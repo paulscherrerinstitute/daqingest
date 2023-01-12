@@ -5,13 +5,16 @@ use futures_util::Future;
 use futures_util::FutureExt;
 use futures_util::StreamExt;
 use log::*;
-use netfetch::ca::conn::CaConn;
+use netfetch::ca::conn::CaConnEvent;
 use netfetch::ca::conn::ConnCommand;
+use netfetch::ca::connset::CaConnSet;
 use netfetch::ca::findioc::FindIocRes;
 use netfetch::ca::findioc::FindIocStream;
 use netfetch::ca::store::DataStore;
+use netfetch::ca::IngestCommons;
 use netfetch::conf::CaIngestOpts;
 use netfetch::errconv::ErrConv;
+use netfetch::insertworker::Ttls;
 use netfetch::metrics::ExtraInsertsConf;
 use netfetch::store::CommonInsertItemQueue;
 use netpod::Database;
@@ -20,6 +23,7 @@ use serde::Serialize;
 use std::collections::BTreeMap;
 use std::collections::VecDeque;
 use std::fmt;
+use std::net::SocketAddr;
 use std::net::SocketAddrV4;
 use std::pin::Pin;
 use std::sync::atomic;
@@ -27,13 +31,14 @@ use std::sync::atomic::AtomicU64;
 use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 use std::time::Duration;
+use std::time::Instant;
 use std::time::SystemTime;
 use tokio_postgres::Client as PgClient;
 use tokio_postgres::Statement as PgStatement;
 
 const CHECK_CHANS_PER_TICK: usize = 10000;
 const FINDER_TIMEOUT: usize = 100;
-const TIMEOUT_WARN: usize = 3000;
+const TIMEOUT_WARN: usize = 6000;
 const FINDER_JOB_QUEUE_LEN_MAX: usize = 20;
 const FINDER_IN_FLIGHT_MAX: usize = 400;
 const FINDER_BATCH_SIZE: usize = 8;
@@ -118,8 +123,10 @@ pub enum DaemonEvent {
     ChannelAdd(Channel),
     ChannelRemove(Channel),
     SearchDone(Result<VecDeque<FindIocRes>, Error>),
+    CaConnEvent(CaConnEvent),
 }
 
+#[derive(Debug, Clone)]
 pub struct DaemonOpts {
     backend: String,
     local_epics_hostname: String,
@@ -129,6 +136,7 @@ pub struct DaemonOpts {
     //search_excl: Vec<SocketAddrV4>,
     pgconf: Database,
     scyconf: ScyllaConfig,
+    ttls: Ttls,
 }
 
 impl DaemonOpts {
@@ -193,7 +201,6 @@ pub struct Daemon {
     channel_states: BTreeMap<Channel, ChannelState>,
     tx: Sender<DaemonEvent>,
     rx: Receiver<DaemonEvent>,
-    conns: BTreeMap<SocketAddrV4, (Sender<ConnCommand>, tokio::task::JoinHandle<()>)>,
     chan_check_next: Option<Channel>,
     search_tx: Sender<String>,
     ioc_finder_jh: tokio::task::JoinHandle<()>,
@@ -213,6 +220,8 @@ pub struct Daemon {
     qu_addr_insert: PgStatement,
     ioc_addr_inserter_jh: tokio::task::JoinHandle<()>,
     ioc_addr_inserter_tx: Sender<AddrInsertJob>,
+    ingest_commons: Arc<IngestCommons>,
+    caconn_last_channel_check: Instant,
 }
 
 impl Daemon {
@@ -241,16 +250,21 @@ impl Daemon {
                         //trace!("insert queue item {item:?}");
                         match &item {
                             netfetch::store::QueryItem::Insert(item) => {
-                                item.pulse;
+                                let shape_kind = match &item.shape {
+                                    netpod::Shape::Scalar => 0 as u32,
+                                    netpod::Shape::Wave(_) => 1,
+                                    netpod::Shape::Image(_, _) => 2,
+                                };
                                 histo
                                     .entry(item.series.clone())
-                                    .and_modify(|(c, msp, lsp, pulse)| {
+                                    .and_modify(|(c, msp, lsp, pulse, _shape_kind)| {
                                         *c += 1;
                                         *msp = item.ts_msp;
                                         *lsp = item.ts_lsp;
                                         *pulse = item.pulse;
+                                        // TODO should check that shape_kind stays the same.
                                     })
-                                    .or_insert((0 as usize, item.ts_msp, item.ts_lsp, item.pulse));
+                                    .or_insert((0 as usize, item.ts_msp, item.ts_lsp, item.pulse, shape_kind));
                             }
                             _ => {}
                         }
@@ -266,10 +280,17 @@ impl Daemon {
                             printed_last = tsnow;
                             let mut all: Vec<_> = histo
                                 .iter()
-                                .map(|(k, (c, msp, lsp, pulse))| (usize::MAX - *c, k.clone(), *msp, *lsp, *pulse))
+                                .map(|(k, (c, msp, lsp, pulse, shape_kind))| {
+                                    (usize::MAX - *c, k.clone(), *msp, *lsp, *pulse, *shape_kind)
+                                })
                                 .collect();
                             all.sort_unstable();
-                            for (c, sid, msp, lsp, pulse) in all.into_iter().take(4) {
+                            info!("Active scalar");
+                            for (c, sid, msp, lsp, pulse, _shape_kind) in all.iter().filter(|x| x.5 == 0).take(6) {
+                                info!("{:10}  {:20}  {:14}  {:20}  {:?}", usize::MAX - c, msp, lsp, pulse, sid);
+                            }
+                            info!("Active wave");
+                            for (c, sid, msp, lsp, pulse, _shape_kind) in all.iter().filter(|x| x.5 == 1).take(6) {
                                 info!("{:10}  {:20}  {:14}  {:20}  {:?}", usize::MAX - c, msp, lsp, pulse, sid);
                             }
                             histo.clear();
@@ -279,7 +300,7 @@ impl Daemon {
             });
         }
 
-        let ingest_commons = netfetch::ca::IngestCommons {
+        let ingest_commons = IngestCommons {
             pgconf: Arc::new(opts.pgconf.clone()),
             backend: opts.backend().into(),
             local_epics_hostname: opts.local_epics_hostname.clone(),
@@ -289,9 +310,22 @@ impl Daemon {
             extra_inserts_conf: tokio::sync::Mutex::new(ExtraInsertsConf::new()),
             store_workers_rate: AtomicU64::new(20000),
             insert_frac: AtomicU64::new(1000),
-            ca_conn_set: netfetch::ca::connset::CaConnSet::new(),
+            ca_conn_set: CaConnSet::new(),
         };
         let ingest_commons = Arc::new(ingest_commons);
+
+        tokio::task::spawn({
+            let rx = ingest_commons.ca_conn_set.conn_item_rx();
+            let tx = tx.clone();
+            async move {
+                while let Ok(item) = rx.recv().await {
+                    match tx.send(DaemonEvent::CaConnEvent(item)).await {
+                        Ok(_) => {}
+                        Err(e) => break,
+                    }
+                }
+            }
+        });
 
         let qu_addr_insert = {
             const TEXT: tokio_postgres::types::Type = tokio_postgres::types::Type::TEXT;
@@ -309,11 +343,7 @@ impl Daemon {
 
         // TODO use a new stats type:
         let store_stats = Arc::new(stats::CaConnStats::new());
-        let ttls = netfetch::insertworker::Ttls {
-            index: Duration::from_secs(60 * 60 * 24 * 4),
-            d0: Duration::from_secs(60 * 60 * 24 * 3),
-            d1: Duration::from_secs(60 * 60 * 4),
-        };
+        let ttls = opts.ttls.clone();
         let jh_insert_workers = netfetch::insertworker::spawn_scylla_insert_workers(
             opts.scyconf.clone(),
             insert_scylla_sessions,
@@ -364,7 +394,6 @@ impl Daemon {
             channel_states: BTreeMap::new(),
             tx,
             rx,
-            conns: BTreeMap::new(),
             chan_check_next: None,
             search_tx,
             ioc_finder_jh,
@@ -382,6 +411,8 @@ impl Daemon {
             qu_addr_insert,
             ioc_addr_inserter_jh: ioc_addr_inserter_task,
             ioc_addr_inserter_tx,
+            ingest_commons,
+            caconn_last_channel_check: Instant::now(),
         };
         Ok(ret)
     }
@@ -549,46 +580,51 @@ impl Daemon {
                             Unassigned { assign_at } => {
                                 if *assign_at <= tsnow {
                                     if st.pending_op.is_none() {
-                                        if !self.conns.contains_key(addr) {
+                                        if self.ingest_commons.ca_conn_set.has_addr(&SocketAddr::V4(*addr)).await {
+                                        } else {
                                             debug!("====================   create CaConn for {ch:?}");
                                             let backend = self.opts.backend().into();
                                             let local_epics_hostname = self.opts.local_epics_hostname.clone();
                                             let array_truncate = self.opts.array_truncate;
-                                            let insert_item_sender = self.common_insert_item_queue.sender().await;
-                                            let mut conn = CaConn::new(
-                                                backend,
-                                                addr.clone(),
-                                                local_epics_hostname,
-                                                self.datastore.clone(),
-                                                insert_item_sender,
-                                                array_truncate,
-                                                256,
-                                            );
-                                            let conn_tx = conn.conn_command_tx();
-                                            let conn_fut = async move { while let Some(_item) = conn.next().await {} };
-                                            let conn_jh = tokio::spawn(conn_fut);
-                                            self.conns.insert(*addr, (conn_tx, conn_jh));
+                                            let insert_item_queue_sender = self.common_insert_item_queue.sender().await;
+                                            let insert_queue_max = 256;
+                                            let data_store = self.datastore.clone();
+                                            let with_channels = Vec::new();
+                                            // TODO want to atomically use or create a connection.
+                                            // TODO creating a connection may block too long, because it establishes TCP first.
+                                            self.ingest_commons
+                                                .ca_conn_set
+                                                .create_ca_conn(
+                                                    backend,
+                                                    *addr,
+                                                    local_epics_hostname,
+                                                    array_truncate,
+                                                    insert_queue_max,
+                                                    insert_item_queue_sender,
+                                                    data_store,
+                                                    with_channels,
+                                                )
+                                                .await?;
                                         }
-                                        if let Some((tx, _)) = self.conns.get(addr) {
-                                            let tx = tx.clone();
-                                            let (cmd, rx) = ConnCommand::channel_add(ch.id().into());
-                                            let fut = async move {
-                                                tx.send(cmd).await?;
-                                                let res = rx.recv().await?;
-                                                debug!("answer from CaConn: {res:?}");
-                                                if res != true {
-                                                    warn!("problem from CaConn");
-                                                }
-                                                Ok(())
-                                            };
-                                            st.pending_op = Some(ChanOp::ConnCmd(Box::pin(fut)));
+                                        {
+                                            let backend = self.opts.backend().into();
+                                            let channel_name = ch.id().into();
+                                            let ingest_commons = self.ingest_commons.clone();
+                                            // This operation is meant to complete very quickly
+                                            self.ingest_commons
+                                                .ca_conn_set
+                                                .add_channel_to_addr(
+                                                    backend,
+                                                    SocketAddr::V4(*addr),
+                                                    channel_name,
+                                                    ingest_commons,
+                                                )
+                                                .await?;
                                             let cs = ConnectionState {
                                                 updated: tsnow,
                                                 value: ConnectionStateValue::Unconnected,
                                             };
                                             *state = WithAddressState::Assigned(cs)
-                                        } else {
-                                            error!("no CaConn for {ch:?}");
                                         }
                                     }
                                 }
@@ -696,9 +732,28 @@ impl Daemon {
         Ok(())
     }
 
+    async fn check_caconn_chans(&mut self) -> Result<(), Error> {
+        if self.caconn_last_channel_check.elapsed() > Duration::from_millis(5000) {
+            info!("Issue channel check to all CaConn");
+            let res = self
+                .ingest_commons
+                .ca_conn_set
+                .send_command_to_all(|| ConnCommand::check_channels_alive())
+                .await?;
+            for x in res {
+                if !x {
+                    warn!("bad check_channels_alive result");
+                }
+            }
+            self.caconn_last_channel_check = Instant::now();
+        }
+        Ok(())
+    }
+
     async fn handle_timer_tick(&mut self) -> Result<(), Error> {
         let tsnow = SystemTime::now();
         self.check_chans().await?;
+        self.check_caconn_chans().await?;
         if tsnow.duration_since(self.last_status_print).unwrap_or(Duration::ZERO) >= Duration::from_millis(1000) {
             self.last_status_print = tsnow;
             info!(
@@ -830,6 +885,19 @@ impl Daemon {
             ChannelAdd(ch) => self.handle_channel_add(ch),
             ChannelRemove(ch) => self.handle_channel_remove(ch),
             SearchDone(item) => self.handle_search_done(item).await,
+            CaConnEvent(item) => {
+                use netfetch::ca::conn::CaConnEventValue::*;
+                match item.value {
+                    None => {
+                        // TODO count, maybe reduce.
+                        Ok(())
+                    }
+                    EchoTimeout => {
+                        error!("TODO on EchoTimeout remove the CaConn and reset channels");
+                        Ok(())
+                    }
+                }
+            }
         }
     }
 
@@ -889,6 +957,11 @@ pub async fn run(opts: CaIngestOpts, channels: Vec<String>) -> Result<(), Error>
         pgconf: opts.postgresql().clone(),
         scyconf: opts.scylla().clone(),
         search_tgts,
+        ttls: Ttls {
+            index: opts.ttl_index(),
+            d0: opts.ttl_d0(),
+            d1: opts.ttl_d1(),
+        },
     };
     let mut daemon = Daemon::new(opts2).await?;
     let tx = daemon.tx.clone();
