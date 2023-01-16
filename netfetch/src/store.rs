@@ -2,19 +2,25 @@ use crate::ca::proto::{CaDataArrayValue, CaDataScalarValue, CaDataValue};
 use crate::ca::store::DataStore;
 use crate::errconv::ErrConv;
 use crate::series::SeriesId;
-use futures_util::{Future, FutureExt};
+use futures_util::Future;
+use futures_util::FutureExt;
 use log::*;
-use netpod::{ScalarType, Shape};
+use netpod::ScalarType;
+use netpod::Shape;
 use scylla::frame::value::ValueList;
 use scylla::prepared_statement::PreparedStatement;
-use scylla::transport::errors::{DbError, QueryError};
-use scylla::{QueryResult, Session as ScySession};
+use scylla::transport::errors::DbError;
+use scylla::transport::errors::QueryError;
+use scylla::QueryResult;
+use scylla::Session as ScySession;
 use stats::CaConnStats;
 use std::net::SocketAddrV4;
 use std::pin::Pin;
-use std::task::{Context, Poll};
-use std::time::{Duration, Instant, SystemTime};
-use tokio::sync::Mutex as TokMx;
+use std::task::Context;
+use std::task::Poll;
+use std::time::Duration;
+use std::time::Instant;
+use std::time::SystemTime;
 
 pub use netpod::CONNECTION_STATUS_DIV;
 
@@ -128,11 +134,24 @@ impl<'a> Future for ScyInsertFut<'a> {
 
 #[derive(Debug)]
 pub enum ConnectionStatus {
-    ConnectError = 1,
-    ConnectTimeout = 2,
-    Established = 3,
-    Closing = 4,
-    ClosedUnexpected = 5,
+    ConnectError,
+    ConnectTimeout,
+    Established,
+    Closing,
+    ClosedUnexpected,
+}
+
+impl ConnectionStatus {
+    pub fn kind(&self) -> u32 {
+        use ConnectionStatus::*;
+        match self {
+            ConnectError => 1,
+            ConnectTimeout => 2,
+            Established => 3,
+            Closing => 4,
+            ClosedUnexpected => 5,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -232,35 +251,32 @@ impl CommonInsertItemQueueSender {
 }
 
 pub struct CommonInsertItemQueue {
-    sender: TokMx<async_channel::Sender<QueryItem>>,
+    sender: async_channel::Sender<QueryItem>,
     recv: async_channel::Receiver<QueryItem>,
 }
 
 impl CommonInsertItemQueue {
     pub fn new(cap: usize) -> Self {
         let (tx, rx) = async_channel::bounded(cap);
-        Self {
-            sender: TokMx::new(tx.clone()),
-            recv: rx,
-        }
+        Self { sender: tx, recv: rx }
     }
 
-    pub async fn sender(&self) -> CommonInsertItemQueueSender {
+    pub fn sender(&self) -> CommonInsertItemQueueSender {
         CommonInsertItemQueueSender {
-            sender: self.sender.lock().await.clone(),
+            sender: self.sender.clone(),
         }
     }
 
-    pub async fn sender_raw(&self) -> async_channel::Sender<QueryItem> {
-        self.sender.lock().await.clone()
+    pub fn sender_raw(&self) -> async_channel::Sender<QueryItem> {
+        self.sender.clone()
     }
 
     pub fn receiver(&self) -> async_channel::Receiver<QueryItem> {
         self.recv.clone()
     }
 
-    pub async fn sender_count(&self) -> usize {
-        self.sender.lock().await.sender_count()
+    pub fn sender_count(&self) -> usize {
+        self.sender.sender_count()
     }
 
     pub fn sender_count2(&self) -> usize {
@@ -271,10 +287,8 @@ impl CommonInsertItemQueue {
         self.recv.receiver_count()
     }
 
-    // TODO should mark this such that a future call to sender() will fail
-    pub async fn drop_sender(&self) {
-        let x = std::mem::replace(&mut *self.sender.lock().await, async_channel::bounded(1).0);
-        drop(x);
+    pub fn close(&self) {
+        self.sender.close();
     }
 }
 
@@ -415,13 +429,13 @@ pub async fn insert_connection_status(
     data_store: &DataStore,
     _stats: &CaConnStats,
 ) -> Result<(), Error> {
-    let tsunix = item.ts.duration_since(std::time::UNIX_EPOCH).unwrap();
+    let tsunix = item.ts.duration_since(std::time::UNIX_EPOCH).unwrap_or(Duration::ZERO);
     let secs = tsunix.as_secs() * netpod::timeunits::SEC;
     let nanos = tsunix.subsec_nanos() as u64;
     let ts = secs + nanos;
     let ts_msp = ts / CONNECTION_STATUS_DIV * CONNECTION_STATUS_DIV;
     let ts_lsp = ts - ts_msp;
-    let kind = item.status as u32;
+    let kind = item.status.kind();
     let addr = format!("{}", item.addr);
     let params = (ts_msp as i64, ts_lsp as i64, kind as i32, addr, ttl.as_secs() as i32);
     data_store
@@ -437,7 +451,7 @@ pub async fn insert_channel_status(
     data_store: &DataStore,
     _stats: &CaConnStats,
 ) -> Result<(), Error> {
-    let tsunix = item.ts.duration_since(std::time::UNIX_EPOCH).unwrap();
+    let tsunix = item.ts.duration_since(std::time::UNIX_EPOCH).unwrap_or(Duration::ZERO);
     let secs = tsunix.as_secs() * netpod::timeunits::SEC;
     let nanos = tsunix.subsec_nanos() as u64;
     let ts = secs + nanos;

@@ -17,25 +17,34 @@ use crate::store::CommonInsertItemQueueSender;
 use crate::store::ConnectionStatus;
 use crate::store::ConnectionStatusItem;
 use crate::store::{InsertItem, IvlItem, MuteItem, QueryItem};
-use async_channel::Sender;
 use err::Error;
 use futures_util::stream::FuturesOrdered;
 use futures_util::{Future, FutureExt, Stream, StreamExt, TryFutureExt};
 use log::*;
 use netpod::timeunits::*;
+use netpod::ScalarType;
+use netpod::Shape;
 use netpod::TS_MSP_GRID_SPACING;
 use netpod::TS_MSP_GRID_UNIT;
-use netpod::{ScalarType, Shape};
 use serde::Serialize;
-use stats::{CaConnStats, IntervalEma};
-use std::collections::{BTreeMap, VecDeque};
+use stats::CaConnStats;
+use stats::IntervalEma;
+use std::collections::BTreeMap;
+use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::net::SocketAddrV4;
 use std::ops::ControlFlow;
 use std::pin::Pin;
+use std::sync::atomic;
+use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::task::{Context, Poll};
-use std::time::{Duration, Instant, SystemTime};
+use std::sync::Mutex as StdMutex;
+use std::task::Context;
+use std::task::Poll;
+use std::time::Duration;
+use std::time::Instant;
+use std::time::SystemTime;
 use tokio::net::TcpStream;
 
 #[derive(Clone, Debug, Serialize)]
@@ -44,6 +53,7 @@ pub enum ChannelConnectedInfo {
     Connecting,
     Connected,
     Error,
+    Ended,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -142,6 +152,7 @@ enum ChannelState {
     Creating { cid: Cid, ts_beg: Instant },
     Created(CreatedState),
     Error(ChannelError),
+    Ended,
 }
 
 impl ChannelState {
@@ -151,6 +162,7 @@ impl ChannelState {
             ChannelState::Creating { .. } => ChannelConnectedInfo::Connecting,
             ChannelState::Created(_) => ChannelConnectedInfo::Connected,
             ChannelState::Error(_) => ChannelConnectedInfo::Error,
+            ChannelState::Ended => ChannelConnectedInfo::Ended,
         };
         let scalar_type = match self {
             ChannelState::Created(s) => Some(s.scalar_type.clone()),
@@ -264,114 +276,106 @@ fn info_store_msp_from_time(ts: SystemTime) -> u32 {
 
 #[derive(Debug)]
 pub enum ConnCommandKind {
-    FindChannel(String, Sender<(SocketAddrV4, Vec<String>)>),
-    ChannelState(String, Sender<(SocketAddrV4, Option<ChannelStateInfo>)>),
-    ChannelStatesAll((), Sender<(SocketAddrV4, Vec<ChannelStateInfo>)>),
-    ChannelAdd(String, Sender<bool>),
-    ChannelRemove(String, Sender<bool>),
-    Shutdown(Sender<bool>),
-    ExtraInsertsConf(ExtraInsertsConf, Sender<bool>),
-    CheckChannelsAlive(Sender<bool>),
-    SaveConnInfo(Sender<bool>),
+    ChannelAdd(String),
+    ChannelRemove(String),
+    CheckHealth,
+    Shutdown,
 }
 
 #[derive(Debug)]
 pub struct ConnCommand {
+    id: usize,
     kind: ConnCommandKind,
 }
 
 impl ConnCommand {
-    pub fn find_channel(pattern: String) -> (ConnCommand, async_channel::Receiver<(SocketAddrV4, Vec<String>)>) {
-        let (tx, rx) = async_channel::bounded(1);
-        let cmd = Self {
-            kind: ConnCommandKind::FindChannel(pattern, tx),
-        };
-        (cmd, rx)
+    pub fn channel_add(name: String) -> Self {
+        Self {
+            id: Self::make_id(),
+            kind: ConnCommandKind::ChannelAdd(name),
+        }
     }
 
-    pub fn channel_state(
-        name: String,
-    ) -> (
-        ConnCommand,
-        async_channel::Receiver<(SocketAddrV4, Option<ChannelStateInfo>)>,
-    ) {
-        let (tx, rx) = async_channel::bounded(1);
-        let cmd = Self {
-            kind: ConnCommandKind::ChannelState(name, tx),
-        };
-        (cmd, rx)
+    pub fn channel_remove(name: String) -> Self {
+        Self {
+            id: Self::make_id(),
+            kind: ConnCommandKind::ChannelRemove(name),
+        }
     }
 
-    pub fn channel_states_all() -> (
-        ConnCommand,
-        async_channel::Receiver<(SocketAddrV4, Vec<ChannelStateInfo>)>,
-    ) {
-        let (tx, rx) = async_channel::bounded(1);
-        let cmd = Self {
-            kind: ConnCommandKind::ChannelStatesAll((), tx),
-        };
-        (cmd, rx)
+    pub fn check_health() -> Self {
+        Self {
+            id: Self::make_id(),
+            kind: ConnCommandKind::CheckHealth,
+        }
     }
 
-    pub fn channel_add(name: String) -> (ConnCommand, async_channel::Receiver<bool>) {
-        let (tx, rx) = async_channel::bounded(1);
-        let cmd = Self {
-            kind: ConnCommandKind::ChannelAdd(name, tx),
-        };
-        (cmd, rx)
+    pub fn shutdown() -> Self {
+        Self {
+            id: Self::make_id(),
+            kind: ConnCommandKind::Shutdown,
+        }
     }
 
-    pub fn channel_remove(name: String) -> (ConnCommand, async_channel::Receiver<bool>) {
-        let (tx, rx) = async_channel::bounded(1);
-        let cmd = Self {
-            kind: ConnCommandKind::ChannelRemove(name, tx),
-        };
-        (cmd, rx)
+    fn make_id() -> usize {
+        static ID: AtomicUsize = AtomicUsize::new(0);
+        ID.fetch_add(1, atomic::Ordering::AcqRel)
     }
 
-    pub fn shutdown() -> (ConnCommand, async_channel::Receiver<bool>) {
-        let (tx, rx) = async_channel::bounded(1);
-        let cmd = Self {
-            kind: ConnCommandKind::Shutdown(tx),
-        };
-        (cmd, rx)
+    pub fn id(&self) -> usize {
+        self.id
     }
+}
 
-    pub fn extra_inserts_conf_set(k: ExtraInsertsConf) -> (ConnCommand, async_channel::Receiver<bool>) {
-        let (tx, rx) = async_channel::bounded(1);
-        let cmd = Self {
-            kind: ConnCommandKind::ExtraInsertsConf(k, tx),
-        };
-        (cmd, rx)
-    }
+#[derive(Debug)]
+pub enum ConnCommandResultKind {
+    CheckHealth,
+}
 
-    pub fn check_channels_alive() -> (ConnCommand, async_channel::Receiver<bool>) {
-        let (tx, rx) = async_channel::bounded(1);
-        let cmd = Self {
-            kind: ConnCommandKind::CheckChannelsAlive(tx),
-        };
-        (cmd, rx)
-    }
-
-    pub fn save_conn_info() -> (ConnCommand, async_channel::Receiver<bool>) {
-        let (tx, rx) = async_channel::bounded(1);
-        let cmd = Self {
-            kind: ConnCommandKind::SaveConnInfo(tx),
-        };
-        (cmd, rx)
-    }
+#[derive(Debug)]
+pub struct ConnCommandResult {
+    id: usize,
+    kind: ConnCommandResultKind,
 }
 
 #[derive(Debug)]
 pub enum CaConnEventValue {
     None,
     EchoTimeout,
+    HealthCheckDone,
+    ConnCommandResult(ConnCommandResult),
+    EndOfStream,
 }
 
 #[derive(Debug)]
 pub struct CaConnEvent {
     pub ts: Instant,
     pub value: CaConnEventValue,
+}
+
+#[derive(Debug)]
+pub enum ChannelSetOp {
+    Add,
+    Remove,
+}
+
+pub struct ChannelSetOps {
+    ops: StdMutex<BTreeMap<String, ChannelSetOp>>,
+    flag: AtomicUsize,
+}
+
+impl ChannelSetOps {
+    pub fn insert(&self, name: String, op: ChannelSetOp) {
+        match self.ops.lock() {
+            Ok(mut g) => {
+                g.insert(name, op);
+                self.flag.fetch_add(g.len(), atomic::Ordering::AcqRel);
+            }
+            Err(e) => {
+                error!("can not lock {e}");
+            }
+        }
+    }
 }
 
 pub struct CaConn {
@@ -406,6 +410,8 @@ pub struct CaConn {
     extra_inserts_conf: ExtraInsertsConf,
     ioc_ping_last: Instant,
     ioc_ping_start: Option<Instant>,
+    cmd_res_queue: VecDeque<ConnCommandResult>,
+    channel_set_ops: Arc<ChannelSetOps>,
 }
 
 impl CaConn {
@@ -450,144 +456,165 @@ impl CaConn {
             extra_inserts_conf: ExtraInsertsConf::new(),
             ioc_ping_last: Instant::now(),
             ioc_ping_start: None,
+            cmd_res_queue: VecDeque::new(),
+            channel_set_ops: Arc::new(ChannelSetOps {
+                ops: StdMutex::new(BTreeMap::new()),
+                flag: AtomicUsize::new(0),
+            }),
         }
+    }
+
+    pub fn get_channel_set_ops_map(&self) -> Arc<ChannelSetOps> {
+        self.channel_set_ops.clone()
     }
 
     pub fn conn_command_tx(&self) -> async_channel::Sender<ConnCommand> {
         self.conn_command_tx.clone()
     }
 
-    fn handle_conn_command(&mut self, cx: &mut Context) -> Option<Poll<()>> {
+    fn trigger_shutdown(&mut self) {
+        self.shutdown = true;
+        for (k, v) in self.channels.iter_mut() {
+            match v {
+                ChannelState::Init => {
+                    *v = ChannelState::Ended;
+                }
+                ChannelState::Creating { .. } => {
+                    *v = ChannelState::Ended;
+                }
+                ChannelState::Created(st) => {
+                    if let Some(series) = &st.series {
+                        let item = QueryItem::ChannelStatus(ChannelStatusItem {
+                            ts: SystemTime::now(),
+                            series: series.clone(),
+                            status: ChannelStatus::Closed,
+                        });
+                        info!("emit status item {item:?}");
+                        self.insert_item_queue.push_back(item);
+                    }
+                    *v = ChannelState::Ended;
+                }
+                ChannelState::Error(_) => {}
+                ChannelState::Ended => {}
+            }
+        }
+    }
+
+    fn cmd_check_health(&mut self) {
+        match self.check_channels_alive() {
+            Ok(_) => {}
+            Err(e) => {
+                error!("{e}");
+                self.trigger_shutdown();
+            }
+        }
+        //self.stats.caconn_command_can_not_reply_inc();
+        // TODO return the result
+    }
+
+    fn cmd_find_channel(&self, pattern: &str) {
+        let res = if let Ok(re) = regex::Regex::new(&pattern) {
+            self.name_by_cid
+                .values()
+                .filter(|x| re.is_match(x))
+                .map(ToString::to_string)
+                .collect()
+        } else {
+            Vec::new()
+        };
+        // TODO return the result
+    }
+
+    fn cmd_channel_state(&self, name: String) {
+        let res = match self.cid_by_name.get(&name) {
+            Some(cid) => match self.channels.get(cid) {
+                Some(state) => Some(state.to_info(name, self.remote_addr_dbg.clone())),
+                None => None,
+            },
+            None => None,
+        };
+        let msg = (self.remote_addr_dbg.clone(), res);
+        if msg.1.is_some() {
+            info!("Sending back {msg:?}");
+        }
+        // TODO return the result
+    }
+
+    fn cmd_channel_states_all(&self) {
+        let res: Vec<_> = self
+            .channels
+            .iter()
+            .map(|(cid, state)| {
+                let name = self
+                    .name_by_cid
+                    .get(cid)
+                    .map_or("--unknown--".into(), |x| x.to_string());
+                state.to_info(name, self.remote_addr_dbg.clone())
+            })
+            .collect();
+        let msg = (self.remote_addr_dbg.clone(), res);
+        // TODO return the result
+    }
+
+    fn cmd_channel_add(&mut self, name: String) {
+        self.channel_add(name);
+        // TODO return the result
+        //self.stats.caconn_command_can_not_reply_inc();
+    }
+
+    fn cmd_channel_remove(&mut self, name: String) {
+        self.channel_remove(name);
+        // TODO return the result
+        //self.stats.caconn_command_can_not_reply_inc();
+    }
+
+    fn cmd_shutdown(&mut self) {
+        self.trigger_shutdown();
+        let res = self.before_reset_of_channel_state();
+        self.state = CaConnState::Shutdown;
+        self.proto = None;
+        // TODO return the result
+    }
+
+    fn cmd_extra_inserts_conf(&mut self, extra_inserts_conf: ExtraInsertsConf) {
+        self.extra_inserts_conf = extra_inserts_conf;
+        // TODO return the result
+    }
+
+    fn cmd_save_conn_info(&mut self) {
+        let res = self.emit_channel_info_insert_items();
+        let res = res.is_ok();
+        // TODO return the result
+    }
+
+    fn handle_conn_command(&mut self, cx: &mut Context) -> Poll<Option<Result<(), Error>>> {
         // TODO if this loops for too long time, yield and make sure we get wake up again.
         use Poll::*;
-        loop {
-            self.stats.caconn_loop3_count_inc();
-            match self.conn_command_rx.poll_next_unpin(cx) {
-                Ready(Some(a)) => match a.kind {
-                    ConnCommandKind::FindChannel(pattern, tx) => {
-                        let res = if let Ok(re) = regex::Regex::new(&pattern) {
-                            self.name_by_cid
-                                .values()
-                                .filter(|x| re.is_match(x))
-                                .map(ToString::to_string)
-                                .collect()
-                        } else {
-                            Vec::new()
-                        };
-                        let msg = (self.remote_addr_dbg.clone(), res);
-                        match tx.try_send(msg) {
-                            Ok(_) => {}
-                            Err(_) => {
-                                self.stats.caconn_command_can_not_reply_inc();
-                            }
-                        }
-                    }
-                    ConnCommandKind::ChannelState(name, tx) => {
-                        let res = match self.cid_by_name.get(&name) {
-                            Some(cid) => match self.channels.get(cid) {
-                                Some(state) => Some(state.to_info(name, self.remote_addr_dbg.clone())),
-                                None => None,
-                            },
-                            None => None,
-                        };
-                        let msg = (self.remote_addr_dbg.clone(), res);
-                        if msg.1.is_some() {
-                            info!("Sending back {msg:?}");
-                        }
-                        match tx.try_send(msg) {
-                            Ok(_) => {}
-                            Err(_) => {
-                                self.stats.caconn_command_can_not_reply_inc();
-                            }
-                        }
-                    }
-                    ConnCommandKind::ChannelStatesAll((), tx) => {
-                        let res = self
-                            .channels
-                            .iter()
-                            .map(|(cid, state)| {
-                                let name = self
-                                    .name_by_cid
-                                    .get(cid)
-                                    .map_or("--unknown--".into(), |x| x.to_string());
-                                state.to_info(name, self.remote_addr_dbg.clone())
-                            })
-                            .collect();
-                        let msg = (self.remote_addr_dbg.clone(), res);
-                        match tx.try_send(msg) {
-                            Ok(_) => {}
-                            Err(_) => {
-                                self.stats.caconn_command_can_not_reply_inc();
-                            }
-                        }
-                    }
-                    ConnCommandKind::ChannelAdd(name, tx) => {
-                        self.channel_add(name);
-                        match tx.try_send(true) {
-                            Ok(_) => {}
-                            Err(_) => {
-                                self.stats.caconn_command_can_not_reply_inc();
-                            }
-                        }
-                    }
-                    ConnCommandKind::ChannelRemove(name, tx) => {
-                        self.channel_remove(name);
-                        match tx.try_send(true) {
-                            Ok(_) => {}
-                            Err(_) => {
-                                self.stats.caconn_command_can_not_reply_inc();
-                            }
-                        }
-                    }
-                    ConnCommandKind::Shutdown(tx) => {
-                        self.shutdown = true;
-                        let res = self.before_reset_of_channel_state();
-                        self.state = CaConnState::Shutdown;
-                        self.proto = None;
-                        match tx.try_send(res.is_ok()) {
-                            Ok(_) => {}
-                            Err(_) => {
-                                self.stats.caconn_command_can_not_reply_inc();
-                            }
-                        }
-                    }
-                    ConnCommandKind::ExtraInsertsConf(k, tx) => {
-                        self.extra_inserts_conf = k;
-                        match tx.try_send(true) {
-                            Ok(_) => {}
-                            Err(_) => {
-                                self.stats.caconn_command_can_not_reply_inc();
-                            }
-                        }
-                    }
-                    ConnCommandKind::CheckChannelsAlive(tx) => {
-                        let res = self.check_channels_alive();
-                        let res = res.is_ok();
-                        match tx.try_send(res) {
-                            Ok(_) => {}
-                            Err(_) => {
-                                self.stats.caconn_command_can_not_reply_inc();
-                            }
-                        }
-                    }
-                    ConnCommandKind::SaveConnInfo(tx) => {
-                        let res = self.save_conn_info();
-                        let res = res.is_ok();
-                        match tx.try_send(res) {
-                            Ok(_) => {}
-                            Err(_) => {
-                                self.stats.caconn_command_can_not_reply_inc();
-                            }
-                        }
-                    }
-                },
-                Ready(None) => {
-                    error!("Command queue closed");
+        self.stats.caconn_loop3_count_inc();
+        match self.conn_command_rx.poll_next_unpin(cx) {
+            Ready(Some(a)) => match a.kind {
+                ConnCommandKind::ChannelAdd(name) => {
+                    self.cmd_channel_add(name);
+                    Ready(Some(Ok(())))
                 }
-                Pending => {
-                    break Some(Pending);
+                ConnCommandKind::ChannelRemove(name) => {
+                    self.cmd_channel_remove(name);
+                    Ready(Some(Ok(())))
                 }
+                ConnCommandKind::CheckHealth => {
+                    self.cmd_check_health();
+                    Ready(Some(Ok(())))
+                }
+                ConnCommandKind::Shutdown => {
+                    self.cmd_shutdown();
+                    Ready(Some(Ok(())))
+                }
+            },
+            Ready(None) => {
+                error!("Command queue closed");
+                Ready(None)
             }
+            Pending => Pending,
         }
     }
 
@@ -595,36 +622,79 @@ impl CaConn {
         self.stats.clone()
     }
 
-    pub fn channel_add(&mut self, channel: String) {
-        if self.cid_by_name.contains_key(&channel) {
+    fn channel_add_expl(
+        channel: String,
+        channels: &mut BTreeMap<Cid, ChannelState>,
+        cid_by_name: &mut BTreeMap<String, Cid>,
+        name_by_cid: &mut BTreeMap<Cid, String>,
+        cid_store: &mut CidStore,
+        init_state_count: &mut u64,
+    ) {
+        if cid_by_name.contains_key(&channel) {
             return;
         }
-        let cid = self.cid_by_name(&channel);
-        if self.channels.contains_key(&cid) {
+        let cid = Self::cid_by_name_expl(&channel, cid_by_name, name_by_cid, cid_store);
+        if channels.contains_key(&cid) {
             error!("logic error");
         } else {
-            self.channels.insert(cid, ChannelState::Init);
+            channels.insert(cid, ChannelState::Init);
             // TODO do not count, use separate queue for those channels.
-            self.init_state_count += 1;
+            *init_state_count += 1;
         }
     }
 
-    pub fn channel_remove(&mut self, channel: String) {
-        let cid = self.cid_by_name(&channel);
-        if self.channels.contains_key(&cid) {
+    pub fn channel_add(&mut self, channel: String) {
+        Self::channel_add_expl(
+            channel,
+            &mut self.channels,
+            &mut self.cid_by_name,
+            &mut self.name_by_cid,
+            &mut self.cid_store,
+            &mut self.init_state_count,
+        )
+    }
+
+    fn channel_remove_expl(
+        channel: String,
+        channels: &mut BTreeMap<Cid, ChannelState>,
+        cid_by_name: &mut BTreeMap<String, Cid>,
+        name_by_cid: &mut BTreeMap<Cid, String>,
+        cid_store: &mut CidStore,
+    ) {
+        let cid = Self::cid_by_name_expl(&channel, cid_by_name, name_by_cid, cid_store);
+        if channels.contains_key(&cid) {
             warn!("TODO actually cause the channel to get closed and removed  {}", channel);
         }
     }
 
-    fn cid_by_name(&mut self, name: &str) -> Cid {
-        if let Some(cid) = self.cid_by_name.get(name) {
+    pub fn channel_remove(&mut self, channel: String) {
+        Self::channel_remove_expl(
+            channel,
+            &mut self.channels,
+            &mut self.cid_by_name,
+            &mut self.name_by_cid,
+            &mut self.cid_store,
+        )
+    }
+
+    fn cid_by_name_expl(
+        name: &str,
+        cid_by_name: &mut BTreeMap<String, Cid>,
+        name_by_cid: &mut BTreeMap<Cid, String>,
+        cid_store: &mut CidStore,
+    ) -> Cid {
+        if let Some(cid) = cid_by_name.get(name) {
             *cid
         } else {
-            let cid = self.cid_store.next();
-            self.cid_by_name.insert(name.into(), cid);
-            self.name_by_cid.insert(cid, name.into());
+            let cid = cid_store.next();
+            cid_by_name.insert(name.into(), cid);
+            name_by_cid.insert(cid, name.into());
             cid
         }
+    }
+
+    fn cid_by_name(&mut self, name: &str) -> Cid {
+        Self::cid_by_name_expl(name, &mut self.cid_by_name, &mut self.name_by_cid, &mut self.cid_store)
     }
 
     fn name_by_cid(&self, cid: Cid) -> Option<&str> {
@@ -721,7 +791,7 @@ impl CaConn {
             if let Some(started) = self.ioc_ping_start {
                 if started.elapsed() > Duration::from_millis(4000) {
                     warn!("Echo timeout {addr:?}", addr = self.remote_addr_dbg);
-                    self.shutdown = true;
+                    self.trigger_shutdown();
                 }
             } else {
                 self.ioc_ping_start = Some(Instant::now());
@@ -731,7 +801,7 @@ impl CaConn {
                     proto.push_out(msg);
                 } else {
                     warn!("can not push echo, no proto");
-                    self.shutdown = true;
+                    self.trigger_shutdown();
                 }
             }
         }
@@ -767,7 +837,7 @@ impl CaConn {
         Ok(())
     }
 
-    fn save_conn_info(&mut self) -> Result<(), Error> {
+    fn emit_channel_info_insert_items(&mut self) -> Result<(), Error> {
         let timenow = SystemTime::now();
         for (_, st) in &mut self.channels {
             match st {
@@ -796,6 +866,7 @@ impl CaConn {
                 ChannelState::Error(_) => {
                     // TODO need last-save-ts for this state.
                 }
+                ChannelState::Ended => {}
             }
         }
         Ok(())
@@ -1516,6 +1587,50 @@ impl CaConn {
             }
         }
     }
+
+    fn apply_3(res: ChannelOpsResources) {
+        let mut g = res.channel_set_ops.lock().unwrap();
+        let map = std::mem::replace(&mut *g, BTreeMap::new());
+        for (ch, op) in map {
+            match op {
+                ChannelSetOp::Add => Self::channel_add_expl(
+                    ch,
+                    res.channels,
+                    res.cid_by_name,
+                    res.name_by_cid,
+                    res.cid_store,
+                    res.init_state_count,
+                ),
+                ChannelSetOp::Remove => {
+                    Self::channel_remove_expl(ch, res.channels, res.cid_by_name, res.name_by_cid, res.cid_store)
+                }
+            }
+        }
+        res.channel_set_ops_flag.store(0, atomic::Ordering::Release);
+    }
+
+    fn apply_2(&mut self) {
+        let res = ChannelOpsResources {
+            channel_set_ops: &self.channel_set_ops.ops,
+            channels: &mut self.channels,
+            cid_by_name: &mut self.cid_by_name,
+            name_by_cid: &mut self.name_by_cid,
+            cid_store: &mut self.cid_store,
+            init_state_count: &mut self.init_state_count,
+            channel_set_ops_flag: &self.channel_set_ops.flag,
+        };
+        Self::apply_3(res)
+    }
+}
+
+struct ChannelOpsResources<'a> {
+    channel_set_ops: &'a StdMutex<BTreeMap<String, ChannelSetOp>>,
+    channels: &'a mut BTreeMap<Cid, ChannelState>,
+    cid_by_name: &'a mut BTreeMap<String, Cid>,
+    name_by_cid: &'a mut BTreeMap<Cid, String>,
+    cid_store: &'a mut CidStore,
+    init_state_count: &'a mut u64,
+    channel_set_ops_flag: &'a AtomicUsize,
 }
 
 impl Stream for CaConn {
@@ -1523,63 +1638,91 @@ impl Stream for CaConn {
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
         use Poll::*;
+        let poll_ts1 = Instant::now();
         self.stats.caconn_poll_count_inc();
-        if self.shutdown {
-            info!("CaConn poll in shutdown");
+        if self.channel_set_ops.flag.load(atomic::Ordering::Acquire) > 0 {
+            Self::apply_2(&mut self);
         }
-        let mut i1 = 0;
-        let ret = loop {
-            i1 += 1;
-            if self.shutdown {
-                info!("CaConn in shutdown loop 1");
-            }
-            self.stats.caconn_loop1_count_inc();
-            if !self.shutdown {
-                self.handle_conn_command(cx);
-            }
-            let q = self.handle_insert_futs(cx);
-            match q {
-                Ready(_) => {}
-                Pending => break Pending,
-            }
-            if self.shutdown {
-                if self.insert_item_queue.len() == 0 {
-                    trace!("no more items to flush");
-                    if i1 >= 10 {
-                        break Ready(Ok(()));
+        let ret = if let Some(item) = self.cmd_res_queue.pop_front() {
+            Ready(Some(Ok(CaConnEvent {
+                ts: Instant::now(),
+                value: CaConnEventValue::ConnCommandResult(item),
+            })))
+        } else {
+            let mut i1 = 0;
+            let ret = loop {
+                i1 += 1;
+                self.stats.caconn_loop1_count_inc();
+                loop {
+                    if self.shutdown {
+                        break;
                     }
-                } else {
-                    //info!("more items {}", self.insert_item_queue.len());
+                    break match self.handle_conn_command(cx) {
+                        Ready(Some(Ok(_))) => {}
+                        Ready(Some(Err(e))) => {
+                            error!("{e}");
+                            self.trigger_shutdown();
+                            break;
+                        }
+                        Ready(None) => {
+                            warn!("command input queue closed, do shutdown");
+                            self.trigger_shutdown();
+                            break;
+                        }
+                        Pending => break,
+                    };
                 }
-            }
-            if self.insert_item_queue.len() >= self.insert_queue_max {
-                break Pending;
-            }
-            if !self.shutdown {
-                if let Some(v) = self.loop_inner(cx) {
-                    if i1 >= 10 {
-                        break v;
+                match self.handle_insert_futs(cx) {
+                    Ready(_) => {}
+                    Pending => break Pending,
+                }
+                if self.shutdown {
+                    if self.insert_item_queue.len() == 0 {
+                        trace!("no more items to flush");
+                        if i1 >= 10 {
+                            break Ready(Ok(()));
+                        }
+                    } else {
+                        //info!("more items {}", self.insert_item_queue.len());
                     }
+                }
+                if self.insert_item_queue.len() >= self.insert_queue_max {
+                    break Pending;
+                }
+                if !self.shutdown {
+                    if let Some(v) = self.loop_inner(cx) {
+                        if i1 >= 10 {
+                            break v;
+                        }
+                    }
+                }
+            };
+            match &ret {
+                Ready(_) => self.stats.conn_stream_ready_inc(),
+                Pending => self.stats.conn_stream_pending_inc(),
+            }
+            if self.shutdown && self.insert_item_queue.len() == 0 {
+                Ready(None)
+            } else {
+                match ret {
+                    Ready(Ok(())) => {
+                        let item = CaConnEvent {
+                            ts: Instant::now(),
+                            value: CaConnEventValue::None,
+                        };
+                        Ready(Some(Ok(item)))
+                    }
+                    Ready(Err(e)) => Ready(Some(Err(e))),
+                    Pending => Pending,
                 }
             }
         };
-        match &ret {
-            Ready(_) => self.stats.conn_stream_ready_inc(),
-            Pending => self.stats.conn_stream_pending_inc(),
-        }
-        if self.shutdown && self.insert_item_queue.len() == 0 {
-            return Ready(None);
-        }
-        match ret {
-            Ready(Ok(())) => {
-                let item = CaConnEvent {
-                    ts: Instant::now(),
-                    value: CaConnEventValue::None,
-                };
-                Ready(Some(Ok(item)))
+        {
+            let dt = poll_ts1.elapsed();
+            if dt > Duration::from_millis(40) {
+                warn!("slow poll: {}ms", dt.as_secs_f32() * 1e3);
             }
-            Ready(Err(e)) => Ready(Some(Err(e))),
-            Pending => Pending,
         }
+        ret
     }
 }

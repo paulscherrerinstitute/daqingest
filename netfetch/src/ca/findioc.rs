@@ -70,6 +70,7 @@ pub struct FindIocStream {
     sids_done: BTreeMap<SearchId, ()>,
     result_for_done_sid_count: u64,
     sleeper: Pin<Box<dyn Future<Output = ()> + Send>>,
+    stop_on_empty_queue: bool,
 }
 
 impl FindIocStream {
@@ -96,7 +97,12 @@ impl FindIocStream {
             channels_per_batch: batch_size,
             batch_run_max,
             sleeper: Box::pin(tokio::time::sleep(Duration::from_millis(500))),
+            stop_on_empty_queue: false,
         }
+    }
+
+    pub fn set_stop_on_empty_queue(&mut self) {
+        self.stop_on_empty_queue = true;
     }
 
     pub fn quick_state(&self) -> String {
@@ -589,12 +595,16 @@ impl Stream for FindIocStream {
                         continue;
                     } else {
                         if self.channels_input.is_empty() && self.in_flight.is_empty() && self.out_queue.is_empty() {
-                            match self.sleeper.poll_unpin(cx) {
-                                Ready(_) => {
-                                    self.sleeper = Box::pin(tokio::time::sleep(Duration::from_millis(500)));
-                                    continue;
+                            if self.stop_on_empty_queue {
+                                Ready(None)
+                            } else {
+                                match self.sleeper.poll_unpin(cx) {
+                                    Ready(_) => {
+                                        self.sleeper = Box::pin(tokio::time::sleep(Duration::from_millis(500)));
+                                        continue;
+                                    }
+                                    Pending => Pending,
                                 }
-                                Pending => Pending,
                             }
                         } else {
                             Pending

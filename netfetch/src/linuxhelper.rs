@@ -2,7 +2,6 @@ use err::Error;
 use log::*;
 use std::ffi::CStr;
 use std::mem::MaybeUninit;
-use std::sync::atomic::Ordering;
 use tokio::net::TcpStream;
 
 pub fn local_hostname() -> String {
@@ -23,18 +22,22 @@ fn test_get_local_hostname() {
     assert_ne!(local_hostname().len(), 0);
 }
 
-pub fn set_signal_handler() -> Result<(), Error> {
+pub fn set_signal_handler(
+    signum: libc::c_int,
+    cb: fn(libc::c_int, *const libc::siginfo_t, *const libc::c_void) -> (),
+) -> Result<(), Error> {
+    //let cb: fn(libc::c_int, *const libc::siginfo_t, *const libc::c_void) -> () = handler_sigaction;
     // Safe because it creates a valid value:
     let mask: libc::sigset_t = unsafe { MaybeUninit::zeroed().assume_init() };
-    let handler: libc::sighandler_t = handler_sigaction as *const libc::c_void as _;
+    let sa_sigaction: libc::sighandler_t = cb as *const libc::c_void as _;
     let act = libc::sigaction {
-        sa_sigaction: handler,
+        sa_sigaction,
         sa_mask: mask,
         sa_flags: 0,
         sa_restorer: None,
     };
     let (ec, msg) = unsafe {
-        let ec = libc::sigaction(libc::SIGINT, &act, std::ptr::null_mut());
+        let ec = libc::sigaction(signum, &act, std::ptr::null_mut());
         let errno = *libc::__errno_location();
         (ec, CStr::from_ptr(libc::strerror(errno)))
     };
@@ -46,7 +49,7 @@ pub fn set_signal_handler() -> Result<(), Error> {
     Ok(())
 }
 
-fn unset_signal_handler() -> Result<(), Error> {
+pub fn unset_signal_handler(signum: libc::c_int) -> Result<(), Error> {
     // Safe because it creates a valid value:
     let mask: libc::sigset_t = unsafe { MaybeUninit::zeroed().assume_init() };
     let act = libc::sigaction {
@@ -56,7 +59,7 @@ fn unset_signal_handler() -> Result<(), Error> {
         sa_restorer: None,
     };
     let (ec, msg) = unsafe {
-        let ec = libc::sigaction(libc::SIGINT, &act, std::ptr::null_mut());
+        let ec = libc::sigaction(signum, &act, std::ptr::null_mut());
         let errno = *libc::__errno_location();
         (ec, CStr::from_ptr(libc::strerror(errno)))
     };
@@ -66,11 +69,6 @@ fn unset_signal_handler() -> Result<(), Error> {
         panic!();
     }
     Ok(())
-}
-
-fn handler_sigaction(_a: libc::c_int, _b: *const libc::siginfo_t, _c: *const libc::c_void) {
-    crate::ca::SIGINT.store(1, Ordering::Release);
-    let _ = unset_signal_handler();
 }
 
 pub fn set_rcv_sock_opts(conn: &mut TcpStream, rcvbuf: u32) -> Result<(), Error> {

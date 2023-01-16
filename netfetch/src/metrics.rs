@@ -8,7 +8,6 @@ use log::*;
 use serde::{Deserialize, Serialize};
 use stats::{CaConnStats, CaConnStatsAgg, CaConnStatsAggDiff};
 use std::collections::HashMap;
-use std::net::SocketAddr;
 use std::net::SocketAddrV4;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -30,36 +29,16 @@ async fn find_channel(
     ingest_commons: Arc<IngestCommons>,
 ) -> axum::Json<Vec<(String, Vec<String>)>> {
     let pattern = params.get("pattern").map_or(String::new(), |x| x.clone()).to_string();
-    // TODO allow usage of `?` in handler:
-    let res = ingest_commons
-        .ca_conn_set
-        .send_command_to_all(|| ConnCommand::find_channel(pattern.clone()))
-        .await
-        .unwrap();
-    let res = res.into_iter().map(|x| (x.0.to_string(), x.1)).collect();
+    // TODO ask Daemon for that information.
+    error!("TODO find_channel");
+    let res = Vec::new();
     axum::Json(res)
 }
 
 async fn channel_add_inner(params: HashMap<String, String>, ingest_commons: Arc<IngestCommons>) -> Result<(), Error> {
     if let (Some(backend), Some(name)) = (params.get("backend"), params.get("name")) {
-        match crate::ca::find_channel_addr(backend.into(), name.into(), &ingest_commons.pgconf).await {
-            Ok(Some(addr)) => {
-                ingest_commons
-                    .ca_conn_set
-                    .add_channel_to_addr(
-                        ingest_commons.backend.clone(),
-                        SocketAddr::V4(addr),
-                        name.into(),
-                        ingest_commons.clone(),
-                    )
-                    .await?;
-                Ok(())
-            }
-            _ => {
-                error!("can not find addr for channel");
-                Err(Error::with_msg_no_trace(format!("can not find addr for channel")))
-            }
-        }
+        error!("TODO channel_add_inner");
+        Err(Error::with_msg_no_trace(format!("TODO channel_add_inner")))
     } else {
         Err(Error::with_msg_no_trace(format!("wrong parameters given")))
     }
@@ -98,35 +77,14 @@ async fn channel_remove(
     } else {
         return Json(Value::Bool(false));
     };
-    match ingest_commons
-        .ca_conn_set
-        .send_command_to_addr(&SocketAddr::V4(addr), || ConnCommand::channel_remove(name.into()))
-        .await
-    {
-        Ok(k) => Json(Value::Bool(k)),
-        Err(e) => {
-            error!("{e:?}");
-            Json(Value::Bool(false))
-        }
-    }
+    error!("TODO channel_remove");
+    Json(Value::Bool(false))
 }
 
-async fn channel_state(params: HashMap<String, String>, ingest_commons: Arc<IngestCommons>) -> String {
+async fn channel_state(params: HashMap<String, String>, ingest_commons: Arc<IngestCommons>) -> axum::Json<bool> {
     let name = params.get("name").map_or(String::new(), |x| x.clone()).to_string();
-    match ingest_commons
-        .ca_conn_set
-        .send_command_to_all(|| ConnCommand::channel_state(name.clone()))
-        .await
-    {
-        Ok(k) => {
-            let a: Vec<_> = k.into_iter().map(|(a, b)| (a.to_string(), b)).collect();
-            serde_json::to_string(&a).unwrap()
-        }
-        Err(e) => {
-            error!("{e:?}");
-            return format!("null");
-        }
-    }
+    error!("TODO channel_state");
+    axum::Json(false)
 }
 
 async fn channel_states(
@@ -134,31 +92,14 @@ async fn channel_states(
     ingest_commons: Arc<IngestCommons>,
 ) -> axum::Json<Vec<crate::ca::conn::ChannelStateInfo>> {
     let limit = params.get("limit").map(|x| x.parse()).unwrap_or(Ok(40)).unwrap_or(40);
-    let vals = ingest_commons
-        .ca_conn_set
-        .send_command_to_all(|| ConnCommand::channel_states_all())
-        .await
-        .unwrap();
-    let mut res = Vec::new();
-    for h in vals {
-        for j in h.1 {
-            res.push(j);
-        }
-    }
-    res.sort_unstable_by_key(|v| u32::MAX - v.interest_score as u32);
-    res.truncate(limit);
-    axum::Json(res)
+    error!("TODO channel_state");
+    axum::Json(Vec::new())
 }
 
 async fn extra_inserts_conf_set(v: ExtraInsertsConf, ingest_commons: Arc<IngestCommons>) -> axum::Json<bool> {
     // TODO ingest_commons is the authorative value. Should have common function outside of this metrics which
     // can update everything to a given value.
-    *ingest_commons.extra_inserts_conf.lock().await = v.clone();
-    ingest_commons
-        .ca_conn_set
-        .send_command_to_all(|| ConnCommand::extra_inserts_conf_set(v.clone()))
-        .await
-        .unwrap();
+    error!("TODO extra_inserts_conf_set");
     axum::Json(true)
 }
 

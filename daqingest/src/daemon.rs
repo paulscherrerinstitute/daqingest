@@ -1,7 +1,6 @@
 use async_channel::Receiver;
 use async_channel::Sender;
 use err::Error;
-use futures_util::Future;
 use futures_util::FutureExt;
 use futures_util::StreamExt;
 use log::*;
@@ -12,6 +11,7 @@ use netfetch::ca::findioc::FindIocRes;
 use netfetch::ca::findioc::FindIocStream;
 use netfetch::ca::store::DataStore;
 use netfetch::ca::IngestCommons;
+use netfetch::ca::SlowWarnable;
 use netfetch::conf::CaIngestOpts;
 use netfetch::errconv::ErrConv;
 use netfetch::insertworker::Ttls;
@@ -21,11 +21,9 @@ use netpod::Database;
 use netpod::ScyllaConfig;
 use serde::Serialize;
 use std::collections::BTreeMap;
+use std::collections::HashMap;
 use std::collections::VecDeque;
-use std::fmt;
-use std::net::SocketAddr;
 use std::net::SocketAddrV4;
-use std::pin::Pin;
 use std::sync::atomic;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::AtomicUsize;
@@ -34,16 +32,55 @@ use std::time::Duration;
 use std::time::Instant;
 use std::time::SystemTime;
 use tokio_postgres::Client as PgClient;
-use tokio_postgres::Statement as PgStatement;
+use tokio_postgres::Row as PgRow;
+use tracing::info_span;
+use tracing::Instrument;
 
-const CHECK_CHANS_PER_TICK: usize = 10000;
-const FINDER_TIMEOUT: usize = 100;
-const TIMEOUT_WARN: usize = 6000;
-const FINDER_JOB_QUEUE_LEN_MAX: usize = 20;
-const FINDER_IN_FLIGHT_MAX: usize = 400;
+const SEARCH_BATCH_MAX: usize = 256;
+const CURRENT_SEARCH_PENDING_MAX: usize = SEARCH_BATCH_MAX * 4;
+const SEARCH_DB_PIPELINE_LEN: usize = 4;
+const FINDER_JOB_QUEUE_LEN_MAX: usize = 10;
+const FINDER_IN_FLIGHT_MAX: usize = 800;
 const FINDER_BATCH_SIZE: usize = 8;
-const CURRENT_SEARCH_PENDING_MAX: usize = 420;
-const SEARCH_PENDING_TIMEOUT: usize = 10000;
+const CHECK_CHANS_PER_TICK: usize = 10000;
+const CA_CONN_INSERT_QUEUE_MAX: usize = 256;
+
+const UNKNOWN_ADDRESS_STAY: Duration = Duration::from_millis(2000);
+const NO_ADDRESS_STAY: Duration = Duration::from_millis(20000);
+const SEARCH_PENDING_TIMEOUT: Duration = Duration::from_millis(30000);
+const SEARCH_PENDING_TIMEOUT_WARN: Duration = Duration::from_millis(8000);
+const FINDER_TIMEOUT: Duration = Duration::from_millis(100);
+const CHANNEL_CHECK_INTERVAL: Duration = Duration::from_millis(5000);
+const PRINT_ACTIVE_INTERVAL: Duration = Duration::from_millis(8000);
+
+const DO_ASSIGN_TO_CA_CONN: bool = true;
+
+static SEARCH_REQ_MARK_COUNT: AtomicUsize = AtomicUsize::new(0);
+static SEARCH_REQ_SEND_COUNT: AtomicUsize = AtomicUsize::new(0);
+static SEARCH_REQ_RECV_COUNT: AtomicUsize = AtomicUsize::new(0);
+static SEARCH_REQ_BATCH_SEND_COUNT: AtomicUsize = AtomicUsize::new(0);
+static SEARCH_REQ_BATCH_RECV_COUNT: AtomicUsize = AtomicUsize::new(0);
+static SEARCH_RES_0_COUNT: AtomicUsize = AtomicUsize::new(0);
+static SEARCH_RES_1_COUNT: AtomicUsize = AtomicUsize::new(0);
+static SEARCH_RES_2_COUNT: AtomicUsize = AtomicUsize::new(0);
+static SEARCH_RES_3_COUNT: AtomicUsize = AtomicUsize::new(0);
+static SEARCH_ANS_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+#[allow(unused)]
+macro_rules! debug_batch {
+    (D$($arg:tt)*) => ();
+    ($($arg:tt)*) => (if false {
+        info!($($arg)*);
+    });
+}
+
+#[allow(unused)]
+macro_rules! trace_batch {
+    (D$($arg:tt)*) => ();
+    ($($arg:tt)*) => (if false {
+        trace!($($arg)*);
+    });
+}
 
 #[derive(Clone, Debug, Serialize, PartialEq, PartialOrd, Eq, Ord)]
 pub struct Channel {
@@ -60,52 +97,66 @@ impl Channel {
     }
 }
 
+#[allow(non_snake_case)]
+mod serde_Instant {
+    use serde::Serializer;
+    use std::time::Instant;
+
+    #[allow(unused)]
+    pub fn serialize<S>(val: &Instant, ser: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let dur = val.elapsed();
+        ser.serialize_u64(dur.as_secs() * 1000 + dur.subsec_millis() as u64)
+    }
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub enum ConnectionStateValue {
     Unconnected,
-    Connected { since: SystemTime },
+    Connected {
+        //#[serde(with = "serde_Instant")]
+        since: SystemTime,
+    },
 }
 
 #[derive(Clone, Debug, Serialize)]
 pub struct ConnectionState {
+    //#[serde(with = "serde_Instant")]
     updated: SystemTime,
     value: ConnectionStateValue,
 }
 
 #[derive(Clone, Debug, Serialize)]
 pub enum WithAddressState {
-    Unassigned { assign_at: SystemTime },
+    Unassigned {
+        //#[serde(with = "serde_Instant")]
+        assign_at: SystemTime,
+    },
     Assigned(ConnectionState),
 }
 
 #[derive(Clone, Debug, Serialize)]
 pub enum ActiveChannelState {
-    UnknownAddress,
-    SearchPending {
+    UnknownAddress {
         since: SystemTime,
+    },
+    SearchPending {
+        //#[serde(with = "serde_Instant")]
+        since: SystemTime,
+        did_send: bool,
     },
     WithAddress {
         addr: SocketAddrV4,
         state: WithAddressState,
     },
-    NoAddress,
+    NoAddress {
+        since: SystemTime,
+    },
 }
 
-enum ChanOp {
-    Finder(String, SystemTime),
-    ConnCmd(Pin<Box<dyn Future<Output = Result<(), Error>> + Send>>),
-}
-
-impl fmt::Debug for ChanOp {
-    fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
-        match self {
-            Self::Finder(arg0, arg1) => fmt.debug_tuple("Finder").field(arg0).field(arg1).finish(),
-            Self::ConnCmd(_arg0) => fmt.debug_tuple("ConnCmd").finish(),
-        }
-    }
-}
-
-#[derive(Debug, Serialize)]
+#[derive(Debug)]
 pub enum ChannelStateValue {
     Active(ActiveChannelState),
     ToRemove { addr: Option<SocketAddrV4> },
@@ -114,7 +165,16 @@ pub enum ChannelStateValue {
 #[derive(Debug)]
 pub struct ChannelState {
     value: ChannelStateValue,
-    pending_op: Option<ChanOp>,
+}
+
+#[derive(Debug, Serialize)]
+pub enum CaConnStateValue {}
+
+#[derive(Debug)]
+pub struct CaConnState {
+    last_feedback: Instant,
+    #[allow(unused)]
+    value: CaConnStateValue,
 }
 
 #[derive(Debug)]
@@ -123,7 +183,29 @@ pub enum DaemonEvent {
     ChannelAdd(Channel),
     ChannelRemove(Channel),
     SearchDone(Result<VecDeque<FindIocRes>, Error>),
-    CaConnEvent(CaConnEvent),
+    CaConnEvent(SocketAddrV4, CaConnEvent),
+}
+
+impl DaemonEvent {
+    pub fn summary(&self) -> String {
+        use DaemonEvent::*;
+        match self {
+            TimerTick => format!("TimerTick"),
+            ChannelAdd(x) => format!("ChannelAdd {x:?}"),
+            ChannelRemove(x) => format!("ChannelRemove {x:?}"),
+            SearchDone(_x) => format!("SearchDone"),
+            CaConnEvent(_a, b) => {
+                use netfetch::ca::conn::CaConnEventValue::*;
+                match &b.value {
+                    None => format!("CaConnEvent/None"),
+                    EchoTimeout => format!("CaConnEvent/EchoTimeout"),
+                    HealthCheckDone => format!("CaConnEvent/HealthCheckDone"),
+                    ConnCommandResult(_) => format!("CaConnEvent/ConnCommandResult"),
+                    EndOfStream => format!("CaConnEvent/EndOfStream"),
+                }
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -132,8 +214,6 @@ pub struct DaemonOpts {
     local_epics_hostname: String,
     array_truncate: usize,
     insert_item_queue_cap: usize,
-    search_tgts: Vec<SocketAddrV4>,
-    //search_excl: Vec<SocketAddrV4>,
     pgconf: Database,
     scyconf: ScyllaConfig,
     ttls: Ttls,
@@ -189,15 +269,9 @@ pub async fn make_pg_client(d: &Database) -> Result<PgClient, Error> {
     Ok(client)
 }
 
-struct AddrInsertJob {
-    backend: String,
-    channel: Channel,
-    response_addr: SocketAddrV4,
-    addr: SocketAddrV4,
-}
-
 pub struct Daemon {
     opts: DaemonOpts,
+    connection_states: BTreeMap<SocketAddrV4, CaConnState>,
     channel_states: BTreeMap<Channel, ChannelState>,
     tx: Sender<DaemonEvent>,
     rx: Receiver<DaemonEvent>,
@@ -209,6 +283,7 @@ pub struct Daemon {
     insert_queue_counter: Arc<AtomicUsize>,
     count_unknown_address: usize,
     count_search_pending: usize,
+    count_search_sent: usize,
     count_no_address: usize,
     count_unassigned: usize,
     count_assigned: usize,
@@ -216,10 +291,6 @@ pub struct Daemon {
     insert_workers_jh: Vec<tokio::task::JoinHandle<()>>,
     #[allow(unused)]
     pg_client: Arc<PgClient>,
-    #[allow(unused)]
-    qu_addr_insert: PgStatement,
-    ioc_addr_inserter_jh: tokio::task::JoinHandle<()>,
-    ioc_addr_inserter_tx: Sender<AddrInsertJob>,
     ingest_commons: Arc<IngestCommons>,
     caconn_last_channel_check: Instant,
 }
@@ -230,8 +301,15 @@ impl Daemon {
         let datastore = DataStore::new(&opts.scyconf, pg_client.clone()).await?;
         let datastore = Arc::new(datastore);
         let (tx, rx) = async_channel::bounded(32);
-        let tgts = opts.search_tgts.clone();
-        let (search_tx, ioc_finder_jh) = Self::start_finder(tx.clone(), tgts);
+        let pgcs = {
+            let mut a = Vec::new();
+            for _ in 0..SEARCH_DB_PIPELINE_LEN {
+                let pgc = Arc::new(make_pg_client(&opts.pgconf).await?);
+                a.push(pgc);
+            }
+            a
+        };
+        let (search_tx, ioc_finder_jh) = Self::start_finder(tx.clone(), opts.backend().into(), pgcs);
         let common_insert_item_queue = Arc::new(CommonInsertItemQueue::new(opts.insert_item_queue_cap));
         let common_insert_item_queue_2 = Arc::new(CommonInsertItemQueue::new(opts.insert_item_queue_cap));
         let insert_queue_counter = Arc::new(AtomicUsize::new(0));
@@ -240,10 +318,10 @@ impl Daemon {
         if true {
             tokio::spawn({
                 let rx = common_insert_item_queue.receiver();
-                let tx = common_insert_item_queue_2.sender().await;
+                let tx = common_insert_item_queue_2.sender();
                 let insert_queue_counter = insert_queue_counter.clone();
                 async move {
-                    let mut printed_last = SystemTime::now();
+                    let mut printed_last = Instant::now();
                     let mut histo = BTreeMap::new();
                     while let Ok(item) = rx.recv().await {
                         insert_queue_counter.fetch_add(1, atomic::Ordering::AcqRel);
@@ -275,8 +353,8 @@ impl Daemon {
                                 break;
                             }
                         }
-                        let tsnow = SystemTime::now();
-                        if tsnow.duration_since(printed_last).unwrap_or(Duration::ZERO) >= Duration::from_millis(2000) {
+                        let tsnow = Instant::now();
+                        if tsnow.duration_since(printed_last) >= PRINT_ACTIVE_INTERVAL {
                             printed_last = tsnow;
                             let mut all: Vec<_> = histo
                                 .iter()
@@ -319,23 +397,16 @@ impl Daemon {
             let tx = tx.clone();
             async move {
                 while let Ok(item) = rx.recv().await {
-                    match tx.send(DaemonEvent::CaConnEvent(item)).await {
+                    match tx.send(DaemonEvent::CaConnEvent(item.0, item.1)).await {
                         Ok(_) => {}
-                        Err(e) => break,
+                        Err(e) => {
+                            error!("{e}");
+                            break;
+                        }
                     }
                 }
             }
         });
-
-        let qu_addr_insert = {
-            const TEXT: tokio_postgres::types::Type = tokio_postgres::types::Type::TEXT;
-            let sql = "insert into ioc_by_channel_log (facility, channel, responseaddr, addr) values ($1, $2, $3, $4)";
-            let res = pg_client
-                .prepare_typed(sql, &[TEXT, TEXT, TEXT, TEXT])
-                .await
-                .map_err(|e| Error::from(e.to_string()))?;
-            res
-        };
 
         let insert_scylla_sessions = 1;
         let insert_worker_count = 1000;
@@ -357,40 +428,9 @@ impl Daemon {
         )
         .await?;
 
-        let (ioc_addr_inserter_tx, ioc_addr_inserter_rx) = async_channel::bounded(64);
-        let fut = {
-            let pg_client = pg_client.clone();
-            let qu_addr_insert = qu_addr_insert.clone();
-            async move {
-                let mut stream = ioc_addr_inserter_rx
-                    .map(|k: AddrInsertJob| {
-                        let pgc = pg_client.clone();
-                        let qu_addr_insert = qu_addr_insert.clone();
-                        async move {
-                            let response_addr = k.response_addr.to_string();
-                            let addr = k.addr.to_string();
-                            let res = pgc
-                                .execute(&qu_addr_insert, &[&k.backend, &k.channel.id(), &response_addr, &addr])
-                                .await
-                                .map_err(|e| Error::from(e.to_string()))?;
-                            Ok::<_, Error>(res)
-                        }
-                    })
-                    .buffer_unordered(16);
-                while let Some(item) = stream.next().await {
-                    match item {
-                        Ok(_) => {}
-                        Err(e) => {
-                            error!("{e}");
-                        }
-                    }
-                }
-            }
-        };
-        let ioc_addr_inserter_task = tokio::spawn(fut);
-
         let ret = Self {
             opts,
+            connection_states: BTreeMap::new(),
             channel_states: BTreeMap::new(),
             tx,
             rx,
@@ -402,31 +442,220 @@ impl Daemon {
             insert_queue_counter,
             count_unknown_address: 0,
             count_search_pending: 0,
+            count_search_sent: 0,
             count_no_address: 0,
             count_unassigned: 0,
             count_assigned: 0,
             last_status_print: SystemTime::now(),
             insert_workers_jh: jh_insert_workers,
             pg_client,
-            qu_addr_insert,
-            ioc_addr_inserter_jh: ioc_addr_inserter_task,
-            ioc_addr_inserter_tx,
             ingest_commons,
             caconn_last_channel_check: Instant::now(),
         };
         Ok(ret)
     }
 
-    fn start_finder(tx: Sender<DaemonEvent>, tgts: Vec<SocketAddrV4>) -> (Sender<String>, tokio::task::JoinHandle<()>) {
+    fn start_finder(
+        tx: Sender<DaemonEvent>,
+        backend: String,
+        pgcs: Vec<Arc<PgClient>>,
+    ) -> (Sender<String>, tokio::task::JoinHandle<()>) {
+        fn transform_pgres(rows: Vec<PgRow>) -> VecDeque<FindIocRes> {
+            let mut ret = VecDeque::new();
+            for row in rows {
+                let ch: Result<String, _> = row.try_get(0);
+                if let Ok(ch) = ch {
+                    if let Some(addr) = row.get::<_, Option<String>>(1) {
+                        let addr = addr.parse().map_or(None, |x| Some(x));
+                        let item = FindIocRes {
+                            channel: ch,
+                            response_addr: None,
+                            addr,
+                            dt: Duration::from_millis(0),
+                        };
+                        ret.push_back(item);
+                    } else {
+                        let item = FindIocRes {
+                            channel: ch,
+                            response_addr: None,
+                            addr: None,
+                            dt: Duration::from_millis(0),
+                        };
+                        ret.push_back(item);
+                    }
+                } else if let Err(e) = ch {
+                    error!("bad string from pg: {e:?}");
+                }
+            }
+            ret
+        }
+        let (qtx, qrx) = async_channel::bounded(CURRENT_SEARCH_PENDING_MAX);
+        let fut = async move {
+            let (batch_tx, batch_rx) = async_channel::bounded(SEARCH_DB_PIPELINE_LEN);
+            let fut2 = async move {
+                let mut batch_ix = 0 as usize;
+                let mut all = Vec::new();
+                let mut do_emit = false;
+                loop {
+                    if do_emit {
+                        do_emit = false;
+                        let batch = std::mem::replace(&mut all, Vec::new());
+                        let n = batch.len();
+                        trace_batch!("--- BATCH TRY SEND");
+                        match batch_tx.send((batch_ix, batch)).await {
+                            Ok(_) => {
+                                trace_batch!("--- BATCH SEND DONE");
+                                batch_ix += 1;
+                                SEARCH_REQ_BATCH_SEND_COUNT.fetch_add(n, atomic::Ordering::AcqRel);
+                            }
+                            Err(e) => {
+                                error!("can not send batch");
+                                all = e.0 .1;
+                            }
+                        }
+                    }
+                    match tokio::time::timeout(Duration::from_millis(200), qrx.recv()).await {
+                        Ok(k) => match k {
+                            Ok(item) => {
+                                SEARCH_REQ_RECV_COUNT.fetch_add(1, atomic::Ordering::AcqRel);
+                                all.push(item);
+                                if all.len() >= SEARCH_BATCH_MAX {
+                                    do_emit = true;
+                                }
+                            }
+                            Err(e) => {
+                                error!("error in batcher, no more input {e}");
+                                break;
+                            }
+                        },
+                        Err(e) => {
+                            let _e: tokio::time::error::Elapsed = e;
+                            if all.len() > 0 {
+                                do_emit = true;
+                            }
+                        }
+                    }
+                }
+                warn!("--------   batcher is done   --------------");
+            };
+            tokio::spawn(fut2);
+            let (pgc_tx, pgc_rx) = async_channel::bounded(128);
+            for pgc in pgcs {
+                let sql = "with q1 as (select * from unnest($2::text[]) as unn (ch)) select distinct on (tt.facility, tt.channel) tt.channel, tt.addr from ioc_by_channel_log tt join q1 on tt.channel = q1.ch and tt.facility = $1 and tt.addr is not null order by tt.facility, tt.channel, tsmod desc";
+                let qu_select_multi = pgc.prepare(sql).await.unwrap();
+                let qu_select_multi = Arc::new(qu_select_multi);
+                match pgc_tx.send((pgc, qu_select_multi)).await {
+                    Ok(_) => {}
+                    Err(e) => {
+                        error!("can not enqueue pgc {e}");
+                    }
+                }
+            }
+            let backend = Arc::new(backend.clone());
+            let stream = batch_rx
+                .map(|(batch_ix, batch): (usize, Vec<String>)| {
+                    let pgc_tx = pgc_tx.clone();
+                    let pgc_rx = pgc_rx.clone();
+                    let backend = backend.clone();
+                    SEARCH_REQ_BATCH_RECV_COUNT.fetch_add(batch.len(), atomic::Ordering::AcqRel);
+                    async move {
+                        let ts1 = Instant::now();
+                        let (pgc, qu_select_multi) = pgc_rx.recv().await.unwrap();
+                        debug_batch!("run  query batch {}  len {}", batch_ix, batch.len());
+                        let qres = pgc.query(qu_select_multi.as_ref(), &[backend.as_ref(), &batch]).await;
+                        let dt = ts1.elapsed();
+                        debug_batch!(
+                            "done query batch {}  len {}: {}  {:.3}ms",
+                            batch_ix,
+                            batch.len(),
+                            qres.is_ok(),
+                            dt.as_secs_f32() * 1e3
+                        );
+                        if dt > Duration::from_millis(5000) {
+                            let mut out = String::from("[");
+                            for s in &batch {
+                                if out.len() > 1 {
+                                    out.push_str(", ");
+                                }
+                                out.push('\'');
+                                out.push_str(s);
+                                out.push('\'');
+                            }
+                            out.push(']');
+                            eprintln!("VERY LONG QUERY batch_ix {batch_ix}\n{out}");
+                        }
+                        pgc_tx.send((pgc, qu_select_multi)).await.unwrap();
+                        (batch_ix, batch, qres)
+                    }
+                })
+                .buffer_unordered(SEARCH_DB_PIPELINE_LEN);
+            let mut resdiff = 0;
+            let mut stream = Box::pin(stream);
+            while let Some((batch_ix, batch, pgres)) = stream.next().await {
+                match pgres {
+                    Ok(rows) => {
+                        if rows.len() > batch.len() {
+                            error!("MORE RESULTS THAN INPUT");
+                        } else if rows.len() < batch.len() {
+                            resdiff += batch.len() - rows.len();
+                        }
+                        let nbatch = batch.len();
+                        trace_batch!("received results {}  resdiff {}", rows.len(), resdiff);
+                        SEARCH_RES_0_COUNT.fetch_add(rows.len(), atomic::Ordering::AcqRel);
+                        let items = transform_pgres(rows);
+                        let names: HashMap<_, _> = items.iter().map(|x| (&x.channel, true)).collect();
+                        let mut to_add = Vec::new();
+                        for s in batch {
+                            if !names.contains_key(&s) {
+                                let item = FindIocRes {
+                                    channel: s,
+                                    response_addr: None,
+                                    addr: None,
+                                    dt: Duration::from_millis(0),
+                                };
+                                to_add.push(item);
+                            }
+                        }
+                        SEARCH_RES_1_COUNT.fetch_add(items.len(), atomic::Ordering::AcqRel);
+                        SEARCH_RES_2_COUNT.fetch_add(to_add.len(), atomic::Ordering::AcqRel);
+                        let mut items = items;
+                        items.extend(to_add.into_iter());
+                        if items.len() != nbatch {
+                            error!("STILL NOT MATCHING LEN");
+                        }
+                        SEARCH_RES_3_COUNT.fetch_add(items.len(), atomic::Ordering::AcqRel);
+                        debug_batch!("TRY  SEND batch_ix {batch_ix}");
+                        let x = tx.send(DaemonEvent::SearchDone(Ok(items))).await;
+                        match x {
+                            Ok(_) => {
+                                debug_batch!("DONE SEND batch_ix {batch_ix}");
+                            }
+                            Err(e) => {
+                                error!("finder sees: {e}");
+                                break;
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        error!("finder sees error: {e}");
+                        tokio::time::sleep(Duration::from_millis(1000)).await;
+                    }
+                }
+            }
+        };
+        let jh = taskrun::spawn(fut);
+        (qtx, jh)
+    }
+
+    #[allow(unused)]
+    fn start_finder_ca(
+        tx: Sender<DaemonEvent>,
+        tgts: Vec<SocketAddrV4>,
+    ) -> (Sender<String>, tokio::task::JoinHandle<()>) {
         let (qtx, qrx) = async_channel::bounded(32);
         let (atx, arx) = async_channel::bounded(32);
         let ioc_finder_fut = async move {
-            let mut finder = FindIocStream::new(
-                tgts,
-                Duration::from_millis(FINDER_TIMEOUT as u64),
-                FINDER_IN_FLIGHT_MAX,
-                FINDER_BATCH_SIZE,
-            );
+            let mut finder = FindIocStream::new(tgts, FINDER_TIMEOUT, FINDER_IN_FLIGHT_MAX, FINDER_BATCH_SIZE);
             let fut_tick_dur = Duration::from_millis(100);
             let mut finder_more = true;
             let mut finder_fut = OptFut::new(finder.next());
@@ -435,14 +664,11 @@ impl Daemon {
             let mut fut_tick = Box::pin(tokio::time::sleep(fut_tick_dur));
             let mut asend = OptFut::empty();
             loop {
-                //tokio::time::sleep(Duration::from_millis(1)).await;
                 tokio::select! {
                     _ = &mut asend, if asend.is_enabled() => {
-                        //info!("finder asend done");
                         asend = OptFut::empty();
                     }
                     r1 = &mut finder_fut, if finder_fut.is_enabled() => {
-                        //info!("finder fut1");
                         finder_fut = OptFut::empty();
                         match r1 {
                             Some(item) => {
@@ -454,7 +680,6 @@ impl Daemon {
                                 finder_more = false;
                             }
                         }
-                        //info!("finder.job_queue_len()  {}", finder.job_queue_len());
                         if qrx_more && finder.job_queue_len() < FINDER_JOB_QUEUE_LEN_MAX {
                             qrx_fut = OptFut::new(qrx.recv());
                         }
@@ -464,11 +689,9 @@ impl Daemon {
                         fut_tick = Box::pin(tokio::time::sleep(fut_tick_dur));
                     }
                     r2 = &mut qrx_fut, if qrx_fut.is_enabled() => {
-                        //info!("finder fut2");
                         qrx_fut = OptFut::empty();
                         match r2 {
                             Ok(item) => {
-                                //info!("Push to finder: {item:?}");
                                 finder.push(item);
                             }
                             Err(e) => {
@@ -477,7 +700,6 @@ impl Daemon {
                                 qrx_more = false;
                             }
                         }
-                        //info!("finder.job_queue_len()  {}", finder.job_queue_len());
                         if qrx_more && finder.job_queue_len() < FINDER_JOB_QUEUE_LEN_MAX {
                             qrx_fut = OptFut::new(qrx.recv());
                         }
@@ -489,7 +711,6 @@ impl Daemon {
                         fut_tick = Box::pin(tokio::time::sleep(fut_tick_dur));
                     }
                     _ = &mut fut_tick => {
-                        //info!("finder fut_tick finder.job_queue_len()  {}", finder.job_queue_len());
                         if qrx_more && finder.job_queue_len() < FINDER_JOB_QUEUE_LEN_MAX {
                             qrx_fut = OptFut::new(qrx.recv());
                         }
@@ -511,7 +732,6 @@ impl Daemon {
         taskrun::spawn({
             async move {
                 while let Ok(item) = arx.recv().await {
-                    //info!("forward search result item");
                     match tx.send(DaemonEvent::SearchDone(item)).await {
                         Ok(_) => {}
                         Err(e) => {
@@ -526,9 +746,15 @@ impl Daemon {
     }
 
     async fn check_chans(&mut self) -> Result<(), Error> {
-        let tsnow = SystemTime::now();
-        let k = self.chan_check_next.take();
-        trace!("------------   check_chans  start at {:?}", k);
+        {
+            let tsnow = Instant::now();
+            for (k, v) in &self.connection_states {
+                // TODO check for delta t since last issued status command.
+                if tsnow.duration_since(v.last_feedback) > Duration::from_millis(20000) {
+                    error!("CaConn without status feedback {k:?}");
+                }
+            }
+        }
         let mut currently_search_pending = 0;
         {
             for (_ch, st) in &self.channel_states {
@@ -537,40 +763,40 @@ impl Daemon {
                 }
             }
         }
+        let k = self.chan_check_next.take();
+        trace!("------------   check_chans  start at {:?}", k);
         let it = if let Some(last) = k {
             self.channel_states.range_mut(last..)
         } else {
             self.channel_states.range_mut(..)
         };
+        let tsnow = SystemTime::now();
         for (i, (ch, st)) in it.enumerate() {
             use ActiveChannelState::*;
             use ChannelStateValue::*;
             match &mut st.value {
                 Active(st2) => match st2 {
-                    UnknownAddress => {
-                        //info!("UnknownAddress {} {:?}", i, ch);
-                        if currently_search_pending < CURRENT_SEARCH_PENDING_MAX {
-                            currently_search_pending += 1;
-                            if st.pending_op.is_none() {
-                                st.pending_op = Some(ChanOp::Finder(ch.id().to_string(), tsnow));
-                                st.value = Active(SearchPending { since: tsnow });
+                    UnknownAddress { since } => {
+                        let dt = tsnow.duration_since(*since).unwrap_or(Duration::ZERO);
+                        if dt > UNKNOWN_ADDRESS_STAY {
+                            //info!("UnknownAddress {} {:?}", i, ch);
+                            if currently_search_pending < CURRENT_SEARCH_PENDING_MAX {
+                                currently_search_pending += 1;
+                                st.value = Active(SearchPending {
+                                    since: tsnow,
+                                    did_send: false,
+                                });
+                                SEARCH_REQ_MARK_COUNT.fetch_add(1, atomic::Ordering::AcqRel);
                             }
                         }
                     }
-                    SearchPending { since } => {
+                    SearchPending { since, did_send: _ } => {
                         //info!("SearchPending {} {:?}", i, ch);
-                        // TODO handle Err
-                        match tsnow.duration_since(*since) {
-                            Ok(dt) => {
-                                if dt >= Duration::from_millis(SEARCH_PENDING_TIMEOUT as u64) {
-                                    debug!("Search timeout for {ch:?}");
-                                    st.value = Active(ActiveChannelState::NoAddress);
-                                    currently_search_pending -= 1;
-                                }
-                            }
-                            Err(e) => {
-                                error!("SearchPending {e}");
-                            }
+                        let dt = tsnow.duration_since(*since).unwrap_or(Duration::ZERO);
+                        if dt > SEARCH_PENDING_TIMEOUT {
+                            info!("Search timeout for {ch:?}");
+                            st.value = Active(ActiveChannelState::NoAddress { since: tsnow });
+                            currently_search_pending -= 1;
                         }
                     }
                     WithAddress { addr, state } => {
@@ -578,55 +804,30 @@ impl Daemon {
                         use WithAddressState::*;
                         match state {
                             Unassigned { assign_at } => {
-                                if *assign_at <= tsnow {
-                                    if st.pending_op.is_none() {
-                                        if self.ingest_commons.ca_conn_set.has_addr(&SocketAddr::V4(*addr)).await {
-                                        } else {
-                                            debug!("====================   create CaConn for {ch:?}");
-                                            let backend = self.opts.backend().into();
-                                            let local_epics_hostname = self.opts.local_epics_hostname.clone();
-                                            let array_truncate = self.opts.array_truncate;
-                                            let insert_item_queue_sender = self.common_insert_item_queue.sender().await;
-                                            let insert_queue_max = 256;
-                                            let data_store = self.datastore.clone();
-                                            let with_channels = Vec::new();
-                                            // TODO want to atomically use or create a connection.
-                                            // TODO creating a connection may block too long, because it establishes TCP first.
-                                            self.ingest_commons
-                                                .ca_conn_set
-                                                .create_ca_conn(
-                                                    backend,
-                                                    *addr,
-                                                    local_epics_hostname,
-                                                    array_truncate,
-                                                    insert_queue_max,
-                                                    insert_item_queue_sender,
-                                                    data_store,
-                                                    with_channels,
-                                                )
-                                                .await?;
-                                        }
-                                        {
-                                            let backend = self.opts.backend().into();
-                                            let channel_name = ch.id().into();
-                                            let ingest_commons = self.ingest_commons.clone();
-                                            // This operation is meant to complete very quickly
-                                            self.ingest_commons
-                                                .ca_conn_set
-                                                .add_channel_to_addr(
-                                                    backend,
-                                                    SocketAddr::V4(*addr),
-                                                    channel_name,
-                                                    ingest_commons,
-                                                )
-                                                .await?;
-                                            let cs = ConnectionState {
-                                                updated: tsnow,
-                                                value: ConnectionStateValue::Unconnected,
-                                            };
-                                            *state = WithAddressState::Assigned(cs)
-                                        }
-                                    }
+                                if DO_ASSIGN_TO_CA_CONN && *assign_at <= tsnow {
+                                    let backend = self.opts.backend().into();
+                                    let channel_name = ch.id().into();
+                                    // This operation is meant to complete very quickly
+                                    self.ingest_commons
+                                        .ca_conn_set
+                                        .add_channel_to_addr(
+                                            backend,
+                                            *addr,
+                                            channel_name,
+                                            &self.common_insert_item_queue,
+                                            &self.datastore,
+                                            CA_CONN_INSERT_QUEUE_MAX,
+                                            self.opts.array_truncate,
+                                            self.opts.local_epics_hostname.clone(),
+                                        )
+                                        .slow_warn(2000)
+                                        .instrument(info_span!("add_channel_to_addr"))
+                                        .await?;
+                                    let cs = ConnectionState {
+                                        updated: tsnow,
+                                        value: ConnectionStateValue::Unconnected,
+                                    };
+                                    *state = WithAddressState::Assigned(cs);
                                 }
                             }
                             Assigned(_) => {
@@ -634,9 +835,11 @@ impl Daemon {
                             }
                         }
                     }
-                    NoAddress => {
-                        // TODO try to find address again after some randomized timeout
-                        //info!("NoAddress {} {:?}", i, ch);
+                    NoAddress { since } => {
+                        let dt = tsnow.duration_since(*since).unwrap_or(Duration::ZERO);
+                        if dt > NO_ADDRESS_STAY {
+                            st.value = Active(ActiveChannelState::UnknownAddress { since: tsnow });
+                        }
                     }
                 },
                 ToRemove { .. } => {
@@ -649,69 +852,43 @@ impl Daemon {
             }
         }
         for (ch, st) in &mut self.channel_states {
-            match &mut st.pending_op {
-                Some(op) => match op {
-                    ChanOp::Finder(s, start) => {
-                        if *start + Duration::from_millis(10000) >= tsnow {
-                            match self.search_tx.try_send(s.clone()) {
-                                Ok(_) => {
-                                    *start = tsnow;
-                                    st.pending_op = None;
-                                }
-                                Err(e) => match e {
-                                    async_channel::TrySendError::Full(_) => {
-                                        //warn!("Finder channel full");
-                                        *start = tsnow;
-                                    }
-                                    async_channel::TrySendError::Closed(_) => {
-                                        error!("Finder channel closed");
-                                    }
-                                },
-                            }
-                        } else {
-                            st.pending_op = None;
-                            warn!("ChanOp::Finder send timeout for {ch:?}");
-                            *st = ChannelState {
-                                value: ChannelStateValue::Active(ActiveChannelState::UnknownAddress),
-                                pending_op: None,
-                            };
+            if let ChannelStateValue::Active(ActiveChannelState::SearchPending { since: _, did_send }) = &mut st.value {
+                if *did_send == false {
+                    match self.search_tx.try_send(ch.id().into()) {
+                        Ok(()) => {
+                            *did_send = true;
+                            SEARCH_REQ_SEND_COUNT.fetch_add(1, atomic::Ordering::AcqRel);
                         }
-                    }
-                    ChanOp::ConnCmd(fut) => {
-                        use std::task::Poll::*;
-                        match futures_util::poll!(fut) {
-                            Ready(res) => {
-                                st.pending_op = None;
-                                match res {
-                                    Ok(_) => {
-                                        debug!("ChanOp::ConnCmd completed fine");
-                                    }
-                                    Err(e) => {
-                                        error!("ChanOp::ConnCmd {e}");
-                                    }
-                                }
+                        Err(e) => match e {
+                            async_channel::TrySendError::Full(_) => {}
+                            async_channel::TrySendError::Closed(_) => {
+                                error!("Finder channel closed");
+                                // TODO recover from this.
+                                panic!();
                             }
-                            Pending => {}
-                        }
+                        },
                     }
-                },
-                None => {}
+                }
             }
         }
         {
             self.count_unknown_address = 0;
             self.count_search_pending = 0;
+            self.count_search_sent = 0;
             self.count_no_address = 0;
             self.count_unassigned = 0;
             self.count_assigned = 0;
             for (_ch, st) in &self.channel_states {
                 match &st.value {
                     ChannelStateValue::Active(st) => match st {
-                        ActiveChannelState::UnknownAddress => {
+                        ActiveChannelState::UnknownAddress { .. } => {
                             self.count_unknown_address += 1;
                         }
-                        ActiveChannelState::SearchPending { .. } => {
+                        ActiveChannelState::SearchPending { did_send, .. } => {
                             self.count_search_pending += 1;
+                            if *did_send {
+                                self.count_search_sent += 1;
+                            }
                         }
                         ActiveChannelState::WithAddress { state, .. } => match state {
                             WithAddressState::Unassigned { .. } => {
@@ -721,7 +898,7 @@ impl Daemon {
                                 self.count_assigned += 1;
                             }
                         },
-                        ActiveChannelState::NoAddress => {
+                        ActiveChannelState::NoAddress { .. } => {
                             self.count_no_address += 1;
                         }
                     },
@@ -733,38 +910,66 @@ impl Daemon {
     }
 
     async fn check_caconn_chans(&mut self) -> Result<(), Error> {
-        if self.caconn_last_channel_check.elapsed() > Duration::from_millis(5000) {
+        if self.caconn_last_channel_check.elapsed() > CHANNEL_CHECK_INTERVAL {
             info!("Issue channel check to all CaConn");
-            let res = self
-                .ingest_commons
+            self.ingest_commons
                 .ca_conn_set
-                .send_command_to_all(|| ConnCommand::check_channels_alive())
+                .enqueue_command_to_all(|| ConnCommand::check_health())
                 .await?;
-            for x in res {
-                if !x {
-                    warn!("bad check_channels_alive result");
-                }
-            }
             self.caconn_last_channel_check = Instant::now();
         }
         Ok(())
     }
 
     async fn handle_timer_tick(&mut self) -> Result<(), Error> {
+        let ts1 = Instant::now();
         let tsnow = SystemTime::now();
+        if SIGINT.load(atomic::Ordering::Acquire) == 1 {
+            warn!("Received SIGINT");
+            SIGINT.store(2, atomic::Ordering::Release);
+        }
+        if SIGTERM.load(atomic::Ordering::Acquire) == 1 {
+            warn!("Received SIGTERM");
+            SIGTERM.store(2, atomic::Ordering::Release);
+        }
         self.check_chans().await?;
+        let dt = ts1.elapsed();
+        if dt > Duration::from_millis(500) {
+            info!("slow check_chans  {}ms", dt.as_secs_f32() * 1e3);
+        }
+        let ts1 = Instant::now();
         self.check_caconn_chans().await?;
+        let dt = ts1.elapsed();
+        if dt > Duration::from_millis(500) {
+            info!("slow check_chans  {}ms", dt.as_secs_f32() * 1e3);
+        }
         if tsnow.duration_since(self.last_status_print).unwrap_or(Duration::ZERO) >= Duration::from_millis(1000) {
             self.last_status_print = tsnow;
             info!(
-                "{:8} {:8} {:8} : {:8} {:8} : {:10}",
+                "{:8}  {:8} {:8} : {:8} : {:8} {:8} : {:10}",
                 self.count_unknown_address,
                 self.count_search_pending,
+                self.count_search_sent,
                 self.count_no_address,
                 self.count_unassigned,
                 self.count_assigned,
                 self.insert_queue_counter.load(atomic::Ordering::Acquire),
             );
+            if false {
+                info!(
+                    "{:5} {:5} {:5} {:5} {:5} {:5} {:5} {:5} {:5} {:5}",
+                    SEARCH_REQ_MARK_COUNT.load(atomic::Ordering::Acquire),
+                    SEARCH_REQ_SEND_COUNT.load(atomic::Ordering::Acquire),
+                    SEARCH_REQ_RECV_COUNT.load(atomic::Ordering::Acquire),
+                    SEARCH_REQ_BATCH_SEND_COUNT.load(atomic::Ordering::Acquire),
+                    SEARCH_REQ_BATCH_RECV_COUNT.load(atomic::Ordering::Acquire),
+                    SEARCH_RES_0_COUNT.load(atomic::Ordering::Acquire),
+                    SEARCH_RES_1_COUNT.load(atomic::Ordering::Acquire),
+                    SEARCH_RES_2_COUNT.load(atomic::Ordering::Acquire),
+                    SEARCH_RES_3_COUNT.load(atomic::Ordering::Acquire),
+                    SEARCH_ANS_COUNT.load(atomic::Ordering::Acquire),
+                );
+            }
         }
         Ok(())
     }
@@ -772,8 +977,9 @@ impl Daemon {
     fn handle_channel_add(&mut self, ch: Channel) -> Result<(), Error> {
         if !self.channel_states.contains_key(&ch) {
             let st = ChannelState {
-                value: ChannelStateValue::Active(ActiveChannelState::UnknownAddress),
-                pending_op: None,
+                value: ChannelStateValue::Active(ActiveChannelState::UnknownAddress {
+                    since: SystemTime::now(),
+                }),
             };
             self.channel_states.insert(ch, st);
         }
@@ -784,7 +990,7 @@ impl Daemon {
         if let Some(k) = self.channel_states.get_mut(&ch) {
             match &k.value {
                 ChannelStateValue::Active(j) => match j {
-                    ActiveChannelState::UnknownAddress => {
+                    ActiveChannelState::UnknownAddress { .. } => {
                         k.value = ChannelStateValue::ToRemove { addr: None };
                     }
                     ActiveChannelState::SearchPending { .. } => {
@@ -795,7 +1001,7 @@ impl Daemon {
                             addr: Some(addr.clone()),
                         };
                     }
-                    ActiveChannelState::NoAddress => {
+                    ActiveChannelState::NoAddress { .. } => {
                         k.value = ChannelStateValue::ToRemove { addr: None };
                     }
                 },
@@ -807,16 +1013,19 @@ impl Daemon {
 
     async fn handle_search_done(&mut self, item: Result<VecDeque<FindIocRes>, Error>) -> Result<(), Error> {
         //debug!("handle SearchDone: {res:?}");
+        let tsnow = SystemTime::now();
         match item {
-            Ok(a) => {
-                for res in a {
+            Ok(ress) => {
+                SEARCH_ANS_COUNT.fetch_add(ress.len(), atomic::Ordering::AcqRel);
+                for res in ress {
                     if let Some(addr) = &res.addr {
-                        let addr = addr.clone();
                         let ch = Channel::new(res.channel);
                         if let Some(st) = self.channel_states.get_mut(&ch) {
-                            if let ChannelStateValue::Active(ActiveChannelState::SearchPending { since }) = &st.value {
-                                let dt = SystemTime::now().duration_since(*since).unwrap();
-                                if dt > Duration::from_millis(TIMEOUT_WARN as u64) {
+                            if let ChannelStateValue::Active(ActiveChannelState::SearchPending { since, did_send: _ }) =
+                                &st.value
+                            {
+                                let dt = tsnow.duration_since(*since).unwrap();
+                                if dt > SEARCH_PENDING_TIMEOUT_WARN {
                                     warn!(
                                         "    FOUND {:5.0}  {:5.0}  {addr}",
                                         1e3 * dt.as_secs_f32(),
@@ -824,21 +1033,10 @@ impl Daemon {
                                     );
                                 }
                                 let stnew = ChannelStateValue::Active(ActiveChannelState::WithAddress {
-                                    addr,
-                                    state: WithAddressState::Unassigned {
-                                        assign_at: SystemTime::now(),
-                                    },
+                                    addr: addr.clone(),
+                                    state: WithAddressState::Unassigned { assign_at: tsnow },
                                 });
                                 st.value = stnew;
-                                if let (Some(response_addr),) = (res.response_addr,) {
-                                    let job = AddrInsertJob {
-                                        backend: self.opts.backend().into(),
-                                        channel: ch.clone(),
-                                        response_addr: response_addr,
-                                        addr: addr,
-                                    };
-                                    self.ioc_addr_inserter_tx.send(job).await?;
-                                }
                             } else {
                                 warn!(
                                     "address found, but state for {ch:?} is not SearchPending: {:?}",
@@ -852,16 +1050,18 @@ impl Daemon {
                         //debug!("no addr from search in {res:?}");
                         let ch = Channel::new(res.channel);
                         if let Some(st) = self.channel_states.get_mut(&ch) {
-                            if let ChannelStateValue::Active(ActiveChannelState::SearchPending { since }) = &st.value {
-                                let dt = SystemTime::now().duration_since(*since).unwrap();
-                                if dt > Duration::from_millis(TIMEOUT_WARN as u64) {
+                            if let ChannelStateValue::Active(ActiveChannelState::SearchPending { since, did_send: _ }) =
+                                &st.value
+                            {
+                                let dt = tsnow.duration_since(*since).unwrap();
+                                if dt > SEARCH_PENDING_TIMEOUT_WARN {
                                     warn!(
                                         "NOT FOUND {:5.0}  {:5.0}",
                                         1e3 * dt.as_secs_f32(),
                                         1e3 * res.dt.as_secs_f32()
                                     );
                                 }
-                                st.value = ChannelStateValue::Active(ActiveChannelState::NoAddress);
+                                st.value = ChannelStateValue::Active(ActiveChannelState::NoAddress { since: tsnow });
                             } else {
                                 warn!("no address, but state for {ch:?} is not SearchPending: {:?}", st.value);
                             }
@@ -878,14 +1078,52 @@ impl Daemon {
         Ok(())
     }
 
-    async fn handle_event(&mut self, item: DaemonEvent) -> Result<(), Error> {
+    async fn handle_ca_conn_done(&mut self, conn_addr: SocketAddrV4) -> Result<(), Error> {
+        info!("handle_ca_conn_done {conn_addr:?}");
+        self.connection_states.remove(&conn_addr);
+        for (k, v) in self.channel_states.iter_mut() {
+            match &v.value {
+                ChannelStateValue::Active(st2) => match st2 {
+                    ActiveChannelState::UnknownAddress { .. } => {}
+                    ActiveChannelState::SearchPending { since: _, did_send: _ } => {}
+                    ActiveChannelState::WithAddress { addr, state: _ } => {
+                        if addr == &conn_addr {
+                            info!("ca conn down, reset {k:?}");
+                            *v = ChannelState {
+                                value: ChannelStateValue::Active(ActiveChannelState::UnknownAddress {
+                                    since: SystemTime::now(),
+                                }),
+                            };
+                        }
+                    }
+                    ActiveChannelState::NoAddress { .. } => {}
+                },
+                ChannelStateValue::ToRemove { addr: _ } => {}
+            }
+        }
+        Ok(())
+    }
+
+    async fn handle_event(&mut self, item: DaemonEvent, ticker_inp_tx: &Sender<u32>) -> Result<(), Error> {
         use DaemonEvent::*;
-        match item {
-            TimerTick => self.handle_timer_tick().await,
+        let ts1 = Instant::now();
+        let item_summary = item.summary();
+        let ret = match item {
+            TimerTick => {
+                let ret = self.handle_timer_tick().await;
+                match ticker_inp_tx.send(42).await {
+                    Ok(_) => {}
+                    Err(_) => {
+                        error!("can not send ticker token");
+                        return Err(Error::with_msg_no_trace("can not send ticker token"));
+                    }
+                }
+                ret
+            }
             ChannelAdd(ch) => self.handle_channel_add(ch),
             ChannelRemove(ch) => self.handle_channel_remove(ch),
             SearchDone(item) => self.handle_search_done(item).await,
-            CaConnEvent(item) => {
+            CaConnEvent(addr, item) => {
                 use netfetch::ca::conn::CaConnEventValue::*;
                 match item.value {
                     None => {
@@ -896,22 +1134,48 @@ impl Daemon {
                         error!("TODO on EchoTimeout remove the CaConn and reset channels");
                         Ok(())
                     }
+                    HealthCheckDone => {
+                        if let Some(st) = self.connection_states.get_mut(&addr) {
+                            st.last_feedback = Instant::now();
+                            Ok(())
+                        } else {
+                            error!("received HealthCheckDone for unknown CaConn");
+                            // TODO
+                            Ok(())
+                        }
+                    }
+                    ConnCommandResult(item) => {
+                        info!("TODO handle ConnCommandResult {item:?}");
+                        Ok(())
+                    }
+                    EndOfStream => self.handle_ca_conn_done(addr).await,
                 }
             }
+        };
+        let dt = ts1.elapsed();
+        if dt > Duration::from_millis(200) {
+            warn!("handle_event  slow  {}ms  {}", dt.as_secs_f32() * 1e3, item_summary);
         }
+        ret
     }
 
     pub async fn daemon(&mut self) -> Result<(), Error> {
+        let (ticker_inp_tx, ticker_inp_rx) = async_channel::bounded::<u32>(1);
         let ticker = {
             let tx = self.tx.clone();
             async move {
-                let mut ticker = tokio::time::interval(Duration::from_millis(100));
-                ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                 loop {
-                    ticker.tick().await;
+                    tokio::time::sleep(Duration::from_millis(100)).await;
                     if let Err(e) = tx.send(DaemonEvent::TimerTick).await {
                         error!("can not send TimerTick {e}");
                         break;
+                    }
+                    let c = ticker_inp_rx.len().max(1);
+                    for _ in 0..c {
+                        match ticker_inp_rx.recv().await {
+                            Ok(_) => {}
+                            Err(_) => break,
+                        }
                     }
                 }
             }
@@ -919,7 +1183,7 @@ impl Daemon {
         taskrun::spawn(ticker);
         loop {
             match self.rx.recv().await {
-                Ok(item) => match self.handle_event(item).await {
+                Ok(item) => match self.handle_event(item, &ticker_inp_tx).await {
                     Ok(_) => {}
                     Err(e) => {
                         error!("daemon: {e}");
@@ -936,19 +1200,28 @@ impl Daemon {
         let _ = &self.ioc_finder_jh;
         warn!("TODO wait for insert workers");
         let _ = &self.insert_workers_jh;
-        let _ = &self.ioc_addr_inserter_jh;
+        info!("daemon done");
         Ok(())
     }
 }
 
+static SIGINT: AtomicUsize = AtomicUsize::new(0);
+static SIGTERM: AtomicUsize = AtomicUsize::new(0);
+
+fn handler_sigint(_a: libc::c_int, _b: *const libc::siginfo_t, _c: *const libc::c_void) {
+    SIGINT.store(1, atomic::Ordering::Release);
+    let _ = netfetch::linuxhelper::unset_signal_handler(libc::SIGINT);
+}
+
+fn handler_sigterm(_a: libc::c_int, _b: *const libc::siginfo_t, _c: *const libc::c_void) {
+    SIGTERM.store(1, atomic::Ordering::Release);
+    let _ = netfetch::linuxhelper::unset_signal_handler(libc::SIGTERM);
+}
+
 pub async fn run(opts: CaIngestOpts, channels: Vec<String>) -> Result<(), Error> {
     info!("start up {opts:?}");
-    let mut search_tgts = Vec::new();
-    for s in opts.search() {
-        let addr: SocketAddrV4 = s.parse()?;
-        search_tgts.push(addr);
-    }
-    info!("parsed search_tgts {search_tgts:?}");
+    netfetch::linuxhelper::set_signal_handler(libc::SIGINT, handler_sigint)?;
+    netfetch::linuxhelper::set_signal_handler(libc::SIGTERM, handler_sigterm)?;
     let opts2 = DaemonOpts {
         backend: opts.backend().into(),
         local_epics_hostname: opts.local_epics_hostname().into(),
@@ -956,7 +1229,6 @@ pub async fn run(opts: CaIngestOpts, channels: Vec<String>) -> Result<(), Error>
         insert_item_queue_cap: opts.insert_item_queue_cap(),
         pgconf: opts.postgresql().clone(),
         scyconf: opts.scylla().clone(),
-        search_tgts,
         ttls: Ttls {
             index: opts.ttl_index(),
             d0: opts.ttl_d0(),

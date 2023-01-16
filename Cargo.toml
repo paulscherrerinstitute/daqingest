@@ -2,13 +2,13 @@
 members = ["log", "netfetch", "daqingest"]
 
 [profile.release]
-opt-level = 3
-debug = 0
+opt-level = 2
+debug = 1
 overflow-checks = false
 debug-assertions = false
 lto = "thin"
-#codegen-units = 32
-incremental = false
+codegen-units = 64
+incremental = true
 
 [patch.crates-io]
 #tokio = { git = "https://github.com/dominikwerder/tokio", rev = "995221d8" }

@@ -1,52 +1,38 @@
-use super::conn::{CaConnEvent, ConnCommand};
+use super::conn::CaConnEvent;
+use super::conn::ChannelSetOp;
+use super::conn::ChannelSetOps;
+use super::conn::ConnCommand;
 use super::store::DataStore;
-use super::IngestCommons;
+use super::SlowWarnable;
 use crate::ca::conn::CaConn;
+use crate::ca::conn::CaConnEventValue;
 use crate::errconv::ErrConv;
-use crate::rt::{JoinHandle, TokMx};
+use crate::rt::JoinHandle;
+use crate::rt::TokMx;
+use crate::store::CommonInsertItemQueue;
 use crate::store::CommonInsertItemQueueSender;
-use async_channel::{Receiver, Sender};
+use async_channel::Receiver;
+use async_channel::Sender;
 use err::Error;
-use futures_util::{FutureExt, StreamExt};
+use futures_util::FutureExt;
+use futures_util::StreamExt;
 use netpod::log::*;
 use stats::CaConnStats;
-use std::collections::{BTreeMap, VecDeque};
-use std::net::{SocketAddr, SocketAddrV4};
+use std::collections::BTreeMap;
+use std::collections::VecDeque;
+use std::net::SocketAddrV4;
 use std::sync::Arc;
 use std::time::Duration;
+use std::time::Instant;
+use tracing::info_span;
+use tracing::Instrument;
 
-pub struct CommandQueueSet {
-    queues: TokMx<BTreeMap<SocketAddrV4, Sender<ConnCommand>>>,
-}
-
-impl CommandQueueSet {
-    pub fn new() -> Self {
-        Self {
-            queues: TokMx::new(BTreeMap::<SocketAddrV4, Sender<ConnCommand>>::new()),
-        }
-    }
-
-    pub async fn queues(&self) -> &TokMx<BTreeMap<SocketAddrV4, Sender<ConnCommand>>> {
-        &self.queues
-    }
-
-    pub async fn queues_locked(&self) -> tokio::sync::MutexGuard<BTreeMap<SocketAddrV4, Sender<ConnCommand>>> {
-        let mut g = self.queues.lock().await;
-        let mut rm = Vec::new();
-        for (k, v) in g.iter() {
-            if v.is_closed() {
-                rm.push(*k);
-            }
-        }
-        for x in rm {
-            g.remove(&x);
-        }
-        g
-    }
-}
+#[derive(Debug, PartialEq, Eq)]
+pub struct CmdId(SocketAddrV4, usize);
 
 pub struct CaConnRess {
     sender: Sender<ConnCommand>,
+    channel_set_ops: Arc<ChannelSetOps>,
     stats: Arc<CaConnStats>,
     jh: JoinHandle<Result<(), Error>>,
 }
@@ -66,30 +52,30 @@ impl CaConnRess {
 // to add it to the correct list.
 // There, make spawning part of this function?
 pub struct CaConnSet {
-    ca_conn_ress: TokMx<BTreeMap<SocketAddr, CaConnRess>>,
-    conn_item_tx: Sender<CaConnEvent>,
-    conn_item_rx: Receiver<CaConnEvent>,
+    ca_conn_ress: Arc<TokMx<BTreeMap<SocketAddrV4, CaConnRess>>>,
+    conn_item_tx: Sender<(SocketAddrV4, CaConnEvent)>,
+    conn_item_rx: Receiver<(SocketAddrV4, CaConnEvent)>,
 }
 
 impl CaConnSet {
     pub fn new() -> Self {
         let (conn_item_tx, conn_item_rx) = async_channel::bounded(10000);
         Self {
-            ca_conn_ress: Default::default(),
+            ca_conn_ress: Arc::new(TokMx::new(BTreeMap::new())),
             conn_item_tx,
             conn_item_rx,
         }
     }
 
-    pub fn conn_item_rx(&self) -> Receiver<CaConnEvent> {
+    pub fn conn_item_rx(&self) -> Receiver<(SocketAddrV4, CaConnEvent)> {
         self.conn_item_rx.clone()
     }
 
-    pub fn ca_conn_ress(&self) -> &TokMx<BTreeMap<SocketAddr, CaConnRess>> {
+    pub fn ca_conn_ress(&self) -> &TokMx<BTreeMap<SocketAddrV4, CaConnRess>> {
         &self.ca_conn_ress
     }
 
-    pub async fn create_ca_conn(
+    pub fn create_ca_conn_2(
         &self,
         backend: String,
         addr: SocketAddrV4,
@@ -99,9 +85,9 @@ impl CaConnSet {
         insert_item_queue_sender: CommonInsertItemQueueSender,
         data_store: Arc<DataStore>,
         with_channels: Vec<String>,
-    ) -> Result<(), Error> {
-        info!("create new CaConn  {:?}", addr);
-        let addr2 = SocketAddr::V4(addr.clone());
+    ) -> Result<CaConnRess, Error> {
+        // TODO should we save this as event?
+        trace!("create new CaConn  {:?}", addr);
         let mut conn = CaConn::new(
             backend.clone(),
             addr,
@@ -117,7 +103,9 @@ impl CaConnSet {
         let conn = conn;
         let conn_tx = conn.conn_command_tx();
         let conn_stats = conn.stats();
+        let channel_set_ops = conn.get_channel_set_ops_map();
         let conn_item_tx = self.conn_item_tx.clone();
+        let ca_conn_ress = self.ca_conn_ress.clone();
         let conn_fut = async move {
             let stats = conn.stats();
             let mut conn = conn;
@@ -125,7 +113,7 @@ impl CaConnSet {
                 match item {
                     Ok(item) => {
                         stats.conn_item_count_inc();
-                        conn_item_tx.send(item).await?;
+                        conn_item_tx.send((addr, item)).await?;
                     }
                     Err(e) => {
                         error!("CaConn gives error: {e:?}");
@@ -133,45 +121,54 @@ impl CaConnSet {
                     }
                 }
             }
+            Self::conn_remove(&ca_conn_ress, addr).await?;
+            conn_item_tx
+                .send((
+                    addr,
+                    CaConnEvent {
+                        ts: Instant::now(),
+                        value: CaConnEventValue::EndOfStream,
+                    },
+                ))
+                .await?;
             Ok(())
         };
         let jh = tokio::spawn(conn_fut);
         let ca_conn_ress = CaConnRess {
             sender: conn_tx,
+            channel_set_ops,
             stats: conn_stats,
             jh,
         };
-        self.ca_conn_ress.lock().await.insert(addr2, ca_conn_ress);
-        Ok(())
+        Ok(ca_conn_ress)
     }
 
-    pub async fn send_command_to_all<F, R>(&self, cmdgen: F) -> Result<Vec<R>, Error>
+    pub async fn enqueue_command_to_all<F>(&self, cmdgen: F) -> Result<Vec<CmdId>, Error>
     where
-        F: Fn() -> (ConnCommand, async_channel::Receiver<R>),
+        F: Fn() -> ConnCommand,
     {
-        //let it = self.ca_conn_ress.iter().map(|x| x);
-        //Self::send_command_inner(it, move || cmd.clone());
-        let mut rxs = Vec::new();
-        for (_addr, ress) in &*self.ca_conn_ress.lock().await {
-            let (cmd, rx) = cmdgen();
-            match ress.sender.send(cmd).await {
+        let mut senders = Vec::new();
+        for (addr, ress) in &*self.ca_conn_ress.lock().await {
+            senders.push((*addr, ress.sender.clone()));
+        }
+        let mut cmdids = Vec::new();
+        for (addr, sender) in senders {
+            let cmd = cmdgen();
+            let cmdid = cmd.id();
+            match sender.send(cmd).await {
                 Ok(()) => {
-                    rxs.push(rx);
+                    cmdids.push(CmdId(addr, cmdid));
                 }
                 Err(e) => {
                     error!("can not send command {e:?}");
                 }
             }
         }
-        let mut res = Vec::new();
-        for rx in rxs {
-            let x = rx.recv().await?;
-            res.push(x);
-        }
-        Ok(res)
+        Ok(cmdids)
     }
 
-    pub async fn send_command_to_addr<F, R>(&self, addr: &SocketAddr, cmdgen: F) -> Result<R, Error>
+    #[allow(unused)]
+    async fn send_command_to_addr_disabled<F, R>(&self, addr: &SocketAddrV4, cmdgen: F) -> Result<R, Error>
     where
         F: Fn() -> (ConnCommand, async_channel::Receiver<R>),
     {
@@ -186,7 +183,7 @@ impl CaConnSet {
     }
 
     #[allow(unused)]
-    async fn send_command_inner<'a, IT, F, R>(it: &mut IT, cmdgen: F) -> Vec<async_channel::Receiver<R>>
+    async fn send_command_inner_disabled<'a, IT, F, R>(it: &mut IT, cmdgen: F) -> Vec<async_channel::Receiver<R>>
     where
         IT: Iterator<Item = (&'a SocketAddrV4, &'a async_channel::Sender<ConnCommand>)>,
         F: Fn() -> (ConnCommand, async_channel::Receiver<R>),
@@ -206,12 +203,8 @@ impl CaConnSet {
         rxs
     }
 
-    pub async fn send_stop(&self) -> Result<(), Error> {
-        self.send_command_to_all(|| ConnCommand::shutdown()).await?;
-        Ok(())
-    }
-
     pub async fn wait_stopped(&self) -> Result<(), Error> {
+        warn!("Lock for wait_stopped");
         let mut g = self.ca_conn_ress.lock().await;
         let mm = std::mem::replace(&mut *g, BTreeMap::new());
         let mut jhs: VecDeque<_> = VecDeque::new();
@@ -249,61 +242,68 @@ impl CaConnSet {
     pub async fn add_channel_to_addr(
         &self,
         backend: String,
-        addr: SocketAddr,
-        channel_name: String,
-        ingest_commons: Arc<IngestCommons>,
+        addr: SocketAddrV4,
+        name: String,
+        insert_item_queue: &CommonInsertItemQueue,
+        data_store: &Arc<DataStore>,
+        insert_queue_max: usize,
+        array_truncate: usize,
+        local_epics_hostname: String,
     ) -> Result<(), Error> {
-        let g = self.ca_conn_ress.lock().await;
+        let mut g = self
+            .ca_conn_ress
+            .lock()
+            .slow_warn(500)
+            .instrument(info_span!("conn_ress.lock"))
+            .await;
+        if !g.contains_key(&addr) {
+            let ca_conn_ress = self.create_ca_conn_2(
+                backend.clone(),
+                addr,
+                local_epics_hostname,
+                array_truncate,
+                insert_queue_max,
+                insert_item_queue.sender(),
+                data_store.clone(),
+                Vec::new(),
+            )?;
+            g.insert(addr, ca_conn_ress);
+        }
         match g.get(&addr) {
             Some(ca_conn) => {
-                //info!("try to add to existing... {addr} {channel_name}");
-                let (cmd, rx) = ConnCommand::channel_add(channel_name);
-                ca_conn.sender.send(cmd).await.err_conv()?;
-                let a = rx.recv().await.err_conv()?;
-                if a {
+                if true {
+                    let op = super::conn::ChannelSetOp::Add;
+                    ca_conn.channel_set_ops.insert(name, op);
                     Ok(())
                 } else {
-                    Err(Error::with_msg_no_trace(format!("channel add failed")))
+                    let cmd = ConnCommand::channel_add(name);
+                    let _cmdid = CmdId(addr, cmd.id());
+                    ca_conn
+                        .sender
+                        .send(cmd)
+                        .slow_warn(500)
+                        .instrument(info_span!("ca_conn.send"))
+                        .await
+                        .err_conv()?;
+                    Ok(())
                 }
             }
             None => {
-                //info!("create new {addr} {channel_name}");
-                drop(g);
-                let addr = if let SocketAddr::V4(x) = addr {
-                    x
-                } else {
-                    return Err(Error::with_msg_no_trace(format!("only ipv4 supported for IOC")));
-                };
-                // TODO use parameters:
-                self.create_ca_conn(
-                    backend.clone(),
-                    addr,
-                    ingest_commons.local_epics_hostname.clone(),
-                    512,
-                    200,
-                    ingest_commons.insert_item_queue.sender().await,
-                    ingest_commons.data_store.clone(),
-                    vec![channel_name],
-                )
-                .await?;
-                Ok(())
+                error!("expected to find matching CaConn");
+                Err(Error::with_msg_no_trace("CaConn not found"))
             }
         }
     }
 
-    pub async fn has_addr(&self, addr: &SocketAddr) -> bool {
-        // TODO only used to check on add-channel whether we want to add channel to conn, or create new conn.
-        // TODO must do that atomic.
-        self.ca_conn_ress.lock().await.contains_key(addr)
-    }
-
-    pub async fn addr_nth_mod(&self, n: usize) -> Option<SocketAddr> {
-        let g = self.ca_conn_ress.lock().await;
-        let len = g.len();
-        if len < 1 {
-            return None;
+    async fn conn_remove(
+        ca_conn_ress: &TokMx<BTreeMap<SocketAddrV4, CaConnRess>>,
+        addr: SocketAddrV4,
+    ) -> Result<bool, Error> {
+        warn!("Lock for conn_remove");
+        if let Some(_caconn) = ca_conn_ress.lock().await.remove(&addr) {
+            Ok(true)
+        } else {
+            Ok(false)
         }
-        let n = n % len;
-        g.keys().take(n).last().map(Clone::clone)
     }
 }

@@ -6,25 +6,31 @@ pub mod search;
 pub mod store;
 
 use self::store::DataStore;
-use crate::ca::conn::ConnCommand;
 use crate::ca::connset::CaConnSet;
 use crate::conf::CaIngestOpts;
 use crate::errconv::ErrConv;
 use crate::insertworker::spawn_scylla_insert_workers;
-use crate::metrics::{metrics_agg_task, ExtraInsertsConf};
+use crate::metrics::metrics_agg_task;
+use crate::metrics::ExtraInsertsConf;
 use crate::rt::TokMx;
 use crate::store::CommonInsertItemQueue;
 use err::Error;
 use futures_util::stream::FuturesUnordered;
+use futures_util::Future;
 use futures_util::{FutureExt, StreamExt};
 use log::*;
 use netpod::Database;
-use stats::{CaConnStats, CaConnStatsAgg};
+use stats::CaConnStats;
+use stats::CaConnStatsAgg;
 use std::collections::BTreeMap;
-use std::net::{SocketAddr, SocketAddrV4};
+use std::net::SocketAddrV4;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::task::Poll;
 use std::time::Duration;
+use std::time::Instant;
 use tokio_postgres::Client as PgClient;
 
 pub static SIGINT: AtomicU32 = AtomicU32::new(0);
@@ -44,6 +50,92 @@ pub struct IngestCommons {
     pub insert_frac: AtomicU64,
     pub store_workers_rate: AtomicU64,
     pub ca_conn_set: CaConnSet,
+}
+
+pub trait SlowWarnable {
+    fn slow_warn(self, ms: u64) -> SlowWarn<Pin<Box<Self>>>
+    where
+        Self: Sized;
+}
+
+impl<F> SlowWarnable for F
+where
+    F: Future,
+{
+    fn slow_warn(self, ms: u64) -> SlowWarn<Pin<Box<Self>>>
+    where
+        Self: Sized,
+    {
+        SlowWarn::new(ms, Box::pin(self))
+    }
+}
+
+pub struct SlowWarn<F> {
+    ms: u64,
+    fut: F,
+    timeout: Option<Option<Pin<Box<tokio::time::Sleep>>>>,
+    first_poll: Option<Instant>,
+}
+
+impl<F> SlowWarn<F>
+where
+    F: Future + Unpin,
+{
+    pub fn new(ms: u64, fut: F) -> Self {
+        Self {
+            ms,
+            fut,
+            timeout: None,
+            first_poll: None,
+        }
+    }
+
+    fn poll_fut(mut self: Pin<&mut Self>, cx: &mut std::task::Context) -> Poll<<F as Future>::Output> {
+        use Poll::*;
+        match self.fut.poll_unpin(cx) {
+            Ready(x) => {
+                if let Some(None) = &self.timeout {
+                    let dt = self.first_poll.take().unwrap().elapsed();
+                    warn!("---------   Completed in {}ms   ----------", dt.as_secs_f32());
+                }
+                Ready(x)
+            }
+            Pending => Pending,
+        }
+    }
+}
+
+impl<F> Future for SlowWarn<F>
+where
+    F: Future + Unpin,
+{
+    type Output = <F as Future>::Output;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut std::task::Context) -> Poll<Self::Output> {
+        use Poll::*;
+        if self.first_poll.is_none() {
+            self.first_poll = Some(Instant::now());
+        }
+        let a = self.timeout.as_mut();
+        match a {
+            Some(x) => match x {
+                Some(x) => match x.poll_unpin(cx) {
+                    Ready(()) => {
+                        warn!("----------------   SlowWarn   ---------------------");
+                        self.timeout = Some(None);
+                        Self::poll_fut(self, cx)
+                    }
+                    Pending => Self::poll_fut(self, cx),
+                },
+                None => Self::poll_fut(self, cx),
+            },
+            None => {
+                self.timeout = Some(Some(Box::pin(tokio::time::sleep(Duration::from_millis(self.ms)))));
+                cx.waker().wake_by_ref();
+                Self::poll_fut(self, cx)
+            }
+        }
+    }
 }
 
 pub async fn find_channel_addr(
@@ -137,8 +229,13 @@ async fn query_addr_multiple(pg_client: &PgClient) -> Result<(), Error> {
     Ok(())
 }
 
+fn handler_sigaction(_a: libc::c_int, _b: *const libc::siginfo_t, _c: *const libc::c_void) {
+    crate::ca::SIGINT.store(1, Ordering::Release);
+    let _ = crate::linuxhelper::unset_signal_handler(libc::SIGINT);
+}
+
 pub async fn ca_connect(opts: CaIngestOpts, channels: &Vec<String>) -> Result<(), Error> {
-    crate::linuxhelper::set_signal_handler()?;
+    crate::linuxhelper::set_signal_handler(libc::SIGINT, handler_sigaction)?;
     let extra_inserts_conf = TokMx::new(ExtraInsertsConf { copies: Vec::new() });
     let insert_ivl_min = Arc::new(AtomicU64::new(8800));
     let scyconf = opts.scylla().clone();
@@ -250,9 +347,13 @@ pub async fn ca_connect(opts: CaIngestOpts, channels: &Vec<String>) -> Result<()
                 .ca_conn_set
                 .add_channel_to_addr(
                     opts.backend().into(),
-                    SocketAddr::V4(addr.clone()),
+                    *addr,
                     ch.clone(),
-                    ingest_commons.clone(),
+                    &ingest_commons.insert_item_queue,
+                    &ingest_commons.data_store,
+                    opts.insert_queue_max(),
+                    opts.array_truncate(),
+                    opts.local_epics_hostname(),
                 )
                 .await?;
         }
@@ -263,33 +364,6 @@ pub async fn ca_connect(opts: CaIngestOpts, channels: &Vec<String>) -> Result<()
     }
     info!("channels_by_host len {}", channels_by_host.len());
 
-    // Periodic tasks triggered by commands:
-    let mut iper = 0;
-    loop {
-        if SIGINT.load(Ordering::Acquire) != 0 {
-            break;
-        }
-        // TODO remove magic number, make adaptive:
-        if ingest_commons.insert_item_queue.receiver().len() < 10000 {
-            let addr = ingest_commons.ca_conn_set.addr_nth_mod(iper).await;
-            if let Some(addr) = addr {
-                //info!("channel info for addr {addr}");
-                fn cmdgen() -> (ConnCommand, async_channel::Receiver<bool>) {
-                    ConnCommand::check_channels_alive()
-                }
-                // TODO race between getting nth address and command send, so ignore error so far.
-                let _res = ingest_commons.ca_conn_set.send_command_to_addr(&addr, cmdgen).await;
-                let cmdgen = || ConnCommand::save_conn_info();
-                // TODO race between getting nth address and command send, so ignore error so far.
-                let _res = ingest_commons.ca_conn_set.send_command_to_addr(&addr, cmdgen).await;
-            } else {
-                //info!("nothing to save iper {iper}");
-            }
-            iper += 1;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-
     loop {
         if SIGINT.load(Ordering::Acquire) != 0 {
             if false {
@@ -298,8 +372,8 @@ pub async fn ca_connect(opts: CaIngestOpts, channels: &Vec<String>) -> Result<()
                 let rc = receiver.receiver_count();
                 info!("item queue  senders {}  receivers {}", sc, rc);
             }
-            info!("sending stop commands");
-            ingest_commons.ca_conn_set.send_stop().await?;
+            error!("TODO sending stop commands");
+            //ingest_commons.ca_conn_set.send_stop().await?;
             break;
         }
         tokio::time::sleep(Duration::from_millis(400)).await;
@@ -307,14 +381,14 @@ pub async fn ca_connect(opts: CaIngestOpts, channels: &Vec<String>) -> Result<()
     ingest_commons.ca_conn_set.wait_stopped().await?;
     info!("all connections done.");
 
-    insert_item_queue.drop_sender().await;
+    insert_item_queue.close();
 
     drop(ingest_commons);
     metrics_agg_jh.abort();
     drop(metrics_agg_jh);
 
     if false {
-        let sender = insert_item_queue.sender_raw().await;
+        let sender = insert_item_queue.sender_raw();
         sender.close();
         let receiver = insert_item_queue.receiver();
         receiver.close();
