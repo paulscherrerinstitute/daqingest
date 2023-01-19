@@ -1,7 +1,10 @@
+pub mod batcher;
+pub mod batchquery;
 pub mod bsread;
 pub mod ca;
 pub mod channelwriter;
 pub mod conf;
+pub mod dbpg;
 pub mod errconv;
 pub mod insertworker;
 pub mod linuxhelper;

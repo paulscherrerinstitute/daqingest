@@ -1,9 +1,9 @@
 use super::conn::CaConnEvent;
-use super::conn::ChannelSetOp;
 use super::conn::ChannelSetOps;
 use super::conn::ConnCommand;
 use super::store::DataStore;
 use super::SlowWarnable;
+use crate::batchquery::series_by_channel::ChannelInfoQuery;
 use crate::ca::conn::CaConn;
 use crate::ca::conn::CaConnEventValue;
 use crate::errconv::ErrConv;
@@ -55,15 +55,17 @@ pub struct CaConnSet {
     ca_conn_ress: Arc<TokMx<BTreeMap<SocketAddrV4, CaConnRess>>>,
     conn_item_tx: Sender<(SocketAddrV4, CaConnEvent)>,
     conn_item_rx: Receiver<(SocketAddrV4, CaConnEvent)>,
+    channel_info_query_tx: Sender<ChannelInfoQuery>,
 }
 
 impl CaConnSet {
-    pub fn new() -> Self {
+    pub fn new(channel_info_query_tx: Sender<ChannelInfoQuery>) -> Self {
         let (conn_item_tx, conn_item_rx) = async_channel::bounded(10000);
         Self {
             ca_conn_ress: Arc::new(TokMx::new(BTreeMap::new())),
             conn_item_tx,
             conn_item_rx,
+            channel_info_query_tx,
         }
     }
 
@@ -92,6 +94,7 @@ impl CaConnSet {
             backend.clone(),
             addr,
             local_epics_hostname,
+            self.channel_info_query_tx.clone(),
             data_store.clone(),
             insert_item_queue_sender,
             array_truncate,

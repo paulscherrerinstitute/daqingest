@@ -56,7 +56,7 @@ pub async fn spawn_scylla_insert_workers(
     insert_worker_count: usize,
     insert_item_queue: Arc<CommonInsertItemQueue>,
     ingest_commons: Arc<IngestCommons>,
-    pg_client: Arc<PgClient>,
+    _pg_client: Arc<PgClient>,
     store_stats: Arc<stats::CaConnStats>,
     use_rate_limit_queue: bool,
     ttls: Ttls,
@@ -119,7 +119,7 @@ pub async fn spawn_scylla_insert_workers(
     let mut jhs = Vec::new();
     let mut data_stores = Vec::new();
     for _ in 0..insert_scylla_sessions {
-        let data_store = Arc::new(DataStore::new(&scyconf, pg_client.clone()).await?);
+        let data_store = Arc::new(DataStore::new(&scyconf).await?);
         data_stores.push(data_store);
     }
     for i1 in 0..insert_worker_count {

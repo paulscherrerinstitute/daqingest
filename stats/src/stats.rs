@@ -264,3 +264,9 @@ stats_proc::stats_struct!((
     agg(name(CaConnStatsAgg), parent(CaConnStats)),
     diff(name(CaConnStatsAggDiff), input(CaConnStatsAgg)),
 ));
+
+stats_proc::stats_struct!((
+    stats_struct(name(DaemonStats), counters(main_lookupaddr_ok)),
+    agg(name(DaemonStatsAgg), parent(DaemonStats)),
+    diff(name(DaemonStatsAggDiff), input(DaemonStatsAgg)),
+));

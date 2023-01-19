@@ -5,11 +5,12 @@ use super::proto::CaMsgTy;
 use super::proto::CaProto;
 use super::store::DataStore;
 use super::ExtraInsertsConf;
+use crate::batchquery::series_by_channel::ChannelInfoQuery;
 use crate::bsread::ChannelDescDecoded;
 use crate::ca::proto::CreateChan;
 use crate::ca::proto::EventAdd;
-use crate::ca::store::ChannelRegistry;
-use crate::series::{Existence, SeriesId};
+use crate::series::Existence;
+use crate::series::SeriesId;
 use crate::store::ChannelInfoItem;
 use crate::store::ChannelStatus;
 use crate::store::ChannelStatusItem;
@@ -17,9 +18,13 @@ use crate::store::CommonInsertItemQueueSender;
 use crate::store::ConnectionStatus;
 use crate::store::ConnectionStatusItem;
 use crate::store::{InsertItem, IvlItem, MuteItem, QueryItem};
+use async_channel::Sender;
 use err::Error;
-use futures_util::stream::FuturesOrdered;
-use futures_util::{Future, FutureExt, Stream, StreamExt, TryFutureExt};
+use futures_util::stream::FuturesUnordered;
+use futures_util::Future;
+use futures_util::FutureExt;
+use futures_util::Stream;
+use futures_util::StreamExt;
 use log::*;
 use netpod::timeunits::*;
 use netpod::ScalarType;
@@ -30,7 +35,6 @@ use serde::Serialize;
 use stats::CaConnStats;
 use stats::IntervalEma;
 use std::collections::BTreeMap;
-use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::net::SocketAddrV4;
 use std::ops::ControlFlow;
@@ -378,9 +382,20 @@ impl ChannelSetOps {
     }
 }
 
+struct ChannelOpsResources<'a> {
+    channel_set_ops: &'a StdMutex<BTreeMap<String, ChannelSetOp>>,
+    channels: &'a mut BTreeMap<Cid, ChannelState>,
+    cid_by_name: &'a mut BTreeMap<String, Cid>,
+    name_by_cid: &'a mut BTreeMap<Cid, String>,
+    cid_store: &'a mut CidStore,
+    init_state_count: &'a mut u64,
+    channel_set_ops_flag: &'a AtomicUsize,
+}
+
 pub struct CaConn {
     state: CaConnState,
     shutdown: bool,
+    ticker: Pin<Box<tokio::time::Sleep>>,
     proto: Option<CaProto>,
     cid_store: CidStore,
     subid_store: SubidStore,
@@ -389,12 +404,9 @@ pub struct CaConn {
     cid_by_name: BTreeMap<String, Cid>,
     cid_by_subid: BTreeMap<u32, Cid>,
     name_by_cid: BTreeMap<Cid, String>,
-    data_store: Arc<DataStore>,
     insert_item_queue: VecDeque<QueryItem>,
     insert_item_sender: CommonInsertItemQueueSender,
     insert_item_send_fut: Option<async_channel::Send<'static, QueryItem>>,
-    fut_get_series:
-        FuturesOrdered<Pin<Box<dyn Future<Output = Result<(Cid, u32, u16, u16, Existence<SeriesId>), Error>> + Send>>>,
     backend: String,
     remote_addr_dbg: SocketAddrV4,
     local_epics_hostname: String,
@@ -412,6 +424,11 @@ pub struct CaConn {
     ioc_ping_start: Option<Instant>,
     cmd_res_queue: VecDeque<ConnCommandResult>,
     channel_set_ops: Arc<ChannelSetOps>,
+    channel_info_query_tx: Sender<ChannelInfoQuery>,
+    series_lookup_schedule: BTreeMap<Cid, ChannelInfoQuery>,
+    series_lookup_futs: FuturesUnordered<
+        Pin<Box<dyn Future<Output = Result<(Cid, u32, u16, u16, Existence<SeriesId>), Error>> + Send>>,
+    >,
 }
 
 impl CaConn {
@@ -419,7 +436,8 @@ impl CaConn {
         backend: String,
         remote_addr_dbg: SocketAddrV4,
         local_epics_hostname: String,
-        data_store: Arc<DataStore>,
+        channel_info_query_tx: Sender<ChannelInfoQuery>,
+        _data_store: Arc<DataStore>,
         insert_item_sender: CommonInsertItemQueueSender,
         array_truncate: usize,
         insert_queue_max: usize,
@@ -428,6 +446,7 @@ impl CaConn {
         Self {
             state: CaConnState::Unconnected,
             shutdown: false,
+            ticker: Box::pin(tokio::time::sleep(Duration::from_millis(500))),
             proto: None,
             cid_store: CidStore::new(),
             subid_store: SubidStore::new(),
@@ -436,11 +455,9 @@ impl CaConn {
             cid_by_name: BTreeMap::new(),
             cid_by_subid: BTreeMap::new(),
             name_by_cid: BTreeMap::new(),
-            data_store,
             insert_item_queue: VecDeque::new(),
             insert_item_sender,
             insert_item_send_fut: None,
-            fut_get_series: FuturesOrdered::new(),
             backend,
             remote_addr_dbg,
             local_epics_hostname,
@@ -461,6 +478,9 @@ impl CaConn {
                 ops: StdMutex::new(BTreeMap::new()),
                 flag: AtomicUsize::new(0),
             }),
+            channel_info_query_tx,
+            series_lookup_schedule: BTreeMap::new(),
+            series_lookup_futs: FuturesUnordered::new(),
         }
     }
 
@@ -474,7 +494,7 @@ impl CaConn {
 
     fn trigger_shutdown(&mut self) {
         self.shutdown = true;
-        for (k, v) in self.channels.iter_mut() {
+        for (_k, v) in self.channels.iter_mut() {
             match v {
                 ChannelState::Init => {
                     *v = ChannelState::Ended;
@@ -810,8 +830,9 @@ impl CaConn {
         for (_, st) in &self.channels {
             match st {
                 ChannelState::Creating { cid, ts_beg } => {
-                    if tsnow.duration_since(*ts_beg) >= Duration::from_millis(10000) {
+                    if false && tsnow.duration_since(*ts_beg) >= Duration::from_millis(10000) {
                         let name = self.name_by_cid.get(cid);
+                        // TODO channel create timed out how to let daemon know?
                         warn!("channel Creating timed out  {}  {:?}", cid.0, name);
                     }
                 }
@@ -945,16 +966,36 @@ impl CaConn {
         Ok(())
     }
 
-    fn handle_get_series_futs(&mut self, cx: &mut Context) -> Poll<Result<(), Error>> {
+    fn emit_series_lookup(&mut self, cx: &mut Context) {
+        let _ = cx;
+        loop {
+            break if let Some(mut entry) = self.series_lookup_schedule.first_entry() {
+                let dummy = entry.get().dummy();
+                let query = std::mem::replace(entry.get_mut(), dummy);
+                match self.channel_info_query_tx.try_send(query) {
+                    Ok(()) => {
+                        entry.remove();
+                        continue;
+                    }
+                    Err(e) => {
+                        *entry.get_mut() = e.into_inner();
+                    }
+                }
+            } else {
+                ()
+            };
+        }
+    }
+
+    fn poll_channel_info_results(&mut self, cx: &mut Context) {
         use Poll::*;
-        while self.fut_get_series.len() > 0 {
-            match self.fut_get_series.poll_next_unpin(cx) {
+        loop {
+            break match self.series_lookup_futs.poll_next_unpin(cx) {
                 Ready(Some(Ok((cid, sid, data_type, data_count, series)))) => {
                     {
-                        let series = series.clone().into_inner();
                         let item = QueryItem::ChannelStatus(ChannelStatusItem {
                             ts: SystemTime::now(),
-                            series: series,
+                            series: series.clone().into_inner(),
                             status: ChannelStatus::Opened,
                         });
                         self.insert_item_queue.push_back(item);
@@ -962,16 +1003,17 @@ impl CaConn {
                     match self.channel_to_evented(cid, sid, data_type, data_count, series, cx) {
                         Ok(_) => {}
                         Err(e) => {
-                            return Ready(Err(e));
+                            error!("poll_channel_info_results {e}");
                         }
                     }
                 }
-                Ready(Some(Err(e))) => return Ready(Err(e)),
-                Ready(None) => return Ready(Err(Error::with_msg_no_trace("series lookup stream should never end"))),
-                Pending => break,
-            }
+                Ready(Some(Err(e))) => {
+                    error!("poll_channel_info_results {e}");
+                }
+                Ready(None) => {}
+                Pending => {}
+            };
         }
-        return Pending;
     }
 
     fn event_add_insert(
@@ -1287,7 +1329,7 @@ impl CaConn {
         use Poll::*;
         let mut ts1 = Instant::now();
         // TODO unify with Listen state where protocol gets polled as well.
-        let mut msgs_tmp = vec![];
+        let mut msgs_tmp = Vec::new();
         self.check_channels_state_init(&mut msgs_tmp)?;
         let ts2 = Instant::now();
         self.stats
@@ -1354,23 +1396,43 @@ impl CaConn {
                                     info_store_msp_last: info_store_msp_from_time(SystemTime::now()),
                                 });
                                 // TODO handle error in different way. Should most likely not abort.
-                                let cd = ChannelDescDecoded {
-                                    name: name.to_string(),
-                                    scalar_type,
-                                    shape,
+                                let _cd = ChannelDescDecoded {
+                                    name: name.clone(),
+                                    scalar_type: scalar_type.clone(),
+                                    shape: shape.clone(),
                                     agg_kind: netpod::AggKind::Plain,
                                     // TODO these play no role in series id:
                                     byte_order: netpod::ByteOrder::Little,
                                     compression: None,
                                 };
-                                let z = unsafe {
-                                    &*(&self.data_store.chan_reg as &ChannelRegistry as *const ChannelRegistry)
+                                let (tx, rx) = async_channel::bounded(1);
+                                let query = ChannelInfoQuery {
+                                    backend: self.backend.clone(),
+                                    channel: name.clone(),
+                                    scalar_type: scalar_type.to_scylla_i32(),
+                                    shape_dims: shape.to_scylla_vec(),
+                                    tx,
                                 };
-                                let fut = z
-                                    .get_series_id(cd, self.backend.clone())
-                                    .map_ok(move |series| (cid, k.sid, k.data_type, k.data_count, series));
-                                // TODO throttle execution rate:
-                                self.fut_get_series.push_back(Box::pin(fut) as _);
+                                if !self.series_lookup_schedule.contains_key(&cid) {
+                                    self.series_lookup_schedule.insert(cid, query);
+                                    let fut = async move {
+                                        match rx.recv().await {
+                                            Ok(item) => match item {
+                                                Ok(item) => Ok((cid, sid, k.data_type, k.data_count, item)),
+                                                Err(e) => Err(e),
+                                            },
+                                            Err(e) => {
+                                                // TODO count only
+                                                error!("can not receive series lookup result {e}");
+                                                Err(Error::with_msg_no_trace("can not receive lookup result"))
+                                            }
+                                        }
+                                    };
+                                    self.series_lookup_futs.push(Box::pin(fut));
+                                } else {
+                                    // TODO count only
+                                    warn!("series lookup for {name} already in progress");
+                                }
                                 do_wake_again = true;
                             }
                             CaMsgTy::EventAddRes(k) => {
@@ -1403,6 +1465,9 @@ impl CaConn {
                                 }
                                 self.ioc_ping_last = Instant::now();
                                 self.ioc_ping_start = None;
+                            }
+                            CaMsgTy::CreateChanFail(_) => {
+                                // TODO handle CreateChanFail
                             }
                             _ => {
                                 warn!("Received unexpected protocol message {:?}", k);
@@ -1440,7 +1505,6 @@ impl CaConn {
         };
         if do_wake_again {
             // TODO remove the need for this:
-            trace!("do_wake_again");
             cx.waker().wake_by_ref();
         }
         res
@@ -1545,14 +1609,6 @@ impl CaConn {
                 Pending => Some(Pending),
             },
             CaConnState::PeerReady => {
-                {
-                    // TODO can I move this block somewhere else?
-                    match self.handle_get_series_futs(cx) {
-                        Ready(Ok(_)) => (),
-                        Ready(Err(e)) => return Some(Ready(Err(e))),
-                        Pending => (),
-                    }
-                }
                 let res = self.handle_peer_ready(cx);
                 match res {
                     Ready(Some(Ok(()))) => None,
@@ -1588,7 +1644,7 @@ impl CaConn {
         }
     }
 
-    fn apply_3(res: ChannelOpsResources) {
+    fn apply_channel_ops_with_res(res: ChannelOpsResources) {
         let mut g = res.channel_set_ops.lock().unwrap();
         let map = std::mem::replace(&mut *g, BTreeMap::new());
         for (ch, op) in map {
@@ -1609,7 +1665,7 @@ impl CaConn {
         res.channel_set_ops_flag.store(0, atomic::Ordering::Release);
     }
 
-    fn apply_2(&mut self) {
+    fn apply_channel_ops(&mut self) {
         let res = ChannelOpsResources {
             channel_set_ops: &self.channel_set_ops.ops,
             channels: &mut self.channels,
@@ -1619,18 +1675,8 @@ impl CaConn {
             init_state_count: &mut self.init_state_count,
             channel_set_ops_flag: &self.channel_set_ops.flag,
         };
-        Self::apply_3(res)
+        Self::apply_channel_ops_with_res(res)
     }
-}
-
-struct ChannelOpsResources<'a> {
-    channel_set_ops: &'a StdMutex<BTreeMap<String, ChannelSetOp>>,
-    channels: &'a mut BTreeMap<Cid, ChannelState>,
-    cid_by_name: &'a mut BTreeMap<String, Cid>,
-    name_by_cid: &'a mut BTreeMap<Cid, String>,
-    cid_store: &'a mut CidStore,
-    init_state_count: &'a mut u64,
-    channel_set_ops_flag: &'a AtomicUsize,
 }
 
 impl Stream for CaConn {
@@ -1641,7 +1687,16 @@ impl Stream for CaConn {
         let poll_ts1 = Instant::now();
         self.stats.caconn_poll_count_inc();
         if self.channel_set_ops.flag.load(atomic::Ordering::Acquire) > 0 {
-            Self::apply_2(&mut self);
+            self.apply_channel_ops();
+        }
+        self.emit_series_lookup(cx);
+        self.poll_channel_info_results(cx);
+        match self.ticker.poll_unpin(cx) {
+            Ready(()) => {
+                self.ticker = Box::pin(tokio::time::sleep(Duration::from_millis(500)));
+                cx.waker().wake_by_ref();
+            }
+            Pending => {}
         }
         let ret = if let Some(item) = self.cmd_res_queue.pop_front() {
             Ready(Some(Ok(CaConnEvent {

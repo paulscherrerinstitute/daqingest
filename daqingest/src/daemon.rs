@@ -298,7 +298,7 @@ pub struct Daemon {
 impl Daemon {
     pub async fn new(opts: DaemonOpts) -> Result<Self, Error> {
         let pg_client = Arc::new(make_pg_client(&opts.pgconf).await?);
-        let datastore = DataStore::new(&opts.scyconf, pg_client.clone()).await?;
+        let datastore = DataStore::new(&opts.scyconf).await?;
         let datastore = Arc::new(datastore);
         let (tx, rx) = async_channel::bounded(32);
         let pgcs = {
@@ -310,6 +310,9 @@ impl Daemon {
             a
         };
         let (search_tx, ioc_finder_jh) = Self::start_finder(tx.clone(), opts.backend().into(), pgcs);
+
+        let channel_info_query_tx = netfetch::batchquery::series_by_channel::start_task(&opts.pgconf).await?;
+
         let common_insert_item_queue = Arc::new(CommonInsertItemQueue::new(opts.insert_item_queue_cap));
         let common_insert_item_queue_2 = Arc::new(CommonInsertItemQueue::new(opts.insert_item_queue_cap));
         let insert_queue_counter = Arc::new(AtomicUsize::new(0));
@@ -388,7 +391,7 @@ impl Daemon {
             extra_inserts_conf: tokio::sync::Mutex::new(ExtraInsertsConf::new()),
             store_workers_rate: AtomicU64::new(20000),
             insert_frac: AtomicU64::new(1000),
-            ca_conn_set: CaConnSet::new(),
+            ca_conn_set: CaConnSet::new(channel_info_query_tx),
         };
         let ingest_commons = Arc::new(ingest_commons);
 
@@ -491,57 +494,20 @@ impl Daemon {
         }
         let (qtx, qrx) = async_channel::bounded(CURRENT_SEARCH_PENDING_MAX);
         let fut = async move {
-            let (batch_tx, batch_rx) = async_channel::bounded(SEARCH_DB_PIPELINE_LEN);
-            let fut2 = async move {
-                let mut batch_ix = 0 as usize;
-                let mut all = Vec::new();
-                let mut do_emit = false;
-                loop {
-                    if do_emit {
-                        do_emit = false;
-                        let batch = std::mem::replace(&mut all, Vec::new());
-                        let n = batch.len();
-                        trace_batch!("--- BATCH TRY SEND");
-                        match batch_tx.send((batch_ix, batch)).await {
-                            Ok(_) => {
-                                trace_batch!("--- BATCH SEND DONE");
-                                batch_ix += 1;
-                                SEARCH_REQ_BATCH_SEND_COUNT.fetch_add(n, atomic::Ordering::AcqRel);
-                            }
-                            Err(e) => {
-                                error!("can not send batch");
-                                all = e.0 .1;
-                            }
-                        }
-                    }
-                    match tokio::time::timeout(Duration::from_millis(200), qrx.recv()).await {
-                        Ok(k) => match k {
-                            Ok(item) => {
-                                SEARCH_REQ_RECV_COUNT.fetch_add(1, atomic::Ordering::AcqRel);
-                                all.push(item);
-                                if all.len() >= SEARCH_BATCH_MAX {
-                                    do_emit = true;
-                                }
-                            }
-                            Err(e) => {
-                                error!("error in batcher, no more input {e}");
-                                break;
-                            }
-                        },
-                        Err(e) => {
-                            let _e: tokio::time::error::Elapsed = e;
-                            if all.len() > 0 {
-                                do_emit = true;
-                            }
-                        }
-                    }
-                }
-                warn!("--------   batcher is done   --------------");
-            };
-            tokio::spawn(fut2);
+            let (batch_rx, _jh) = netfetch::batcher::batch(
+                SEARCH_BATCH_MAX,
+                Duration::from_millis(200),
+                SEARCH_DB_PIPELINE_LEN,
+                qrx,
+            );
             let (pgc_tx, pgc_rx) = async_channel::bounded(128);
             for pgc in pgcs {
-                let sql = "with q1 as (select * from unnest($2::text[]) as unn (ch)) select distinct on (tt.facility, tt.channel) tt.channel, tt.addr from ioc_by_channel_log tt join q1 on tt.channel = q1.ch and tt.facility = $1 and tt.addr is not null order by tt.facility, tt.channel, tsmod desc";
+                let sql = concat!(
+                    "with q1 as (select * from unnest($2::text[]) as unn (ch))",
+                    " select distinct on (tt.facility, tt.channel) tt.channel, tt.addr",
+                    " from ioc_by_channel_log tt join q1 on tt.channel = q1.ch and tt.facility = $1 and tt.addr is not null",
+                    " order by tt.facility, tt.channel, tsmod desc",
+                );
                 let qu_select_multi = pgc.prepare(sql).await.unwrap();
                 let qu_select_multi = Arc::new(qu_select_multi);
                 match pgc_tx.send((pgc, qu_select_multi)).await {
@@ -553,7 +519,7 @@ impl Daemon {
             }
             let backend = Arc::new(backend.clone());
             let stream = batch_rx
-                .map(|(batch_ix, batch): (usize, Vec<String>)| {
+                .map(|batch: Vec<String>| {
                     let pgc_tx = pgc_tx.clone();
                     let pgc_rx = pgc_rx.clone();
                     let backend = backend.clone();
@@ -561,12 +527,11 @@ impl Daemon {
                     async move {
                         let ts1 = Instant::now();
                         let (pgc, qu_select_multi) = pgc_rx.recv().await.unwrap();
-                        debug_batch!("run  query batch {}  len {}", batch_ix, batch.len());
+                        debug_batch!("run  query batch  len {}", batch.len());
                         let qres = pgc.query(qu_select_multi.as_ref(), &[backend.as_ref(), &batch]).await;
                         let dt = ts1.elapsed();
                         debug_batch!(
-                            "done query batch {}  len {}: {}  {:.3}ms",
-                            batch_ix,
+                            "done query batch  len {}: {}  {:.3}ms",
                             batch.len(),
                             qres.is_ok(),
                             dt.as_secs_f32() * 1e3
@@ -582,16 +547,16 @@ impl Daemon {
                                 out.push('\'');
                             }
                             out.push(']');
-                            eprintln!("VERY LONG QUERY batch_ix {batch_ix}\n{out}");
+                            eprintln!("VERY SLOW QUERY\n{out}");
                         }
                         pgc_tx.send((pgc, qu_select_multi)).await.unwrap();
-                        (batch_ix, batch, qres)
+                        (batch, qres)
                     }
                 })
                 .buffer_unordered(SEARCH_DB_PIPELINE_LEN);
             let mut resdiff = 0;
             let mut stream = Box::pin(stream);
-            while let Some((batch_ix, batch, pgres)) = stream.next().await {
+            while let Some((batch, pgres)) = stream.next().await {
                 match pgres {
                     Ok(rows) => {
                         if rows.len() > batch.len() {
@@ -624,12 +589,9 @@ impl Daemon {
                             error!("STILL NOT MATCHING LEN");
                         }
                         SEARCH_RES_3_COUNT.fetch_add(items.len(), atomic::Ordering::AcqRel);
-                        debug_batch!("TRY  SEND batch_ix {batch_ix}");
                         let x = tx.send(DaemonEvent::SearchDone(Ok(items))).await;
                         match x {
-                            Ok(_) => {
-                                debug_batch!("DONE SEND batch_ix {batch_ix}");
-                            }
+                            Ok(_) => {}
                             Err(e) => {
                                 error!("finder sees: {e}");
                                 break;
@@ -1088,7 +1050,8 @@ impl Daemon {
                     ActiveChannelState::SearchPending { since: _, did_send: _ } => {}
                     ActiveChannelState::WithAddress { addr, state: _ } => {
                         if addr == &conn_addr {
-                            info!("ca conn down, reset {k:?}");
+                            // TODO reset channel, emit log event for the connection addr only
+                            //info!("ca conn down, reset {k:?}");
                             *v = ChannelState {
                                 value: ChannelStateValue::Active(ActiveChannelState::UnknownAddress {
                                     since: SystemTime::now(),
@@ -1222,6 +1185,15 @@ pub async fn run(opts: CaIngestOpts, channels: Vec<String>) -> Result<(), Error>
     info!("start up {opts:?}");
     netfetch::linuxhelper::set_signal_handler(libc::SIGINT, handler_sigint)?;
     netfetch::linuxhelper::set_signal_handler(libc::SIGTERM, handler_sigterm)?;
+
+    let dcom = Arc::new(netfetch::metrics::DaemonComm::dummy());
+    netfetch::metrics::start_metrics_service(opts.api_bind(), dcom);
+
+    // TODO use a new stats type:
+    let store_stats = Arc::new(CaConnStats::new());
+    let metrics_agg_fut = metrics_agg_task(ingest_commons.clone(), local_stats.clone(), store_stats.clone());
+    let metrics_agg_jh = tokio::spawn(metrics_agg_fut);
+
     let opts2 = DaemonOpts {
         backend: opts.backend().into(),
         local_epics_hostname: opts.local_epics_hostname().into(),

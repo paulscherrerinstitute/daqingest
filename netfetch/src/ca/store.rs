@@ -1,44 +1,9 @@
-use crate::bsread::ChannelDescDecoded;
-use crate::series::{Existence, SeriesId};
-use async_channel::{Receiver, Sender};
 use err::Error;
 use netpod::ScyllaConfig;
 use scylla::prepared_statement::PreparedStatement;
 use scylla::statement::Consistency;
 use scylla::Session as ScySession;
 use std::sync::Arc;
-use tokio_postgres::Client as PgClient;
-
-#[allow(unused)]
-pub struct RegisterJob {
-    desc: ChannelDescDecoded,
-}
-
-impl RegisterJob {
-    pub fn new(desc: ChannelDescDecoded) -> Self {
-        Self { desc }
-    }
-}
-
-#[allow(unused)]
-pub struct RegisterChannel {
-    tx: Sender<RegisterJob>,
-    rx: Receiver<RegisterJob>,
-}
-
-pub struct ChannelRegistry {
-    pg_client: Arc<PgClient>,
-}
-
-impl ChannelRegistry {
-    pub fn new(pg_client: Arc<PgClient>) -> Self {
-        Self { pg_client }
-    }
-
-    pub async fn get_series_id(&self, cd: ChannelDescDecoded, backend: String) -> Result<Existence<SeriesId>, Error> {
-        crate::series::get_series_id(&self.pg_client, &cd, backend).await
-    }
-}
 
 pub struct DataStore {
     pub scy: Arc<ScySession>,
@@ -61,11 +26,10 @@ pub struct DataStore {
     pub qu_insert_channel_status: Arc<PreparedStatement>,
     pub qu_insert_channel_status_by_ts_msp: Arc<PreparedStatement>,
     pub qu_insert_channel_ping: Arc<PreparedStatement>,
-    pub chan_reg: Arc<ChannelRegistry>,
 }
 
 impl DataStore {
-    pub async fn new(scyconf: &ScyllaConfig, pg_client: Arc<PgClient>) -> Result<Self, Error> {
+    pub async fn new(scyconf: &ScyllaConfig) -> Result<Self, Error> {
         let scy = scylla::SessionBuilder::new()
             .known_nodes(&scyconf.hosts)
             .default_consistency(Consistency::LocalOne)
@@ -182,7 +146,6 @@ impl DataStore {
             .map_err(|e| Error::with_msg_no_trace(format!("{e:?}")))?;
         let qu_insert_channel_ping = Arc::new(q);
         let ret = Self {
-            chan_reg: Arc::new(ChannelRegistry::new(pg_client)),
             scy,
             qu_insert_ts_msp,
             qu_insert_series_by_ts_msp,

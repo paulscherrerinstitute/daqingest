@@ -1,12 +1,14 @@
-use crate::ca::conn::ConnCommand;
 use crate::ca::IngestCommons;
 use crate::ca::METRICS;
 use axum::extract::Query;
 use err::Error;
 use http::Request;
 use log::*;
-use serde::{Deserialize, Serialize};
-use stats::{CaConnStats, CaConnStatsAgg, CaConnStatsAggDiff};
+use serde::Deserialize;
+use serde::Serialize;
+use stats::CaConnStats;
+use stats::CaConnStatsAgg;
+use stats::CaConnStatsAggDiff;
 use std::collections::HashMap;
 use std::net::SocketAddrV4;
 use std::sync::atomic::Ordering;
@@ -26,7 +28,7 @@ impl ExtraInsertsConf {
 
 async fn find_channel(
     params: HashMap<String, String>,
-    ingest_commons: Arc<IngestCommons>,
+    dcom: Arc<DaemonComm>,
 ) -> axum::Json<Vec<(String, Vec<String>)>> {
     let pattern = params.get("pattern").map_or(String::new(), |x| x.clone()).to_string();
     // TODO ask Daemon for that information.
@@ -35,7 +37,7 @@ async fn find_channel(
     axum::Json(res)
 }
 
-async fn channel_add_inner(params: HashMap<String, String>, ingest_commons: Arc<IngestCommons>) -> Result<(), Error> {
+async fn channel_add_inner(params: HashMap<String, String>, dcom: Arc<DaemonComm>) -> Result<(), Error> {
     if let (Some(backend), Some(name)) = (params.get("backend"), params.get("name")) {
         error!("TODO channel_add_inner");
         Err(Error::with_msg_no_trace(format!("TODO channel_add_inner")))
@@ -44,18 +46,15 @@ async fn channel_add_inner(params: HashMap<String, String>, ingest_commons: Arc<
     }
 }
 
-async fn channel_add(params: HashMap<String, String>, ingest_commons: Arc<IngestCommons>) -> axum::Json<bool> {
-    let ret = match channel_add_inner(params, ingest_commons).await {
+async fn channel_add(params: HashMap<String, String>, dcom: Arc<DaemonComm>) -> axum::Json<bool> {
+    let ret = match channel_add_inner(params, dcom).await {
         Ok(_) => true,
         Err(_) => false,
     };
     axum::Json(ret)
 }
 
-async fn channel_remove(
-    params: HashMap<String, String>,
-    ingest_commons: Arc<IngestCommons>,
-) -> axum::Json<serde_json::Value> {
+async fn channel_remove(params: HashMap<String, String>, dcom: Arc<DaemonComm>) -> axum::Json<serde_json::Value> {
     use axum::Json;
     use serde_json::Value;
     let addr = if let Some(x) = params.get("addr") {
@@ -81,7 +80,7 @@ async fn channel_remove(
     Json(Value::Bool(false))
 }
 
-async fn channel_state(params: HashMap<String, String>, ingest_commons: Arc<IngestCommons>) -> axum::Json<bool> {
+async fn channel_state(params: HashMap<String, String>, dcom: Arc<DaemonComm>) -> axum::Json<bool> {
     let name = params.get("name").map_or(String::new(), |x| x.clone()).to_string();
     error!("TODO channel_state");
     axum::Json(false)
@@ -89,14 +88,14 @@ async fn channel_state(params: HashMap<String, String>, ingest_commons: Arc<Inge
 
 async fn channel_states(
     params: HashMap<String, String>,
-    ingest_commons: Arc<IngestCommons>,
+    dcom: Arc<DaemonComm>,
 ) -> axum::Json<Vec<crate::ca::conn::ChannelStateInfo>> {
     let limit = params.get("limit").map(|x| x.parse()).unwrap_or(Ok(40)).unwrap_or(40);
     error!("TODO channel_state");
     axum::Json(Vec::new())
 }
 
-async fn extra_inserts_conf_set(v: ExtraInsertsConf, ingest_commons: Arc<IngestCommons>) -> axum::Json<bool> {
+async fn extra_inserts_conf_set(v: ExtraInsertsConf, dcom: Arc<DaemonComm>) -> axum::Json<bool> {
     // TODO ingest_commons is the authorative value. Should have common function outside of this metrics which
     // can update everything to a given value.
     error!("TODO extra_inserts_conf_set");
@@ -111,12 +110,22 @@ struct DummyQuery {
     age: usize,
 }
 
-pub async fn start_metrics_service(bind_to: String, ingest_commons: Arc<IngestCommons>) {
+pub struct DaemonComm {}
+
+impl DaemonComm {
+    pub fn dummy() -> Self {
+        Self {}
+    }
+}
+
+fn make_routes(dcom: Arc<DaemonComm>) -> axum::Router {
     use axum::extract;
-    use axum::http::StatusCode;
-    use axum::routing::{get, put};
+    use axum::routing::get;
+    use axum::routing::put;
     use axum::Router;
-    let app = Router::new()
+    use http::StatusCode;
+
+    Router::new()
         .fallback(|req: Request<axum::body::Body>| async move {
             info!("Fallback for {} {}", req.method(), req.uri());
             StatusCode::NOT_FOUND
@@ -149,89 +158,83 @@ pub async fn start_metrics_service(bind_to: String, ingest_commons: Arc<IngestCo
         .route(
             "/daqingest/find/channel",
             get({
-                let ingest_commons = ingest_commons.clone();
-                |Query(params): Query<HashMap<String, String>>| find_channel(params, ingest_commons)
+                let dcom = dcom.clone();
+                |Query(params): Query<HashMap<String, String>>| find_channel(params, dcom)
             }),
         )
         .route(
             "/daqingest/channel/state",
             get({
-                let ingest_commons = ingest_commons.clone();
-                |Query(params): Query<HashMap<String, String>>| channel_state(params, ingest_commons)
+                let dcom = dcom.clone();
+                |Query(params): Query<HashMap<String, String>>| channel_state(params, dcom)
             }),
         )
         .route(
             "/daqingest/channel/states",
             get({
-                let ingest_commons = ingest_commons.clone();
-                |Query(params): Query<HashMap<String, String>>| channel_states(params, ingest_commons)
+                let dcom = dcom.clone();
+                |Query(params): Query<HashMap<String, String>>| channel_states(params, dcom)
             }),
         )
         .route(
             "/daqingest/channel/add",
             get({
-                let ingest_commons = ingest_commons.clone();
-                |Query(params): Query<HashMap<String, String>>| channel_add(params, ingest_commons)
+                let dcom = dcom.clone();
+                |Query(params): Query<HashMap<String, String>>| channel_add(params, dcom)
             }),
         )
         .route(
             "/daqingest/channel/remove",
             get({
-                let ingest_commons = ingest_commons.clone();
-                |Query(params): Query<HashMap<String, String>>| channel_remove(params, ingest_commons)
+                let dcom = dcom.clone();
+                |Query(params): Query<HashMap<String, String>>| channel_remove(params, dcom)
             }),
         )
         .route(
             "/store_workers_rate",
             get({
-                let c = ingest_commons.clone();
-                || async move { axum::Json(c.store_workers_rate.load(Ordering::Acquire)) }
+                let dcom = dcom.clone();
+                || async move { axum::Json(123) }
             })
             .put({
-                let c = ingest_commons.clone();
-                |v: extract::Json<u64>| async move {
-                    c.store_workers_rate.store(v.0, Ordering::Release);
-                }
+                let dcom = dcom.clone();
+                |v: extract::Json<u64>| async move {}
             }),
         )
         .route(
             "/insert_frac",
             get({
-                let c = ingest_commons.clone();
-                || async move { axum::Json(c.insert_frac.load(Ordering::Acquire)) }
+                let dcom = dcom.clone();
+                || async move { axum::Json(123) }
             })
             .put({
-                let c = ingest_commons.clone();
-                |v: extract::Json<u64>| async move {
-                    c.insert_frac.store(v.0, Ordering::Release);
-                }
+                let dcom = dcom.clone();
+                |v: extract::Json<u64>| async move {}
             }),
         )
         .route(
             "/extra_inserts_conf",
             get({
-                let c = ingest_commons.clone();
-                || async move {
-                    let res = c.extra_inserts_conf.lock().await;
-                    axum::Json(serde_json::to_value(&*res).unwrap())
-                }
+                let dcom = dcom.clone();
+                || async move { axum::Json(serde_json::to_value(&"TODO").unwrap()) }
             })
             .put({
-                let ingest_commons = ingest_commons.clone();
-                |v: extract::Json<ExtraInsertsConf>| extra_inserts_conf_set(v.0, ingest_commons)
+                let dcom = dcom.clone();
+                |v: extract::Json<ExtraInsertsConf>| extra_inserts_conf_set(v.0, dcom)
             }),
         )
         .route(
             "/insert_ivl_min",
             put({
-                let insert_ivl_min = ingest_commons.insert_ivl_min.clone();
-                |v: extract::Json<u64>| async move {
-                    insert_ivl_min.store(v.0, Ordering::Release);
-                }
+                let dcom = dcom.clone();
+                |v: extract::Json<u64>| async move {}
             }),
-        );
+        )
+}
+
+pub async fn start_metrics_service(bind_to: String, dcom: Arc<DaemonComm>) {
     axum::Server::bind(&bind_to.parse().unwrap())
-        .serve(app.into_make_service())
+        .serve(make_routes(dcom).into_make_service())
         .await
         .unwrap()
 }
