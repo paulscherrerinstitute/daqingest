@@ -59,8 +59,68 @@ async fn prepare_pgcs(sql: &str, pgcn: usize, db: &Database) -> Result<(Sender<P
     Ok((pgc_tx, pgc_rx))
 }
 
-async fn fetch_data(pgres: PgRes) -> Result<ChannelInfoResult, Error> {
-    err::todoval()
+async fn fetch_data(batch: Vec<ChannelInfoQuery>, pgres: PgRes) -> Result<(ChannelInfoResult, PgRes), Error> {
+    let mut backend = Vec::new();
+    let mut channel = Vec::new();
+    let mut scalar_type = Vec::new();
+    let mut shape_dims: Vec<String> = Vec::new();
+    let mut rid = Vec::new();
+    let mut tx = Vec::new();
+    for (i, e) in batch.into_iter().enumerate() {
+        backend.push(e.backend);
+        channel.push(e.channel);
+        scalar_type.push(e.scalar_type);
+        let mut dims = String::with_capacity(16);
+        dims.push('{');
+        for (i, v) in e.shape_dims.into_iter().enumerate() {
+            if i > 0 {
+                dims.push(',');
+            }
+            use std::fmt::Write;
+            write!(dims, "{}", v).unwrap();
+        }
+        dims.push('}');
+        shape_dims.push(dims);
+        rid.push(i as i32);
+        tx.push((i as u32, e.tx));
+    }
+    match pgres
+        .pgc
+        .query(&pgres.st, &[&backend, &channel, &scalar_type, &shape_dims, &rid])
+        .await
+        .map_err(|e| {
+            error!("{e}");
+            Error::from(e.to_string())
+        }) {
+        Ok(rows) => {
+            let mut series_ids = Vec::new();
+            let mut txs = Vec::new();
+            let mut it1 = rows.into_iter();
+            let mut e1 = it1.next();
+            for (qrid, tx) in tx {
+                if let Some(row) = &e1 {
+                    let rid: i32 = row.get(1);
+                    if rid as u32 == qrid {
+                        let series: i64 = row.get(0);
+                        let series = SeriesId::new(series as _);
+                        series_ids.push(Existence::Existing(series));
+                        txs.push(tx);
+                    }
+                    e1 = it1.next();
+                }
+            }
+            let result = ChannelInfoResult {
+                series: series_ids,
+                tx: txs,
+            };
+            Ok((result, pgres))
+        }
+        Err(e) => {
+            error!("error in pg query {e}");
+            tokio::time::sleep(Duration::from_millis(2000)).await;
+            Err(e)
+        }
+    }
 }
 
 async fn run_queries(
@@ -75,70 +135,12 @@ async fn run_queries(
             let pgc_tx = pgc_tx.clone();
             async move {
                 if let Ok(pgres) = pgc_rx.recv().await {
-                    let mut backend = Vec::new();
-                    let mut channel = Vec::new();
-                    let mut scalar_type = Vec::new();
-                    let mut shape_dims: Vec<String> = Vec::new();
-                    let mut rid = Vec::new();
-                    let mut tx = Vec::new();
-                    for (i, e) in batch.into_iter().enumerate() {
-                        backend.push(e.backend);
-                        channel.push(e.channel);
-                        scalar_type.push(e.scalar_type);
-                        let mut dims = String::with_capacity(16);
-                        dims.push('{');
-                        for (i, v) in e.shape_dims.into_iter().enumerate() {
-                            if i > 0 {
-                                dims.push(',');
-                            }
-                            use std::fmt::Write;
-                            write!(dims, "{}", v).unwrap();
-                        }
-                        dims.push('}');
-                        shape_dims.push(dims);
-                        rid.push(i as i32);
-                        tx.push((i as u32, e.tx));
-                    }
-                    match pgres
-                        .pgc
-                        .query(&pgres.st, &[&backend, &channel, &scalar_type, &shape_dims, &rid])
-                        .await
-                        .map_err(|e| {
-                            error!("{e}");
-                            Error::from(e.to_string())
-                        }) {
-                        Ok(rows) => {
-                            if pgc_tx.send(pgres).await.is_err() {
-                                Err(Error::with_msg_no_trace("can not hand pgres back"))
-                            } else {
-                                let mut series_ids = Vec::new();
-                                let mut txs = Vec::new();
-                                let mut it1 = rows.into_iter();
-                                let mut e1 = it1.next();
-                                for (qrid, tx) in tx {
-                                    if let Some(row) = &e1 {
-                                        let rid: i32 = row.get(1);
-                                        if rid as u32 == qrid {
-                                            let series: i64 = row.get(0);
-                                            let series = SeriesId::new(series as _);
-                                            series_ids.push(Existence::Existing(series));
-                                            txs.push(tx);
-                                        }
-                                        e1 = it1.next();
-                                    }
-                                }
-                                let result = ChannelInfoResult {
-                                    series: series_ids,
-                                    tx: txs,
-                                };
-                                Ok(result)
-                            }
-                        }
-                        Err(e) => {
-                            error!("error in pg query {e}");
-                            tokio::time::sleep(Duration::from_millis(2000)).await;
-                            Err(e)
-                        }
+                    let (res, pgres) = fetch_data(batch, pgres).await?;
+                    if let Err(_) = pgc_tx.send(pgres).await {
+                        error!("can not hand back pgres");
+                        Err(Error::with_msg_no_trace("can not hand back pgres"))
+                    } else {
+                        Ok(res)
                     }
                 } else {
                     error!("can not get pgc");

@@ -4,6 +4,7 @@ pub mod bsread;
 pub mod ca;
 pub mod channelwriter;
 pub mod conf;
+pub mod daemon_common;
 pub mod dbpg;
 pub mod errconv;
 pub mod insertworker;

@@ -4,7 +4,6 @@ use err::Error;
 use futures_util::FutureExt;
 use futures_util::StreamExt;
 use log::*;
-use netfetch::ca::conn::CaConnEvent;
 use netfetch::ca::conn::ConnCommand;
 use netfetch::ca::connset::CaConnSet;
 use netfetch::ca::findioc::FindIocRes;
@@ -13,6 +12,8 @@ use netfetch::ca::store::DataStore;
 use netfetch::ca::IngestCommons;
 use netfetch::ca::SlowWarnable;
 use netfetch::conf::CaIngestOpts;
+use netfetch::daemon_common::Channel;
+use netfetch::daemon_common::DaemonEvent;
 use netfetch::errconv::ErrConv;
 use netfetch::insertworker::Ttls;
 use netfetch::metrics::ExtraInsertsConf;
@@ -80,21 +81,6 @@ macro_rules! trace_batch {
     ($($arg:tt)*) => (if false {
         trace!($($arg)*);
     });
-}
-
-#[derive(Clone, Debug, Serialize, PartialEq, PartialOrd, Eq, Ord)]
-pub struct Channel {
-    id: String,
-}
-
-impl Channel {
-    pub fn new(id: String) -> Self {
-        Self { id }
-    }
-
-    pub fn id(&self) -> &str {
-        &self.id
-    }
 }
 
 #[allow(non_snake_case)]
@@ -175,37 +161,6 @@ pub struct CaConnState {
     last_feedback: Instant,
     #[allow(unused)]
     value: CaConnStateValue,
-}
-
-#[derive(Debug)]
-pub enum DaemonEvent {
-    TimerTick,
-    ChannelAdd(Channel),
-    ChannelRemove(Channel),
-    SearchDone(Result<VecDeque<FindIocRes>, Error>),
-    CaConnEvent(SocketAddrV4, CaConnEvent),
-}
-
-impl DaemonEvent {
-    pub fn summary(&self) -> String {
-        use DaemonEvent::*;
-        match self {
-            TimerTick => format!("TimerTick"),
-            ChannelAdd(x) => format!("ChannelAdd {x:?}"),
-            ChannelRemove(x) => format!("ChannelRemove {x:?}"),
-            SearchDone(_x) => format!("SearchDone"),
-            CaConnEvent(_a, b) => {
-                use netfetch::ca::conn::CaConnEventValue::*;
-                match &b.value {
-                    None => format!("CaConnEvent/None"),
-                    EchoTimeout => format!("CaConnEvent/EchoTimeout"),
-                    HealthCheckDone => format!("CaConnEvent/HealthCheckDone"),
-                    ConnCommandResult(_) => format!("CaConnEvent/ConnCommandResult"),
-                    EndOfStream => format!("CaConnEvent/EndOfStream"),
-                }
-            }
-        }
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -1186,13 +1141,10 @@ pub async fn run(opts: CaIngestOpts, channels: Vec<String>) -> Result<(), Error>
     netfetch::linuxhelper::set_signal_handler(libc::SIGINT, handler_sigint)?;
     netfetch::linuxhelper::set_signal_handler(libc::SIGTERM, handler_sigterm)?;
 
-    let dcom = Arc::new(netfetch::metrics::DaemonComm::dummy());
-    netfetch::metrics::start_metrics_service(opts.api_bind(), dcom);
-
     // TODO use a new stats type:
-    let store_stats = Arc::new(CaConnStats::new());
-    let metrics_agg_fut = metrics_agg_task(ingest_commons.clone(), local_stats.clone(), store_stats.clone());
-    let metrics_agg_jh = tokio::spawn(metrics_agg_fut);
+    //let store_stats = Arc::new(CaConnStats::new());
+    //let metrics_agg_fut = metrics_agg_task(ingest_commons.clone(), local_stats.clone(), store_stats.clone());
+    //let metrics_agg_jh = tokio::spawn(metrics_agg_fut);
 
     let opts2 = DaemonOpts {
         backend: opts.backend().into(),
@@ -1209,6 +1161,10 @@ pub async fn run(opts: CaIngestOpts, channels: Vec<String>) -> Result<(), Error>
     };
     let mut daemon = Daemon::new(opts2).await?;
     let tx = daemon.tx.clone();
+
+    let dcom = Arc::new(netfetch::metrics::DaemonComm::dummy());
+    netfetch::metrics::start_metrics_service(opts.api_bind(), dcom);
+
     let daemon_jh = taskrun::spawn(async move {
         // TODO handle Err
         daemon.daemon().await.unwrap();

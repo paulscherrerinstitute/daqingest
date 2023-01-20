@@ -1,5 +1,7 @@
 use crate::ca::IngestCommons;
 use crate::ca::METRICS;
+use crate::daemon_common::DaemonEvent;
+use async_channel::Sender;
 use axum::extract::Query;
 use err::Error;
 use http::Request;
@@ -113,6 +115,10 @@ struct DummyQuery {
 pub struct DaemonComm {}
 
 impl DaemonComm {
+    pub fn new(tx: Sender<DaemonEvent>) -> Self {
+        Self {}
+    }
+
     pub fn dummy() -> Self {
         Self {}
     }
