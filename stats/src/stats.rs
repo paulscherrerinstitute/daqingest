@@ -266,7 +266,29 @@ stats_proc::stats_struct!((
 ));
 
 stats_proc::stats_struct!((
-    stats_struct(name(DaemonStats), counters(main_lookupaddr_ok)),
+    stats_struct(
+        name(DaemonStats),
+        prefix(daemon),
+        counters(
+            critical_error,
+            todo_mark,
+            ticker_token_acquire_error,
+            ticker_token_release_error,
+            handle_timer_tick_count,
+            ioc_search_err,
+            ioc_search_some,
+            ioc_search_none,
+            lookupaddr_ok,
+            events,
+            event_ca_conn,
+            ca_conn_status_done,
+            ca_conn_status_feedback_timeout,
+            ca_conn_status_feedback_recv,
+            ca_conn_status_feedback_no_dst,
+            ca_echo_timeout_total,
+        ),
+        values(channel_without_address, channel_with_address),
+    ),
     agg(name(DaemonStatsAgg), parent(DaemonStats)),
     diff(name(DaemonStatsAggDiff), input(DaemonStatsAgg)),
 ));

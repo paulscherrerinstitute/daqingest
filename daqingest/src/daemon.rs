@@ -4,6 +4,7 @@ use err::Error;
 use futures_util::FutureExt;
 use futures_util::StreamExt;
 use log::*;
+use netfetch::ca::conn::CaConnEvent;
 use netfetch::ca::conn::ConnCommand;
 use netfetch::ca::connset::CaConnSet;
 use netfetch::ca::findioc::FindIocRes;
@@ -17,10 +18,12 @@ use netfetch::daemon_common::DaemonEvent;
 use netfetch::errconv::ErrConv;
 use netfetch::insertworker::Ttls;
 use netfetch::metrics::ExtraInsertsConf;
+use netfetch::metrics::StatsSet;
 use netfetch::store::CommonInsertItemQueue;
 use netpod::Database;
 use netpod::ScyllaConfig;
 use serde::Serialize;
+use stats::DaemonStats;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::VecDeque;
@@ -153,17 +156,19 @@ pub struct ChannelState {
     value: ChannelStateValue,
 }
 
-#[derive(Debug, Serialize)]
-pub enum CaConnStateValue {}
+#[derive(Debug)]
+pub enum CaConnStateValue {
+    Fresh,
+    HadFeedback,
+    Shutdown { since: Instant },
+}
 
 #[derive(Debug)]
 pub struct CaConnState {
     last_feedback: Instant,
-    #[allow(unused)]
     value: CaConnStateValue,
 }
 
-#[derive(Debug, Clone)]
 pub struct DaemonOpts {
     backend: String,
     local_epics_hostname: String,
@@ -248,6 +253,7 @@ pub struct Daemon {
     pg_client: Arc<PgClient>,
     ingest_commons: Arc<IngestCommons>,
     caconn_last_channel_check: Instant,
+    stats: Arc<DaemonStats>,
 }
 
 impl Daemon {
@@ -409,6 +415,7 @@ impl Daemon {
             pg_client,
             ingest_commons,
             caconn_last_channel_check: Instant::now(),
+            stats: Arc::new(DaemonStats::new()),
         };
         Ok(ret)
     }
@@ -662,23 +669,77 @@ impl Daemon {
         (qtx, ioc_finder_jh)
     }
 
+    fn stats(&self) -> &Arc<DaemonStats> {
+        &self.stats
+    }
+
     async fn check_chans(&mut self) -> Result<(), Error> {
         {
             let tsnow = Instant::now();
-            for (k, v) in &self.connection_states {
-                // TODO check for delta t since last issued status command.
-                if tsnow.duration_since(v.last_feedback) > Duration::from_millis(20000) {
-                    error!("CaConn without status feedback {k:?}");
+            for (k, v) in &mut self.connection_states {
+                match v.value {
+                    CaConnStateValue::Fresh => {
+                        // TODO check for delta t since last issued status command.
+                        if tsnow.duration_since(v.last_feedback) > Duration::from_millis(20000) {
+                            error!("TODO send connection-close for {k:?}");
+                            self.stats.ca_conn_status_feedback_timeout_inc();
+                            v.value = CaConnStateValue::Shutdown { since: tsnow };
+                        }
+                    }
+                    CaConnStateValue::HadFeedback => {
+                        // TODO check for delta t since last issued status command.
+                        if tsnow.duration_since(v.last_feedback) > Duration::from_millis(20000) {
+                            error!("TODO send connection-close for {k:?}");
+                            self.stats.ca_conn_status_feedback_timeout_inc();
+                            v.value = CaConnStateValue::Shutdown { since: tsnow };
+                        }
+                    }
+                    CaConnStateValue::Shutdown { since } => {
+                        if tsnow.saturating_duration_since(since) > Duration::from_millis(10000) {
+                            self.stats.critical_error_inc();
+                            error!("Shutdown of CaConn to {} failed", k);
+                        }
+                    }
                 }
             }
         }
         let mut currently_search_pending = 0;
         {
+            let mut with_address_count = 0;
+            let mut without_address_count = 0;
             for (_ch, st) in &self.channel_states {
-                if let ChannelStateValue::Active(ActiveChannelState::SearchPending { .. }) = &st.value {
-                    currently_search_pending += 1;
+                match &st.value {
+                    ChannelStateValue::Active(st2) => match st2 {
+                        ActiveChannelState::UnknownAddress { since: _ } => {
+                            without_address_count += 1;
+                        }
+                        ActiveChannelState::SearchPending { since: _, did_send: _ } => {
+                            currently_search_pending += 1;
+                            without_address_count += 1;
+                        }
+                        ActiveChannelState::WithAddress { addr: _, state } => match state {
+                            WithAddressState::Unassigned { assign_at: _ } => {
+                                with_address_count += 1;
+                            }
+                            WithAddressState::Assigned(_) => {
+                                with_address_count += 1;
+                            }
+                        },
+                        ActiveChannelState::NoAddress { since: _ } => {
+                            without_address_count += 1;
+                        }
+                    },
+                    ChannelStateValue::ToRemove { addr: _ } => {
+                        with_address_count += 1;
+                    }
                 }
             }
+            self.stats
+                .channel_with_address
+                .store(with_address_count, atomic::Ordering::Release);
+            self.stats
+                .channel_without_address
+                .store(without_address_count, atomic::Ordering::Release);
         }
         let k = self.chan_check_next.take();
         trace!("------------   check_chans  start at {:?}", k);
@@ -745,6 +806,13 @@ impl Daemon {
                                         value: ConnectionStateValue::Unconnected,
                                     };
                                     *state = WithAddressState::Assigned(cs);
+                                    self.connection_states.entry(*addr).or_insert_with(|| {
+                                        let t = CaConnState {
+                                            last_feedback: Instant::now(),
+                                            value: CaConnStateValue::Fresh,
+                                        };
+                                        t
+                                    });
                                 }
                             }
                             Assigned(_) => {
@@ -838,7 +906,17 @@ impl Daemon {
         Ok(())
     }
 
+    async fn ca_conn_send_shutdown(&mut self) -> Result<(), Error> {
+        warn!("send shutdown to all ca connections");
+        self.ingest_commons
+            .ca_conn_set
+            .enqueue_command_to_all(|| ConnCommand::shutdown())
+            .await?;
+        Ok(())
+    }
+
     async fn handle_timer_tick(&mut self) -> Result<(), Error> {
+        self.stats.handle_timer_tick_count_inc();
         let ts1 = Instant::now();
         let tsnow = SystemTime::now();
         if SIGINT.load(atomic::Ordering::Acquire) == 1 {
@@ -936,6 +1014,7 @@ impl Daemon {
                 SEARCH_ANS_COUNT.fetch_add(ress.len(), atomic::Ordering::AcqRel);
                 for res in ress {
                     if let Some(addr) = &res.addr {
+                        self.stats.ioc_search_some_inc();
                         let ch = Channel::new(res.channel);
                         if let Some(st) = self.channel_states.get_mut(&ch) {
                             if let ChannelStateValue::Active(ActiveChannelState::SearchPending { since, did_send: _ }) =
@@ -989,6 +1068,7 @@ impl Daemon {
                 }
             }
             Err(e) => {
+                self.stats.ioc_search_err_inc();
                 error!("error from search: {e}");
             }
         }
@@ -998,7 +1078,7 @@ impl Daemon {
     async fn handle_ca_conn_done(&mut self, conn_addr: SocketAddrV4) -> Result<(), Error> {
         info!("handle_ca_conn_done {conn_addr:?}");
         self.connection_states.remove(&conn_addr);
-        for (k, v) in self.channel_states.iter_mut() {
+        for (_k, v) in self.channel_states.iter_mut() {
             match &v.value {
                 ChannelStateValue::Active(st2) => match st2 {
                     ActiveChannelState::UnknownAddress { .. } => {}
@@ -1022,8 +1102,45 @@ impl Daemon {
         Ok(())
     }
 
+    async fn handle_ca_conn_event(&mut self, addr: SocketAddrV4, item: CaConnEvent) -> Result<(), Error> {
+        self.stats.event_ca_conn_inc();
+        use netfetch::ca::conn::CaConnEventValue::*;
+        match item.value {
+            None => {
+                // TODO count, maybe reduce.
+                Ok(())
+            }
+            EchoTimeout => {
+                self.stats.ca_echo_timeout_total_inc();
+                error!("TODO on EchoTimeout remove the CaConn and reset channels");
+                Ok(())
+            }
+            ConnCommandResult(item) => {
+                self.stats.todo_mark_inc();
+                use netfetch::ca::conn::ConnCommandResultKind::*;
+                match &item.kind {
+                    CheckHealth => {
+                        if let Some(st) = self.connection_states.get_mut(&addr) {
+                            self.stats.ca_conn_status_feedback_recv_inc();
+                            st.last_feedback = Instant::now();
+                            Ok(())
+                        } else {
+                            self.stats.ca_conn_status_feedback_no_dst_inc();
+                            Ok(())
+                        }
+                    }
+                }
+            }
+            EndOfStream => {
+                self.stats.ca_conn_status_done_inc();
+                self.handle_ca_conn_done(addr).await
+            }
+        }
+    }
+
     async fn handle_event(&mut self, item: DaemonEvent, ticker_inp_tx: &Sender<u32>) -> Result<(), Error> {
         use DaemonEvent::*;
+        self.stats.events_inc();
         let ts1 = Instant::now();
         let item_summary = item.summary();
         let ret = match item {
@@ -1032,6 +1149,7 @@ impl Daemon {
                 match ticker_inp_tx.send(42).await {
                     Ok(_) => {}
                     Err(_) => {
+                        self.stats.ticker_token_release_error_inc();
                         error!("can not send ticker token");
                         return Err(Error::with_msg_no_trace("can not send ticker token"));
                     }
@@ -1041,34 +1159,7 @@ impl Daemon {
             ChannelAdd(ch) => self.handle_channel_add(ch),
             ChannelRemove(ch) => self.handle_channel_remove(ch),
             SearchDone(item) => self.handle_search_done(item).await,
-            CaConnEvent(addr, item) => {
-                use netfetch::ca::conn::CaConnEventValue::*;
-                match item.value {
-                    None => {
-                        // TODO count, maybe reduce.
-                        Ok(())
-                    }
-                    EchoTimeout => {
-                        error!("TODO on EchoTimeout remove the CaConn and reset channels");
-                        Ok(())
-                    }
-                    HealthCheckDone => {
-                        if let Some(st) = self.connection_states.get_mut(&addr) {
-                            st.last_feedback = Instant::now();
-                            Ok(())
-                        } else {
-                            error!("received HealthCheckDone for unknown CaConn");
-                            // TODO
-                            Ok(())
-                        }
-                    }
-                    ConnCommandResult(item) => {
-                        info!("TODO handle ConnCommandResult {item:?}");
-                        Ok(())
-                    }
-                    EndOfStream => self.handle_ca_conn_done(addr).await,
-                }
-            }
+            CaConnEvent(addr, item) => self.handle_ca_conn_event(addr, item).await,
         };
         let dt = ts1.elapsed();
         if dt > Duration::from_millis(200) {
@@ -1081,6 +1172,7 @@ impl Daemon {
         let (ticker_inp_tx, ticker_inp_rx) = async_channel::bounded::<u32>(1);
         let ticker = {
             let tx = self.tx.clone();
+            let stats = self.stats.clone();
             async move {
                 loop {
                     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -1092,7 +1184,10 @@ impl Daemon {
                     for _ in 0..c {
                         match ticker_inp_rx.recv().await {
                             Ok(_) => {}
-                            Err(_) => break,
+                            Err(_) => {
+                                stats.ticker_token_acquire_error_inc();
+                                break;
+                            }
                         }
                     }
                 }
@@ -1161,9 +1256,14 @@ pub async fn run(opts: CaIngestOpts, channels: Vec<String>) -> Result<(), Error>
     };
     let mut daemon = Daemon::new(opts2).await?;
     let tx = daemon.tx.clone();
+    let daemon_stats = daemon.stats().clone();
 
-    let dcom = Arc::new(netfetch::metrics::DaemonComm::dummy());
-    netfetch::metrics::start_metrics_service(opts.api_bind(), dcom);
+    let dcom = Arc::new(netfetch::metrics::DaemonComm::new(tx.clone()));
+    let metrics_jh = {
+        let stats_set = StatsSet::new(daemon_stats);
+        let fut = netfetch::metrics::start_metrics_service(opts.api_bind(), dcom, stats_set);
+        tokio::task::spawn(fut)
+    };
 
     let daemon_jh = taskrun::spawn(async move {
         // TODO handle Err
@@ -1175,5 +1275,8 @@ pub async fn run(opts: CaIngestOpts, channels: Vec<String>) -> Result<(), Error>
     }
     info!("all channels sent to daemon");
     daemon_jh.await.unwrap();
+    if false {
+        metrics_jh.await.unwrap();
+    }
     Ok(())
 }

@@ -338,15 +338,14 @@ pub enum ConnCommandResultKind {
 
 #[derive(Debug)]
 pub struct ConnCommandResult {
-    id: usize,
-    kind: ConnCommandResultKind,
+    pub id: usize,
+    pub kind: ConnCommandResultKind,
 }
 
 #[derive(Debug)]
 pub enum CaConnEventValue {
     None,
     EchoTimeout,
-    HealthCheckDone,
     ConnCommandResult(ConnCommandResult),
     EndOfStream,
 }
@@ -423,6 +422,7 @@ pub struct CaConn {
     ioc_ping_last: Instant,
     ioc_ping_start: Option<Instant>,
     cmd_res_queue: VecDeque<ConnCommandResult>,
+    ca_conn_event_out_queue: VecDeque<CaConnEvent>,
     channel_set_ops: Arc<ChannelSetOps>,
     channel_info_query_tx: Sender<ChannelInfoQuery>,
     series_lookup_schedule: BTreeMap<Cid, ChannelInfoQuery>,
@@ -474,6 +474,7 @@ impl CaConn {
             ioc_ping_last: Instant::now(),
             ioc_ping_start: None,
             cmd_res_queue: VecDeque::new(),
+            ca_conn_event_out_queue: VecDeque::new(),
             channel_set_ops: Arc::new(ChannelSetOps {
                 ops: StdMutex::new(BTreeMap::new()),
                 flag: AtomicUsize::new(0),
@@ -528,8 +529,13 @@ impl CaConn {
                 self.trigger_shutdown();
             }
         }
-        //self.stats.caconn_command_can_not_reply_inc();
         // TODO return the result
+        let res = ConnCommandResult {
+            id: 0,
+            kind: ConnCommandResultKind::CheckHealth,
+        };
+        self.cmd_res_queue.push_back(res);
+        //self.stats.caconn_command_can_not_reply_inc();
     }
 
     fn cmd_find_channel(&self, pattern: &str) {
@@ -811,6 +817,11 @@ impl CaConn {
             if let Some(started) = self.ioc_ping_start {
                 if started.elapsed() > Duration::from_millis(4000) {
                     warn!("Echo timeout {addr:?}", addr = self.remote_addr_dbg);
+                    let item = CaConnEvent {
+                        ts: Instant::now(),
+                        value: CaConnEventValue::EchoTimeout,
+                    };
+                    self.ca_conn_event_out_queue.push_back(item);
                     self.trigger_shutdown();
                 }
             } else {
@@ -1703,6 +1714,8 @@ impl Stream for CaConn {
                 ts: Instant::now(),
                 value: CaConnEventValue::ConnCommandResult(item),
             })))
+        } else if let Some(item) = self.ca_conn_event_out_queue.pop_front() {
+            Ready(Some(Ok(item)))
         } else {
             let mut i1 = 0;
             let ret = loop {

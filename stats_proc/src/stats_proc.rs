@@ -13,7 +13,9 @@ struct FuncCallWithArgs {
 #[derive(Clone, Debug)]
 struct StatsStructDef {
     name: syn::Ident,
+    prefix: Option<syn::Ident>,
     counters: Vec<syn::Ident>,
+    values: Vec<syn::Ident>,
 }
 
 #[derive(Debug)]
@@ -36,18 +38,22 @@ fn extend_str(mut a: String, x: impl AsRef<str>) -> String {
 }
 
 fn stats_struct_impl(st: &StatsStructDef) -> String {
+    use std::fmt::Write;
     let name = &st.name;
-    let inits: Vec<_> = st
+    let inits1 = st
         .counters
         .iter()
-        .map(|x| format!("{:12}{}: AtomicU64::new(0)", "", x.to_string()))
-        .collect();
+        .map(|x| format!("{:12}{}: AtomicU64::new(0)", "", x.to_string()));
+    let inits2 = st
+        .values
+        .iter()
+        .map(|x| format!("{:12}{}: AtomicU64::new(0)", "", x.to_string()));
+    let inits: Vec<_> = inits1.into_iter().chain(inits2).collect();
     let inits = inits.join(",\n");
     let incers: String = st
         .counters
         .iter()
-        .map(|x| {
-            let nn = x.to_string();
+        .map(|nn| {
             format!(
                 "
     pub fn {nn}_inc(&self) {{
@@ -62,7 +68,61 @@ fn stats_struct_impl(st: &StatsStructDef) -> String {
 "
             )
         })
-        .fold(String::new(), |a, x| format!("{}{}", a, x));
+        .fold(String::new(), |mut a, x| {
+            a.push_str(&x);
+            a
+        });
+    let values = {
+        let mut buf = String::new();
+        for nn in &st.values {
+            write!(
+                buf,
+                "
+    pub fn {nn}_set(&self, v: u64) {{
+        self.{nn}.store(v, Ordering::Release);
+    }}
+"
+            )
+            .unwrap();
+        }
+        buf
+    };
+    let fn_prometheus = {
+        let mut buf = String::new();
+        for x in &st.counters {
+            let n = x.to_string();
+            let pre = if let Some(x) = &st.prefix {
+                format!("_{}", x)
+            } else {
+                String::new()
+            };
+            buf.push_str(&format!(
+                "ret.push_str(&format!(\"daqingest{}_{} {{}}\\n\", self.{}.load(Ordering::Acquire)));\n",
+                pre, n, n
+            ));
+        }
+        for x in &st.values {
+            let n = x.to_string();
+            let nn = if let Some(pre) = &st.prefix {
+                format!("{pre}_{n}")
+            } else {
+                n.to_string()
+            };
+            buf.push_str(&format!(
+                "ret.push_str(&format!(\"daqingest_{} {{}}\\n\", self.{}.load(Ordering::Acquire)));\n",
+                nn, n
+            ));
+        }
+        format!(
+            "
+            pub fn prometheus(&self) -> String {{
+                let mut ret = String::new();
+                {buf}
+                ret
+            }}
+        "
+        )
+    };
     format!(
         "
 impl {name} {{
@@ -74,6 +134,10 @@ impl {name} {{
     }}
 
     {incers}
+
+    {values}
+
+    {fn_prometheus}
 }}
     "
     )
@@ -86,11 +150,17 @@ fn stats_struct_decl_impl(st: &StatsStructDef) -> String {
         .iter()
         .map(|x| format!("{:4}pub {}: AtomicU64,\n", "", x.to_string()))
         .fold(String::new(), extend_str);
+    let values_decl = st
+        .values
+        .iter()
+        .map(|x| format!("{:4}pub {}: AtomicU64,\n", "", x.to_string()))
+        .fold(String::new(), extend_str);
     let structt = format!(
         "
 pub struct {name} {{
     pub ts_create: Instant,
 {counters_decl}
+{values_decl}
 }}
 
 "
@@ -350,27 +420,40 @@ impl StatsStructDef {
     fn empty() -> Self {
         Self {
             name: syn::parse_str("__empty").unwrap(),
-            counters: vec![],
+            prefix: syn::parse_str("__empty").unwrap(),
+            counters: Vec::new(),
+            values: Vec::new(),
         }
     }
 
     fn from_args(inp: PunctExpr) -> syn::Result<Self> {
         let mut name = None;
+        let mut prefix = None;
         let mut counters = None;
+        let mut values = None;
         for k in inp {
             let fa = FuncCallWithArgs::from_expr(k)?;
             if fa.name == "name" {
                 let ident = ident_from_expr(fa.args[0].clone())?;
                 name = Some(ident);
-            }
-            if fa.name == "counters" {
+            } else if fa.name == "prefix" {
+                let ident = ident_from_expr(fa.args[0].clone())?;
+                prefix = Some(ident);
+            } else if fa.name == "counters" {
                 let idents = idents_from_exprs(fa.args)?;
                 counters = Some(idents);
+            } else if fa.name == "values" {
+                let idents = idents_from_exprs(fa.args)?;
+                values = Some(idents);
+            } else {
+                panic!("fa.name: {:?}", fa.name);
             }
         }
         let ret = StatsStructDef {
             name: name.expect("Expect name for StatsStructDef"),
-            counters: counters.unwrap_or(vec![]),
+            prefix,
+            counters: counters.unwrap_or(Vec::new()),
+            values: values.unwrap_or(Vec::new()),
         };
         Ok(ret)
     }
@@ -476,7 +559,9 @@ pub fn stats_struct(ts: TokenStream) -> TokenStream {
         for j in &def.agg_defs {
             let h = StatsStructDef {
                 name: j.name.clone(),
+                prefix: None,
                 counters: j.stats.counters.clone(),
+                values: Vec::new(),
             };
             def.stats_struct_defs.push(h);
         }
@@ -505,7 +590,11 @@ pub fn stats_struct(ts: TokenStream) -> TokenStream {
                 // TODO currently, "j.stats" describes the input to the "agg", so that contains the wrong name.
                 let p = StatsStructDef {
                     name: k.input.clone(),
+                    // TODO refactor
+                    prefix: None,
                     counters: j.stats.counters.clone(),
+                    // TODO compute values
+                    values: Vec::new(),
                 };
                 let s = diff_decl_impl(k, &p);
                 code.push_str(&s);

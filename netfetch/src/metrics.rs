@@ -11,11 +11,22 @@ use serde::Serialize;
 use stats::CaConnStats;
 use stats::CaConnStatsAgg;
 use stats::CaConnStatsAggDiff;
+use stats::DaemonStats;
 use std::collections::HashMap;
 use std::net::SocketAddrV4;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
+
+pub struct StatsSet {
+    daemon: Arc<DaemonStats>,
+}
+
+impl StatsSet {
+    pub fn new(daemon: Arc<DaemonStats>) -> Self {
+        Self { daemon }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExtraInsertsConf {
@@ -112,19 +123,17 @@ struct DummyQuery {
     age: usize,
 }
 
-pub struct DaemonComm {}
+pub struct DaemonComm {
+    tx: Sender<DaemonEvent>,
+}
 
 impl DaemonComm {
     pub fn new(tx: Sender<DaemonEvent>) -> Self {
-        Self {}
-    }
-
-    pub fn dummy() -> Self {
-        Self {}
+        Self { tx }
     }
 }
 
-fn make_routes(dcom: Arc<DaemonComm>) -> axum::Router {
+fn make_routes(dcom: Arc<DaemonComm>, stats_set: StatsSet) -> axum::Router {
     use axum::extract;
     use axum::routing::get;
     use axum::routing::put;
@@ -147,17 +156,12 @@ fn make_routes(dcom: Arc<DaemonComm>) -> axum::Router {
         )
         .route(
             "/metrics",
-            get(|| async {
-                let stats = crate::ca::METRICS.lock().unwrap();
-                match stats.as_ref() {
-                    Some(s) => {
-                        trace!("Metrics");
-                        s.prometheus()
-                    }
-                    None => {
-                        trace!("Metrics empty");
-                        String::new()
-                    }
+            get({
+                //
+                || async move {
+                    info!("metrics");
+                    let s1 = stats_set.daemon.prometheus();
+                    s1
                 }
             }),
         )
@@ -238,9 +242,9 @@ fn make_routes(dcom: Arc<DaemonComm>) -> axum::Router {
         )
 }
 
-pub async fn start_metrics_service(bind_to: String, dcom: Arc<DaemonComm>) {
+pub async fn start_metrics_service(bind_to: String, dcom: Arc<DaemonComm>, stats_set: StatsSet) {
     axum::Server::bind(&bind_to.parse().unwrap())
-        .serve(make_routes(dcom).into_make_service())
+        .serve(make_routes(dcom, stats_set).into_make_service())
         .await
         .unwrap()
 }
