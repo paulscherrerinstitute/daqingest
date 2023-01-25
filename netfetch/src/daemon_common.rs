@@ -27,6 +27,7 @@ pub enum DaemonEvent {
     ChannelRemove(Channel),
     SearchDone(Result<VecDeque<FindIocRes>, Error>),
     CaConnEvent(SocketAddrV4, CaConnEvent),
+    Shutdown,
 }
 
 impl DaemonEvent {
@@ -47,6 +48,7 @@ impl DaemonEvent {
                     EndOfStream => format!("CaConnEvent/EndOfStream"),
                 }
             }
+            Shutdown => format!("Shutdown"),
         }
     }
 }

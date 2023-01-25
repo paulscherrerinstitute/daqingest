@@ -254,6 +254,7 @@ pub struct Daemon {
     ingest_commons: Arc<IngestCommons>,
     caconn_last_channel_check: Instant,
     stats: Arc<DaemonStats>,
+    shutting_down: bool,
 }
 
 impl Daemon {
@@ -281,8 +282,12 @@ impl Daemon {
         // Insert queue hook
         if true {
             tokio::spawn({
-                let rx = common_insert_item_queue.receiver();
-                let tx = common_insert_item_queue_2.sender();
+                let rx = common_insert_item_queue
+                    .receiver()
+                    .ok_or_else(|| Error::with_msg_no_trace("can not derive receiver for insert queue adapter"))?;
+                let tx = common_insert_item_queue_2
+                    .sender()
+                    .ok_or_else(|| Error::with_msg_no_trace("can not derive sender for insert queue adapter"))?;
                 let insert_queue_counter = insert_queue_counter.clone();
                 async move {
                     let mut printed_last = Instant::now();
@@ -338,6 +343,7 @@ impl Daemon {
                             histo.clear();
                         }
                     }
+                    info!("insert queue adapter ended");
                 }
             });
         }
@@ -416,6 +422,7 @@ impl Daemon {
             ingest_commons,
             caconn_last_channel_check: Instant::now(),
             stats: Arc::new(DaemonStats::new()),
+            shutting_down: false,
         };
         Ok(ret)
     }
@@ -673,6 +680,10 @@ impl Daemon {
         &self.stats
     }
 
+    fn allow_create_new_connections(&self) -> bool {
+        !self.shutting_down
+    }
+
     async fn check_chans(&mut self) -> Result<(), Error> {
         {
             let tsnow = Instant::now();
@@ -916,6 +927,11 @@ impl Daemon {
     }
 
     async fn handle_timer_tick(&mut self) -> Result<(), Error> {
+        if self.shutting_down {
+            let sa1 = self.ingest_commons.insert_item_queue.sender_count();
+            let sa2 = self.ingest_commons.insert_item_queue.sender_count_2();
+            info!("qu senders A {:?} {:?}", sa1, sa2);
+        }
         self.stats.handle_timer_tick_count_inc();
         let ts1 = Instant::now();
         let tsnow = SystemTime::now();
@@ -1015,32 +1031,38 @@ impl Daemon {
                 for res in ress {
                     if let Some(addr) = &res.addr {
                         self.stats.ioc_search_some_inc();
-                        let ch = Channel::new(res.channel);
-                        if let Some(st) = self.channel_states.get_mut(&ch) {
-                            if let ChannelStateValue::Active(ActiveChannelState::SearchPending { since, did_send: _ }) =
-                                &st.value
-                            {
-                                let dt = tsnow.duration_since(*since).unwrap();
-                                if dt > SEARCH_PENDING_TIMEOUT_WARN {
+                        if self.allow_create_new_connections() {
+                            let ch = Channel::new(res.channel);
+                            if let Some(st) = self.channel_states.get_mut(&ch) {
+                                if let ChannelStateValue::Active(ActiveChannelState::SearchPending {
+                                    since,
+                                    did_send: _,
+                                }) = &st.value
+                                {
+                                    let dt = tsnow.duration_since(*since).unwrap();
+                                    if dt > SEARCH_PENDING_TIMEOUT_WARN {
+                                        warn!(
+                                            "    FOUND {:5.0}  {:5.0}  {addr}",
+                                            1e3 * dt.as_secs_f32(),
+                                            1e3 * res.dt.as_secs_f32()
+                                        );
+                                    }
+                                    let stnew = ChannelStateValue::Active(ActiveChannelState::WithAddress {
+                                        addr: addr.clone(),
+                                        state: WithAddressState::Unassigned { assign_at: tsnow },
+                                    });
+                                    st.value = stnew;
+                                } else {
                                     warn!(
-                                        "    FOUND {:5.0}  {:5.0}  {addr}",
-                                        1e3 * dt.as_secs_f32(),
-                                        1e3 * res.dt.as_secs_f32()
+                                        "address found, but state for {ch:?} is not SearchPending: {:?}",
+                                        st.value
                                     );
                                 }
-                                let stnew = ChannelStateValue::Active(ActiveChannelState::WithAddress {
-                                    addr: addr.clone(),
-                                    state: WithAddressState::Unassigned { assign_at: tsnow },
-                                });
-                                st.value = stnew;
                             } else {
-                                warn!(
-                                    "address found, but state for {ch:?} is not SearchPending: {:?}",
-                                    st.value
-                                );
+                                warn!("can not find channel state for {ch:?}");
                             }
                         } else {
-                            warn!("can not find channel state for {ch:?}");
+                            // Emit something here?
                         }
                     } else {
                         //debug!("no addr from search in {res:?}");
@@ -1138,6 +1160,20 @@ impl Daemon {
         }
     }
 
+    async fn handle_shutdown(&mut self) -> Result<(), Error> {
+        warn!("received shutdown event");
+        if self.shutting_down {
+            info!("already shutting down");
+            Ok(())
+        } else {
+            self.shutting_down = true;
+            self.channel_states.clear();
+            self.ca_conn_send_shutdown().await?;
+            self.ingest_commons.insert_item_queue.drop_sender();
+            Ok(())
+        }
+    }
+
     async fn handle_event(&mut self, item: DaemonEvent, ticker_inp_tx: &Sender<u32>) -> Result<(), Error> {
         use DaemonEvent::*;
         self.stats.events_inc();
@@ -1160,6 +1196,7 @@ impl Daemon {
             ChannelRemove(ch) => self.handle_channel_remove(ch),
             SearchDone(item) => self.handle_search_done(item).await,
             CaConnEvent(addr, item) => self.handle_ca_conn_event(addr, item).await,
+            Shutdown => self.handle_shutdown().await,
         };
         let dt = ts1.elapsed();
         if dt > Duration::from_millis(200) {
@@ -1176,6 +1213,16 @@ impl Daemon {
             async move {
                 loop {
                     tokio::time::sleep(Duration::from_millis(100)).await;
+                    if SIGINT.load(atomic::Ordering::Acquire) != 0 || SIGTERM.load(atomic::Ordering::Acquire) != 0 {
+                        if SHUTDOWN_SENT.load(atomic::Ordering::Acquire) == 0 {
+                            if let Err(e) = tx.send(DaemonEvent::Shutdown).await {
+                                error!("can not send TimerTick {e}");
+                                break;
+                            } else {
+                                SHUTDOWN_SENT.store(1, atomic::Ordering::Release);
+                            }
+                        }
+                    }
                     if let Err(e) = tx.send(DaemonEvent::TimerTick).await {
                         error!("can not send TimerTick {e}");
                         break;
@@ -1220,6 +1267,7 @@ impl Daemon {
 
 static SIGINT: AtomicUsize = AtomicUsize::new(0);
 static SIGTERM: AtomicUsize = AtomicUsize::new(0);
+static SHUTDOWN_SENT: AtomicUsize = AtomicUsize::new(0);
 
 fn handler_sigint(_a: libc::c_int, _b: *const libc::siginfo_t, _c: *const libc::c_void) {
     SIGINT.store(1, atomic::Ordering::Release);

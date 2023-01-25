@@ -61,11 +61,17 @@ pub async fn spawn_scylla_insert_workers(
     use_rate_limit_queue: bool,
     ttls: Ttls,
 ) -> Result<Vec<JoinHandle<()>>, Error> {
-    let (q2_tx, q2_rx) = async_channel::bounded(insert_item_queue.receiver().capacity().unwrap_or(20000));
+    let (q2_tx, q2_rx) = async_channel::bounded(
+        insert_item_queue
+            .receiver()
+            .map_or(20000, |x| x.capacity().unwrap_or(20000)),
+    );
     {
         let ingest_commons = ingest_commons.clone();
         let stats = store_stats.clone();
-        let recv = insert_item_queue.receiver();
+        let recv = insert_item_queue
+            .receiver()
+            .ok_or_else(|| Error::with_msg_no_trace("can not derive insert queue receiver"))?;
         let store_stats = store_stats.clone();
         let fut = async move {
             if !use_rate_limit_queue {
@@ -128,7 +134,9 @@ pub async fn spawn_scylla_insert_workers(
         let recv = if use_rate_limit_queue {
             q2_rx.clone()
         } else {
-            insert_item_queue.receiver()
+            insert_item_queue
+                .receiver()
+                .ok_or_else(|| Error::with_msg_no_trace("can not derive receiver"))?
         };
         let ingest_commons = ingest_commons.clone();
         let fut = async move {
@@ -259,7 +267,7 @@ pub async fn spawn_scylla_insert_workers(
                     }
                 }
             }
-            trace!("insert worker has no more messages");
+            info!("insert worker {i1} has no more messages");
         };
         let jh = tokio::spawn(fut);
         jhs.push(jh);

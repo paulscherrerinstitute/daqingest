@@ -393,7 +393,6 @@ struct ChannelOpsResources<'a> {
 
 pub struct CaConn {
     state: CaConnState,
-    shutdown: bool,
     ticker: Pin<Box<tokio::time::Sleep>>,
     proto: Option<CaProto>,
     cid_store: CidStore,
@@ -445,7 +444,6 @@ impl CaConn {
         let (cq_tx, cq_rx) = async_channel::bounded(32);
         Self {
             state: CaConnState::Unconnected,
-            shutdown: false,
             ticker: Box::pin(tokio::time::sleep(Duration::from_millis(500))),
             proto: None,
             cid_store: CidStore::new(),
@@ -493,32 +491,18 @@ impl CaConn {
         self.conn_command_tx.clone()
     }
 
-    fn trigger_shutdown(&mut self) {
-        self.shutdown = true;
-        for (_k, v) in self.channels.iter_mut() {
-            match v {
-                ChannelState::Init => {
-                    *v = ChannelState::Ended;
-                }
-                ChannelState::Creating { .. } => {
-                    *v = ChannelState::Ended;
-                }
-                ChannelState::Created(st) => {
-                    if let Some(series) = &st.series {
-                        let item = QueryItem::ChannelStatus(ChannelStatusItem {
-                            ts: SystemTime::now(),
-                            series: series.clone(),
-                            status: ChannelStatus::Closed,
-                        });
-                        info!("emit status item {item:?}");
-                        self.insert_item_queue.push_back(item);
-                    }
-                    *v = ChannelState::Ended;
-                }
-                ChannelState::Error(_) => {}
-                ChannelState::Ended => {}
-            }
+    fn is_shutdown(&self) -> bool {
+        if let CaConnState::Shutdown = self.state {
+            true
+        } else {
+            false
         }
+    }
+
+    fn trigger_shutdown(&mut self) {
+        self.state = CaConnState::Shutdown;
+        self.proto = None;
+        let res = self.channel_state_on_shutdown();
     }
 
     fn cmd_check_health(&mut self) {
@@ -596,10 +580,6 @@ impl CaConn {
 
     fn cmd_shutdown(&mut self) {
         self.trigger_shutdown();
-        let res = self.before_reset_of_channel_state();
-        self.state = CaConnState::Shutdown;
-        self.proto = None;
-        // TODO return the result
     }
 
     fn cmd_extra_inserts_conf(&mut self, extra_inserts_conf: ExtraInsertsConf) {
@@ -737,12 +717,15 @@ impl CaConn {
         self.conn_backoff = self.conn_backoff_beg;
     }
 
-    fn before_reset_of_channel_state(&mut self) -> Result<(), Error> {
+    fn before_reset_of_channel_state(&mut self) {
         trace!("before_reset_of_channel_state  channels {}", self.channels.len());
-        let mut created = 0;
         let mut warn_max = 0;
-        for (_cid, chst) in &self.channels {
+        for (_cid, chst) in &mut self.channels {
             match chst {
+                ChannelState::Init => {}
+                ChannelState::Creating { .. } => {
+                    *chst = ChannelState::Init;
+                }
                 ChannelState::Created(st) => {
                     if let Some(series) = &st.series {
                         let item = QueryItem::ChannelStatus(ChannelStatusItem {
@@ -750,9 +733,6 @@ impl CaConn {
                             series: series.clone(),
                             status: ChannelStatus::Closed,
                         });
-                        if created < 10 {
-                            trace!("store {:?}", item);
-                        }
                         self.insert_item_queue.push_back(item);
                     } else {
                         if warn_max < 10 {
@@ -760,12 +740,51 @@ impl CaConn {
                             warn_max += 1;
                         }
                     }
-                    created += 1;
+                    *chst = ChannelState::Init;
                 }
-                _ => (),
+                ChannelState::Error(_) => {
+                    *chst = ChannelState::Init;
+                }
+                ChannelState::Ended => {
+                    *chst = ChannelState::Init;
+                }
             }
         }
-        Ok(())
+    }
+
+    fn channel_state_on_shutdown(&mut self) {
+        trace!("channel_state_on_shutdown  channels {}", self.channels.len());
+        let mut warn_max = 0;
+        for (_cid, chst) in &mut self.channels {
+            match chst {
+                ChannelState::Init => {
+                    *chst = ChannelState::Ended;
+                }
+                ChannelState::Creating { .. } => {
+                    *chst = ChannelState::Ended;
+                }
+                ChannelState::Created(st) => {
+                    if let Some(series) = &st.series {
+                        let item = QueryItem::ChannelStatus(ChannelStatusItem {
+                            ts: SystemTime::now(),
+                            series: series.clone(),
+                            status: ChannelStatus::Closed,
+                        });
+                        self.insert_item_queue.push_back(item);
+                    } else {
+                        if warn_max < 10 {
+                            debug!("no series for cid {:?}", st.cid);
+                            warn_max += 1;
+                        }
+                    }
+                    *chst = ChannelState::Ended;
+                }
+                ChannelState::Error(_) => {
+                    *chst = ChannelState::Ended;
+                }
+                ChannelState::Ended => {}
+            }
+        }
     }
 
     fn handle_insert_futs(&mut self, cx: &mut Context) -> Poll<Result<(), Error>> {
@@ -1491,26 +1510,13 @@ impl CaConn {
             }
             Ready(Some(Err(e))) => {
                 error!("CaProto yields error: {e:?}  remote {:?}", self.remote_addr_dbg);
-                // TODO unify this handling with the block below
-                let reset_res = self.before_reset_of_channel_state();
-                self.state = CaConnState::Wait(wait_fut(self.backoff_next()));
-                self.proto = None;
-                if let Err(e) = reset_res {
-                    error!("can not destruct channel state before reset {e:?}");
-                }
+                self.trigger_shutdown();
                 Ready(Some(Err(e)))
             }
             Ready(None) => {
                 warn!("handle_peer_ready CaProto is done  {:?}", self.remote_addr_dbg);
-                let reset_res = self.before_reset_of_channel_state();
-                self.state = CaConnState::Wait(wait_fut(self.backoff_next()));
-                self.proto = None;
-                if let Err(e) = reset_res {
-                    error!("can not destruct channel state before reset {e:?}");
-                    Ready(Some(Err(e)))
-                } else {
-                    Ready(None)
-                }
+                self.trigger_shutdown();
+                Ready(None)
             }
             Pending => Pending,
         };
@@ -1649,7 +1655,7 @@ impl CaConn {
             if self.insert_item_queue.len() >= self.insert_queue_max {
                 break None;
             }
-            if self.shutdown {
+            if self.is_shutdown() {
                 break None;
             }
         }
@@ -1722,7 +1728,7 @@ impl Stream for CaConn {
                 i1 += 1;
                 self.stats.caconn_loop1_count_inc();
                 loop {
-                    if self.shutdown {
+                    if self.is_shutdown() {
                         break;
                     }
                     break match self.handle_conn_command(cx) {
@@ -1744,7 +1750,7 @@ impl Stream for CaConn {
                     Ready(_) => {}
                     Pending => break Pending,
                 }
-                if self.shutdown {
+                if self.is_shutdown() {
                     if self.insert_item_queue.len() == 0 {
                         trace!("no more items to flush");
                         if i1 >= 10 {
@@ -1757,7 +1763,7 @@ impl Stream for CaConn {
                 if self.insert_item_queue.len() >= self.insert_queue_max {
                     break Pending;
                 }
-                if !self.shutdown {
+                if !self.is_shutdown() {
                     if let Some(v) = self.loop_inner(cx) {
                         if i1 >= 10 {
                             break v;
@@ -1769,7 +1775,7 @@ impl Stream for CaConn {
                 Ready(_) => self.stats.conn_stream_ready_inc(),
                 Pending => self.stats.conn_stream_pending_inc(),
             }
-            if self.shutdown && self.insert_item_queue.len() == 0 {
+            if self.is_shutdown() && self.insert_item_queue.len() == 0 {
                 Ready(None)
             } else {
                 match ret {

@@ -267,7 +267,10 @@ pub async fn metrics_agg_task(
             }
         }
         {
-            let val = ingest_commons.insert_item_queue.receiver().len() as u64;
+            let val = ingest_commons
+                .insert_item_queue
+                .receiver()
+                .map_or(0, |x| x.len() as u64);
             agg.store_worker_recv_queue_len.store(val, Ordering::Release);
         }
         let mut m = METRICS.lock().unwrap();

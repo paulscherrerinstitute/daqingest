@@ -266,7 +266,9 @@ impl CaConnSet {
                 local_epics_hostname,
                 array_truncate,
                 insert_queue_max,
-                insert_item_queue.sender(),
+                insert_item_queue
+                    .sender()
+                    .ok_or_else(|| Error::with_msg_no_trace("can not derive sender"))?,
                 data_store.clone(),
                 Vec::new(),
             )?;
@@ -302,7 +304,8 @@ impl CaConnSet {
         ca_conn_ress: &TokMx<BTreeMap<SocketAddrV4, CaConnRess>>,
         addr: SocketAddrV4,
     ) -> Result<bool, Error> {
-        warn!("Lock for conn_remove");
+        // TODO make this lock-free.
+        //warn!("Lock for conn_remove");
         if let Some(_caconn) = ca_conn_ress.lock().await.remove(&addr) {
             Ok(true)
         } else {

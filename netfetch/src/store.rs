@@ -251,35 +251,39 @@ impl CommonInsertItemQueueSender {
 }
 
 pub struct CommonInsertItemQueue {
-    sender: async_channel::Sender<QueryItem>,
+    sender: std::sync::Mutex<Option<async_channel::Sender<QueryItem>>>,
     recv: async_channel::Receiver<QueryItem>,
 }
 
 impl CommonInsertItemQueue {
     pub fn new(cap: usize) -> Self {
         let (tx, rx) = async_channel::bounded(cap);
-        Self { sender: tx, recv: rx }
-    }
-
-    pub fn sender(&self) -> CommonInsertItemQueueSender {
-        CommonInsertItemQueueSender {
-            sender: self.sender.clone(),
+        Self {
+            sender: std::sync::Mutex::new(Some(tx)),
+            recv: rx,
         }
     }
 
-    pub fn sender_raw(&self) -> async_channel::Sender<QueryItem> {
-        self.sender.clone()
+    pub fn sender(&self) -> Option<CommonInsertItemQueueSender> {
+        match self.sender.lock().unwrap().as_ref() {
+            Some(sender) => {
+                let ret = CommonInsertItemQueueSender { sender: sender.clone() };
+                Some(ret)
+            }
+            None => None,
+        }
     }
 
-    pub fn receiver(&self) -> async_channel::Receiver<QueryItem> {
-        self.recv.clone()
+    pub fn receiver(&self) -> Option<async_channel::Receiver<QueryItem>> {
+        let ret = self.recv.clone();
+        Some(ret)
     }
 
-    pub fn sender_count(&self) -> usize {
-        self.sender.sender_count()
+    pub fn sender_count(&self) -> Option<usize> {
+        self.sender.lock().unwrap().as_ref().map(|x| x.sender_count())
     }
 
-    pub fn sender_count2(&self) -> usize {
+    pub fn sender_count_2(&self) -> usize {
         self.recv.sender_count()
     }
 
@@ -288,8 +292,10 @@ impl CommonInsertItemQueue {
     }
 
     pub fn close(&self) {
-        self.sender.close();
+        self.sender.lock().unwrap().as_ref().map(|x| x.close());
     }
+
+    pub fn drop_sender(&self) {}
 }
 
 struct InsParCom {
