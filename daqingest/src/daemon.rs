@@ -289,6 +289,7 @@ impl Daemon {
                     .sender()
                     .ok_or_else(|| Error::with_msg_no_trace("can not derive sender for insert queue adapter"))?;
                 let insert_queue_counter = insert_queue_counter.clone();
+                let common_insert_item_queue_2 = common_insert_item_queue_2.clone();
                 async move {
                     let mut printed_last = Instant::now();
                     let mut histo = BTreeMap::new();
@@ -344,6 +345,7 @@ impl Daemon {
                         }
                     }
                     info!("insert queue adapter ended");
+                    common_insert_item_queue_2.drop_sender();
                 }
             });
         }
@@ -359,6 +361,7 @@ impl Daemon {
             store_workers_rate: AtomicU64::new(20000),
             insert_frac: AtomicU64::new(1000),
             ca_conn_set: CaConnSet::new(channel_info_query_tx),
+            insert_workers_running: atomic::AtomicUsize::new(0),
         };
         let ingest_commons = Arc::new(ingest_commons);
 
@@ -930,7 +933,15 @@ impl Daemon {
         if self.shutting_down {
             let sa1 = self.ingest_commons.insert_item_queue.sender_count();
             let sa2 = self.ingest_commons.insert_item_queue.sender_count_2();
-            info!("qu senders A {:?} {:?}", sa1, sa2);
+            let nworkers = self
+                .ingest_commons
+                .insert_workers_running
+                .load(atomic::Ordering::Acquire);
+            info!("qu senders A {:?} {:?}  nworkers {}", sa1, sa2, nworkers);
+            if nworkers == 0 {
+                info!("goodbye");
+                std::process::exit(0);
+            }
         }
         self.stats.handle_timer_tick_count_inc();
         let ts1 = Instant::now();

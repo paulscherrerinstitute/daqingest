@@ -19,6 +19,7 @@ use netpod::Database;
 use stats::CaConnStatsAgg;
 use std::net::SocketAddrV4;
 use std::pin::Pin;
+use std::sync::atomic;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -44,6 +45,7 @@ pub struct IngestCommons {
     pub insert_frac: AtomicU64,
     pub store_workers_rate: AtomicU64,
     pub ca_conn_set: CaConnSet,
+    pub insert_workers_running: atomic::AtomicUsize,
 }
 
 pub trait SlowWarnable {

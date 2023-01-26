@@ -161,21 +161,66 @@ pub struct ConnectionStatusItem {
     pub status: ConnectionStatus,
 }
 
+#[derive(Debug, Clone)]
+pub enum ChannelStatusClosedReason {
+    IngestExit,
+    ChannelRemove,
+    ProtocolError,
+    FrequencyQuota,
+    BandwidthQuota,
+    InternalError,
+    IocTimeout,
+    NoProtocol,
+    ProtocolDone,
+}
+
 #[derive(Debug)]
 pub enum ChannelStatus {
     Opened,
-    Closed,
-    ClosedUnexpected,
+    Closed(ChannelStatusClosedReason),
 }
 
 impl ChannelStatus {
-    pub fn kind(&self) -> u32 {
+    pub fn to_kind(&self) -> u32 {
         use ChannelStatus::*;
+        use ChannelStatusClosedReason::*;
         match self {
             Opened => 1,
-            Closed => 2,
-            ClosedUnexpected => 3,
+            Closed(x) => match x {
+                IngestExit => 2,
+                ChannelRemove => 3,
+                ProtocolError => 4,
+                FrequencyQuota => 5,
+                BandwidthQuota => 6,
+                InternalError => 7,
+                IocTimeout => 8,
+                NoProtocol => 9,
+                ProtocolDone => 10,
+            },
         }
+    }
+
+    pub fn from_kind(kind: u32) -> Result<Self, err::Error> {
+        use ChannelStatus::*;
+        use ChannelStatusClosedReason::*;
+        let ret = match kind {
+            1 => Opened,
+            2 => Closed(IngestExit),
+            3 => Closed(ChannelRemove),
+            4 => Closed(ProtocolError),
+            5 => Closed(FrequencyQuota),
+            6 => Closed(BandwidthQuota),
+            7 => Closed(InternalError),
+            8 => Closed(IocTimeout),
+            9 => Closed(NoProtocol),
+            10 => Closed(ProtocolDone),
+            _ => {
+                return Err(err::Error::with_msg_no_trace(format!(
+                    "unknown ChannelStatus kind {kind}"
+                )));
+            }
+        };
+        Ok(ret)
     }
 }
 
@@ -295,7 +340,9 @@ impl CommonInsertItemQueue {
         self.sender.lock().unwrap().as_ref().map(|x| x.close());
     }
 
-    pub fn drop_sender(&self) {}
+    pub fn drop_sender(&self) {
+        self.sender.lock().unwrap().take();
+    }
 }
 
 struct InsParCom {
@@ -463,7 +510,7 @@ pub async fn insert_channel_status(
     let ts = secs + nanos;
     let ts_msp = ts / CONNECTION_STATUS_DIV * CONNECTION_STATUS_DIV;
     let ts_lsp = ts - ts_msp;
-    let kind = item.status.kind();
+    let kind = item.status.to_kind();
     let series = item.series.id();
     let params = (
         series as i64,

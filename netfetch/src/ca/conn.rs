@@ -13,11 +13,15 @@ use crate::series::Existence;
 use crate::series::SeriesId;
 use crate::store::ChannelInfoItem;
 use crate::store::ChannelStatus;
+use crate::store::ChannelStatusClosedReason;
 use crate::store::ChannelStatusItem;
 use crate::store::CommonInsertItemQueueSender;
 use crate::store::ConnectionStatus;
 use crate::store::ConnectionStatusItem;
-use crate::store::{InsertItem, IvlItem, MuteItem, QueryItem};
+use crate::store::InsertItem;
+use crate::store::IvlItem;
+use crate::store::MuteItem;
+use crate::store::QueryItem;
 use async_channel::Sender;
 use err::Error;
 use futures_util::stream::FuturesUnordered;
@@ -499,10 +503,10 @@ impl CaConn {
         }
     }
 
-    fn trigger_shutdown(&mut self) {
+    fn trigger_shutdown(&mut self, channel_reason: ChannelStatusClosedReason) {
         self.state = CaConnState::Shutdown;
         self.proto = None;
-        let res = self.channel_state_on_shutdown();
+        self.channel_state_on_shutdown(channel_reason);
     }
 
     fn cmd_check_health(&mut self) {
@@ -510,7 +514,7 @@ impl CaConn {
             Ok(_) => {}
             Err(e) => {
                 error!("{e}");
-                self.trigger_shutdown();
+                self.trigger_shutdown(ChannelStatusClosedReason::InternalError);
             }
         }
         // TODO return the result
@@ -579,7 +583,7 @@ impl CaConn {
     }
 
     fn cmd_shutdown(&mut self) {
-        self.trigger_shutdown();
+        self.trigger_shutdown(ChannelStatusClosedReason::IngestExit);
     }
 
     fn cmd_extra_inserts_conf(&mut self, extra_inserts_conf: ExtraInsertsConf) {
@@ -717,42 +721,7 @@ impl CaConn {
         self.conn_backoff = self.conn_backoff_beg;
     }
 
-    fn before_reset_of_channel_state(&mut self) {
-        trace!("before_reset_of_channel_state  channels {}", self.channels.len());
-        let mut warn_max = 0;
-        for (_cid, chst) in &mut self.channels {
-            match chst {
-                ChannelState::Init => {}
-                ChannelState::Creating { .. } => {
-                    *chst = ChannelState::Init;
-                }
-                ChannelState::Created(st) => {
-                    if let Some(series) = &st.series {
-                        let item = QueryItem::ChannelStatus(ChannelStatusItem {
-                            ts: SystemTime::now(),
-                            series: series.clone(),
-                            status: ChannelStatus::Closed,
-                        });
-                        self.insert_item_queue.push_back(item);
-                    } else {
-                        if warn_max < 10 {
-                            debug!("no series for cid {:?}", st.cid);
-                            warn_max += 1;
-                        }
-                    }
-                    *chst = ChannelState::Init;
-                }
-                ChannelState::Error(_) => {
-                    *chst = ChannelState::Init;
-                }
-                ChannelState::Ended => {
-                    *chst = ChannelState::Init;
-                }
-            }
-        }
-    }
-
-    fn channel_state_on_shutdown(&mut self) {
+    fn channel_state_on_shutdown(&mut self, channel_reason: ChannelStatusClosedReason) {
         trace!("channel_state_on_shutdown  channels {}", self.channels.len());
         let mut warn_max = 0;
         for (_cid, chst) in &mut self.channels {
@@ -768,7 +737,7 @@ impl CaConn {
                         let item = QueryItem::ChannelStatus(ChannelStatusItem {
                             ts: SystemTime::now(),
                             series: series.clone(),
-                            status: ChannelStatus::Closed,
+                            status: ChannelStatus::Closed(channel_reason.clone()),
                         });
                         self.insert_item_queue.push_back(item);
                     } else {
@@ -841,7 +810,7 @@ impl CaConn {
                         value: CaConnEventValue::EchoTimeout,
                     };
                     self.ca_conn_event_out_queue.push_back(item);
-                    self.trigger_shutdown();
+                    self.trigger_shutdown(ChannelStatusClosedReason::IocTimeout);
                 }
             } else {
                 self.ioc_ping_start = Some(Instant::now());
@@ -851,7 +820,7 @@ impl CaConn {
                     proto.push_out(msg);
                 } else {
                     warn!("can not push echo, no proto");
-                    self.trigger_shutdown();
+                    self.trigger_shutdown(ChannelStatusClosedReason::NoProtocol);
                 }
             }
         }
@@ -1510,12 +1479,12 @@ impl CaConn {
             }
             Ready(Some(Err(e))) => {
                 error!("CaProto yields error: {e:?}  remote {:?}", self.remote_addr_dbg);
-                self.trigger_shutdown();
+                self.trigger_shutdown(ChannelStatusClosedReason::ProtocolError);
                 Ready(Some(Err(e)))
             }
             Ready(None) => {
                 warn!("handle_peer_ready CaProto is done  {:?}", self.remote_addr_dbg);
-                self.trigger_shutdown();
+                self.trigger_shutdown(ChannelStatusClosedReason::ProtocolDone);
                 Ready(None)
             }
             Pending => Pending,
@@ -1735,12 +1704,12 @@ impl Stream for CaConn {
                         Ready(Some(Ok(_))) => {}
                         Ready(Some(Err(e))) => {
                             error!("{e}");
-                            self.trigger_shutdown();
+                            self.trigger_shutdown(ChannelStatusClosedReason::InternalError);
                             break;
                         }
                         Ready(None) => {
                             warn!("command input queue closed, do shutdown");
-                            self.trigger_shutdown();
+                            self.trigger_shutdown(ChannelStatusClosedReason::InternalError);
                             break;
                         }
                         Pending => break,

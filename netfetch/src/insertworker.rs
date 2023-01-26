@@ -6,7 +6,7 @@ use err::Error;
 use log::*;
 use netpod::timeunits::{MS, SEC};
 use netpod::ScyllaConfig;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{self, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio_postgres::Client as PgClient;
@@ -128,8 +128,8 @@ pub async fn spawn_scylla_insert_workers(
         let data_store = Arc::new(DataStore::new(&scyconf).await?);
         data_stores.push(data_store);
     }
-    for i1 in 0..insert_worker_count {
-        let data_store = data_stores[i1 * data_stores.len() / insert_worker_count].clone();
+    for worker_ix in 0..insert_worker_count {
+        let data_store = data_stores[worker_ix * data_stores.len() / insert_worker_count].clone();
         let stats = store_stats.clone();
         let recv = if use_rate_limit_queue {
             q2_rx.clone()
@@ -140,6 +140,9 @@ pub async fn spawn_scylla_insert_workers(
         };
         let ingest_commons = ingest_commons.clone();
         let fut = async move {
+            ingest_commons
+                .insert_workers_running
+                .fetch_add(1, atomic::Ordering::AcqRel);
             let backoff_0 = Duration::from_millis(10);
             let mut backoff = backoff_0.clone();
             let mut i1 = 0;
@@ -267,7 +270,10 @@ pub async fn spawn_scylla_insert_workers(
                     }
                 }
             }
-            info!("insert worker {i1} has no more messages");
+            ingest_commons
+                .insert_workers_running
+                .fetch_sub(1, atomic::Ordering::AcqRel);
+            info!("insert worker {worker_ix} has no more messages");
         };
         let jh = tokio::spawn(fut);
         jhs.push(jh);
