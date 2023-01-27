@@ -139,10 +139,11 @@ pub enum ConnectionStatus {
     Established,
     Closing,
     ClosedUnexpected,
+    ConnectionHandlerDone,
 }
 
 impl ConnectionStatus {
-    pub fn kind(&self) -> u32 {
+    pub fn to_kind(&self) -> u32 {
         use ConnectionStatus::*;
         match self {
             ConnectError => 1,
@@ -150,7 +151,26 @@ impl ConnectionStatus {
             Established => 3,
             Closing => 4,
             ClosedUnexpected => 5,
+            ConnectionHandlerDone => 6,
         }
+    }
+
+    pub fn from_kind(kind: u32) -> Result<Self, err::Error> {
+        use ConnectionStatus::*;
+        let ret = match kind {
+            1 => ConnectError,
+            2 => ConnectTimeout,
+            3 => Established,
+            4 => Closing,
+            5 => ClosedUnexpected,
+            6 => ConnectionHandlerDone,
+            _ => {
+                return Err(err::Error::with_msg_no_trace(format!(
+                    "unknown ConnectionStatus kind {kind}"
+                )));
+            }
+        };
+        Ok(ret)
     }
 }
 
@@ -451,7 +471,8 @@ pub async fn insert_item(
                 I32(val) => insert_scalar_gen(par, val, &data_store.qu_insert_scalar_i32, &data_store).await?,
                 F32(val) => insert_scalar_gen(par, val, &data_store.qu_insert_scalar_f32, &data_store).await?,
                 F64(val) => insert_scalar_gen(par, val, &data_store.qu_insert_scalar_f64, &data_store).await?,
-                String(_) => (),
+                String(_) => warn!("TODO string insert"),
+                Bool(_v) => warn!("TODO bool insert"),
             }
         }
         Array(val) => {
@@ -469,6 +490,7 @@ pub async fn insert_item(
                 I32(val) => insert_array_gen(par, val, &data_store.qu_insert_array_i32, &data_store).await?,
                 F32(val) => insert_array_gen(par, val, &data_store.qu_insert_array_f32, &data_store).await?,
                 F64(val) => insert_array_gen(par, val, &data_store.qu_insert_array_f64, &data_store).await?,
+                Bool(val) => insert_array_gen(par, val, &data_store.qu_insert_array_bool, &data_store).await?,
             }
         }
     }
@@ -488,7 +510,7 @@ pub async fn insert_connection_status(
     let ts = secs + nanos;
     let ts_msp = ts / CONNECTION_STATUS_DIV * CONNECTION_STATUS_DIV;
     let ts_lsp = ts - ts_msp;
-    let kind = item.status.kind();
+    let kind = item.status.to_kind();
     let addr = format!("{}", item.addr);
     let params = (ts_msp as i64, ts_lsp as i64, kind as i32, addr, ttl.as_secs() as i32);
     data_store

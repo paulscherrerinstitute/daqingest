@@ -162,6 +162,8 @@ pub enum CaDataScalarValue {
     F64(f64),
     Enum(i16),
     String(String),
+    // TODO remove, CA has no bool, make new enum for other use cases.
+    Bool(bool),
 }
 
 #[derive(Clone, Debug)]
@@ -171,6 +173,8 @@ pub enum CaDataArrayValue {
     I32(Vec<i32>),
     F32(Vec<f32>),
     F64(Vec<f64>),
+    // TODO remove, CA has no bool, make new enum for other use cases.
+    Bool(Vec<bool>),
 }
 
 #[derive(Clone, Debug)]

@@ -1024,13 +1024,12 @@ impl CaConn {
         ev: proto::EventAddRes,
         item_queue: &mut VecDeque<QueryItem>,
         ts_msp_last: u64,
-        inserted_in_ts_msp: u64,
         ts_msp_grid: Option<u32>,
         stats: Arc<CaConnStats>,
     ) -> Result<(), Error> {
         // TODO decide on better msp/lsp: random offset!
         // As long as one writer is active, the msp is arbitrary.
-        let (ts_msp, ts_msp_changed) = if inserted_in_ts_msp >= 64000 || st.ts_msp_last + HOUR <= ts {
+        let (ts_msp, ts_msp_changed) = if st.inserted_in_ts_msp >= 64000 || st.ts_msp_last + HOUR <= ts {
             let div = SEC * 10;
             let ts_msp = ts / div * div;
             if ts_msp == st.ts_msp_last {
@@ -1085,7 +1084,6 @@ impl CaConn {
             .checked_add(Duration::from_micros((dt * 1e6) as u64))
             .ok_or_else(|| Error::with_msg_no_trace("time overflow in next insert"))?;
         let ts_msp_last = st.ts_msp_last;
-        let inserted_in_ts_msp = st.inserted_in_ts_msp;
         // TODO get event timestamp from channel access field
         let ts_msp_grid = (ts / TS_MSP_GRID_UNIT / TS_MSP_GRID_SPACING * TS_MSP_GRID_SPACING) as u32;
         let ts_msp_grid = if st.ts_msp_grid_last != ts_msp_grid {
@@ -1105,7 +1103,6 @@ impl CaConn {
                     ev.clone(),
                     item_queue,
                     ts_msp_last,
-                    inserted_in_ts_msp,
                     ts_msp_grid,
                     stats.clone(),
                 )?;
@@ -1120,7 +1117,6 @@ impl CaConn {
             ev,
             item_queue,
             ts_msp_last,
-            inserted_in_ts_msp,
             ts_msp_grid,
             stats,
         )?;

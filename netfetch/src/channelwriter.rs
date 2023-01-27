@@ -1,5 +1,5 @@
 use crate::errconv::ErrConv;
-use crate::zmtp::{CommonQueries, ZmtpFrame};
+use crate::zmtp::ZmtpFrame;
 use err::Error;
 use futures_util::{Future, FutureExt};
 use log::*;
@@ -21,11 +21,12 @@ pub struct ScyQueryFut<'a> {
 }
 
 impl<'a> ScyQueryFut<'a> {
-    pub fn new<V>(scy: &'a ScySession, query: &'a PreparedStatement, values: V) -> Self
+    pub fn new<V>(scy: &'a ScySession, query: Option<&'a PreparedStatement>, values: V) -> Self
     where
         V: ValueList + Send + 'static,
     {
-        let fut = scy.execute(query, values);
+        //let fut = scy.execute(query, values);
+        let fut = futures_util::future::ready(Err(QueryError::TimeoutError));
         Self { fut: Box::pin(fut) }
     }
 }
@@ -164,7 +165,7 @@ pub struct InsertLoopFut<'a> {
 }
 
 impl<'a> InsertLoopFut<'a> {
-    pub fn new<V>(scy: &'a ScySession, query: &'a PreparedStatement, values: Vec<V>, skip_insert: bool) -> Self
+    pub fn new<V>(scy: &'a ScySession, query: Option<&'a PreparedStatement>, values: Vec<V>, skip_insert: bool) -> Self
     where
         V: ValueList + Send + Sync + 'static,
     {
@@ -178,7 +179,8 @@ impl<'a> InsertLoopFut<'a> {
         let futs: Vec<_> = values
             .into_iter()
             .map(|vs| {
-                let fut = scy.execute(query, vs);
+                //let fut = scy.execute(query, vs);
+                let fut = futures_util::future::ready(Err(QueryError::TimeoutError));
                 Box::pin(fut) as _
             })
             .collect();
@@ -325,7 +327,6 @@ pub trait ChannelWriter {
 }
 
 struct MsgAcceptorOptions {
-    cq: Arc<CommonQueries>,
     skip_insert: bool,
     array_truncate: usize,
 }
@@ -341,7 +342,7 @@ trait MsgAcceptor {
 macro_rules! impl_msg_acceptor_scalar {
     ($sname:ident, $st:ty, $qu_id:ident, $from_bytes:ident) => {
         struct $sname {
-            query: PreparedStatement,
+            //query: PreparedStatement,
             values: Vec<(i64, i64, i64, i64, $st)>,
             series: i64,
             opts: MsgAcceptorOptions,
@@ -351,8 +352,8 @@ macro_rules! impl_msg_acceptor_scalar {
         impl $sname {
             pub fn new(series: i64, opts: MsgAcceptorOptions) -> Self {
                 Self {
-                    query: opts.cq.$qu_id.clone(),
-                    values: vec![],
+                    //query: opts.cq.$qu_id.clone(),
+                    values: Vec::new(),
                     series,
                     opts,
                     batch: Batch::new((BatchType::Unlogged)),
@@ -387,20 +388,20 @@ macro_rules! impl_msg_acceptor_scalar {
             }
 
             fn flush_batch<'a>(&'a mut self, scy: &'a ScySession) -> Result<ScyBatchFutGen<'a>, Error> {
-                let vt = mem::replace(&mut self.values, vec![]);
+                let vt = mem::replace(&mut self.values, Vec::new());
                 let nn = vt.len();
                 self.batch = Batch::new(BatchType::Unlogged);
                 let batch = &mut self.batch;
                 for _ in 0..nn {
-                    batch.append_statement(self.query.clone());
+                    //batch.append_statement(self.query.clone());
                 }
                 let ret = ScyBatchFutGen::new(&scy, batch, vt);
                 Ok(ret)
             }
 
             fn flush_loop<'a>(&'a mut self, scy: &'a ScySession) -> Result<InsertLoopFut<'a>, Error> {
-                let vt = mem::replace(&mut self.values, vec![]);
-                let ret = InsertLoopFut::new(scy, &self.query, vt, self.opts.skip_insert);
+                let vt = mem::replace(&mut self.values, Vec::new());
+                let ret = InsertLoopFut::new(scy, None, vt, self.opts.skip_insert);
                 Ok(ret)
             }
         }
@@ -410,7 +411,7 @@ macro_rules! impl_msg_acceptor_scalar {
 macro_rules! impl_msg_acceptor_array {
     ($sname:ident, $st:ty, $qu_id:ident, $from_bytes:ident) => {
         struct $sname {
-            query: PreparedStatement,
+            //query: PreparedStatement,
             values: Vec<(i64, i64, i64, i64, Vec<$st>)>,
             series: i64,
             array_truncate: usize,
@@ -422,8 +423,8 @@ macro_rules! impl_msg_acceptor_array {
         impl $sname {
             pub fn new(series: i64, opts: MsgAcceptorOptions) -> Self {
                 Self {
-                    query: opts.cq.$qu_id.clone(),
-                    values: vec![],
+                    //query: opts.cq.$qu_id.clone(),
+                    values: Vec::new(),
                     series,
                     array_truncate: opts.array_truncate,
                     truncated: 0,
@@ -461,20 +462,20 @@ macro_rules! impl_msg_acceptor_array {
             }
 
             fn flush_batch<'a>(&'a mut self, scy: &'a ScySession) -> Result<ScyBatchFutGen<'a>, Error> {
-                let vt = mem::replace(&mut self.values, vec![]);
+                let vt = mem::replace(&mut self.values, Vec::new());
                 let nn = vt.len();
                 self.batch = Batch::new(BatchType::Unlogged);
                 let batch = &mut self.batch;
                 for _ in 0..nn {
-                    batch.append_statement(self.query.clone());
+                    //batch.append_statement(self.query.clone());
                 }
                 let ret = ScyBatchFutGen::new(&scy, batch, vt);
                 Ok(ret)
             }
 
             fn flush_loop<'a>(&'a mut self, scy: &'a ScySession) -> Result<InsertLoopFut<'a>, Error> {
-                let vt = mem::replace(&mut self.values, vec![]);
-                let ret = InsertLoopFut::new(scy, &self.query, vt, self.opts.skip_insert);
+                let vt = mem::replace(&mut self.values, Vec::new());
+                let ret = InsertLoopFut::new(scy, None, vt, self.opts.skip_insert);
                 Ok(ret)
             }
         }
@@ -506,7 +507,7 @@ impl_msg_acceptor_array!(MsgAcceptorArrayF64LE, f64, qu_insert_array_f64, from_l
 impl_msg_acceptor_array!(MsgAcceptorArrayF64BE, f64, qu_insert_array_f64, from_be_bytes);
 
 struct MsgAcceptorArrayBool {
-    query: PreparedStatement,
+    //query: PreparedStatement,
     values: Vec<(i64, i64, i64, i64, Vec<bool>)>,
     series: i64,
     array_truncate: usize,
@@ -518,8 +519,8 @@ struct MsgAcceptorArrayBool {
 impl MsgAcceptorArrayBool {
     pub fn new(series: i64, opts: MsgAcceptorOptions) -> Self {
         Self {
-            query: opts.cq.qu_insert_array_bool.clone(),
-            values: vec![],
+            //query: opts.cq.qu_insert_array_bool.clone(),
+            values: Vec::new(),
             series,
             array_truncate: opts.array_truncate,
             truncated: 0,
@@ -566,20 +567,20 @@ impl MsgAcceptor for MsgAcceptorArrayBool {
     }
 
     fn flush_batch<'a>(&'a mut self, scy: &'a ScySession) -> Result<ScyBatchFutGen, Error> {
-        let vt = mem::replace(&mut self.values, vec![]);
+        let vt = mem::replace(&mut self.values, Vec::new());
         let nn = vt.len();
         self.batch = Batch::new(BatchType::Unlogged);
         let batch = &mut self.batch;
         for _ in 0..nn {
-            batch.append_statement(self.query.clone());
+            //batch.append_statement(self.query.clone());
         }
         let ret = ScyBatchFutGen::new(&scy, batch, vt);
         Ok(ret)
     }
 
     fn flush_loop<'a>(&'a mut self, scy: &'a ScySession) -> Result<InsertLoopFut<'a>, Error> {
-        let vt = mem::replace(&mut self.values, vec![]);
-        let ret = InsertLoopFut::new(scy, &self.query, vt, self.opts.skip_insert);
+        let vt = mem::replace(&mut self.values, Vec::new());
+        let ret = InsertLoopFut::new(scy, None, vt, self.opts.skip_insert);
         Ok(ret)
     }
 }
@@ -587,7 +588,6 @@ impl MsgAcceptor for MsgAcceptorArrayBool {
 pub struct ChannelWriterAll {
     series: u64,
     scy: Arc<ScySession>,
-    common_queries: Arc<CommonQueries>,
     ts_msp_lsp: fn(u64, u64) -> (u64, u64),
     ts_msp_last: u64,
     acceptor: Box<dyn MsgAcceptor + Send>,
@@ -603,7 +603,6 @@ pub struct ChannelWriterAll {
 impl ChannelWriterAll {
     pub fn new(
         series: u64,
-        common_queries: Arc<CommonQueries>,
         scy: Arc<ScySession>,
         scalar_type: ScalarType,
         shape: Shape,
@@ -612,7 +611,6 @@ impl ChannelWriterAll {
         skip_insert: bool,
     ) -> Result<Self, Error> {
         let opts = MsgAcceptorOptions {
-            cq: common_queries.clone(),
             skip_insert,
             array_truncate,
         };
@@ -762,7 +760,6 @@ impl ChannelWriterAll {
         let ret = Self {
             series,
             scy,
-            common_queries,
             ts_msp_lsp,
             ts_msp_last: 0,
             acceptor: acc,
@@ -787,11 +784,7 @@ impl ChannelWriterAll {
             debug!("ts_msp changed  ts {ts}  pulse {pulse}  ts_msp {ts_msp}  ts_lsp {ts_lsp}");
             self.ts_msp_last = ts_msp;
             if !self.skip_insert {
-                let fut = ScyQueryFut::new(
-                    &self.scy,
-                    &self.common_queries.qu_insert_ts_msp,
-                    (self.series as i64, ts_msp as i64),
-                );
+                let fut = ScyQueryFut::new(&self.scy, None, (self.series as i64, ts_msp as i64));
                 Some(Box::pin(fut) as _)
             } else {
                 None

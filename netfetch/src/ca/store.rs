@@ -1,4 +1,5 @@
 use err::Error;
+use futures_util::StreamExt;
 use netpod::ScyllaConfig;
 use scylla::prepared_statement::PreparedStatement;
 use scylla::statement::Consistency;
@@ -20,6 +21,7 @@ pub struct DataStore {
     pub qu_insert_array_i32: Arc<PreparedStatement>,
     pub qu_insert_array_f32: Arc<PreparedStatement>,
     pub qu_insert_array_f64: Arc<PreparedStatement>,
+    pub qu_insert_array_bool: Arc<PreparedStatement>,
     pub qu_insert_muted: Arc<PreparedStatement>,
     pub qu_insert_item_recv_ivl: Arc<PreparedStatement>,
     pub qu_insert_connection_status: Arc<PreparedStatement>,
@@ -29,6 +31,31 @@ pub struct DataStore {
 }
 
 impl DataStore {
+    async fn has_table(name: &str, scy: &ScySession, scyconf: &ScyllaConfig) -> Result<bool, Error> {
+        let mut res = scy
+            .query_iter(
+                "select table_name from system_schema.tables where keyspace_name = ?",
+                (&scyconf.keyspace,),
+            )
+            .await
+            .map_err(|e| e.to_string())
+            .map_err(Error::from)?;
+        while let Some(k) = res.next().await {
+            let row = k.map_err(|e| e.to_string()).map_err(Error::from)?;
+            if let Some(table_name) = row.columns[0].as_ref().unwrap().as_text() {
+                if table_name == name {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
+    }
+
+    async fn migrate_00(scy: &ScySession, scyconf: &ScyllaConfig) -> Result<(), Error> {
+        if !Self::has_table("somename", scy, scyconf).await? {}
+        Ok(())
+    }
+
     pub async fn new(scyconf: &ScyllaConfig) -> Result<Self, Error> {
         let scy = scylla::SessionBuilder::new()
             .known_nodes(&scyconf.hosts)
@@ -38,6 +65,9 @@ impl DataStore {
             .await
             .map_err(|e| Error::with_msg_no_trace(format!("{e:?}")))?;
         let scy = Arc::new(scy);
+
+        Self::migrate_00(&scy, scyconf).await?;
+
         let q = scy
             .prepare("insert into ts_msp (series, ts_msp) values (?, ?) using ttl ?")
             .await
@@ -111,6 +141,11 @@ impl DataStore {
             .await
             .map_err(|e| Error::with_msg_no_trace(format!("{e:?}")))?;
         let qu_insert_array_f64 = Arc::new(q);
+        let q = scy
+            .prepare("insert into events_array_bool (series, ts_msp, ts_lsp, pulse, value) values (?, ?, ?, ?, ?) using ttl ?")
+            .await
+            .map_err(|e| Error::with_msg_no_trace(format!("{e:?}")))?;
+        let qu_insert_array_bool = Arc::new(q);
         // Others:
         let q = scy
             .prepare("insert into muted (part, series, ts, ema, emd) values (?, ?, ?, ?, ?) using ttl ?")
@@ -160,6 +195,7 @@ impl DataStore {
             qu_insert_array_i32,
             qu_insert_array_f32,
             qu_insert_array_f64,
+            qu_insert_array_bool,
             qu_insert_muted,
             qu_insert_item_recv_ivl,
             qu_insert_connection_status,

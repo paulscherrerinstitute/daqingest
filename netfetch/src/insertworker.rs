@@ -273,7 +273,7 @@ pub async fn spawn_scylla_insert_workers(
             ingest_commons
                 .insert_workers_running
                 .fetch_sub(1, atomic::Ordering::AcqRel);
-            info!("insert worker {worker_ix} has no more messages");
+            trace!("insert worker {worker_ix} done");
         };
         let jh = tokio::spawn(fut);
         jhs.push(jh);

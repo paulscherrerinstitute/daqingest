@@ -1,5 +1,6 @@
 use async_channel::Receiver;
 use async_channel::Sender;
+use async_channel::WeakReceiver;
 use err::Error;
 use futures_util::FutureExt;
 use futures_util::StreamExt;
@@ -20,6 +21,9 @@ use netfetch::insertworker::Ttls;
 use netfetch::metrics::ExtraInsertsConf;
 use netfetch::metrics::StatsSet;
 use netfetch::store::CommonInsertItemQueue;
+use netfetch::store::ConnectionStatus;
+use netfetch::store::ConnectionStatusItem;
+use netfetch::store::QueryItem;
 use netpod::Database;
 use netpod::ScyllaConfig;
 use serde::Serialize;
@@ -177,6 +181,7 @@ pub struct DaemonOpts {
     pgconf: Database,
     scyconf: ScyllaConfig,
     ttls: Ttls,
+    test_bsread_addr: Option<String>,
 }
 
 impl DaemonOpts {
@@ -249,12 +254,11 @@ pub struct Daemon {
     count_assigned: usize,
     last_status_print: SystemTime,
     insert_workers_jh: Vec<tokio::task::JoinHandle<()>>,
-    #[allow(unused)]
-    pg_client: Arc<PgClient>,
     ingest_commons: Arc<IngestCommons>,
     caconn_last_channel_check: Instant,
     stats: Arc<DaemonStats>,
     shutting_down: bool,
+    insert_rx_weak: WeakReceiver<QueryItem>,
 }
 
 impl Daemon {
@@ -360,7 +364,7 @@ impl Daemon {
             extra_inserts_conf: tokio::sync::Mutex::new(ExtraInsertsConf::new()),
             store_workers_rate: AtomicU64::new(20000),
             insert_frac: AtomicU64::new(1000),
-            ca_conn_set: CaConnSet::new(channel_info_query_tx),
+            ca_conn_set: CaConnSet::new(channel_info_query_tx.clone()),
             insert_workers_running: atomic::AtomicUsize::new(0),
         };
         let ingest_commons = Arc::new(ingest_commons);
@@ -385,6 +389,8 @@ impl Daemon {
         let insert_worker_count = 1000;
         let use_rate_limit_queue = false;
 
+        let insert_rx_weak = common_insert_item_queue_2.receiver().unwrap().downgrade();
+
         // TODO use a new stats type:
         let store_stats = Arc::new(stats::CaConnStats::new());
         let ttls = opts.ttls.clone();
@@ -400,6 +406,34 @@ impl Daemon {
             ttls,
         )
         .await?;
+
+        if let Some(bsaddr) = &opts.test_bsread_addr {
+            //netfetch::zmtp::Zmtp;
+            let zmtpopts = netfetch::zmtp::ZmtpClientOpts {
+                backend: opts.backend().into(),
+                addr: bsaddr.parse().unwrap(),
+                do_pulse_id: false,
+                rcvbuf: None,
+                array_truncate: Some(1024),
+                process_channel_count_limit: Some(32),
+            };
+            let client =
+                netfetch::zmtp::BsreadClient::new(zmtpopts, ingest_commons.clone(), channel_info_query_tx.clone())
+                    .await?;
+            let fut = {
+                async move {
+                    let mut client = client;
+                    client.run().await?;
+                    Ok::<_, Error>(())
+                }
+            };
+            // TODO await on shutdown
+            let jh = tokio::spawn(fut);
+            //let mut jhs = Vec::new();
+            //jhs.push(jh);
+            //futures_util::future::join_all(jhs).await;
+            //jh.await.map_err(|e| e.to_string()).map_err(Error::from)??;
+        }
 
         let ret = Self {
             opts,
@@ -421,11 +455,11 @@ impl Daemon {
             count_assigned: 0,
             last_status_print: SystemTime::now(),
             insert_workers_jh: jh_insert_workers,
-            pg_client,
             ingest_commons,
             caconn_last_channel_check: Instant::now(),
             stats: Arc::new(DaemonStats::new()),
             shutting_down: false,
+            insert_rx_weak,
         };
         Ok(ret)
     }
@@ -937,7 +971,11 @@ impl Daemon {
                 .ingest_commons
                 .insert_workers_running
                 .load(atomic::Ordering::Acquire);
-            info!("qu senders A {:?} {:?}  nworkers {}", sa1, sa2, nworkers);
+            let nitems = self.insert_rx_weak.upgrade().map(|x| x.len());
+            info!(
+                "qu senders A {:?} {:?}  nworkers {}  nitems {:?}",
+                sa1, sa2, nworkers, nitems
+            );
             if nworkers == 0 {
                 info!("goodbye");
                 std::process::exit(0);
@@ -1132,6 +1170,19 @@ impl Daemon {
                 ChannelStateValue::ToRemove { addr: _ } => {}
             }
         }
+        let item = QueryItem::ConnectionStatus(ConnectionStatusItem {
+            ts: SystemTime::now(),
+            addr: conn_addr,
+            status: ConnectionStatus::ConnectionHandlerDone,
+        });
+        if let Some(tx) = self.ingest_commons.insert_item_queue.sender() {
+            if let Err(e) = tokio::time::timeout(Duration::from_millis(1000), tx.send(item)).await {
+                error!("timeout on insert queue send");
+            } else {
+            }
+        } else {
+            error!("can not emit CaConn done event");
+        }
         Ok(())
     }
 
@@ -1295,10 +1346,17 @@ pub async fn run(opts: CaIngestOpts, channels: Vec<String>) -> Result<(), Error>
     netfetch::linuxhelper::set_signal_handler(libc::SIGINT, handler_sigint)?;
     netfetch::linuxhelper::set_signal_handler(libc::SIGTERM, handler_sigterm)?;
 
+    netfetch::dbpg::schema_check(opts.postgresql()).await?;
+
     // TODO use a new stats type:
     //let store_stats = Arc::new(CaConnStats::new());
     //let metrics_agg_fut = metrics_agg_task(ingest_commons.clone(), local_stats.clone(), store_stats.clone());
     //let metrics_agg_jh = tokio::spawn(metrics_agg_fut);
+
+    let mut channels = channels;
+    if opts.test_bsread_addr.is_some() {
+        channels.clear();
+    }
 
     let opts2 = DaemonOpts {
         backend: opts.backend().into(),
@@ -1312,6 +1370,7 @@ pub async fn run(opts: CaIngestOpts, channels: Vec<String>) -> Result<(), Error>
             d0: opts.ttl_d0(),
             d1: opts.ttl_d1(),
         },
+        test_bsread_addr: opts.test_bsread_addr.clone(),
     };
     let mut daemon = Daemon::new(opts2).await?;
     let tx = daemon.tx.clone();

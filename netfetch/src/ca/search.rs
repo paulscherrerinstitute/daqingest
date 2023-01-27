@@ -137,6 +137,7 @@ impl DbUpdateWorker {
 
 pub async fn ca_search(opts: CaIngestOpts, channels: &Vec<String>) -> Result<(), Error> {
     info!("ca_search begin");
+    crate::dbpg::schema_check(opts.postgresql()).await?;
     let mut addrs = Vec::new();
     for s in opts.search() {
         match resolve_address(s).await {
@@ -191,7 +192,7 @@ pub async fn ca_search(opts: CaIngestOpts, channels: &Vec<String>) -> Result<(),
     let dbtx: Sender<_> = dbtx;
 
     let mut ts_last = Instant::now();
-    loop {
+    'outer: loop {
         let ts_now = Instant::now();
         if ts_now.duration_since(ts_last) >= Duration::from_millis(2000) {
             ts_last = ts_now;
@@ -240,7 +241,7 @@ pub async fn ca_search(opts: CaIngestOpts, channels: &Vec<String>) -> Result<(),
                     Ok(_) => {}
                     Err(_) => {
                         error!("dbtx broken");
-                        break;
+                        break 'outer;
                     }
                 }
             }

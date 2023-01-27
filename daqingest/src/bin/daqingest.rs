@@ -32,6 +32,12 @@ pub fn main() -> Result<(), Error> {
                     daqingest::daemon::run(conf, channels).await?
                 }
             },
+            SubCmd::Logappend(k) => {
+                let jh = tokio::task::spawn_blocking(move || {
+                    taskrun::append::append(&k.dir, k.total_size_max_bytes(), std::io::stdin()).unwrap();
+                });
+                jh.await.map_err(Error::from_string)?;
+            }
         }
         Ok(())
     });

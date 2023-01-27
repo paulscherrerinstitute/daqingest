@@ -40,6 +40,7 @@ pub struct CaIngestOpts {
     ttl_d0: Option<Duration>,
     #[serde(with = "humantime_serde")]
     ttl_d1: Option<Duration>,
+    pub test_bsread_addr: Option<String>,
 }
 
 impl CaIngestOpts {
