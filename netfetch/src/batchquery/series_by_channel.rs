@@ -29,7 +29,7 @@ impl ChannelInfoQuery {
         Self {
             backend: String::new(),
             channel: String::new(),
-            scalar_type: 4242,
+            scalar_type: -1,
             shape_dims: Vec::new(),
             tx: self.tx.clone(),
         }
@@ -37,9 +37,8 @@ impl ChannelInfoQuery {
 }
 
 struct ChannelInfoResult {
-    series: Vec<Existence<SeriesId>>,
-    tx: Vec<Sender<Result<Existence<SeriesId>, Error>>>,
-    missing: Vec<ChannelInfoQuery>,
+    series: Existence<SeriesId>,
+    tx: Sender<Result<Existence<SeriesId>, Error>>,
 }
 
 struct PgRes {
@@ -63,7 +62,10 @@ async fn prepare_pgcs(sql: &str, pgcn: usize, db: &Database) -> Result<(Sender<P
     Ok((pgc_tx, pgc_rx))
 }
 
-async fn select(batch: Vec<ChannelInfoQuery>, pgres: PgRes) -> Result<(ChannelInfoResult, PgRes), Error> {
+async fn select(
+    batch: Vec<ChannelInfoQuery>,
+    pgres: PgRes,
+) -> Result<(Vec<ChannelInfoResult>, Vec<ChannelInfoQuery>, PgRes), Error> {
     let mut backend = Vec::new();
     let mut channel = Vec::new();
     let mut scalar_type = Vec::new();
@@ -99,8 +101,7 @@ async fn select(batch: Vec<ChannelInfoQuery>, pgres: PgRes) -> Result<(ChannelIn
             Error::from(e.to_string())
         }) {
         Ok(rows) => {
-            let mut series_ids = Vec::new();
-            let mut txs = Vec::new();
+            let mut result = Vec::new();
             let mut missing = Vec::new();
             let mut it1 = rows.into_iter();
             let mut e1 = it1.next();
@@ -110,8 +111,11 @@ async fn select(batch: Vec<ChannelInfoQuery>, pgres: PgRes) -> Result<(ChannelIn
                     if rid as u32 == qrid {
                         let series: i64 = row.get(0);
                         let series = SeriesId::new(series as _);
-                        series_ids.push(Existence::Existing(series));
-                        txs.push(tx);
+                        let res = ChannelInfoResult {
+                            series: Existence::Existing(series),
+                            tx,
+                        };
+                        result.push(res);
                     }
                     e1 = it1.next();
                 } else {
@@ -126,12 +130,7 @@ async fn select(batch: Vec<ChannelInfoQuery>, pgres: PgRes) -> Result<(ChannelIn
                     missing.push(k);
                 }
             }
-            let result = ChannelInfoResult {
-                series: series_ids,
-                tx: txs,
-                missing,
-            };
-            Ok((result, pgres))
+            Ok((result, missing, pgres))
         }
         Err(e) => {
             error!("error in pg query {e}");
@@ -219,12 +218,12 @@ async fn insert_missing(batch: &Vec<ChannelInfoQuery>, pgres: PgRes) -> Result<(
     Ok(((), pgres))
 }
 
-async fn fetch_data(batch: Vec<ChannelInfoQuery>, pgres: PgRes) -> Result<(ChannelInfoResult, PgRes), Error> {
-    let (res1, pgres) = select(batch, pgres).await?;
-    if res1.missing.len() > 0 {
-        let ((), pgres) = insert_missing(&res1.missing, pgres).await?;
-        let (res2, pgres) = select(res1.missing, pgres).await?;
-        if res2.missing.len() > 0 {
+async fn fetch_data(batch: Vec<ChannelInfoQuery>, pgres: PgRes) -> Result<(Vec<ChannelInfoResult>, PgRes), Error> {
+    let (res1, missing, pgres) = select(batch, pgres).await?;
+    if missing.len() > 0 {
+        let ((), pgres) = insert_missing(&missing, pgres).await?;
+        let (res2, missing2, pgres) = select(missing, pgres).await?;
+        if missing2.len() > 0 {
             Err(Error::with_msg_no_trace("some series not found even after write"))
         } else {
             Ok((res2, pgres))
@@ -264,8 +263,8 @@ async fn run_queries(
     while let Some(item) = stream.next().await {
         match item {
             Ok(res) => {
-                for (sid, tx) in res.series.into_iter().zip(res.tx) {
-                    match tx.send(Ok(sid)).await {
+                for r in res {
+                    match r.tx.send(Ok(r.series)).await {
                         Ok(_) => {}
                         Err(e) => {
                             // TODO count cases, but no log. Client may no longer be interested in this result.

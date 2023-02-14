@@ -5,6 +5,7 @@ use err::Error;
 use futures_util::FutureExt;
 use futures_util::StreamExt;
 use log::*;
+use netfetch::batchquery::series_by_channel::ChannelInfoQuery;
 use netfetch::ca::conn::CaConnEvent;
 use netfetch::ca::conn::ConnCommand;
 use netfetch::ca::connset::CaConnSet;
@@ -20,6 +21,11 @@ use netfetch::errconv::ErrConv;
 use netfetch::insertworker::Ttls;
 use netfetch::metrics::ExtraInsertsConf;
 use netfetch::metrics::StatsSet;
+use netfetch::series::ChannelStatusSeriesId;
+use netfetch::series::Existence;
+use netfetch::series::SeriesId;
+use netfetch::store::ChannelStatus;
+use netfetch::store::ChannelStatusItem;
 use netfetch::store::CommonInsertItemQueue;
 use netfetch::store::ConnectionStatus;
 use netfetch::store::ConnectionStatusItem;
@@ -52,6 +58,7 @@ const FINDER_IN_FLIGHT_MAX: usize = 800;
 const FINDER_BATCH_SIZE: usize = 8;
 const CHECK_CHANS_PER_TICK: usize = 10000;
 const CA_CONN_INSERT_QUEUE_MAX: usize = 256;
+const CHANNEL_STATUS_DUMMY_SCALAR_TYPE: i32 = i32::MIN + 1;
 
 const UNKNOWN_ADDRESS_STAY: Duration = Duration::from_millis(2000);
 const NO_ADDRESS_STAY: Duration = Duration::from_millis(20000);
@@ -131,7 +138,7 @@ pub enum WithAddressState {
 }
 
 #[derive(Clone, Debug, Serialize)]
-pub enum ActiveChannelState {
+pub enum WithStatusSeriesIdStateInner {
     UnknownAddress {
         since: SystemTime,
     },
@@ -146,6 +153,26 @@ pub enum ActiveChannelState {
     },
     NoAddress {
         since: SystemTime,
+    },
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct WithStatusSeriesIdState {
+    inner: WithStatusSeriesIdStateInner,
+}
+
+#[derive(Clone, Debug)]
+pub enum ActiveChannelState {
+    Init {
+        since: SystemTime,
+    },
+    WaitForStatusSeriesId {
+        since: SystemTime,
+        rx: Receiver<Result<Existence<SeriesId>, Error>>,
+    },
+    WithStatusSeriesId {
+        status_series_id: ChannelStatusSeriesId,
+        state: WithStatusSeriesIdState,
     },
 }
 
@@ -259,6 +286,7 @@ pub struct Daemon {
     stats: Arc<DaemonStats>,
     shutting_down: bool,
     insert_rx_weak: WeakReceiver<QueryItem>,
+    channel_info_query_tx: Sender<ChannelInfoQuery>,
 }
 
 impl Daemon {
@@ -428,7 +456,7 @@ impl Daemon {
                 }
             };
             // TODO await on shutdown
-            let jh = tokio::spawn(fut);
+            let _jh = tokio::spawn(fut);
             //let mut jhs = Vec::new();
             //jhs.push(jh);
             //futures_util::future::join_all(jhs).await;
@@ -460,6 +488,7 @@ impl Daemon {
             stats: Arc::new(DaemonStats::new()),
             shutting_down: false,
             insert_rx_weak,
+            channel_info_query_tx,
         };
         Ok(ret)
     }
@@ -758,26 +787,34 @@ impl Daemon {
             for (_ch, st) in &self.channel_states {
                 match &st.value {
                     ChannelStateValue::Active(st2) => match st2 {
-                        ActiveChannelState::UnknownAddress { since: _ } => {
+                        ActiveChannelState::Init { .. } => {
                             without_address_count += 1;
                         }
-                        ActiveChannelState::SearchPending { since: _, did_send: _ } => {
-                            currently_search_pending += 1;
+                        ActiveChannelState::WaitForStatusSeriesId { .. } => {
                             without_address_count += 1;
                         }
-                        ActiveChannelState::WithAddress { addr: _, state } => match state {
-                            WithAddressState::Unassigned { assign_at: _ } => {
-                                with_address_count += 1;
+                        ActiveChannelState::WithStatusSeriesId { state, .. } => match &state.inner {
+                            WithStatusSeriesIdStateInner::UnknownAddress { .. } => {
+                                without_address_count += 1;
                             }
-                            WithAddressState::Assigned(_) => {
-                                with_address_count += 1;
+                            WithStatusSeriesIdStateInner::SearchPending { .. } => {
+                                currently_search_pending += 1;
+                                without_address_count += 1;
+                            }
+                            WithStatusSeriesIdStateInner::WithAddress { state, .. } => match state {
+                                WithAddressState::Unassigned { .. } => {
+                                    with_address_count += 1;
+                                }
+                                WithAddressState::Assigned(_) => {
+                                    with_address_count += 1;
+                                }
+                            },
+                            WithStatusSeriesIdStateInner::NoAddress { .. } => {
+                                without_address_count += 1;
                             }
                         },
-                        ActiveChannelState::NoAddress { since: _ } => {
-                            without_address_count += 1;
-                        }
                     },
-                    ChannelStateValue::ToRemove { addr: _ } => {
+                    ChannelStateValue::ToRemove { .. } => {
                         with_address_count += 1;
                     }
                 }
@@ -797,85 +834,151 @@ impl Daemon {
             self.channel_states.range_mut(..)
         };
         let tsnow = SystemTime::now();
+        let mut attempt_series_search = true;
         for (i, (ch, st)) in it.enumerate() {
-            use ActiveChannelState::*;
-            use ChannelStateValue::*;
             match &mut st.value {
-                Active(st2) => match st2 {
-                    UnknownAddress { since } => {
-                        let dt = tsnow.duration_since(*since).unwrap_or(Duration::ZERO);
-                        if dt > UNKNOWN_ADDRESS_STAY {
-                            //info!("UnknownAddress {} {:?}", i, ch);
-                            if currently_search_pending < CURRENT_SEARCH_PENDING_MAX {
-                                currently_search_pending += 1;
-                                st.value = Active(SearchPending {
-                                    since: tsnow,
-                                    did_send: false,
-                                });
-                                SEARCH_REQ_MARK_COUNT.fetch_add(1, atomic::Ordering::AcqRel);
+                ChannelStateValue::Active(st2) => match st2 {
+                    ActiveChannelState::Init { since: _ } => {
+                        let (tx, rx) = async_channel::bounded(1);
+                        let q = ChannelInfoQuery {
+                            backend: self.ingest_commons.backend.clone(),
+                            channel: ch.id().into(),
+                            scalar_type: CHANNEL_STATUS_DUMMY_SCALAR_TYPE,
+                            shape_dims: Vec::new(),
+                            tx,
+                        };
+                        if attempt_series_search {
+                            match self.channel_info_query_tx.try_send(q) {
+                                Ok(()) => {
+                                    *st2 = ActiveChannelState::WaitForStatusSeriesId { since: tsnow, rx };
+                                }
+                                Err(e) => match e {
+                                    _ => {
+                                        attempt_series_search = false;
+                                    }
+                                },
                             }
                         }
                     }
-                    SearchPending { since, did_send: _ } => {
-                        //info!("SearchPending {} {:?}", i, ch);
+                    ActiveChannelState::WaitForStatusSeriesId { since, rx } => {
                         let dt = tsnow.duration_since(*since).unwrap_or(Duration::ZERO);
-                        if dt > SEARCH_PENDING_TIMEOUT {
-                            info!("Search timeout for {ch:?}");
-                            st.value = Active(ActiveChannelState::NoAddress { since: tsnow });
-                            currently_search_pending -= 1;
+                        if dt > Duration::from_millis(5000) {
+                            warn!("timeout can not get status series id");
+                            *st2 = ActiveChannelState::Init { since: tsnow };
+                        } else {
+                            match rx.try_recv() {
+                                Ok(x) => match x {
+                                    Ok(x) => {
+                                        //info!("received status series id: {x:?}");
+                                        *st2 = ActiveChannelState::WithStatusSeriesId {
+                                            status_series_id: ChannelStatusSeriesId::new(x.into_inner().id()),
+                                            state: WithStatusSeriesIdState {
+                                                inner: WithStatusSeriesIdStateInner::UnknownAddress { since: tsnow },
+                                            },
+                                        };
+                                    }
+                                    Err(e) => {
+                                        error!("could not get a status series id");
+                                    }
+                                },
+                                Err(e) => {}
+                            }
                         }
                     }
-                    WithAddress { addr, state } => {
-                        //info!("WithAddress {} {:?}", i, ch);
-                        use WithAddressState::*;
-                        match state {
-                            Unassigned { assign_at } => {
-                                if DO_ASSIGN_TO_CA_CONN && *assign_at <= tsnow {
-                                    let backend = self.opts.backend().into();
-                                    let channel_name = ch.id().into();
-                                    // This operation is meant to complete very quickly
-                                    self.ingest_commons
-                                        .ca_conn_set
-                                        .add_channel_to_addr(
-                                            backend,
-                                            *addr,
-                                            channel_name,
-                                            &self.common_insert_item_queue,
-                                            &self.datastore,
-                                            CA_CONN_INSERT_QUEUE_MAX,
-                                            self.opts.array_truncate,
-                                            self.opts.local_epics_hostname.clone(),
-                                        )
-                                        .slow_warn(2000)
-                                        .instrument(info_span!("add_channel_to_addr"))
-                                        .await?;
-                                    let cs = ConnectionState {
-                                        updated: tsnow,
-                                        value: ConnectionStateValue::Unconnected,
+                    ActiveChannelState::WithStatusSeriesId {
+                        status_series_id,
+                        state,
+                    } => match &mut state.inner {
+                        WithStatusSeriesIdStateInner::UnknownAddress { since } => {
+                            let dt = tsnow.duration_since(*since).unwrap_or(Duration::ZERO);
+                            if dt > UNKNOWN_ADDRESS_STAY {
+                                //info!("UnknownAddress {} {:?}", i, ch);
+                                if currently_search_pending < CURRENT_SEARCH_PENDING_MAX {
+                                    currently_search_pending += 1;
+                                    state.inner = WithStatusSeriesIdStateInner::SearchPending {
+                                        since: tsnow,
+                                        did_send: false,
                                     };
-                                    *state = WithAddressState::Assigned(cs);
-                                    self.connection_states.entry(*addr).or_insert_with(|| {
-                                        let t = CaConnState {
-                                            last_feedback: Instant::now(),
-                                            value: CaConnStateValue::Fresh,
-                                        };
-                                        t
-                                    });
+                                    SEARCH_REQ_MARK_COUNT.fetch_add(1, atomic::Ordering::AcqRel);
                                 }
                             }
-                            Assigned(_) => {
-                                // TODO check if channel is healthy and alive
+                        }
+                        WithStatusSeriesIdStateInner::SearchPending { since, did_send: _ } => {
+                            //info!("SearchPending {} {:?}", i, ch);
+                            let dt = tsnow.duration_since(*since).unwrap_or(Duration::ZERO);
+                            if dt > SEARCH_PENDING_TIMEOUT {
+                                info!("Search timeout for {ch:?}");
+                                state.inner = WithStatusSeriesIdStateInner::NoAddress { since: tsnow };
+                                currently_search_pending -= 1;
                             }
                         }
-                    }
-                    NoAddress { since } => {
-                        let dt = tsnow.duration_since(*since).unwrap_or(Duration::ZERO);
-                        if dt > NO_ADDRESS_STAY {
-                            st.value = Active(ActiveChannelState::UnknownAddress { since: tsnow });
+                        WithStatusSeriesIdStateInner::WithAddress { addr, state } => {
+                            //info!("WithAddress {} {:?}", i, ch);
+                            use WithAddressState::*;
+                            match state {
+                                Unassigned { assign_at } => {
+                                    if DO_ASSIGN_TO_CA_CONN && *assign_at <= tsnow {
+                                        let backend = self.opts.backend().into();
+                                        let channel_name = ch.id().into();
+                                        // This operation is meant to complete very quickly
+                                        self.ingest_commons
+                                            .ca_conn_set
+                                            .add_channel_to_addr(
+                                                backend,
+                                                *addr,
+                                                channel_name,
+                                                status_series_id.clone(),
+                                                &self.common_insert_item_queue,
+                                                &self.datastore,
+                                                CA_CONN_INSERT_QUEUE_MAX,
+                                                self.opts.array_truncate,
+                                                self.opts.local_epics_hostname.clone(),
+                                            )
+                                            .slow_warn(2000)
+                                            .instrument(info_span!("add_channel_to_addr"))
+                                            .await?;
+                                        let cs = ConnectionState {
+                                            updated: tsnow,
+                                            value: ConnectionStateValue::Unconnected,
+                                        };
+                                        *state = WithAddressState::Assigned(cs);
+                                        self.connection_states.entry(*addr).or_insert_with(|| {
+                                            let t = CaConnState {
+                                                last_feedback: Instant::now(),
+                                                value: CaConnStateValue::Fresh,
+                                            };
+                                            t
+                                        });
+                                        // TODO move await out of here
+                                        if let Some(tx) = self.ingest_commons.insert_item_queue.sender() {
+                                            let item = QueryItem::ChannelStatus(ChannelStatusItem {
+                                                ts: tsnow,
+                                                series: SeriesId::new(status_series_id.id()),
+                                                status: ChannelStatus::AssignedToAddress,
+                                            });
+                                            match tx.send(item).await {
+                                                Ok(_) => {}
+                                                Err(_) => {
+                                                    // TODO feed into throttled log, or count as unlogged
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                Assigned(_) => {
+                                    // TODO check if channel is healthy and alive
+                                }
+                            }
                         }
-                    }
+                        WithStatusSeriesIdStateInner::NoAddress { since } => {
+                            let dt = tsnow.duration_since(*since).unwrap_or(Duration::ZERO);
+                            if dt > NO_ADDRESS_STAY {
+                                state.inner = WithStatusSeriesIdStateInner::UnknownAddress { since: tsnow };
+                            }
+                        }
+                    },
                 },
-                ToRemove { .. } => {
+                ChannelStateValue::ToRemove { .. } => {
                     // TODO if assigned to some address,
                 }
             }
@@ -885,21 +988,27 @@ impl Daemon {
             }
         }
         for (ch, st) in &mut self.channel_states {
-            if let ChannelStateValue::Active(ActiveChannelState::SearchPending { since: _, did_send }) = &mut st.value {
-                if *did_send == false {
-                    match self.search_tx.try_send(ch.id().into()) {
-                        Ok(()) => {
-                            *did_send = true;
-                            SEARCH_REQ_SEND_COUNT.fetch_add(1, atomic::Ordering::AcqRel);
-                        }
-                        Err(e) => match e {
-                            async_channel::TrySendError::Full(_) => {}
-                            async_channel::TrySendError::Closed(_) => {
-                                error!("Finder channel closed");
-                                // TODO recover from this.
-                                panic!();
+            if let ChannelStateValue::Active(ActiveChannelState::WithStatusSeriesId {
+                status_series_id: _,
+                state,
+            }) = &mut st.value
+            {
+                if let WithStatusSeriesIdStateInner::SearchPending { since: _, did_send } = &mut state.inner {
+                    if *did_send == false {
+                        match self.search_tx.try_send(ch.id().into()) {
+                            Ok(()) => {
+                                *did_send = true;
+                                SEARCH_REQ_SEND_COUNT.fetch_add(1, atomic::Ordering::AcqRel);
                             }
-                        },
+                            Err(e) => match e {
+                                async_channel::TrySendError::Full(_) => {}
+                                async_channel::TrySendError::Closed(_) => {
+                                    error!("Finder channel closed");
+                                    // TODO recover from this.
+                                    panic!();
+                                }
+                            },
+                        }
                     }
                 }
             }
@@ -914,26 +1023,30 @@ impl Daemon {
             for (_ch, st) in &self.channel_states {
                 match &st.value {
                     ChannelStateValue::Active(st) => match st {
-                        ActiveChannelState::UnknownAddress { .. } => {
-                            self.count_unknown_address += 1;
-                        }
-                        ActiveChannelState::SearchPending { did_send, .. } => {
-                            self.count_search_pending += 1;
-                            if *did_send {
-                                self.count_search_sent += 1;
+                        ActiveChannelState::Init { .. } => {}
+                        ActiveChannelState::WaitForStatusSeriesId { .. } => {}
+                        ActiveChannelState::WithStatusSeriesId { state, .. } => match &state.inner {
+                            WithStatusSeriesIdStateInner::UnknownAddress { .. } => {
+                                self.count_unknown_address += 1;
                             }
-                        }
-                        ActiveChannelState::WithAddress { state, .. } => match state {
-                            WithAddressState::Unassigned { .. } => {
-                                self.count_unassigned += 1;
+                            WithStatusSeriesIdStateInner::SearchPending { did_send, .. } => {
+                                self.count_search_pending += 1;
+                                if *did_send {
+                                    self.count_search_sent += 1;
+                                }
                             }
-                            WithAddressState::Assigned(_) => {
-                                self.count_assigned += 1;
+                            WithStatusSeriesIdStateInner::WithAddress { state, .. } => match state {
+                                WithAddressState::Unassigned { .. } => {
+                                    self.count_unassigned += 1;
+                                }
+                                WithAddressState::Assigned(_) => {
+                                    self.count_assigned += 1;
+                                }
+                            },
+                            WithStatusSeriesIdStateInner::NoAddress { .. } => {
+                                self.count_no_address += 1;
                             }
                         },
-                        ActiveChannelState::NoAddress { .. } => {
-                            self.count_no_address += 1;
-                        }
                     },
                     ChannelStateValue::ToRemove { .. } => {}
                 }
@@ -1037,7 +1150,7 @@ impl Daemon {
     fn handle_channel_add(&mut self, ch: Channel) -> Result<(), Error> {
         if !self.channel_states.contains_key(&ch) {
             let st = ChannelState {
-                value: ChannelStateValue::Active(ActiveChannelState::UnknownAddress {
+                value: ChannelStateValue::Active(ActiveChannelState::Init {
                     since: SystemTime::now(),
                 }),
             };
@@ -1050,20 +1163,31 @@ impl Daemon {
         if let Some(k) = self.channel_states.get_mut(&ch) {
             match &k.value {
                 ChannelStateValue::Active(j) => match j {
-                    ActiveChannelState::UnknownAddress { .. } => {
+                    ActiveChannelState::Init { .. } => {
                         k.value = ChannelStateValue::ToRemove { addr: None };
                     }
-                    ActiveChannelState::SearchPending { .. } => {
+                    ActiveChannelState::WaitForStatusSeriesId { .. } => {
                         k.value = ChannelStateValue::ToRemove { addr: None };
                     }
-                    ActiveChannelState::WithAddress { addr, .. } => {
-                        k.value = ChannelStateValue::ToRemove {
-                            addr: Some(addr.clone()),
-                        };
-                    }
-                    ActiveChannelState::NoAddress { .. } => {
-                        k.value = ChannelStateValue::ToRemove { addr: None };
-                    }
+                    ActiveChannelState::WithStatusSeriesId {
+                        status_series_id: _,
+                        state,
+                    } => match state.inner {
+                        WithStatusSeriesIdStateInner::UnknownAddress { .. } => {
+                            k.value = ChannelStateValue::ToRemove { addr: None };
+                        }
+                        WithStatusSeriesIdStateInner::SearchPending { .. } => {
+                            k.value = ChannelStateValue::ToRemove { addr: None };
+                        }
+                        WithStatusSeriesIdStateInner::WithAddress { addr, .. } => {
+                            k.value = ChannelStateValue::ToRemove {
+                                addr: Some(addr.clone()),
+                            };
+                        }
+                        WithStatusSeriesIdStateInner::NoAddress { .. } => {
+                            k.value = ChannelStateValue::ToRemove { addr: None };
+                        }
+                    },
                 },
                 ChannelStateValue::ToRemove { .. } => {}
             }
@@ -1073,6 +1197,7 @@ impl Daemon {
 
     async fn handle_search_done(&mut self, item: Result<VecDeque<FindIocRes>, Error>) -> Result<(), Error> {
         //debug!("handle SearchDone: {res:?}");
+        let allow_create_new_connections = self.allow_create_new_connections();
         let tsnow = SystemTime::now();
         match item {
             Ok(ress) => {
@@ -1080,56 +1205,96 @@ impl Daemon {
                 for res in ress {
                     if let Some(addr) = &res.addr {
                         self.stats.ioc_search_some_inc();
-                        if self.allow_create_new_connections() {
-                            let ch = Channel::new(res.channel);
-                            if let Some(st) = self.channel_states.get_mut(&ch) {
-                                if let ChannelStateValue::Active(ActiveChannelState::SearchPending {
-                                    since,
-                                    did_send: _,
-                                }) = &st.value
-                                {
-                                    let dt = tsnow.duration_since(*since).unwrap();
-                                    if dt > SEARCH_PENDING_TIMEOUT_WARN {
-                                        warn!(
-                                            "    FOUND {:5.0}  {:5.0}  {addr}",
-                                            1e3 * dt.as_secs_f32(),
-                                            1e3 * res.dt.as_secs_f32()
-                                        );
-                                    }
-                                    let stnew = ChannelStateValue::Active(ActiveChannelState::WithAddress {
-                                        addr: addr.clone(),
-                                        state: WithAddressState::Unassigned { assign_at: tsnow },
-                                    });
-                                    st.value = stnew;
-                                } else {
-                                    warn!(
-                                        "address found, but state for {ch:?} is not SearchPending: {:?}",
-                                        st.value
-                                    );
-                                }
-                            } else {
-                                warn!("can not find channel state for {ch:?}");
+
+                        let ch = Channel::new(res.channel);
+                        if let Some(st) = self.channel_states.get_mut(&ch) {
+                            match &st.value {
+                                ChannelStateValue::Active(st2) => match st2 {
+                                    ActiveChannelState::Init { .. } => {}
+                                    ActiveChannelState::WaitForStatusSeriesId { .. } => {}
+                                    ActiveChannelState::WithStatusSeriesId {
+                                        status_series_id,
+                                        state,
+                                    } => match state.inner {
+                                        WithStatusSeriesIdStateInner::SearchPending { since, did_send: _ } => {
+                                            if allow_create_new_connections {
+                                                let dt = tsnow.duration_since(since).unwrap();
+                                                if dt > SEARCH_PENDING_TIMEOUT_WARN {
+                                                    warn!(
+                                                        "    FOUND {:5.0}  {:5.0}  {addr}",
+                                                        1e3 * dt.as_secs_f32(),
+                                                        1e3 * res.dt.as_secs_f32()
+                                                    );
+                                                }
+                                                let stnew =
+                                                    ChannelStateValue::Active(ActiveChannelState::WithStatusSeriesId {
+                                                        status_series_id: status_series_id.clone(),
+                                                        state: WithStatusSeriesIdState {
+                                                            inner: WithStatusSeriesIdStateInner::WithAddress {
+                                                                addr: addr.clone(),
+                                                                state: WithAddressState::Unassigned {
+                                                                    assign_at: tsnow,
+                                                                },
+                                                            },
+                                                        },
+                                                    });
+                                                st.value = stnew;
+                                            } else {
+                                                // Emit something here?
+                                            }
+                                        }
+                                        _ => {
+                                            warn!(
+                                                "address found, but state for {ch:?} is not SearchPending: {:?}",
+                                                st.value
+                                            );
+                                        }
+                                    },
+                                },
+                                ChannelStateValue::ToRemove { addr: _ } => {}
                             }
                         } else {
-                            // Emit something here?
+                            warn!("can not find channel state for {ch:?}");
                         }
                     } else {
                         //debug!("no addr from search in {res:?}");
                         let ch = Channel::new(res.channel);
                         if let Some(st) = self.channel_states.get_mut(&ch) {
-                            if let ChannelStateValue::Active(ActiveChannelState::SearchPending { since, did_send: _ }) =
-                                &st.value
-                            {
-                                let dt = tsnow.duration_since(*since).unwrap();
-                                if dt > SEARCH_PENDING_TIMEOUT_WARN {
-                                    warn!(
-                                        "NOT FOUND {:5.0}  {:5.0}",
-                                        1e3 * dt.as_secs_f32(),
-                                        1e3 * res.dt.as_secs_f32()
-                                    );
-                                }
-                                st.value = ChannelStateValue::Active(ActiveChannelState::NoAddress { since: tsnow });
-                            } else {
+                            let mut unexpected_state = true;
+                            match &st.value {
+                                ChannelStateValue::Active(st2) => match st2 {
+                                    ActiveChannelState::Init { .. } => {}
+                                    ActiveChannelState::WaitForStatusSeriesId { .. } => {}
+                                    ActiveChannelState::WithStatusSeriesId {
+                                        status_series_id,
+                                        state: st3,
+                                    } => match &st3.inner {
+                                        WithStatusSeriesIdStateInner::UnknownAddress { .. } => {}
+                                        WithStatusSeriesIdStateInner::SearchPending { since, .. } => {
+                                            unexpected_state = false;
+                                            let dt = tsnow.duration_since(*since).unwrap();
+                                            if dt > SEARCH_PENDING_TIMEOUT_WARN {
+                                                warn!(
+                                                    "NOT FOUND {:5.0}  {:5.0}",
+                                                    1e3 * dt.as_secs_f32(),
+                                                    1e3 * res.dt.as_secs_f32()
+                                                );
+                                            }
+                                            st.value =
+                                                ChannelStateValue::Active(ActiveChannelState::WithStatusSeriesId {
+                                                    status_series_id: status_series_id.clone(),
+                                                    state: WithStatusSeriesIdState {
+                                                        inner: WithStatusSeriesIdStateInner::NoAddress { since: tsnow },
+                                                    },
+                                                });
+                                        }
+                                        WithStatusSeriesIdStateInner::WithAddress { .. } => {}
+                                        WithStatusSeriesIdStateInner::NoAddress { .. } => {}
+                                    },
+                                },
+                                ChannelStateValue::ToRemove { .. } => {}
+                            }
+                            if unexpected_state {
                                 warn!("no address, but state for {ch:?} is not SearchPending: {:?}", st.value);
                             }
                         } else {
@@ -1152,22 +1317,29 @@ impl Daemon {
         for (_k, v) in self.channel_states.iter_mut() {
             match &v.value {
                 ChannelStateValue::Active(st2) => match st2 {
-                    ActiveChannelState::UnknownAddress { .. } => {}
-                    ActiveChannelState::SearchPending { since: _, did_send: _ } => {}
-                    ActiveChannelState::WithAddress { addr, state: _ } => {
-                        if addr == &conn_addr {
-                            // TODO reset channel, emit log event for the connection addr only
-                            //info!("ca conn down, reset {k:?}");
-                            *v = ChannelState {
-                                value: ChannelStateValue::Active(ActiveChannelState::UnknownAddress {
-                                    since: SystemTime::now(),
-                                }),
-                            };
+                    ActiveChannelState::WithStatusSeriesId {
+                        status_series_id: _,
+                        state: st3,
+                    } => match &st3.inner {
+                        WithStatusSeriesIdStateInner::UnknownAddress { .. } => {}
+                        WithStatusSeriesIdStateInner::SearchPending { .. } => {}
+                        WithStatusSeriesIdStateInner::WithAddress { addr, .. } => {
+                            if addr == &conn_addr {
+                                // TODO reset channel, emit log event for the connection addr only
+                                //info!("ca conn down, reset {k:?}");
+                                *v = ChannelState {
+                                    value: ChannelStateValue::Active(ActiveChannelState::Init {
+                                        since: SystemTime::now(),
+                                    }),
+                                };
+                            }
                         }
-                    }
-                    ActiveChannelState::NoAddress { .. } => {}
+                        WithStatusSeriesIdStateInner::NoAddress { .. } => {}
+                    },
+                    ActiveChannelState::Init { .. } => {}
+                    ActiveChannelState::WaitForStatusSeriesId { .. } => {}
                 },
-                ChannelStateValue::ToRemove { addr: _ } => {}
+                ChannelStateValue::ToRemove { .. } => {}
             }
         }
         let item = QueryItem::ConnectionStatus(ConnectionStatusItem {
@@ -1176,7 +1348,7 @@ impl Daemon {
             status: ConnectionStatus::ConnectionHandlerDone,
         });
         if let Some(tx) = self.ingest_commons.insert_item_queue.sender() {
-            if let Err(e) = tokio::time::timeout(Duration::from_millis(1000), tx.send(item)).await {
+            if let Err(_) = tokio::time::timeout(Duration::from_millis(1000), tx.send(item)).await {
                 error!("timeout on insert queue send");
             } else {
             }

@@ -9,6 +9,7 @@ use crate::ca::conn::CaConnEventValue;
 use crate::errconv::ErrConv;
 use crate::rt::JoinHandle;
 use crate::rt::TokMx;
+use crate::series::ChannelStatusSeriesId;
 use crate::store::CommonInsertItemQueue;
 use crate::store::CommonInsertItemQueueSender;
 use async_channel::Receiver;
@@ -86,11 +87,10 @@ impl CaConnSet {
         insert_queue_max: usize,
         insert_item_queue_sender: CommonInsertItemQueueSender,
         data_store: Arc<DataStore>,
-        with_channels: Vec<String>,
     ) -> Result<CaConnRess, Error> {
         // TODO should we save this as event?
         trace!("create new CaConn  {:?}", addr);
-        let mut conn = CaConn::new(
+        let conn = CaConn::new(
             backend.clone(),
             addr,
             local_epics_hostname,
@@ -100,9 +100,6 @@ impl CaConnSet {
             array_truncate,
             insert_queue_max,
         );
-        for ch in with_channels {
-            conn.channel_add(ch);
-        }
         let conn = conn;
         let conn_tx = conn.conn_command_tx();
         let conn_stats = conn.stats();
@@ -247,6 +244,7 @@ impl CaConnSet {
         backend: String,
         addr: SocketAddrV4,
         name: String,
+        cssid: ChannelStatusSeriesId,
         insert_item_queue: &CommonInsertItemQueue,
         data_store: &Arc<DataStore>,
         insert_queue_max: usize,
@@ -270,18 +268,17 @@ impl CaConnSet {
                     .sender()
                     .ok_or_else(|| Error::with_msg_no_trace("can not derive sender"))?,
                 data_store.clone(),
-                Vec::new(),
             )?;
             g.insert(addr, ca_conn_ress);
         }
         match g.get(&addr) {
             Some(ca_conn) => {
                 if true {
-                    let op = super::conn::ChannelSetOp::Add;
+                    let op = super::conn::ChannelSetOp::Add(cssid);
                     ca_conn.channel_set_ops.insert(name, op);
                     Ok(())
                 } else {
-                    let cmd = ConnCommand::channel_add(name);
+                    let cmd = ConnCommand::channel_add(name, cssid);
                     let _cmdid = CmdId(addr, cmd.id());
                     ca_conn
                         .sender

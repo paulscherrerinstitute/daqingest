@@ -9,6 +9,7 @@ use crate::batchquery::series_by_channel::ChannelInfoQuery;
 use crate::bsread::ChannelDescDecoded;
 use crate::ca::proto::CreateChan;
 use crate::ca::proto::EventAdd;
+use crate::series::ChannelStatusSeriesId;
 use crate::series::Existence;
 use crate::series::SeriesId;
 use crate::store::ChannelInfoItem;
@@ -132,6 +133,7 @@ enum MonitoringState {
 
 #[derive(Clone, Debug)]
 struct CreatedState {
+    cssid: ChannelStatusSeriesId,
     #[allow(unused)]
     cid: Cid,
     #[allow(unused)]
@@ -156,8 +158,12 @@ struct CreatedState {
 #[allow(unused)]
 #[derive(Clone, Debug)]
 enum ChannelState {
-    Init,
-    Creating { cid: Cid, ts_beg: Instant },
+    Init(ChannelStatusSeriesId),
+    Creating {
+        cssid: ChannelStatusSeriesId,
+        cid: Cid,
+        ts_beg: Instant,
+    },
     Created(CreatedState),
     Error(ChannelError),
     Ended,
@@ -166,7 +172,7 @@ enum ChannelState {
 impl ChannelState {
     fn to_info(&self, name: String, addr: SocketAddrV4) -> ChannelStateInfo {
         let channel_connected_info = match self {
-            ChannelState::Init => ChannelConnectedInfo::Disconnected,
+            ChannelState::Init(_) => ChannelConnectedInfo::Disconnected,
             ChannelState::Creating { .. } => ChannelConnectedInfo::Connecting,
             ChannelState::Created(_) => ChannelConnectedInfo::Connected,
             ChannelState::Error(_) => ChannelConnectedInfo::Error,
@@ -220,11 +226,6 @@ impl ChannelState {
             interest_score,
         }
     }
-}
-
-#[allow(unused)]
-struct ChannelsStates {
-    channels: BTreeMap<Cid, ChannelState>,
 }
 
 enum CaConnState {
@@ -284,7 +285,7 @@ fn info_store_msp_from_time(ts: SystemTime) -> u32 {
 
 #[derive(Debug)]
 pub enum ConnCommandKind {
-    ChannelAdd(String),
+    ChannelAdd(String, ChannelStatusSeriesId),
     ChannelRemove(String),
     CheckHealth,
     Shutdown,
@@ -297,10 +298,10 @@ pub struct ConnCommand {
 }
 
 impl ConnCommand {
-    pub fn channel_add(name: String) -> Self {
+    pub fn channel_add(name: String, cssid: ChannelStatusSeriesId) -> Self {
         Self {
             id: Self::make_id(),
-            kind: ConnCommandKind::ChannelAdd(name),
+            kind: ConnCommandKind::ChannelAdd(name, cssid),
         }
     }
 
@@ -362,7 +363,7 @@ pub struct CaConnEvent {
 
 #[derive(Debug)]
 pub enum ChannelSetOp {
-    Add,
+    Add(ChannelStatusSeriesId),
     Remove,
 }
 
@@ -570,8 +571,8 @@ impl CaConn {
         // TODO return the result
     }
 
-    fn cmd_channel_add(&mut self, name: String) {
-        self.channel_add(name);
+    fn cmd_channel_add(&mut self, name: String, cssid: ChannelStatusSeriesId) {
+        self.channel_add(name, cssid);
         // TODO return the result
         //self.stats.caconn_command_can_not_reply_inc();
     }
@@ -583,7 +584,7 @@ impl CaConn {
     }
 
     fn cmd_shutdown(&mut self) {
-        self.trigger_shutdown(ChannelStatusClosedReason::IngestExit);
+        self.trigger_shutdown(ChannelStatusClosedReason::ShutdownCommand);
     }
 
     fn cmd_extra_inserts_conf(&mut self, extra_inserts_conf: ExtraInsertsConf) {
@@ -603,8 +604,8 @@ impl CaConn {
         self.stats.caconn_loop3_count_inc();
         match self.conn_command_rx.poll_next_unpin(cx) {
             Ready(Some(a)) => match a.kind {
-                ConnCommandKind::ChannelAdd(name) => {
-                    self.cmd_channel_add(name);
+                ConnCommandKind::ChannelAdd(name, cssid) => {
+                    self.cmd_channel_add(name, cssid);
                     Ready(Some(Ok(())))
                 }
                 ConnCommandKind::ChannelRemove(name) => {
@@ -634,6 +635,7 @@ impl CaConn {
 
     fn channel_add_expl(
         channel: String,
+        cssid: ChannelStatusSeriesId,
         channels: &mut BTreeMap<Cid, ChannelState>,
         cid_by_name: &mut BTreeMap<String, Cid>,
         name_by_cid: &mut BTreeMap<Cid, String>,
@@ -647,15 +649,16 @@ impl CaConn {
         if channels.contains_key(&cid) {
             error!("logic error");
         } else {
-            channels.insert(cid, ChannelState::Init);
+            channels.insert(cid, ChannelState::Init(cssid));
             // TODO do not count, use separate queue for those channels.
             *init_state_count += 1;
         }
     }
 
-    pub fn channel_add(&mut self, channel: String) {
+    pub fn channel_add(&mut self, channel: String, cssid: ChannelStatusSeriesId) {
         Self::channel_add_expl(
             channel,
+            cssid,
             &mut self.channels,
             &mut self.cid_by_name,
             &mut self.name_by_cid,
@@ -726,7 +729,7 @@ impl CaConn {
         let mut warn_max = 0;
         for (_cid, chst) in &mut self.channels {
             match chst {
-                ChannelState::Init => {
+                ChannelState::Init(cssid) => {
                     *chst = ChannelState::Ended;
                 }
                 ChannelState::Creating { .. } => {
@@ -828,7 +831,7 @@ impl CaConn {
         let mut not_alive_count = 0;
         for (_, st) in &self.channels {
             match st {
-                ChannelState::Creating { cid, ts_beg } => {
+                ChannelState::Creating { cid, ts_beg, cssid: _ } => {
                     if false && tsnow.duration_since(*ts_beg) >= Duration::from_millis(10000) {
                         let name = self.name_by_cid.get(cid);
                         // TODO channel create timed out how to let daemon know?
@@ -861,10 +864,14 @@ impl CaConn {
         let timenow = SystemTime::now();
         for (_, st) in &mut self.channels {
             match st {
-                ChannelState::Init => {
+                ChannelState::Init(cssid) => {
                     // TODO need last-save-ts for this state.
                 }
-                ChannelState::Creating { cid: _, ts_beg: _ } => {
+                ChannelState::Creating {
+                    cid: _,
+                    ts_beg: _,
+                    cssid: _,
+                } => {
                     // TODO need last-save-ts for this state.
                 }
                 ChannelState::Created(st) => {
@@ -930,7 +937,15 @@ impl CaConn {
         proto.push_out(msg);
         // TODO handle not-found error:
         let ch_s = self.channels.get_mut(&cid).unwrap();
+        let cssid = match ch_s {
+            ChannelState::Creating { cssid, cid, ts_beg } => cssid.clone(),
+            _ => {
+                let e = Error::with_msg_no_trace("channel_to_evented  bad state");
+                return Err(e);
+            }
+        };
         *ch_s = ChannelState::Created(CreatedState {
+            cssid,
             cid,
             sid,
             // TODO handle error better! Transition channel to Error state?
@@ -1289,12 +1304,13 @@ impl CaConn {
         let keys: Vec<Cid> = self.channels.keys().map(|x| *x).collect();
         for cid in keys {
             match self.channels.get_mut(&cid).unwrap() {
-                ChannelState::Init => {
+                ChannelState::Init(cssid) => {
+                    let cssid = cssid.clone();
                     let name = self
                         .name_by_cid(cid)
                         .ok_or_else(|| Error::with_msg_no_trace("name for cid not known"));
                     let name = match name {
-                        Ok(k) => k,
+                        Ok(k) => k.to_string(),
                         Err(e) => return Err(e),
                     };
                     let msg = CaMsg {
@@ -1307,6 +1323,7 @@ impl CaConn {
                     // TODO handle not-found error:
                     let ch_s = self.channels.get_mut(&cid).unwrap();
                     *ch_s = ChannelState::Creating {
+                        cssid,
                         cid,
                         ts_beg: Instant::now(),
                     };
@@ -1371,7 +1388,15 @@ impl CaConn {
                                 let shape = Shape::from_ca_count(k.data_count)?;
                                 // TODO handle not-found error:
                                 let ch_s = self.channels.get_mut(&cid).unwrap();
+                                let cssid = match ch_s {
+                                    ChannelState::Creating { cssid, cid, ts_beg } => cssid.clone(),
+                                    _ => {
+                                        let e = Error::with_msg_no_trace("channel_to_evented  bad state");
+                                        return Ready(Some(Err(e)));
+                                    }
+                                };
                                 *ch_s = ChannelState::Created(CreatedState {
+                                    cssid,
                                     cid,
                                     sid,
                                     scalar_type: scalar_type.clone(),
@@ -1631,8 +1656,9 @@ impl CaConn {
         let map = std::mem::replace(&mut *g, BTreeMap::new());
         for (ch, op) in map {
             match op {
-                ChannelSetOp::Add => Self::channel_add_expl(
+                ChannelSetOp::Add(cssid) => Self::channel_add_expl(
                     ch,
+                    cssid,
                     res.channels,
                     res.cid_by_name,
                     res.name_by_cid,

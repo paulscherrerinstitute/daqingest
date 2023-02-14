@@ -35,6 +35,19 @@ impl SeriesId {
     }
 }
 
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Serialize)]
+pub struct ChannelStatusSeriesId(u64);
+
+impl ChannelStatusSeriesId {
+    pub fn new(id: u64) -> Self {
+        Self(id)
+    }
+
+    pub fn id(&self) -> u64 {
+        self.0
+    }
+}
+
 // TODO don't need byte_order or compression from ChannelDescDecoded for channel registration.
 pub async fn get_series_id(
     pg_client: &PgClient,

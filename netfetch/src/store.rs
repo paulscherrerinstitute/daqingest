@@ -183,7 +183,7 @@ pub struct ConnectionStatusItem {
 
 #[derive(Debug, Clone)]
 pub enum ChannelStatusClosedReason {
-    IngestExit,
+    ShutdownCommand,
     ChannelRemove,
     ProtocolError,
     FrequencyQuota,
@@ -196,6 +196,7 @@ pub enum ChannelStatusClosedReason {
 
 #[derive(Debug)]
 pub enum ChannelStatus {
+    AssignedToAddress,
     Opened,
     Closed(ChannelStatusClosedReason),
 }
@@ -205,9 +206,10 @@ impl ChannelStatus {
         use ChannelStatus::*;
         use ChannelStatusClosedReason::*;
         match self {
+            AssignedToAddress => 24,
             Opened => 1,
             Closed(x) => match x {
-                IngestExit => 2,
+                ShutdownCommand => 2,
                 ChannelRemove => 3,
                 ProtocolError => 4,
                 FrequencyQuota => 5,
@@ -225,7 +227,7 @@ impl ChannelStatus {
         use ChannelStatusClosedReason::*;
         let ret = match kind {
             1 => Opened,
-            2 => Closed(IngestExit),
+            2 => Closed(ShutdownCommand),
             3 => Closed(ChannelRemove),
             4 => Closed(ProtocolError),
             5 => Closed(FrequencyQuota),
@@ -234,6 +236,7 @@ impl ChannelStatus {
             8 => Closed(IocTimeout),
             9 => Closed(NoProtocol),
             10 => Closed(ProtocolDone),
+            24 => AssignedToAddress,
             _ => {
                 return Err(err::Error::with_msg_no_trace(format!(
                     "unknown ChannelStatus kind {kind}"
