@@ -818,11 +818,11 @@ impl CaConn {
             } else {
                 self.ioc_ping_start = Some(Instant::now());
                 if let Some(proto) = &mut self.proto {
-                    trace!("push echo to {}", self.remote_addr_dbg);
+                    info!("push echo to {}", self.remote_addr_dbg);
                     let msg = CaMsg { ty: CaMsgTy::Echo };
                     proto.push_out(msg);
                 } else {
-                    warn!("can not push echo, no proto");
+                    warn!("can not push echo, no proto {}", self.remote_addr_dbg);
                     self.trigger_shutdown(ChannelStatusClosedReason::NoProtocol);
                 }
             }
@@ -1443,7 +1443,7 @@ impl CaConn {
                                             },
                                             Err(e) => {
                                                 // TODO count only
-                                                error!("can not receive series lookup result {e}");
+                                                error!("can not receive series lookup result for {name} {e}");
                                                 Err(Error::with_msg_no_trace("can not receive lookup result"))
                                             }
                                         }

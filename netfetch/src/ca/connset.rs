@@ -109,6 +109,7 @@ impl CaConnSet {
         let conn_fut = async move {
             let stats = conn.stats();
             let mut conn = conn;
+            let mut ret = Ok(());
             while let Some(item) = conn.next().await {
                 match item {
                     Ok(item) => {
@@ -117,10 +118,11 @@ impl CaConnSet {
                     }
                     Err(e) => {
                         error!("CaConn gives error: {e:?}");
-                        return Err(e);
+                        ret = Err(e);
                     }
                 }
             }
+            info!("CaConn stream ended {}", addr);
             Self::conn_remove(&ca_conn_ress, addr).await?;
             conn_item_tx
                 .send((
@@ -131,7 +133,7 @@ impl CaConnSet {
                     },
                 ))
                 .await?;
-            Ok(())
+            ret
         };
         let jh = tokio::spawn(conn_fut);
         let ca_conn_ress = CaConnRess {
