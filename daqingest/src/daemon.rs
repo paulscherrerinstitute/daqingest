@@ -782,26 +782,26 @@ impl Daemon {
     }
 
     async fn check_channel_states(&mut self) -> Result<(), Error> {
-        let mut currently_search_pending = 0;
+        let mut search_pending_count = 0;
         {
+            let mut unknown_address_count = 0;
             let mut with_address_count = 0;
-            let mut without_address_count = 0;
+            let mut no_address_count = 0;
             for (_ch, st) in &self.channel_states {
                 match &st.value {
                     ChannelStateValue::Active(st2) => match st2 {
                         ActiveChannelState::Init { .. } => {
-                            without_address_count += 1;
+                            unknown_address_count += 1;
                         }
                         ActiveChannelState::WaitForStatusSeriesId { .. } => {
-                            without_address_count += 1;
+                            unknown_address_count += 1;
                         }
                         ActiveChannelState::WithStatusSeriesId { state, .. } => match &state.inner {
                             WithStatusSeriesIdStateInner::UnknownAddress { .. } => {
-                                without_address_count += 1;
+                                unknown_address_count += 1;
                             }
                             WithStatusSeriesIdStateInner::SearchPending { .. } => {
-                                currently_search_pending += 1;
-                                without_address_count += 1;
+                                search_pending_count += 1;
                             }
                             WithStatusSeriesIdStateInner::WithAddress { state, .. } => match state {
                                 WithAddressState::Unassigned { .. } => {
@@ -812,21 +812,27 @@ impl Daemon {
                                 }
                             },
                             WithStatusSeriesIdStateInner::NoAddress { .. } => {
-                                without_address_count += 1;
+                                no_address_count += 1;
                             }
                         },
                     },
                     ChannelStateValue::ToRemove { .. } => {
-                        with_address_count += 1;
+                        unknown_address_count += 1;
                     }
                 }
             }
             self.stats
+                .channel_unknown_address
+                .store(unknown_address_count, atomic::Ordering::Release);
+            self.stats
                 .channel_with_address
                 .store(with_address_count, atomic::Ordering::Release);
             self.stats
-                .channel_without_address
-                .store(without_address_count, atomic::Ordering::Release);
+                .channel_search_pending
+                .store(search_pending_count as u64, atomic::Ordering::Release);
+            self.stats
+                .channel_no_address
+                .store(no_address_count, atomic::Ordering::Release);
         }
         let k = self.chan_check_next.take();
         trace!("------------   check_chans  start at {:?}", k);
@@ -880,10 +886,12 @@ impl Daemon {
                                         };
                                     }
                                     Err(e) => {
-                                        error!("could not get a status series id");
+                                        error!("could not get a status series id  {ch:?}  {e}");
                                     }
                                 },
-                                Err(e) => {}
+                                Err(_) => {
+                                    // TODO should maybe not attempt receive on each channel check.
+                                }
                             }
                         }
                     }
@@ -895,8 +903,8 @@ impl Daemon {
                             let dt = tsnow.duration_since(*since).unwrap_or(Duration::ZERO);
                             if dt > UNKNOWN_ADDRESS_STAY {
                                 //info!("UnknownAddress {} {:?}", i, ch);
-                                if currently_search_pending < CURRENT_SEARCH_PENDING_MAX {
-                                    currently_search_pending += 1;
+                                if search_pending_count < CURRENT_SEARCH_PENDING_MAX {
+                                    search_pending_count += 1;
                                     state.inner = WithStatusSeriesIdStateInner::SearchPending {
                                         since: tsnow,
                                         did_send: false,
@@ -911,7 +919,7 @@ impl Daemon {
                             if dt > SEARCH_PENDING_TIMEOUT {
                                 info!("Search timeout for {ch:?}");
                                 state.inner = WithStatusSeriesIdStateInner::NoAddress { since: tsnow };
-                                currently_search_pending -= 1;
+                                search_pending_count -= 1;
                             }
                         }
                         WithStatusSeriesIdStateInner::WithAddress { addr, state } => {
@@ -1334,6 +1342,7 @@ impl Daemon {
                         WithStatusSeriesIdStateInner::SearchPending { .. } => {}
                         WithStatusSeriesIdStateInner::WithAddress { addr, .. } => {
                             if addr == &conn_addr {
+                                self.stats.caconn_done_channel_state_reset_inc();
                                 // TODO reset channel, emit log event for the connection addr only
                                 //info!("ca conn down, reset {k:?}");
                                 *v = ChannelState {

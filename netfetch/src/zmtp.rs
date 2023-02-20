@@ -158,7 +158,7 @@ impl BsreadClient {
         ts: u64,
         pulse: u64,
     ) -> Result<(), Error> {
-        let chname = "SAR-CVME-TIFALL4:EvtSet";
+        let chname = "SAR-CVME-TIFALL5:EvtSet";
         // Test the bool set write
         let mut i3 = usize::MAX;
         for (i, ch) in bm.head_b.channels.iter().enumerate() {
@@ -675,7 +675,8 @@ impl Zmtp {
             complete: false,
             socket_type,
             conn,
-            conn_state: ConnState::LockScan(1),
+            //conn_state: ConnState::LockScan(1),
+            conn_state: ConnState::InitSend,
             buf: NetBuf::new(1024 * 128),
             outbuf: NetBuf::new(1024 * 128),
             out_enable: false,

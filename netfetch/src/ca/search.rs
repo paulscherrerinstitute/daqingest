@@ -119,7 +119,10 @@ impl DbUpdateWorker {
                     .unwrap();
             } else {
                 warn!("Duplicate for {}", item.channel);
-                let sql="with q1 as (select ctid from ioc_by_channel_log where facility = $1 and channel = $2 and addr is not distinct from $3 order by tsmod desc, ctid desc limit 1) update ioc_by_channel_log t set archived = 1 from q1 where t.facility = $1 and t.channel = $2 and t.addr is not distinct from $3 and t.ctid != q1.ctid";
+                let sql = concat!(
+                    "with q1 as (select ctid from ioc_by_channel_log where facility = $1 and channel = $2 and addr is not distinct from $3 order by tsmod desc, ctid desc limit 1)",
+                    " update ioc_by_channel_log t set archived = 1 from q1 where t.facility = $1 and t.channel = $2 and t.ctid != q1.ctid and archived != 1",
+                );
                 pg_client.execute(sql, &[&backend, &item.channel, &addr]).await.unwrap();
                 pg_client
                     .execute(&qu_update_tsmod, &[&backend, &item.channel, &addr, &responseaddr])

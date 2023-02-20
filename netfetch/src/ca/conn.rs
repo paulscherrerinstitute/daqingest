@@ -927,7 +927,7 @@ impl CaConn {
         // TODO handle not-found error:
         let ch_s = self.channels.get_mut(&cid).unwrap();
         let cssid = match ch_s {
-            ChannelState::Created(_series, st2) => st2.cssid.clone(),
+            ChannelState::FetchingSeriesId(st2) => st2.cssid.clone(),
             _ => {
                 let name = self.name_by_cid.get(&cid);
                 let e = Error::with_msg_no_trace(format!("channel_to_evented  bad state  {name:?}  {ch_s:?}"));
@@ -1381,7 +1381,7 @@ impl CaConn {
                                 let cssid = match ch_s {
                                     ChannelState::Creating { cssid, .. } => cssid.clone(),
                                     _ => {
-                                        let e = Error::with_msg_no_trace("channel_to_evented  bad state");
+                                        let e = Error::with_msg_no_trace("handle_peer_ready  bad state");
                                         return Ready(Some(Err(e)));
                                     }
                                 };

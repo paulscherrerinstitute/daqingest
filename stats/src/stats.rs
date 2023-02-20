@@ -286,8 +286,14 @@ stats_proc::stats_struct!((
             ca_conn_status_feedback_recv,
             ca_conn_status_feedback_no_dst,
             ca_echo_timeout_total,
+            caconn_done_channel_state_reset,
         ),
-        values(channel_without_address, channel_with_address),
+        values(
+            channel_unknown_address,
+            channel_search_pending,
+            channel_with_address,
+            channel_no_address
+        ),
     ),
     agg(name(DaemonStatsAgg), parent(DaemonStats)),
     diff(name(DaemonStatsAggDiff), input(DaemonStatsAgg)),
