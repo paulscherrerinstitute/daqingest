@@ -9,6 +9,3 @@ debug-assertions = false
 lto = "thin"
 codegen-units = 64
 incremental = true
-
-[patch.crates-io]
-#tokio = { git = "https://github.com/dominikwerder/tokio", rev = "995221d8" }

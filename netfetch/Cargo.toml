@@ -40,5 +40,8 @@ log = { path = "../log" }
 stats = { path = "../stats" }
 err = { path = "../../daqbuffer/err" }
 netpod = { path = "../../daqbuffer/netpod" }
+items_0 = { path = "../../daqbuffer/items_0" }
+items_2 = { path = "../../daqbuffer/items_2" }
+streams = { path = "../../daqbuffer/streams" }
 taskrun = { path = "../../daqbuffer/taskrun" }
 bitshuffle = { path = "../../daqbuffer/bitshuffle" }
