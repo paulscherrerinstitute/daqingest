@@ -1,6 +1,7 @@
 use err::Error;
 use futures_util::StreamExt;
 use netpod::ScyllaConfig;
+use scylla::execution_profile::ExecutionProfileBuilder;
 use scylla::prepared_statement::PreparedStatement;
 use scylla::statement::Consistency;
 use scylla::Session as ScySession;
@@ -59,8 +60,13 @@ impl DataStore {
     pub async fn new(scyconf: &ScyllaConfig) -> Result<Self, Error> {
         let scy = scylla::SessionBuilder::new()
             .known_nodes(&scyconf.hosts)
-            .default_consistency(Consistency::LocalOne)
             .use_keyspace(&scyconf.keyspace, true)
+            .default_execution_profile_handle(
+                ExecutionProfileBuilder::default()
+                    .consistency(Consistency::LocalOne)
+                    .build()
+                    .into_handle(),
+            )
             .build()
             .await
             .map_err(|e| Error::with_msg_no_trace(format!("{e:?}")))?;

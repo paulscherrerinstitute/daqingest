@@ -1,4 +1,6 @@
 use super::proto;
+use super::proto::CaDataValue;
+use super::proto::CaEventValue;
 use super::proto::CaItem;
 use super::proto::CaMsg;
 use super::proto::CaMsgTy;
@@ -30,9 +32,11 @@ use futures_util::Future;
 use futures_util::FutureExt;
 use futures_util::Stream;
 use futures_util::StreamExt;
+use items_0::scalar_ops::ScalarOps;
 use items_0::Appendable;
 use items_0::Empty;
 use items_2::eventsdim0::EventsDim0;
+use items_2::eventsdim1::EventsDim1;
 use log::*;
 use netpod::timeunits::*;
 use netpod::ScalarType;
@@ -440,6 +444,7 @@ pub struct CaConn {
         Pin<Box<dyn Future<Output = Result<(Cid, u32, u16, u16, Existence<SeriesId>), Error>> + Send>>,
     >,
     events_acc: Box<dyn Any + Send>,
+    events_acc_func: Box<dyn Fn(&mut CaConn, u64, CaEventValue) -> Result<(), Error> + Send>,
 }
 
 impl CaConn {
@@ -493,6 +498,7 @@ impl CaConn {
             series_lookup_schedule: BTreeMap::new(),
             series_lookup_futs: FuturesUnordered::new(),
             events_acc: Box::new(()),
+            events_acc_func: Box::new(Self::event_acc_push::<i32>),
         }
     }
 
@@ -1029,29 +1035,16 @@ impl CaConn {
         }
     }
 
-    // TODO write generic.
-    // TODO store a pointer to the type-resolved function for faster usage.
-    fn event_acc_push(&mut self, ts: u64, ev: proto::EventAddRes) -> Result<(), Error> {
-        match &ev.value.data {
-            proto::CaDataValue::Scalar(k) => {
-                use proto::CaDataScalarValue::*;
-                match k {
-                    F64(v) => {
-                        if let Some(c) = self.events_acc.downcast_mut::<EventsDim0<f64>>() {
-                            c.push(ts, 0, v.clone());
-                            // TODO check for a max length.
-                            // Also check at every check-tick.
-                        } else {
-                        }
-                    }
-                    _ => {
-                        // TODO
-                    }
-                }
-            }
-            proto::CaDataValue::Array(_) => {
-                // TODO
-            }
+    fn event_acc_push<STY>(this: &mut CaConn, ts: u64, ev: CaEventValue) -> Result<(), Error>
+    where
+        STY: ScalarOps,
+        CaDataValue: proto::GetValHelp<STY, ScalTy = STY>,
+    {
+        let v = proto::GetValHelp::<STY>::get(&ev.data)?;
+        if let Some(c) = this.events_acc.downcast_mut::<EventsDim0<STY>>() {
+            c.push(ts, 0, v.clone());
+            // TODO check for a max length.
+            // Also check at every check-tick.
         }
         Ok(())
     }
@@ -1059,16 +1052,63 @@ impl CaConn {
     fn setup_event_acc(&mut self, scalar_type: &ScalarType, shape: &Shape) -> Result<(), Error> {
         use ScalarType::*;
         match shape {
-            Shape::Scalar => match scalar_type {
-                F64 => {
-                    self.events_acc = Box::new(EventsDim0::<f64>::empty());
+            Shape::Scalar => {
+                type Cont<T> = EventsDim0<T>;
+                match scalar_type {
+                    I8 => {
+                        self.events_acc = Box::new(Cont::<i8>::empty());
+                    }
+                    I16 => {
+                        self.events_acc = Box::new(Cont::<i16>::empty());
+                    }
+                    I32 => {
+                        type ST = i32;
+                        self.events_acc = Box::new(Cont::<ST>::empty());
+                        let f: Box<dyn Fn(&mut CaConn, u64, CaEventValue) -> Result<(), Error>> =
+                            Box::new(Self::event_acc_push::<ST>);
+                    }
+                    F32 => {
+                        type ST = f32;
+                        self.events_acc = Box::new(Cont::<ST>::empty());
+                        let f: Box<dyn Fn(&mut CaConn, u64, CaEventValue) -> Result<(), Error>> =
+                            Box::new(Self::event_acc_push::<ST>);
+                    }
+                    F64 => {
+                        type ST = f64;
+                        self.events_acc = Box::new(Cont::<ST>::empty());
+                        let f: Box<dyn Fn(&mut CaConn, u64, CaEventValue) -> Result<(), Error>> =
+                            Box::new(Self::event_acc_push::<ST>);
+                    }
+                    _ => {
+                        warn!("TODO  setup_event_acc  {:?}  {:?}", scalar_type, shape);
+                    }
                 }
-                _ => {
-                    // TODO
+            }
+            Shape::Wave(..) => {
+                type Cont<T> = EventsDim1<T>;
+                match scalar_type {
+                    I8 => {
+                        self.events_acc = Box::new(Cont::<i8>::empty());
+                    }
+                    I16 => {
+                        self.events_acc = Box::new(Cont::<i16>::empty());
+                    }
+                    I32 => {
+                        self.events_acc = Box::new(Cont::<i32>::empty());
+                    }
+                    F32 => {
+                        self.events_acc = Box::new(Cont::<f32>::empty());
+                    }
+                    F64 => {
+                        self.events_acc = Box::new(Cont::<f64>::empty());
+                    }
+                    _ => {
+                        warn!("TODO  setup_event_acc  {:?}  {:?}", scalar_type, shape);
+                    }
                 }
-            },
+            }
             _ => {
-                // TODO
+                warn!("TODO  setup_event_acc  {:?}  {:?}", scalar_type, shape);
             }
         }
         Ok(())

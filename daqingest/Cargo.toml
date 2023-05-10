@@ -1,6 +1,6 @@
 [package]
 name = "daqingest"
-version = "0.1.3"
+version = "0.1.4"
 authors = ["Dominik Werder <dominik.werder@gmail.com>"]
 edition = "2021"
 
@@ -18,8 +18,8 @@ tracing = "0.1.37"
 futures-util = "0.3"
 async-channel = "1.6"
 chrono = "0.4"
-bytes = "1.1"
-scylla = "0.7"
+bytes = "1.4.0"
+scylla = "0.8.1"
 tokio-postgres = "0.7.7"
 serde = { version = "1.0", features = ["derive"] }
 libc = "0.2"

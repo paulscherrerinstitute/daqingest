@@ -166,6 +166,50 @@ pub enum CaDataScalarValue {
     Bool(bool),
 }
 
+pub trait GetValHelp<T> {
+    type ScalTy: Clone;
+    fn get(&self) -> Result<&Self::ScalTy, Error>;
+}
+
+impl GetValHelp<i32> for CaDataValue {
+    type ScalTy = i32;
+    fn get(&self) -> Result<&Self::ScalTy, Error> {
+        match self {
+            CaDataValue::Scalar(v) => match v {
+                CaDataScalarValue::I32(v) => Ok(v),
+                _ => Err(Error::with_msg_no_trace("GetValHelp inner type mismatch")),
+            },
+            _ => Err(Error::with_msg_no_trace("GetValHelp inner type mismatch")),
+        }
+    }
+}
+
+impl GetValHelp<f32> for CaDataValue {
+    type ScalTy = f32;
+    fn get(&self) -> Result<&Self::ScalTy, Error> {
+        match self {
+            CaDataValue::Scalar(v) => match v {
+                CaDataScalarValue::F32(v) => Ok(v),
+                _ => Err(Error::with_msg_no_trace("GetValHelp inner type mismatch")),
+            },
+            _ => Err(Error::with_msg_no_trace("GetValHelp inner type mismatch")),
+        }
+    }
+}
+
+impl GetValHelp<f64> for CaDataValue {
+    type ScalTy = f64;
+    fn get(&self) -> Result<&Self::ScalTy, Error> {
+        match self {
+            CaDataValue::Scalar(v) => match v {
+                CaDataScalarValue::F64(v) => Ok(v),
+                _ => Err(Error::with_msg_no_trace("GetValHelp inner type mismatch")),
+            },
+            _ => Err(Error::with_msg_no_trace("GetValHelp inner type mismatch")),
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum CaDataArrayValue {
     I8(Vec<i8>),

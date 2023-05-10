@@ -1,8 +1,10 @@
 use crate::opts::FetchEvents;
 use log::*;
 use scylla::batch::Consistency;
+use scylla::execution_profile::ExecutionProfileBuilder;
 use scylla::transport::errors::NewSessionError;
 use scylla::transport::errors::QueryError;
+use scylla::Session;
 use scylla::SessionBuilder;
 
 pub struct Error(err::Error);
@@ -25,13 +27,23 @@ impl From<QueryError> for Error {
     }
 }
 
-pub async fn list_pkey() -> Result<(), Error> {
+async fn make_scy_session() -> Result<Session, Error> {
     let scy = SessionBuilder::new()
         .known_node("127.0.0.1:19042")
-        .default_consistency(Consistency::LocalOne)
         .use_keyspace("ks1", true)
+        .default_execution_profile_handle(
+            ExecutionProfileBuilder::default()
+                .consistency(Consistency::LocalOne)
+                .build()
+                .into_handle(),
+        )
         .build()
         .await?;
+    Ok(scy)
+}
+
+pub async fn list_pkey() -> Result<(), Error> {
+    let scy = make_scy_session().await?;
     let query = scy
         .prepare("select distinct token(pulse_a), pulse_a from pulse where token(pulse_a) >= ? and token(pulse_a) <= ?")
         .await?;
@@ -67,12 +79,7 @@ pub async fn list_pkey() -> Result<(), Error> {
 }
 
 pub async fn list_pulses() -> Result<(), Error> {
-    let scy = SessionBuilder::new()
-        .known_node("127.0.0.1:19042")
-        .default_consistency(Consistency::LocalOne)
-        .use_keyspace("ks1", true)
-        .build()
-        .await?;
+    let scy = make_scy_session().await?;
     let query = scy
         .prepare("select token(tsa) as tsatok, tsa, tsb, pulse from pulse where token(tsa) >= ? and token(tsa) <= ?")
         .await?;
@@ -109,12 +116,7 @@ pub async fn list_pulses() -> Result<(), Error> {
 pub async fn fetch_events(opts: FetchEvents) -> Result<(), Error> {
     // TODO use the keyspace from commandline.
     err::todo();
-    let scy = SessionBuilder::new()
-        .known_nodes(&opts.scylla)
-        .default_consistency(Consistency::LocalOne)
-        .use_keyspace("ks1", true)
-        .build()
-        .await?;
+    let scy = make_scy_session().await?;
     let qu_series = scy
         .prepare(
             "select series, scalar_type, shape_dims from series_by_channel where facility = ? and channel_name = ?",
