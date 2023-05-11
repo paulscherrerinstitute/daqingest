@@ -301,6 +301,7 @@ pub enum QueryItem {
     Mute(MuteItem),
     Ivl(IvlItem),
     ChannelInfo(ChannelInfoItem),
+    TimeBinPatch,
 }
 
 pub struct CommonInsertItemQueueSender {

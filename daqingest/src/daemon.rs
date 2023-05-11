@@ -66,7 +66,8 @@ const SEARCH_PENDING_TIMEOUT: Duration = Duration::from_millis(30000);
 const SEARCH_PENDING_TIMEOUT_WARN: Duration = Duration::from_millis(8000);
 const FINDER_TIMEOUT: Duration = Duration::from_millis(100);
 const CHANNEL_CHECK_INTERVAL: Duration = Duration::from_millis(5000);
-const PRINT_ACTIVE_INTERVAL: Duration = Duration::from_millis(8000);
+const PRINT_ACTIVE_INTERVAL: Duration = Duration::from_millis(60000);
+const PRINT_STATUS_INTERVAL: Duration = Duration::from_millis(20000);
 
 const DO_ASSIGN_TO_CA_CONN: bool = true;
 
@@ -1073,7 +1074,7 @@ impl Daemon {
 
     async fn check_caconn_chans(&mut self) -> Result<(), Error> {
         if self.caconn_last_channel_check.elapsed() > CHANNEL_CHECK_INTERVAL {
-            info!("Issue channel check to all CaConn");
+            debug!("Issue channel check to all CaConn");
             self.ingest_commons
                 .ca_conn_set
                 .enqueue_command_to_all(|| ConnCommand::check_health())
@@ -1133,7 +1134,7 @@ impl Daemon {
         if dt > Duration::from_millis(500) {
             info!("slow check_chans  {}ms", dt.as_secs_f32() * 1e3);
         }
-        if tsnow.duration_since(self.last_status_print).unwrap_or(Duration::ZERO) >= Duration::from_millis(1000) {
+        if tsnow.duration_since(self.last_status_print).unwrap_or(Duration::ZERO) >= PRINT_STATUS_INTERVAL {
             self.last_status_print = tsnow;
             info!(
                 "{:8}  {:8} {:8} : {:8} : {:8} {:8} : {:10}",
@@ -1542,6 +1543,8 @@ pub async fn run(opts: CaIngestOpts, channels: Vec<String>) -> Result<(), Error>
     netfetch::linuxhelper::set_signal_handler(libc::SIGTERM, handler_sigterm)?;
 
     netfetch::dbpg::schema_check(opts.postgresql()).await?;
+
+    netfetch::scylla::migrate_keyspace(opts.scylla()).await?;
 
     // TODO use a new stats type:
     //let store_stats = Arc::new(CaConnStats::new());

@@ -268,6 +268,7 @@ pub async fn spawn_scylla_insert_workers(
                             }
                         }
                     }
+                    QueryItem::TimeBinPatch => {}
                 }
             }
             ingest_commons

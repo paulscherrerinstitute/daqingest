@@ -11,7 +11,9 @@ pub mod insertworker;
 pub mod linuxhelper;
 pub mod metrics;
 pub mod netbuf;
+pub mod patchcollect;
 pub mod rt;
+pub mod scylla;
 pub mod series;
 pub mod store;
 #[cfg(test)]

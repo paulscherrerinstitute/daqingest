@@ -171,6 +171,32 @@ pub trait GetValHelp<T> {
     fn get(&self) -> Result<&Self::ScalTy, Error>;
 }
 
+impl GetValHelp<i8> for CaDataValue {
+    type ScalTy = i8;
+    fn get(&self) -> Result<&Self::ScalTy, Error> {
+        match self {
+            CaDataValue::Scalar(v) => match v {
+                CaDataScalarValue::I8(v) => Ok(v),
+                _ => Err(Error::with_msg_no_trace("GetValHelp inner type mismatch")),
+            },
+            _ => Err(Error::with_msg_no_trace("GetValHelp inner type mismatch")),
+        }
+    }
+}
+
+impl GetValHelp<i16> for CaDataValue {
+    type ScalTy = i16;
+    fn get(&self) -> Result<&Self::ScalTy, Error> {
+        match self {
+            CaDataValue::Scalar(v) => match v {
+                CaDataScalarValue::I16(v) => Ok(v),
+                _ => Err(Error::with_msg_no_trace("GetValHelp inner type mismatch")),
+            },
+            _ => Err(Error::with_msg_no_trace("GetValHelp inner type mismatch")),
+        }
+    }
+}
+
 impl GetValHelp<i32> for CaDataValue {
     type ScalTy = i32;
     fn get(&self) -> Result<&Self::ScalTy, Error> {
