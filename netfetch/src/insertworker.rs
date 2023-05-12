@@ -48,6 +48,7 @@ pub struct Ttls {
     pub index: Duration,
     pub d0: Duration,
     pub d1: Duration,
+    pub binned: Duration,
 }
 
 pub async fn spawn_scylla_insert_workers(
@@ -268,7 +269,36 @@ pub async fn spawn_scylla_insert_workers(
                             }
                         }
                     }
-                    QueryItem::TimeBinPatch => {}
+                    QueryItem::TimeBinPatchSimpleF32(item) => {
+                        info!("have time bin patch to insert: {item:?}");
+                        let params = (
+                            item.series.id() as i64,
+                            item.bin_len_sec as i32,
+                            item.bin_count as i32,
+                            item.off_msp as i32,
+                            item.off_lsp as i32,
+                            item.counts,
+                            item.mins,
+                            item.maxs,
+                            item.avgs,
+                            ttls.binned.as_secs() as i32,
+                        );
+                        let qres = data_store
+                            .scy
+                            .execute(&data_store.qu_insert_binned_scalar_f32_v01, params)
+                            .await;
+                        match qres {
+                            Ok(_) => {
+                                stats.store_worker_insert_binned_done_inc();
+                                backoff = backoff_0;
+                            }
+                            Err(e) => {
+                                let e = e.into_simpler();
+                                stats_inc_for_err(&stats, &e);
+                                back_off_sleep(&mut backoff).await;
+                            }
+                        }
+                    }
                 }
             }
             ingest_commons

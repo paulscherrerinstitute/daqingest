@@ -177,9 +177,14 @@ impl GetValHelp<i8> for CaDataValue {
         match self {
             CaDataValue::Scalar(v) => match v {
                 CaDataScalarValue::I8(v) => Ok(v),
-                _ => Err(Error::with_msg_no_trace("GetValHelp inner type mismatch")),
+                _ => {
+                    let ty = std::any::type_name::<Self::ScalTy>();
+                    Err(Error::with_msg_no_trace(format!(
+                        "GetValHelp inner type mismatch {ty} vs {v:?}",
+                    )))
+                }
             },
-            _ => Err(Error::with_msg_no_trace("GetValHelp inner type mismatch")),
+            _ => Err(Error::with_msg_no_trace("GetValHelp waveform not supported")),
         }
     }
 }
@@ -190,9 +195,14 @@ impl GetValHelp<i16> for CaDataValue {
         match self {
             CaDataValue::Scalar(v) => match v {
                 CaDataScalarValue::I16(v) => Ok(v),
-                _ => Err(Error::with_msg_no_trace("GetValHelp inner type mismatch")),
+                _ => {
+                    let ty = std::any::type_name::<Self::ScalTy>();
+                    Err(Error::with_msg_no_trace(format!(
+                        "GetValHelp inner type mismatch {ty} vs {v:?}",
+                    )))
+                }
             },
-            _ => Err(Error::with_msg_no_trace("GetValHelp inner type mismatch")),
+            _ => Err(Error::with_msg_no_trace("GetValHelp waveform not supported")),
         }
     }
 }
@@ -203,9 +213,14 @@ impl GetValHelp<i32> for CaDataValue {
         match self {
             CaDataValue::Scalar(v) => match v {
                 CaDataScalarValue::I32(v) => Ok(v),
-                _ => Err(Error::with_msg_no_trace("GetValHelp inner type mismatch")),
+                _ => {
+                    let ty = std::any::type_name::<Self::ScalTy>();
+                    Err(Error::with_msg_no_trace(format!(
+                        "GetValHelp inner type mismatch {ty} vs {v:?}",
+                    )))
+                }
             },
-            _ => Err(Error::with_msg_no_trace("GetValHelp inner type mismatch")),
+            _ => Err(Error::with_msg_no_trace("GetValHelp waveform not supported")),
         }
     }
 }
@@ -216,9 +231,14 @@ impl GetValHelp<f32> for CaDataValue {
         match self {
             CaDataValue::Scalar(v) => match v {
                 CaDataScalarValue::F32(v) => Ok(v),
-                _ => Err(Error::with_msg_no_trace("GetValHelp inner type mismatch")),
+                _ => {
+                    let ty = std::any::type_name::<Self::ScalTy>();
+                    Err(Error::with_msg_no_trace(format!(
+                        "GetValHelp inner type mismatch {ty} vs {v:?}",
+                    )))
+                }
             },
-            _ => Err(Error::with_msg_no_trace("GetValHelp inner type mismatch")),
+            _ => Err(Error::with_msg_no_trace("GetValHelp waveform not supported")),
         }
     }
 }
@@ -229,9 +249,14 @@ impl GetValHelp<f64> for CaDataValue {
         match self {
             CaDataValue::Scalar(v) => match v {
                 CaDataScalarValue::F64(v) => Ok(v),
-                _ => Err(Error::with_msg_no_trace("GetValHelp inner type mismatch")),
+                _ => {
+                    let ty = std::any::type_name::<Self::ScalTy>();
+                    Err(Error::with_msg_no_trace(format!(
+                        "GetValHelp inner type mismatch {ty} vs {v:?}",
+                    )))
+                }
             },
-            _ => Err(Error::with_msg_no_trace("GetValHelp inner type mismatch")),
+            _ => Err(Error::with_msg_no_trace("GetValHelp waveform not supported")),
         }
     }
 }

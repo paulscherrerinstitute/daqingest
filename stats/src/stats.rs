@@ -226,6 +226,7 @@ stats_proc::stats_struct!((
             store_worker_fraction_drop,
             store_worker_ratelimit_drop,
             store_worker_insert_done,
+            store_worker_insert_binned_done,
             store_worker_insert_overload,
             store_worker_insert_timeout,
             store_worker_insert_unavailable,

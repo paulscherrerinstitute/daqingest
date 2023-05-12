@@ -1,4 +1,5 @@
 use err::Error;
+use futures_util::StreamExt;
 use netpod::log::*;
 use netpod::ScyllaConfig;
 use scylla::execution_profile::ExecutionProfileBuilder;
@@ -23,6 +24,29 @@ pub async fn create_session(scyconf: &ScyllaConfig) -> Result<Arc<Session>, Erro
         .map_err(|e| Error::from(format!("{e}")))?;
     let scy = Arc::new(scy);
     Ok(scy)
+}
+
+async fn has_table(name: &str, scy: &Session, scyconf: &ScyllaConfig) -> Result<bool, Error> {
+    let ks = scy
+        .get_keyspace()
+        .ok_or_else(|| Error::with_msg_no_trace("session is not using a keyspace yet"))?;
+    let mut res = scy
+        .query_iter(
+            "select table_name from system_schema.tables where keyspace_name = ?",
+            (ks.as_ref(),),
+        )
+        .await
+        .map_err(|e| e.to_string())
+        .map_err(Error::from)?;
+    while let Some(k) = res.next().await {
+        let row = k.map_err(|e| e.to_string()).map_err(Error::from)?;
+        if let Some(table_name) = row.columns[0].as_ref().unwrap().as_text() {
+            if table_name == name {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
 }
 
 async fn check_table_exist(name: &str, scy: &Session) -> Result<bool, Error> {
@@ -256,21 +280,6 @@ pub async fn migrate_keyspace(scyconf: &ScyllaConfig) -> Result<(), Error> {
     }
     {
         let desc = GenTwcsTab {
-            name: "binned_scalar_f32_v00".into(),
-            cql: "(series bigint, bin_len_sec int, patch_len_sec int, off_msp bigint, off_lsp bigint, counts frozen<list<bigint>>, avgs frozen<list<float>>, mins frozen<list<float>>, maxs frozen<list<float>>, primary key ((series, bin_len_sec, patch_len_sec, off_msp), off_lsp))"
-                .into(),
-            default_time_to_live: 60 * 60 * 24 * 30,
-            compaction_window_size: 24 * 4,
-        };
-        if !check_table_exist(&desc.name(), scy).await? {
-            scy.query(desc.cql(), ())
-                .await
-                .map_err(|e| Error::from(format!("{e}")))?;
-        }
-    }
-
-    {
-        let desc = GenTwcsTab {
             name: "muted".into(),
             cql: "(part int, series bigint, ts bigint, ema float, emd float, primary key (part, series, ts))".into(),
             default_time_to_live: 60 * 60 * 4,
@@ -288,6 +297,20 @@ pub async fn migrate_keyspace(scyconf: &ScyllaConfig) -> Result<(), Error> {
             cql: "(part int, series bigint, ts bigint, ema float, emd float, primary key (part, series, ts))".into(),
             default_time_to_live: 60 * 60 * 4,
             compaction_window_size: 24 * 1,
+        };
+        if !check_table_exist(&desc.name(), scy).await? {
+            scy.query(desc.cql(), ())
+                .await
+                .map_err(|e| Error::from(format!("{e}")))?;
+        }
+    }
+    {
+        let desc = GenTwcsTab {
+            name: "binned_scalar_f32_v01".into(),
+            cql: "(series bigint, bin_len_sec int, bin_count int, off_msp int, off_lsp int, counts frozen<list<bigint>>, mins frozen<list<float>>, maxs frozen<list<float>>, avgs frozen<list<float>>, primary key ((series, bin_len_sec, bin_count, off_msp), off_lsp))"
+                .into(),
+            default_time_to_live: 60 * 60 * 24 * 30,
+            compaction_window_size: 24 * 4,
         };
         if !check_table_exist(&desc.name(), scy).await? {
             scy.query(desc.cql(), ())

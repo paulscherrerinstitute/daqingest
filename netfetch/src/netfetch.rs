@@ -18,4 +18,5 @@ pub mod series;
 pub mod store;
 #[cfg(test)]
 pub mod test;
+pub mod timebin;
 pub mod zmtp;

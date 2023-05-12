@@ -1567,6 +1567,7 @@ pub async fn run(opts: CaIngestOpts, channels: Vec<String>) -> Result<(), Error>
             index: opts.ttl_index(),
             d0: opts.ttl_d0(),
             d1: opts.ttl_d1(),
+            binned: opts.ttl_binned(),
         },
         test_bsread_addr: opts.test_bsread_addr.clone(),
     };

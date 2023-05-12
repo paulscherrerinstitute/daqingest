@@ -29,34 +29,10 @@ pub struct DataStore {
     pub qu_insert_channel_status: Arc<PreparedStatement>,
     pub qu_insert_channel_status_by_ts_msp: Arc<PreparedStatement>,
     pub qu_insert_channel_ping: Arc<PreparedStatement>,
+    pub qu_insert_binned_scalar_f32_v01: Arc<PreparedStatement>,
 }
 
 impl DataStore {
-    async fn has_table(name: &str, scy: &ScySession, scyconf: &ScyllaConfig) -> Result<bool, Error> {
-        let mut res = scy
-            .query_iter(
-                "select table_name from system_schema.tables where keyspace_name = ?",
-                (&scyconf.keyspace,),
-            )
-            .await
-            .map_err(|e| e.to_string())
-            .map_err(Error::from)?;
-        while let Some(k) = res.next().await {
-            let row = k.map_err(|e| e.to_string()).map_err(Error::from)?;
-            if let Some(table_name) = row.columns[0].as_ref().unwrap().as_text() {
-                if table_name == name {
-                    return Ok(true);
-                }
-            }
-        }
-        Ok(false)
-    }
-
-    async fn migrate_00(scy: &ScySession, scyconf: &ScyllaConfig) -> Result<(), Error> {
-        if !Self::has_table("somename", scy, scyconf).await? {}
-        Ok(())
-    }
-
     pub async fn new(scyconf: &ScyllaConfig) -> Result<Self, Error> {
         let scy = scylla::SessionBuilder::new()
             .known_nodes(&scyconf.hosts)
@@ -71,8 +47,6 @@ impl DataStore {
             .await
             .map_err(|e| Error::with_msg_no_trace(format!("{e:?}")))?;
         let scy = Arc::new(scy);
-
-        Self::migrate_00(&scy, scyconf).await?;
 
         let q = scy
             .prepare("insert into ts_msp (series, ts_msp) values (?, ?) using ttl ?")
@@ -186,6 +160,12 @@ impl DataStore {
             .await
             .map_err(|e| Error::with_msg_no_trace(format!("{e:?}")))?;
         let qu_insert_channel_ping = Arc::new(q);
+
+        let q = scy
+            .prepare("insert into binned_scalar_f32_v01 (series, bin_len_sec, bin_count, off_msp, off_lsp, counts, mins, maxs, avgs) values (?, ?, ?, ?, ?, ?, ?, ?, ?) using ttl ?")
+            .await
+            .map_err(|e| Error::with_msg_no_trace(format!("{e:?}")))?;
+        let qu_insert_binned_scalar_f32_v01 = Arc::new(q);
         let ret = Self {
             scy,
             qu_insert_ts_msp,
@@ -208,6 +188,7 @@ impl DataStore {
             qu_insert_channel_status,
             qu_insert_channel_status_by_ts_msp,
             qu_insert_channel_ping,
+            qu_insert_binned_scalar_f32_v01,
         };
         Ok(ret)
     }

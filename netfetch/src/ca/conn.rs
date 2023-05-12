@@ -26,6 +26,8 @@ use crate::store::InsertItem;
 use crate::store::IvlItem;
 use crate::store::MuteItem;
 use crate::store::QueryItem;
+use crate::store::TimeBinPatchSimpleF32;
+use crate::timebin::ConnTimeBin;
 use async_channel::Sender;
 use err::Error;
 use futures_util::stream::FuturesUnordered;
@@ -39,6 +41,7 @@ use items_0::Appendable;
 use items_0::Empty;
 use items_0::Events;
 use items_0::Resettable;
+use items_2::binsdim0::BinsDim0;
 use items_2::eventsdim0::EventsDim0;
 use items_2::eventsdim1::EventsDim1;
 use log::*;
@@ -450,12 +453,7 @@ pub struct CaConn {
     series_lookup_futs: FuturesUnordered<
         Pin<Box<dyn Future<Output = Result<(Cid, u32, u16, u16, Existence<SeriesId>), Error>> + Send>>,
     >,
-    events_acc: Box<dyn Any + Send>,
-    events_acc_push: Box<dyn Fn(&mut Box<dyn Any + Send>, u64, &CaEventValue) -> Result<(), Error> + Send>,
-    events_acc_tick:
-        Box<dyn Fn(&mut Box<dyn Any + Send>, &mut Box<dyn TimeBinner>, &mut PatchCollect) -> Result<(), Error> + Send>,
-    events_binner: Option<Box<dyn TimeBinner>>,
-    patch_collect: PatchCollect,
+    conn_time_bin: ConnTimeBin,
 }
 
 impl CaConn {
@@ -472,7 +470,7 @@ impl CaConn {
         let (cq_tx, cq_rx) = async_channel::bounded(32);
         Self {
             state: CaConnState::Unconnected,
-            ticker: Box::pin(tokio::time::sleep(Duration::from_millis(500))),
+            ticker: Self::new_self_ticker(),
             proto: None,
             cid_store: CidStore::new(),
             subid_store: SubidStore::new(),
@@ -508,12 +506,12 @@ impl CaConn {
             channel_info_query_tx,
             series_lookup_schedule: BTreeMap::new(),
             series_lookup_futs: FuturesUnordered::new(),
-            events_acc: Box::new(()),
-            events_acc_push: Box::new(Self::event_acc_push::<i32>),
-            events_acc_tick: Box::new(Self::event_acc_tick::<i32>),
-            events_binner: None,
-            patch_collect: PatchCollect::new(TsNano(SEC * 10), 3),
+            conn_time_bin: ConnTimeBin::empty(),
         }
+    }
+
+    fn new_self_ticker() -> Pin<Box<tokio::time::Sleep>> {
+        Box::pin(tokio::time::sleep(Duration::from_millis(1000)))
     }
 
     pub fn get_channel_set_ops_map(&self) -> Arc<ChannelSetOps> {
@@ -938,7 +936,7 @@ impl CaConn {
         // TODO handle error better! Transition channel to Error state?
         let scalar_type = ScalarType::from_ca_id(data_type)?;
         let shape = Shape::from_ca_count(data_count)?;
-        self.setup_event_acc(&scalar_type, &shape)?;
+        self.conn_time_bin.setup_for(series.clone(), &scalar_type, &shape)?;
         let subid = self.subid_store.next();
         self.cid_by_subid.insert(subid, cid);
         let name = self.name_by_cid(cid).unwrap().to_string();
@@ -1047,173 +1045,6 @@ impl CaConn {
                 Pending => {}
             };
         }
-    }
-
-    fn event_acc_push<STY>(acc: &mut Box<dyn Any + Send>, ts: u64, ev: &CaEventValue) -> Result<(), Error>
-    where
-        STY: ScalarOps,
-        CaDataValue: proto::GetValHelp<STY, ScalTy = STY>,
-    {
-        let v = proto::GetValHelp::<STY>::get(&ev.data)?;
-        if let Some(c) = acc.downcast_mut::<EventsDim0<STY>>() {
-            c.push(ts, 0, v.clone());
-            Ok(())
-        } else {
-            // TODO report once and error out
-            error!("unexpected container");
-            //Err(Error::with_msg_no_trace("unexpected container"))
-            Ok(())
-        }
-    }
-
-    fn event_acc_tick<STY>(
-        acc: &mut Box<dyn Any + Send>,
-        tb: &mut Box<dyn TimeBinner>,
-        patch_collect: &mut PatchCollect,
-    ) -> Result<(), Error>
-    where
-        STY: ScalarOps,
-    {
-        use items_0::WithLen;
-        if let Some(c) = acc.downcast_mut::<EventsDim0<STY>>() {
-            if c.len() >= 1 {
-                //info!("push events  len {}", c.len());
-                tb.ingest(c);
-                c.reset();
-                if tb.bins_ready_count() >= 1 {
-                    info!("store bins len {}", tb.bins_ready_count());
-                    if let Some(mut bins) = tb.bins_ready() {
-                        //info!("store bins  {bins:?}");
-                        let mut bins = bins.to_simple_bins_f32();
-                        patch_collect.ingest(bins.as_mut())?;
-                        Ok(())
-                    } else {
-                        error!("have bins but none returned");
-                        Err(Error::with_msg_no_trace("have bins but none returned"))
-                    }
-                } else {
-                    Ok(())
-                }
-            } else {
-                Ok(())
-            }
-        } else {
-            error!("unexpected container");
-            //Err(Error::with_msg_no_trace("unexpected container"))
-            Ok(())
-        }
-    }
-
-    fn setup_event_acc(&mut self, scalar_type: &ScalarType, shape: &Shape) -> Result<(), Error> {
-        use ScalarType::*;
-        let tsnow = SystemTime::now();
-        let ts0 = SEC * tsnow.duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs();
-        let bin_len = TsNano(SEC * 10);
-        let range1 = BinnedRange {
-            bin_off: ts0 / bin_len.ns(),
-            bin_cnt: u64::MAX / bin_len.ns() - 10,
-            bin_len,
-        };
-        let binrange = BinnedRangeEnum::Time(range1);
-        info!("binrange {binrange:?}");
-        let do_time_weight = true;
-        match shape {
-            Shape::Scalar => {
-                type Cont<T> = EventsDim0<T>;
-                match scalar_type {
-                    I8 => {
-                        type ST = i8;
-                        info!("SCALAR {}", std::any::type_name::<ST>());
-                        let cont = Cont::<ST>::empty();
-                        self.events_binner =
-                            Some(cont.as_time_binnable_ref().time_binner_new(binrange, do_time_weight));
-                        self.events_acc = Box::new(cont);
-                        self.events_acc_push = Box::new(Self::event_acc_push::<ST>);
-                        self.events_acc_tick = Box::new(Self::event_acc_tick::<ST>);
-                    }
-                    I16 => {
-                        type ST = i16;
-                        info!("SCALAR {}", std::any::type_name::<ST>());
-                        let cont = Cont::<ST>::empty();
-                        self.events_binner =
-                            Some(cont.as_time_binnable_ref().time_binner_new(binrange, do_time_weight));
-                        self.events_acc = Box::new(cont);
-                        self.events_acc_push = Box::new(Self::event_acc_push::<ST>);
-                        self.events_acc_tick = Box::new(Self::event_acc_tick::<ST>);
-                    }
-                    I32 => {
-                        type ST = i32;
-                        info!("SCALAR {}", std::any::type_name::<ST>());
-                        let cont = Cont::<ST>::empty();
-                        self.events_binner =
-                            Some(cont.as_time_binnable_ref().time_binner_new(binrange, do_time_weight));
-                        self.events_acc = Box::new(cont);
-                        self.events_acc_push = Box::new(Self::event_acc_push::<ST>);
-                        self.events_acc_tick = Box::new(Self::event_acc_tick::<ST>);
-                    }
-                    F32 => {
-                        type ST = f32;
-                        info!("SCALAR {}", std::any::type_name::<ST>());
-                        let cont = Cont::<ST>::empty();
-                        self.events_binner =
-                            Some(cont.as_time_binnable_ref().time_binner_new(binrange, do_time_weight));
-                        self.events_acc = Box::new(cont);
-                        self.events_acc_push = Box::new(Self::event_acc_push::<ST>);
-                        self.events_acc_tick = Box::new(Self::event_acc_tick::<ST>);
-                    }
-                    F64 => {
-                        type ST = f64;
-                        info!("SCALAR {}", std::any::type_name::<ST>());
-                        let cont = Cont::<ST>::empty();
-                        self.events_binner =
-                            Some(cont.as_time_binnable_ref().time_binner_new(binrange, do_time_weight));
-                        self.events_acc = Box::new(cont);
-                        self.events_acc_push = Box::new(Self::event_acc_push::<ST>);
-                        self.events_acc_tick = Box::new(Self::event_acc_tick::<ST>);
-                    }
-                    _ => {
-                        warn!("TODO  setup_event_acc  {:?}  {:?}", scalar_type, shape);
-                    }
-                }
-            }
-            Shape::Wave(..) => {
-                type Cont<T> = EventsDim1<T>;
-                match scalar_type {
-                    I8 => {
-                        type ST = i8;
-                        info!("DIM1 {}", std::any::type_name::<ST>());
-                        self.events_acc = Box::new(Cont::<i8>::empty());
-                    }
-                    I16 => {
-                        type ST = i16;
-                        info!("DIM1 {}", std::any::type_name::<ST>());
-                        self.events_acc = Box::new(Cont::<i16>::empty());
-                    }
-                    I32 => {
-                        type ST = i32;
-                        info!("DIM1 {}", std::any::type_name::<ST>());
-                        self.events_acc = Box::new(Cont::<i32>::empty());
-                    }
-                    F32 => {
-                        type ST = f32;
-                        info!("DIM1 {}", std::any::type_name::<ST>());
-                        self.events_acc = Box::new(Cont::<f32>::empty());
-                    }
-                    F64 => {
-                        type ST = f64;
-                        info!("DIM1 {}", std::any::type_name::<ST>());
-                        self.events_acc = Box::new(Cont::<f64>::empty());
-                    }
-                    _ => {
-                        warn!("TODO  setup_event_acc  {:?}  {:?}", scalar_type, shape);
-                    }
-                }
-            }
-            _ => {
-                warn!("TODO  setup_event_acc  {:?}  {:?}", scalar_type, shape);
-            }
-        }
-        Ok(())
     }
 
     fn event_add_insert(
@@ -1386,9 +1217,37 @@ impl CaConn {
                     let item_queue = &mut self.insert_item_queue;
                     let inserts_counter = &mut self.inserts_counter;
                     let extra_inserts_conf = &self.extra_inserts_conf;
-                    {
-                        let (f, acc) = { (&self.events_acc_push, &mut self.events_acc) };
-                        f(acc, ts, &ev.value)?;
+                    self.conn_time_bin.push(ts, &ev.value)?;
+                    #[cfg(DISABLED)]
+                    match &ev.value.data {
+                        CaDataValue::Scalar(x) => match &x {
+                            proto::CaDataScalarValue::F32(..) => match &scalar_type {
+                                ScalarType::F32 => {}
+                                _ => {
+                                    error!("MISMATCH  got f32  exp {:?}", scalar_type);
+                                }
+                            },
+                            proto::CaDataScalarValue::F64(..) => match &scalar_type {
+                                ScalarType::F64 => {}
+                                _ => {
+                                    error!("MISMATCH  got f64  exp {:?}", scalar_type);
+                                }
+                            },
+                            proto::CaDataScalarValue::I16(..) => match &scalar_type {
+                                ScalarType::I16 => {}
+                                _ => {
+                                    error!("MISMATCH  got i16  exp {:?}", scalar_type);
+                                }
+                            },
+                            proto::CaDataScalarValue::I32(..) => match &scalar_type {
+                                ScalarType::I32 => {}
+                                _ => {
+                                    error!("MISMATCH  got i32  exp {:?}", scalar_type);
+                                }
+                            },
+                            _ => {}
+                        },
+                        _ => {}
                     }
                     Self::do_event_insert(
                         st,
@@ -1878,15 +1737,8 @@ impl CaConn {
 
     fn handle_own_ticker_tick(self: Pin<&mut Self>, _cx: &mut Context) -> Result<(), Error> {
         let this = self.get_mut();
-        let (f, acc, tb, patch_collect) = {
-            (
-                &this.events_acc_tick,
-                &mut this.events_acc,
-                this.events_binner.as_mut().unwrap(),
-                &mut this.patch_collect,
-            )
-        };
-        f(acc, tb, patch_collect)?;
+        let (obj, insert_item_queue) = { (&mut this.conn_time_bin, &mut this.insert_item_queue) };
+        obj.tick(insert_item_queue)?;
         Ok(())
     }
 }
@@ -1913,7 +1765,7 @@ impl Stream for CaConn {
                         return Ready(Some(Err(e)));
                     }
                 }
-                self.ticker = Box::pin(tokio::time::sleep(Duration::from_millis(500)));
+                self.ticker = Self::new_self_ticker();
                 cx.waker().wake_by_ref();
             }
             Pending => {}

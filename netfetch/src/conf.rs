@@ -40,6 +40,8 @@ pub struct CaIngestOpts {
     ttl_d0: Option<Duration>,
     #[serde(with = "humantime_serde")]
     ttl_d1: Option<Duration>,
+    #[serde(with = "humantime_serde")]
+    ttl_binned: Option<Duration>,
     pub test_bsread_addr: Option<String>,
 }
 
@@ -123,6 +125,12 @@ impl CaIngestOpts {
     pub fn ttl_d1(&self) -> Duration {
         self.ttl_d1.clone().unwrap_or_else(|| Duration::from_secs(60 * 60 * 12))
     }
+
+    pub fn ttl_binned(&self) -> Duration {
+        self.ttl_binned
+            .clone()
+            .unwrap_or_else(|| Duration::from_secs(60 * 60 * 24 * 40))
+    }
 }
 
 #[test]
@@ -130,6 +138,7 @@ fn parse_config_minimal() {
     let conf = r###"
 backend: scylla
 ttl_d1: 10m 3s
+ttl_binned: 70d
 api_bind: "0.0.0.0:3011"
 channels: /some/path/file.txt
 search:
@@ -155,6 +164,7 @@ scylla:
     assert_eq!(conf.search.get(0), Some(&"172.26.0.255".to_string()));
     assert_eq!(conf.scylla.hosts.get(1), Some(&"sf-nube-12:19042".to_string()));
     assert_eq!(conf.ttl_d1, Some(Duration::from_millis(1000 * (60 * 10 + 3) + 45)));
+    assert_eq!(conf.ttl_binned, Some(Duration::from_secs(60 * 60 * 70)));
 }
 
 #[test]

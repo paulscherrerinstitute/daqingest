@@ -4,6 +4,7 @@ use crate::errconv::ErrConv;
 use crate::series::SeriesId;
 use futures_util::Future;
 use futures_util::FutureExt;
+use items_2::binsdim0::BinsDim0;
 use log::*;
 use netpod::ScalarType;
 use netpod::Shape;
@@ -23,6 +24,7 @@ use std::time::Instant;
 use std::time::SystemTime;
 
 pub use netpod::CONNECTION_STATUS_DIV;
+use std::collections::VecDeque;
 
 #[derive(Debug)]
 pub enum Error {
@@ -294,6 +296,19 @@ pub struct ChannelInfoItem {
 }
 
 #[derive(Debug)]
+pub struct TimeBinPatchSimpleF32 {
+    pub series: SeriesId,
+    pub bin_len_sec: u32,
+    pub bin_count: u32,
+    pub off_msp: u32,
+    pub off_lsp: u32,
+    pub counts: Vec<i64>,
+    pub mins: Vec<f32>,
+    pub maxs: Vec<f32>,
+    pub avgs: Vec<f32>,
+}
+
+#[derive(Debug)]
 pub enum QueryItem {
     ConnectionStatus(ConnectionStatusItem),
     ChannelStatus(ChannelStatusItem),
@@ -301,7 +316,7 @@ pub enum QueryItem {
     Mute(MuteItem),
     Ivl(IvlItem),
     ChannelInfo(ChannelInfoItem),
-    TimeBinPatch,
+    TimeBinPatchSimpleF32(TimeBinPatchSimpleF32),
 }
 
 pub struct CommonInsertItemQueueSender {
