@@ -26,7 +26,7 @@ pub enum SubCmd {
     BsreadDump(BsreadDump),
     #[command(subcommand)]
     ChannelAccess(ChannelAccess),
-    Logappend(Logappend),
+    Version,
 }
 
 #[derive(Debug, Parser)]
@@ -87,18 +87,4 @@ pub struct CaSearch {
 #[derive(Debug, Parser)]
 pub struct CaConfig {
     pub config: String,
-}
-
-#[derive(Debug, Parser)]
-pub struct Logappend {
-    #[arg(long)]
-    pub dir: String,
-    #[arg(long)]
-    pub total_mb: Option<u64>,
-}
-
-impl Logappend {
-    pub fn total_size_max_bytes(&self) -> u64 {
-        1024 * 1024 * self.total_mb.unwrap_or(20)
-    }
 }

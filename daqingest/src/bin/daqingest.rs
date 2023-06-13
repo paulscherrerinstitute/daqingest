@@ -9,7 +9,6 @@ pub fn main() -> Result<(), Error> {
     // TODO offer again function to get runtime and configure tracing in one call
     let runtime = taskrun::get_runtime_opts(opts.nworkers.unwrap_or(12), 32);
     taskrun::tracing_init().unwrap();
-    info!("daqingest version {}", clap::crate_version!());
     let res = runtime.block_on(async move {
         use daqingest::opts::ChannelAccess;
         use daqingest::opts::SubCmd;
@@ -26,19 +25,18 @@ pub fn main() -> Result<(), Error> {
             }
             SubCmd::ChannelAccess(k) => match k {
                 ChannelAccess::CaSearch(k) => {
+                    info!("daqingest version {}", clap::crate_version!());
                     let (conf, channels) = parse_config(k.config.into()).await?;
                     netfetch::ca::search::ca_search(conf, &channels).await?
                 }
                 ChannelAccess::CaIngest(k) => {
+                    info!("daqingest version {}", clap::crate_version!());
                     let (conf, channels) = parse_config(k.config.into()).await?;
                     daqingest::daemon::run(conf, channels).await?
                 }
             },
-            SubCmd::Logappend(k) => {
-                let jh = tokio::task::spawn_blocking(move || {
-                    taskrun::append::append(&k.dir, k.total_size_max_bytes(), std::io::stdin()).unwrap();
-                });
-                jh.await.map_err(Error::from_string)?;
+            SubCmd::Version => {
+                println!("{}", clap::crate_version!());
             }
         }
         Ok(())
