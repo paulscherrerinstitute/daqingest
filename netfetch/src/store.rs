@@ -1,10 +1,11 @@
-use crate::ca::proto::{CaDataArrayValue, CaDataScalarValue, CaDataValue};
+use crate::ca::proto::CaDataArrayValue;
+use crate::ca::proto::CaDataScalarValue;
+use crate::ca::proto::CaDataValue;
 use crate::ca::store::DataStore;
 use crate::errconv::ErrConv;
 use crate::series::SeriesId;
 use futures_util::Future;
 use futures_util::FutureExt;
-use items_2::binsdim0::BinsDim0;
 use log::*;
 use netpod::ScalarType;
 use netpod::Shape;
@@ -24,7 +25,6 @@ use std::time::Instant;
 use std::time::SystemTime;
 
 pub use netpod::CONNECTION_STATUS_DIV;
-use std::collections::VecDeque;
 
 #[derive(Debug)]
 pub enum Error {

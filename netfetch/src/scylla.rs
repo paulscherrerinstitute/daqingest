@@ -1,5 +1,6 @@
 use err::Error;
 use futures_util::StreamExt;
+#[allow(unused)]
 use netpod::log::*;
 use netpod::ScyllaConfig;
 use scylla::execution_profile::ExecutionProfileBuilder;
