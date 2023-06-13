@@ -372,7 +372,7 @@ fn ident_from_expr(inp: syn::Expr) -> syn::Result<syn::Ident> {
 }
 
 fn idents_from_exprs(inp: PunctExpr) -> syn::Result<Vec<syn::Ident>> {
-    let mut ret = vec![];
+    let mut ret = Vec::new();
     for k in inp {
         let g = ident_from_expr(k)?;
         ret.push(g);
@@ -517,9 +517,9 @@ struct StatsTreeDef {
 impl syn::parse::Parse for StatsTreeDef {
     fn parse(inp: ParseStream) -> syn::Result<Self> {
         let k = inp.parse::<syn::ExprTuple>()?;
-        let mut a = vec![];
-        let mut agg_defs = vec![];
-        let mut diff_defs = vec![];
+        let mut a = Vec::new();
+        let mut agg_defs = Vec::new();
+        let mut diff_defs = Vec::new();
         for k in k.elems {
             let fa = FuncCallWithArgs::from_expr(k)?;
             if fa.name == "stats_struct" {
