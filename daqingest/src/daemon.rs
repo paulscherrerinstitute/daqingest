@@ -446,13 +446,17 @@ impl Daemon {
                 array_truncate: Some(1024),
                 process_channel_count_limit: Some(32),
             };
-            let client =
-                netfetch::zmtp::BsreadClient::new(zmtpopts, ingest_commons.clone(), channel_info_query_tx.clone())
-                    .await?;
+            let client = netfetch::bsreadclient::BsreadClient::new(
+                zmtpopts,
+                ingest_commons.clone(),
+                channel_info_query_tx.clone(),
+            )
+            .await
+            .map_err(|e| Error::from(e.to_string()))?;
             let fut = {
                 async move {
                     let mut client = client;
-                    client.run().await?;
+                    client.run().await.map_err(|e| Error::from(e.to_string()))?;
                     Ok::<_, Error>(())
                 }
             };

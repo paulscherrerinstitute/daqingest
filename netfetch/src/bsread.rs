@@ -1,9 +1,13 @@
-use crate::zmtp::ZmtpMessage;
+use crate::zmtp::zmtpproto::ZmtpMessage;
 use err::Error;
 #[allow(unused)]
 use log::*;
-use netpod::{AggKind, ByteOrder, ScalarType, Shape};
-use serde::{Deserialize, Serialize};
+use netpod::AggKind;
+use netpod::ByteOrder;
+use netpod::ScalarType;
+use netpod::Shape;
+use serde::Deserialize;
+use serde::Serialize;
 use serde_json::Value as JsVal;
 
 // TODO
@@ -35,7 +39,7 @@ fn bsread_type_default() -> String {
 }
 
 fn bsread_shape_default() -> JsVal {
-    JsVal::Array(vec![])
+    JsVal::Array(Vec::new())
 }
 
 fn bsread_encoding_default() -> String {
@@ -229,13 +233,5 @@ impl Parser {
             head_b_md5,
         };
         Ok(ret)
-    }
-}
-
-pub struct BsreadCollector {}
-
-impl BsreadCollector {
-    pub fn new<S: Into<String>>(_addr: S) -> Self {
-        err::todoval()
     }
 }

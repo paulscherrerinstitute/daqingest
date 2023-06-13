@@ -1,15 +1,58 @@
+use crate::netbuf;
 use crate::netbuf::NetBuf;
-use err::Error;
-use futures_util::{pin_mut, Stream};
+use futures_util::pin_mut;
+use futures_util::Stream;
 use log::*;
 use netpod::timeunits::*;
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::BTreeMap;
+use std::collections::VecDeque;
+use std::io;
 use std::net::SocketAddrV4;
-use std::num::{NonZeroU16, NonZeroU64};
+use std::num::NonZeroU16;
+use std::num::NonZeroU64;
 use std::pin::Pin;
-use std::task::{Context, Poll};
-use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use std::task::Context;
+use std::task::Poll;
+use tokio::io::AsyncRead;
+use tokio::io::AsyncWrite;
+use tokio::io::ReadBuf;
 use tokio::net::TcpStream;
+
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    #[error("{0}")]
+    NetBuf(#[from] netbuf::Error),
+    #[error("BufferTooSmallForNeedMin({0}, {1})")]
+    BufferTooSmallForNeedMin(usize, usize),
+    #[error("IO({0})")]
+    IO(#[from] io::Error),
+    #[error("BadSlice")]
+    BadSlice,
+    #[error("BadCaDbrTypeId({0})")]
+    BadCaDbrTypeId(u16),
+    #[error("BadCaScalarTypeId({0})")]
+    BadCaScalarTypeId(u16),
+    #[error("GetValHelpInnerTypeMismatch")]
+    GetValHelpInnerTypeMismatch,
+    #[error("GetValHelpTodoWaveform")]
+    GetValHelpTodoWaveform,
+    #[error("NotEnoughPayload")]
+    NotEnoughPayload,
+    #[error("TodoConversionArray")]
+    TodoConversionArray,
+    #[error("CaProtoVersionMissing")]
+    CaProtoVersionMissing,
+    #[error("NotEnoughPayloadTimeMetadata({0})")]
+    NotEnoughPayloadTimeMetadata(usize),
+    #[error("MismatchDbrTimeType")]
+    MismatchDbrTimeType,
+    #[error("BadCaCount")]
+    BadCaCount,
+    #[error("CaCommandNotSupported({0})")]
+    CaCommandNotSupported(u16),
+    #[error("ParseAttemptInDoneState")]
+    ParseAttemptInDoneState,
+}
 
 const CA_PROTO_VERSION: u16 = 13;
 const EPICS_EPOCH_OFFSET: u64 = 631152000;
@@ -126,10 +169,7 @@ pub struct CaDbrType {
 impl CaDbrType {
     pub fn from_ca_u16(k: u16) -> Result<Self, Error> {
         if k > 20 {
-            return Err(Error::with_msg_no_trace(format!(
-                "can not understand ca dbr type id {}",
-                k
-            )));
+            return Err(Error::BadCaDbrTypeId(k));
         }
         let (meta, k) = if k >= 14 {
             (CaDbrMetaType::Time, k - 14)
@@ -147,7 +187,7 @@ impl CaDbrType {
             6 => F64,
             3 => Enum,
             0 => String,
-            k => return Err(Error::with_msg_no_trace(format!("bad ca scalar type id: {k}"))),
+            k => return Err(Error::BadCaScalarTypeId(k)),
         };
         Ok(CaDbrType { meta, scalar_type })
     }
@@ -178,13 +218,11 @@ impl GetValHelp<i8> for CaDataValue {
             CaDataValue::Scalar(v) => match v {
                 CaDataScalarValue::I8(v) => Ok(v),
                 _ => {
-                    let ty = std::any::type_name::<Self::ScalTy>();
-                    Err(Error::with_msg_no_trace(format!(
-                        "GetValHelp inner type mismatch {ty} vs {v:?}",
-                    )))
+                    //let ty = any::type_name::<Self::ScalTy>();
+                    Err(Error::GetValHelpInnerTypeMismatch)
                 }
             },
-            _ => Err(Error::with_msg_no_trace("GetValHelp waveform not supported")),
+            _ => Err(Error::GetValHelpTodoWaveform),
         }
     }
 }
@@ -196,13 +234,11 @@ impl GetValHelp<i16> for CaDataValue {
             CaDataValue::Scalar(v) => match v {
                 CaDataScalarValue::I16(v) => Ok(v),
                 _ => {
-                    let ty = std::any::type_name::<Self::ScalTy>();
-                    Err(Error::with_msg_no_trace(format!(
-                        "GetValHelp inner type mismatch {ty} vs {v:?}",
-                    )))
+                    //let ty = any::type_name::<Self::ScalTy>();
+                    Err(Error::GetValHelpInnerTypeMismatch)
                 }
             },
-            _ => Err(Error::with_msg_no_trace("GetValHelp waveform not supported")),
+            _ => Err(Error::GetValHelpTodoWaveform),
         }
     }
 }
@@ -214,13 +250,11 @@ impl GetValHelp<i32> for CaDataValue {
             CaDataValue::Scalar(v) => match v {
                 CaDataScalarValue::I32(v) => Ok(v),
                 _ => {
-                    let ty = std::any::type_name::<Self::ScalTy>();
-                    Err(Error::with_msg_no_trace(format!(
-                        "GetValHelp inner type mismatch {ty} vs {v:?}",
-                    )))
+                    //let ty = any::type_name::<Self::ScalTy>();
+                    Err(Error::GetValHelpInnerTypeMismatch)
                 }
             },
-            _ => Err(Error::with_msg_no_trace("GetValHelp waveform not supported")),
+            _ => Err(Error::GetValHelpTodoWaveform),
         }
     }
 }
@@ -232,13 +266,11 @@ impl GetValHelp<f32> for CaDataValue {
             CaDataValue::Scalar(v) => match v {
                 CaDataScalarValue::F32(v) => Ok(v),
                 _ => {
-                    let ty = std::any::type_name::<Self::ScalTy>();
-                    Err(Error::with_msg_no_trace(format!(
-                        "GetValHelp inner type mismatch {ty} vs {v:?}",
-                    )))
+                    //let ty = any::type_name::<Self::ScalTy>();
+                    Err(Error::GetValHelpInnerTypeMismatch)
                 }
             },
-            _ => Err(Error::with_msg_no_trace("GetValHelp waveform not supported")),
+            _ => Err(Error::GetValHelpTodoWaveform),
         }
     }
 }
@@ -250,13 +282,11 @@ impl GetValHelp<f64> for CaDataValue {
             CaDataValue::Scalar(v) => match v {
                 CaDataScalarValue::F64(v) => Ok(v),
                 _ => {
-                    let ty = std::any::type_name::<Self::ScalTy>();
-                    Err(Error::with_msg_no_trace(format!(
-                        "GetValHelp inner type mismatch {ty} vs {v:?}",
-                    )))
+                    //let ty = any::type_name::<Self::ScalTy>();
+                    Err(Error::GetValHelpInnerTypeMismatch)
                 }
             },
-            _ => Err(Error::with_msg_no_trace("GetValHelp waveform not supported")),
+            _ => Err(Error::GetValHelpTodoWaveform),
         }
     }
 }
@@ -529,13 +559,9 @@ macro_rules! convert_scalar_value {
         type ST = $st;
         const STL: usize = std::mem::size_of::<ST>();
         if $buf.len() < STL {
-            return Err(Error::with_msg_no_trace(format!(
-                "not enough payload for {} {}",
-                std::any::type_name::<ST>(),
-                $buf.len()
-            )));
+            return Err(Error::NotEnoughPayload);
         }
-        let v = ST::from_be_bytes($buf[..STL].try_into()?);
+        let v = ST::from_be_bytes($buf[..STL].try_into().map_err(|_| Error::BadSlice)?);
         CaDataValue::Scalar(CaDataScalarValue::$var(v))
     }};
 }
@@ -549,7 +575,7 @@ macro_rules! convert_wave_value {
         // TODO should optimize?
         let mut bb = &$buf[..];
         for _ in 0..nn {
-            let v = ST::from_be_bytes(bb[..STL].try_into()?);
+            let v = ST::from_be_bytes(bb[..STL].try_into().map_err(|_| Error::BadSlice)?);
             bb = &bb[STL..];
             a.push(v);
         }
@@ -634,9 +660,7 @@ impl CaMsg {
             CaScalarType::String => CaDataValue::Scalar(CaDataScalarValue::String("todo-array-string".into())),
             _ => {
                 warn!("TODO conversion array {scalar_type:?}");
-                return Err(Error::with_msg_no_trace(format!(
-                    "can not yet handle conversion of type array {scalar_type:?}"
-                )));
+                return Err(Error::TodoConversionArray);
             }
         };
         Ok(val)
@@ -681,9 +705,9 @@ impl CaMsg {
                     warn!("protocol error: search result is expected with data count 0");
                 }
                 if payload.len() < 2 {
-                    return Err(Error::with_msg_no_trace("server did not include protocol version"));
+                    return Err(Error::CaProtoVersionMissing);
                 }
-                let proto_version = u16::from_be_bytes(payload[0..2].try_into()?);
+                let proto_version = u16::from_be_bytes(payload[0..2].try_into().map_err(|_| Error::BadSlice)?);
                 CaMsg {
                     ty: CaMsgTy::SearchRes(SearchRes {
                         tcp_port: hi.data_type,
@@ -724,22 +748,16 @@ impl CaMsg {
                 let ca_dbr_ty = CaDbrType::from_ca_u16(hi.data_type)?;
                 if let CaDbrMetaType::Time = ca_dbr_ty.meta {
                 } else {
-                    return Err(Error::with_msg_no_trace(format!(
-                        "expect ca dbr time type, got: {:?}",
-                        ca_dbr_ty
-                    )));
+                    return Err(Error::MismatchDbrTimeType);
                 }
                 if payload.len() < 12 {
-                    return Err(Error::with_msg_no_trace(format!(
-                        "not enough payload for time metadata {}",
-                        payload.len()
-                    )));
+                    return Err(Error::NotEnoughPayloadTimeMetadata(payload.len()));
                 }
-                let ca_status = u16::from_be_bytes(payload[0..2].try_into()?);
-                let ca_severity = u16::from_be_bytes(payload[2..4].try_into()?);
-                let ca_secs = u32::from_be_bytes(payload[4..8].try_into()?);
-                let ca_nanos = u32::from_be_bytes(payload[8..12].try_into()?);
-                let ca_sh = Shape::from_ca_count(hi.data_count)?;
+                let ca_status = u16::from_be_bytes(payload[0..2].try_into().map_err(|_| Error::BadSlice)?);
+                let ca_severity = u16::from_be_bytes(payload[2..4].try_into().map_err(|_| Error::BadSlice)?);
+                let ca_secs = u32::from_be_bytes(payload[4..8].try_into().map_err(|_| Error::BadSlice)?);
+                let ca_nanos = u32::from_be_bytes(payload[8..12].try_into().map_err(|_| Error::BadSlice)?);
+                let ca_sh = Shape::from_ca_count(hi.data_count).map_err(|_| Error::BadCaCount)?;
                 let meta_padding = match ca_dbr_ty.meta {
                     CaDbrMetaType::Plain => 0,
                     CaDbrMetaType::Status => match ca_dbr_ty.scalar_type {
@@ -792,11 +810,11 @@ impl CaMsg {
             }
             15 => {
                 if payload.len() == 8 {
-                    let v = u64::from_be_bytes(payload.try_into()?);
+                    let v = u64::from_be_bytes(payload.try_into().map_err(|_| Error::BadSlice)?);
                     info!("Payload as u64: {v}");
-                    let v = i64::from_be_bytes(payload.try_into()?);
+                    let v = i64::from_be_bytes(payload.try_into().map_err(|_| Error::BadSlice)?);
                     info!("Payload as i64: {v}");
-                    let v = f64::from_be_bytes(payload.try_into()?);
+                    let v = f64::from_be_bytes(payload.try_into().map_err(|_| Error::BadSlice)?);
                     info!("Payload as f64: {v}");
                 } else {
                     info!(
@@ -816,7 +834,7 @@ impl CaMsg {
                 }
             }
             0x17 => CaMsg { ty: CaMsgTy::Echo },
-            x => return Err(Error::with_msg_no_trace(format!("unsupported ca command {}", x))),
+            x => return Err(Error::CaCommandNotSupported(x)),
         };
         Ok(msg)
     }
@@ -951,7 +969,7 @@ impl CaProto {
                     Ok(()) => Ready(Ok(())),
                     Err(e) => {
                         error!("advance error {:?}", e);
-                        Ready(Err(e))
+                        Ready(Err(e.into()))
                     }
                 },
                 Err(e) => {
@@ -1004,11 +1022,7 @@ impl CaProto {
         let read_res = {
             if self.buf.cap() < need_min {
                 self.state = CaState::Done;
-                let e = Error::with_msg_no_trace(format!(
-                    "buffer too small for need_min  {}  {}",
-                    self.buf.cap(),
-                    self.state.need_min()
-                ));
+                let e = Error::BufferTooSmallForNeedMin(self.buf.cap(), self.state.need_min());
                 Err(e)
             } else if self.buf.len() < need_min {
                 let (w, mut rbuf) = self.inpbuf_conn(need_min);
@@ -1037,7 +1051,7 @@ impl CaProto {
                                     Ok(()) => Ok(Some(Ready(CaItem::empty()))),
                                     Err(e) => {
                                         error!("netbuf wadv fail  nf {nf}");
-                                        Err(e)
+                                        Err(e.into())
                                     }
                                 }
                             }
@@ -1130,7 +1144,7 @@ impl CaProto {
                     self.state = CaState::StdHead;
                     Ok(Some(CaItem::Msg(msg)))
                 }
-                CaState::Done => Err(Error::with_msg_no_trace("attempt to parse in Done state")),
+                CaState::Done => Err(Error::ParseAttemptInDoneState),
             };
         }
     }

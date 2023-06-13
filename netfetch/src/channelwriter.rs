@@ -1,20 +1,28 @@
 use crate::errconv::ErrConv;
-use crate::zmtp::ZmtpFrame;
+use crate::zmtp::zmtpproto::ZmtpFrame;
 use err::Error;
-use futures_util::{Future, FutureExt};
+use futures_util::Future;
+use futures_util::FutureExt;
 use log::*;
 use netpod::timeunits::SEC;
-use netpod::{ByteOrder, ScalarType, Shape};
-use scylla::batch::{Batch, BatchType};
-use scylla::frame::value::{BatchValues, ValueList};
+use netpod::ByteOrder;
+use netpod::ScalarType;
+use netpod::Shape;
+use scylla::batch::Batch;
+use scylla::batch::BatchType;
+use scylla::frame::value::BatchValues;
+use scylla::frame::value::ValueList;
 use scylla::prepared_statement::PreparedStatement;
 use scylla::transport::errors::QueryError;
-use scylla::{QueryResult, Session as ScySession};
+use scylla::QueryResult;
+use scylla::Session as ScySession;
 use std::mem;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::task::{Context, Poll};
-use std::time::{Duration, Instant};
+use std::task::Context;
+use std::task::Poll;
+use std::time::Duration;
+use std::time::Instant;
 
 pub struct ScyQueryFut<'a> {
     fut: Pin<Box<dyn Future<Output = Result<QueryResult, QueryError>> + Send + 'a>>,

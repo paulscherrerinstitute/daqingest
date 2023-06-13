@@ -14,13 +14,15 @@ pub fn main() -> Result<(), Error> {
         use daqingest::opts::ChannelAccess;
         use daqingest::opts::SubCmd;
         match opts.subcmd {
-            SubCmd::Bsread(k) => netfetch::zmtp::zmtp_client(k.into()).await?,
+            SubCmd::Bsread(k) => netfetch::zmtp::zmtp_client(k.into())
+                .await
+                .map_err(|e| Error::from(e.to_string()))?,
             SubCmd::ListPkey => daqingest::query::list_pkey().await?,
             SubCmd::ListPulses => daqingest::query::list_pulses().await?,
             SubCmd::FetchEvents(k) => daqingest::query::fetch_events(k).await?,
             SubCmd::BsreadDump(k) => {
-                let mut f = netfetch::zmtp::BsreadDumper::new(k.source);
-                f.run().await?
+                let mut f = netfetch::zmtp::dumper::BsreadDumper::new(k.source);
+                f.run().await.map_err(|e| Error::from(e.to_string()))?
             }
             SubCmd::ChannelAccess(k) => match k {
                 ChannelAccess::CaSearch(k) => {

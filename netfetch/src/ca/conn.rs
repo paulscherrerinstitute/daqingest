@@ -1355,7 +1355,7 @@ impl CaConn {
                 },
                 Err(e) => {
                     error!("got error item from CaProto {e:?}");
-                    Ready(Some(Err(e)))
+                    Ready(Some(Err(e.to_string().into())))
                 }
             },
             Ready(None) => {
@@ -1586,7 +1586,7 @@ impl CaConn {
             // TODO remove the need for this:
             cx.waker().wake_by_ref();
         }
-        res
+        res.map_err(|e| Error::from(e.to_string()))
     }
 
     // `?` works not in here.

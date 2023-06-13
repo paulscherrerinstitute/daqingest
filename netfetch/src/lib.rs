@@ -1,6 +1,7 @@
 pub mod batcher;
 pub mod batchquery;
 pub mod bsread;
+pub mod bsreadclient;
 pub mod ca;
 pub mod channelwriter;
 pub mod conf;

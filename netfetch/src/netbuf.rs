@@ -1,5 +1,17 @@
-use err::Error;
+use err::thiserror;
+use std::array::TryFromSliceError;
+use std::mem;
 use tokio::io::ReadBuf;
+
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    #[error("read {0}  have {1}")]
+    AdvanceOver(usize, usize),
+    #[error("write {0}  have {1}")]
+    WriteAdvanceOver(usize, usize),
+    #[error("TryFromSliceError")]
+    Slice(#[from] TryFromSliceError),
+}
 
 pub struct NetBuf {
     buf: Vec<u8>,
@@ -50,7 +62,7 @@ impl NetBuf {
     pub fn adv(&mut self, x: usize) -> Result<(), Error> {
         check_invariants!(self);
         if self.len() < x {
-            return Err(Error::with_msg_no_trace("not enough bytes"));
+            Err(Error::AdvanceOver(x, self.len()))
         } else {
             self.rp += x;
             Ok(())
@@ -60,7 +72,7 @@ impl NetBuf {
     pub fn wadv(&mut self, x: usize) -> Result<(), Error> {
         check_invariants!(self);
         if self.wcap() < x {
-            return Err(Error::with_msg_no_trace("not enough space"));
+            Err(Error::WriteAdvanceOver(x, self.wcap()))
         } else {
             self.wp += x;
             Ok(())
@@ -70,9 +82,9 @@ impl NetBuf {
     pub fn read_u8(&mut self) -> Result<u8, Error> {
         check_invariants!(self);
         type T = u8;
-        const TS: usize = std::mem::size_of::<T>();
+        const TS: usize = mem::size_of::<T>();
         if self.len() < TS {
-            return Err(Error::with_msg_no_trace("not enough bytes"));
+            Err(Error::AdvanceOver(TS, self.len()))
         } else {
             let val = self.buf[self.rp];
             self.rp += TS;
@@ -85,7 +97,7 @@ impl NetBuf {
         type T = u16;
         const TS: usize = std::mem::size_of::<T>();
         if self.len() < TS {
-            return Err(Error::with_msg_no_trace("not enough bytes"));
+            Err(Error::AdvanceOver(TS, self.len()))
         } else {
             let val = T::from_be_bytes(self.buf[self.rp..self.rp + TS].try_into()?);
             self.rp += TS;
@@ -98,7 +110,7 @@ impl NetBuf {
         type T = u32;
         const TS: usize = std::mem::size_of::<T>();
         if self.len() < TS {
-            return Err(Error::with_msg_no_trace("not enough bytes"));
+            Err(Error::AdvanceOver(TS, self.len()))
         } else {
             let val = T::from_be_bytes(self.buf[self.rp..self.rp + TS].try_into()?);
             self.rp += TS;
@@ -111,7 +123,7 @@ impl NetBuf {
         type T = u64;
         const TS: usize = std::mem::size_of::<T>();
         if self.len() < TS {
-            return Err(Error::with_msg_no_trace("not enough bytes"));
+            Err(Error::AdvanceOver(TS, self.len()))
         } else {
             let val = T::from_be_bytes(self.buf[self.rp..self.rp + TS].try_into()?);
             self.rp += TS;
@@ -122,7 +134,7 @@ impl NetBuf {
     pub fn read_bytes(&mut self, n: usize) -> Result<&[u8], Error> {
         check_invariants!(self);
         if self.len() < n {
-            return Err(Error::with_msg_no_trace("not enough bytes"));
+            Err(Error::AdvanceOver(n, self.len()))
         } else {
             let val = self.buf[self.rp..self.rp + n].as_ref();
             self.rp += n;
@@ -141,7 +153,7 @@ impl NetBuf {
         check_invariants!(self);
         self.rewind_if_needed(n);
         if self.wcap() < n {
-            Err(Error::with_msg_no_trace("write_buf not enough space"))
+            Err(Error::WriteAdvanceOver(n, self.wcap()))
         } else {
             let ret = &mut self.buf[self.wp..self.wp + n];
             self.wp += n;
@@ -166,7 +178,7 @@ impl NetBuf {
         check_invariants!(self);
         self.rewind_if_needed(buf.len());
         if self.wcap() < buf.len() {
-            return Err(Error::with_msg_no_trace("not enough space"));
+            Err(Error::WriteAdvanceOver(buf.len(), self.wcap()))
         } else {
             self.buf[self.wp..self.wp + buf.len()].copy_from_slice(buf);
             self.wp += buf.len();
@@ -180,7 +192,7 @@ impl NetBuf {
         const TS: usize = std::mem::size_of::<T>();
         self.rewind_if_needed(TS);
         if self.wcap() < TS {
-            return Err(Error::with_msg_no_trace("not enough space"));
+            Err(Error::WriteAdvanceOver(TS, self.wcap()))
         } else {
             self.buf[self.wp..self.wp + TS].copy_from_slice(&v.to_be_bytes());
             self.wp += TS;
@@ -194,7 +206,7 @@ impl NetBuf {
         const TS: usize = std::mem::size_of::<T>();
         self.rewind_if_needed(TS);
         if self.wcap() < TS {
-            return Err(Error::with_msg_no_trace("not enough space"));
+            Err(Error::WriteAdvanceOver(TS, self.wcap()))
         } else {
             self.buf[self.wp..self.wp + TS].copy_from_slice(&v.to_be_bytes());
             self.wp += TS;

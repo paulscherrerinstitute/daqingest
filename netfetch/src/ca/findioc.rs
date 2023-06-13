@@ -270,7 +270,7 @@ impl FindIocStream {
                 panic!();
             }
             let mut nb = crate::netbuf::NetBuf::new(2048);
-            nb.put_slice(&buf[..ec as usize])?;
+            nb.put_slice(&buf[..ec as usize]).map_err(|e| e.to_string())?;
             let mut msgs = Vec::new();
             let mut accounted = 0;
             loop {
@@ -282,7 +282,7 @@ impl FindIocStream {
                     error!("incomplete message, not enough for header");
                     break;
                 }
-                let hi = HeadInfo::from_netbuf(&mut nb)?;
+                let hi = HeadInfo::from_netbuf(&mut nb).map_err(|e| e.to_string())?;
                 if hi.cmdid() == 0 && hi.payload() == 0 {
                 } else if hi.cmdid() == 6 && hi.payload() == 8 {
                 } else {
@@ -292,8 +292,8 @@ impl FindIocStream {
                     error!("incomplete message, missing payload");
                     break;
                 }
-                let msg = CaMsg::from_proto_infos(&hi, nb.data(), 32)?;
-                nb.adv(hi.payload())?;
+                let msg = CaMsg::from_proto_infos(&hi, nb.data(), 32).map_err(|e| e.to_string())?;
+                nb.adv(hi.payload()).map_err(|e| e.to_string())?;
                 msgs.push(msg);
                 accounted += 16 + hi.payload();
             }
