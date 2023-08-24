@@ -163,7 +163,7 @@ pub async fn ca_search(opts: CaIngestOpts, channels: &Vec<String>) -> Result<(),
                     gw_addrs.push(addr);
                 }
                 Err(e) => {
-                    error!("can not resolve {s} {e}");
+                    warn!("can not resolve {s} {e}");
                 }
             }
         }

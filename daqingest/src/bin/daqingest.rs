@@ -5,11 +5,13 @@ use log::*;
 use netfetch::conf::parse_config;
 
 pub fn main() -> Result<(), Error> {
-    println!("daqingest fn main");
     let opts = DaqIngestOpts::parse();
     // TODO offer again function to get runtime and configure tracing in one call
     let runtime = taskrun::get_runtime_opts(opts.nworkers.unwrap_or(12), 32);
-    taskrun::tracing_init().unwrap();
+    match taskrun::tracing_init() {
+        Ok(()) => {}
+        Err(()) => return Err(Error::with_msg_no_trace("tracing init failed")),
+    }
     let res = runtime.block_on(async move {
         use daqingest::opts::ChannelAccess;
         use daqingest::opts::SubCmd;

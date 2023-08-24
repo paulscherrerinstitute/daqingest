@@ -17,7 +17,7 @@ use futures_util::FutureExt;
 use futures_util::StreamExt;
 use futures_util::TryFutureExt;
 use log::*;
-use scylla::Session as ScySession;
+use scywr::session::ScySession;
 use std::io;
 use std::net::SocketAddr;
 use std::pin::Pin;

@@ -1,15 +1,8 @@
 [package]
 name = "daqingest"
-version = "0.1.5"
+version = "0.2.0-alpha.0"
 authors = ["Dominik Werder <dominik.werder@gmail.com>"]
 edition = "2021"
-
-[lib]
-path = "src/daqingest.rs"
-
-[[bin]]
-name = "daqingest"
-path = "src/bin/daqingest.rs"
 
 [dependencies]
 clap = { version = "4.3.24", features = ["derive", "cargo"] }
@@ -19,7 +12,7 @@ async-channel = "1.9.0"
 chrono = "0.4"
 bytes = "1.4.0"
 scylla = "0.9.0"
-tokio-postgres = "0.7.7"
+tokio-postgres = "0.7.9"
 serde = { version = "1.0", features = ["derive"] }
 libc = "0.2"
 err = { path = "../../daqbuffer/crates/err" }

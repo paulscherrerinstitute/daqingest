@@ -3,52 +3,7 @@ use futures_util::StreamExt;
 #[allow(unused)]
 use netpod::log::*;
 use netpod::ScyllaConfig;
-use scylla::execution_profile::ExecutionProfileBuilder;
-use scylla::statement::Consistency;
-use scylla::transport::errors::DbError;
-use scylla::transport::errors::QueryError;
-use scylla::Session;
 use std::sync::Arc;
-
-pub async fn create_session(scyconf: &ScyllaConfig) -> Result<Arc<Session>, Error> {
-    let scy = scylla::SessionBuilder::new()
-        .known_nodes(&scyconf.hosts)
-        .use_keyspace(&scyconf.keyspace, true)
-        .default_execution_profile_handle(
-            ExecutionProfileBuilder::default()
-                .consistency(Consistency::LocalOne)
-                .build()
-                .into_handle(),
-        )
-        .build()
-        .await
-        .map_err(|e| Error::from(format!("{e}")))?;
-    let scy = Arc::new(scy);
-    Ok(scy)
-}
-
-async fn has_table(name: &str, scy: &Session, scyconf: &ScyllaConfig) -> Result<bool, Error> {
-    let ks = scy
-        .get_keyspace()
-        .ok_or_else(|| Error::with_msg_no_trace("session is not using a keyspace yet"))?;
-    let mut res = scy
-        .query_iter(
-            "select table_name from system_schema.tables where keyspace_name = ?",
-            (ks.as_ref(),),
-        )
-        .await
-        .map_err(|e| e.to_string())
-        .map_err(Error::from)?;
-    while let Some(k) = res.next().await {
-        let row = k.map_err(|e| e.to_string()).map_err(Error::from)?;
-        if let Some(table_name) = row.columns[0].as_ref().unwrap().as_text() {
-            if table_name == name {
-                return Ok(true);
-            }
-        }
-    }
-    Ok(false)
-}
 
 async fn check_table_exist(name: &str, scy: &Session) -> Result<bool, Error> {
     match scy.query(format!("select * from {} limit 1", name), ()).await {
