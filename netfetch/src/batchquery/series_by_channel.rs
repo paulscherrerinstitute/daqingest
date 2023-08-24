@@ -12,6 +12,7 @@ use netpod::log::*;
 use netpod::Database;
 use std::time::Duration;
 use std::time::Instant;
+use taskrun::tokio;
 use tokio::task::JoinHandle;
 use tokio_postgres::Client as PgClient;
 use tokio_postgres::Statement as PgStatement;

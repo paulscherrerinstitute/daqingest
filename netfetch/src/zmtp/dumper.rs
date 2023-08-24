@@ -10,6 +10,7 @@ use futures_util::StreamExt;
 use netpod::log::*;
 use netpod::timeunits::SEC;
 use std::io;
+use taskrun::tokio;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

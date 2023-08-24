@@ -1,14 +1,20 @@
 use crate::ca::store::DataStore;
 use crate::ca::IngestCommons;
 use crate::rt::JoinHandle;
-use crate::store::{CommonInsertItemQueue, IntoSimplerError, QueryItem};
+use crate::store::CommonInsertItemQueue;
+use crate::store::IntoSimplerError;
+use crate::store::QueryItem;
 use err::Error;
 use log::*;
-use netpod::timeunits::{MS, SEC};
+use netpod::timeunits::MS;
+use netpod::timeunits::SEC;
 use netpod::ScyllaConfig;
-use std::sync::atomic::{self, Ordering};
+use std::sync::atomic;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use std::time::Instant;
+use taskrun::tokio;
 use tokio_postgres::Client as PgClient;
 
 fn stats_inc_for_err(stats: &stats::CaConnStats, err: &crate::store::Error) {

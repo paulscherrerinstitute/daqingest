@@ -55,6 +55,7 @@ use std::task::Poll;
 use std::time::Duration;
 use std::time::Instant;
 use std::time::SystemTime;
+use taskrun::tokio;
 use tokio::net::TcpStream;
 
 #[derive(Clone, Debug, Serialize)]

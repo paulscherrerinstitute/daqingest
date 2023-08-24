@@ -660,7 +660,7 @@ dependencies = [
 
 [[package]]
 name = "daqingest"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "async-channel",
  "bytes",
@@ -676,7 +676,6 @@ dependencies = [
  "serde",
  "stats",
  "taskrun",
- "tokio",
  "tokio-postgres",
  "tracing",
 ]
@@ -1658,7 +1657,6 @@ dependencies = [
  "stats",
  "streams",
  "taskrun",
- "tokio",
  "tokio-postgres",
  "tokio-stream",
  "tracing",

@@ -7,6 +7,7 @@ use serde::Deserialize;
 use serde::Serialize;
 use std::path::PathBuf;
 use std::time::Duration;
+use taskrun::tokio;
 use tokio::fs::OpenOptions;
 use tokio::io::AsyncReadExt;
 

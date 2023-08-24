@@ -1,6 +1,7 @@
 use err::thiserror;
 use std::array::TryFromSliceError;
 use std::mem;
+use taskrun::tokio;
 use tokio::io::ReadBuf;
 
 #[derive(Debug, thiserror::Error)]

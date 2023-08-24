@@ -17,6 +17,7 @@ use std::net::SocketAddrV4;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
+use taskrun::tokio;
 
 pub struct StatsSet {
     daemon: Arc<DaemonStats>,

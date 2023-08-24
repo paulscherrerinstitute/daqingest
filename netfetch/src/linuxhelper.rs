@@ -2,6 +2,7 @@ use err::Error;
 use log::*;
 use std::ffi::CStr;
 use std::mem::MaybeUninit;
+use taskrun::tokio;
 use tokio::net::TcpStream;
 
 pub fn local_hostname() -> String {

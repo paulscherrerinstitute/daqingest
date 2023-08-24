@@ -1,7 +1,7 @@
 use crate::opts::FetchEvents;
 use log::*;
-use scylla::batch::Consistency;
 use scylla::execution_profile::ExecutionProfileBuilder;
+use scylla::statement::Consistency;
 use scylla::transport::errors::NewSessionError;
 use scylla::transport::errors::QueryError;
 use scylla::Session;

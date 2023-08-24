@@ -26,6 +26,7 @@ use std::sync::Mutex;
 use std::task::Poll;
 use std::time::Duration;
 use std::time::Instant;
+use taskrun::tokio;
 use tokio_postgres::Client as PgClient;
 
 pub static SIGINT: AtomicU32 = AtomicU32::new(0);

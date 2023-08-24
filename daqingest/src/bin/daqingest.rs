@@ -5,6 +5,7 @@ use log::*;
 use netfetch::conf::parse_config;
 
 pub fn main() -> Result<(), Error> {
+    println!("daqingest fn main");
     let opts = DaqIngestOpts::parse();
     // TODO offer again function to get runtime and configure tracing in one call
     let runtime = taskrun::get_runtime_opts(opts.nworkers.unwrap_or(12), 32);

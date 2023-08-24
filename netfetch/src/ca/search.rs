@@ -11,6 +11,7 @@ use std::net::IpAddr;
 use std::net::SocketAddr;
 use std::time::Duration;
 use std::time::Instant;
+use taskrun::tokio;
 use tokio::task::JoinHandle;
 use tokio_postgres::Client as PgClient;
 

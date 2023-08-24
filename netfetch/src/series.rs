@@ -4,6 +4,7 @@ use err::Error;
 use log::*;
 use serde::Serialize;
 use std::time::{Duration, Instant};
+use taskrun::tokio;
 use tokio_postgres::Client as PgClient;
 
 #[derive(Clone, Debug)]

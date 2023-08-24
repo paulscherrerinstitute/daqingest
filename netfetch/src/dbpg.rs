@@ -2,6 +2,7 @@ use crate::errconv::ErrConv;
 use err::Error;
 use netpod::log::*;
 use netpod::Database;
+use taskrun::tokio;
 use tokio_postgres::Client as PgClient;
 
 pub async fn make_pg_client(d: &Database) -> Result<PgClient, Error> {

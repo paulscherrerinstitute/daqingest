@@ -15,6 +15,7 @@ use std::num::NonZeroU64;
 use std::pin::Pin;
 use std::task::Context;
 use std::task::Poll;
+use taskrun::tokio;
 use tokio::io::AsyncRead;
 use tokio::io::AsyncWrite;
 use tokio::io::ReadBuf;

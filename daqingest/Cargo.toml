@@ -1,6 +1,6 @@
 [package]
 name = "daqingest"
-version = "0.1.4"
+version = "0.1.5"
 authors = ["Dominik Werder <dominik.werder@gmail.com>"]
 edition = "2021"
 
@@ -12,8 +12,7 @@ name = "daqingest"
 path = "src/bin/daqingest.rs"
 
 [dependencies]
-clap = { version = "4.0.22", features = ["derive", "cargo"] }
-tokio = { version = "1.32.0", features = ["rt-multi-thread", "io-util", "net", "time", "sync", "fs", "tracing"] }
+clap = { version = "4.3.24", features = ["derive", "cargo"] }
 tracing = "0.1.37"
 futures-util = "0.3"
 async-channel = "1.9.0"

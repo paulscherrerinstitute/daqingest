@@ -45,6 +45,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
 use std::time::SystemTime;
+use taskrun::tokio;
 use tokio_postgres::Client as PgClient;
 use tokio_postgres::Row as PgRow;
 use tracing::info_span;
@@ -293,7 +294,9 @@ pub struct Daemon {
 impl Daemon {
     pub async fn new(opts: DaemonOpts) -> Result<Self, Error> {
         let pg_client = Arc::new(make_pg_client(&opts.pgconf).await?);
-        let datastore = DataStore::new(&opts.scyconf).await?;
+        let datastore = DataStore::new(&opts.scyconf)
+            .await
+            .map_err(|e| Error::with_msg_no_trace(e.to_string()))?;
         let datastore = Arc::new(datastore);
         let (tx, rx) = async_channel::bounded(32);
         let pgcs = {
