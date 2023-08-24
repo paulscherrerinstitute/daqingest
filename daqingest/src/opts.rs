@@ -1,8 +1,7 @@
-use std::net::SocketAddr;
-
 use clap::ArgAction::Count;
 use clap::Parser;
 use netfetch::zmtp::ZmtpClientOpts;
+use std::net::SocketAddr;
 
 #[derive(Debug, Parser)]
 #[command(author, version, about)]

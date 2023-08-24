@@ -43,7 +43,6 @@ impl DaemonEvent {
                 match &b.value {
                     None => format!("CaConnEvent/None"),
                     EchoTimeout => format!("CaConnEvent/EchoTimeout"),
-                    HealthCheckDone => format!("CaConnEvent/HealthCheckDone"),
                     ConnCommandResult(_) => format!("CaConnEvent/ConnCommandResult"),
                     EndOfStream => format!("CaConnEvent/EndOfStream"),
                 }

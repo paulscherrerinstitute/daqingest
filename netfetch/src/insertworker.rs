@@ -126,7 +126,7 @@ pub async fn spawn_scylla_insert_workers(
     let mut jhs = Vec::new();
     let mut data_stores = Vec::new();
     for _ in 0..insert_scylla_sessions {
-        let data_store = Arc::new(DataStore::new(&scyconf).await?);
+        let data_store = Arc::new(DataStore::new(&scyconf).await.map_err(|e| Error::from(e.to_string()))?);
         data_stores.push(data_store);
     }
     for worker_ix in 0..insert_worker_count {

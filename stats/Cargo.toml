@@ -11,5 +11,5 @@ path = "src/stats.rs"
 stats_types = { path = "../stats_types" }
 stats_proc = { path = "../stats_proc" }
 log = { path = "../log" }
-err = { path = "../../daqbuffer/err" }
+err = { path = "../../daqbuffer/crates/err" }
 libc = "0.2"

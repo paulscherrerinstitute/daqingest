@@ -7,6 +7,7 @@ use crate::zmtp::ZmtpEvent;
 use async_channel::Receiver;
 use async_channel::Sender;
 use err::thiserror;
+use err::ThisError;
 use futures_util::pin_mut;
 use futures_util::Stream;
 use futures_util::StreamExt;
@@ -25,7 +26,7 @@ use tokio::io::AsyncWrite;
 use tokio::io::ReadBuf;
 use tokio::net::TcpStream;
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, ThisError)]
 pub enum Error {
     #[error("bad")]
     Bad,
@@ -59,6 +60,7 @@ enum ConnState {
     ReadFrameShort,
     ReadFrameLong,
     ReadFrameBody(usize),
+    #[allow(unused)]
     LockScan(usize),
 }
 

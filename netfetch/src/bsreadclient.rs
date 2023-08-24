@@ -18,6 +18,8 @@ use crate::zmtp::zmtpproto::ZmtpMessage;
 use crate::zmtp::ZmtpClientOpts;
 use crate::zmtp::ZmtpEvent;
 use async_channel::Sender;
+use err::thiserror;
+use err::ThisError;
 use futures_util::StreamExt;
 use netpod::log::*;
 use netpod::timeunits::HOUR;
@@ -34,7 +36,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, ThisError)]
 pub enum Error {
     #[error("InsertQueueSenderMissing")]
     InsertQueueSenderMissing,

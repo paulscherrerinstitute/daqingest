@@ -13,19 +13,19 @@ path = "src/bin/daqingest.rs"
 
 [dependencies]
 clap = { version = "4.0.22", features = ["derive", "cargo"] }
-tokio = { version = "1.23.0", features = ["rt-multi-thread", "io-util", "net", "time", "sync", "fs", "tracing"] }
+tokio = { version = "1.32.0", features = ["rt-multi-thread", "io-util", "net", "time", "sync", "fs", "tracing"] }
 tracing = "0.1.37"
 futures-util = "0.3"
-async-channel = "1.6"
+async-channel = "1.9.0"
 chrono = "0.4"
 bytes = "1.4.0"
-scylla = "0.8.1"
+scylla = "0.9.0"
 tokio-postgres = "0.7.7"
 serde = { version = "1.0", features = ["derive"] }
 libc = "0.2"
-err = { path = "../../daqbuffer/err" }
+err = { path = "../../daqbuffer/crates/err" }
+netpod = { path = "../../daqbuffer/crates/netpod" }
+taskrun = { path = "../../daqbuffer/crates/taskrun" }
 log = { path = "../log" }
-netpod = { path = "../../daqbuffer/netpod" }
 stats = { path = "../stats" }
 netfetch = { path = "../netfetch" }
-taskrun = { path = "../../daqbuffer/taskrun" }

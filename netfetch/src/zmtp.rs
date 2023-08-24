@@ -10,6 +10,8 @@ use crate::zmtp::zmtpproto::SocketType;
 use crate::zmtp::zmtpproto::Zmtp;
 #[allow(unused)]
 use bytes::BufMut;
+use err::thiserror;
+use err::ThisError;
 use futures_util::Future;
 use futures_util::FutureExt;
 use futures_util::StreamExt;
@@ -22,7 +24,7 @@ use std::pin::Pin;
 use std::task::Context;
 use std::task::Poll;
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, ThisError)]
 pub enum Error {
     #[error("Msg({0})")]
     Msg(String),
