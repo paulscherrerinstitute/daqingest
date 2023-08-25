@@ -20,4 +20,5 @@ netpod = { path = "../../daqbuffer/crates/netpod" }
 taskrun = { path = "../../daqbuffer/crates/taskrun" }
 log = { path = "../log" }
 stats = { path = "../stats" }
+scywr = { path = "../scywr" }
 netfetch = { path = "../netfetch" }

@@ -3,19 +3,19 @@ pub mod connset;
 pub mod findioc;
 pub mod proto;
 pub mod search;
-pub mod store;
 
-use self::store::DataStore;
 use crate::ca::connset::CaConnSet;
 use crate::errconv::ErrConv;
 use crate::metrics::ExtraInsertsConf;
 use crate::rt::TokMx;
-use crate::store::CommonInsertItemQueue;
 use err::Error;
 use futures_util::Future;
 use futures_util::FutureExt;
 use log::*;
 use netpod::Database;
+use scywr::insertworker::InsertWorkerOpts;
+use scywr::iteminsertqueue::CommonInsertItemQueue;
+use scywr::store::DataStore;
 use stats::CaConnStatsAgg;
 use std::net::SocketAddrV4;
 use std::pin::Pin;
@@ -43,10 +43,20 @@ pub struct IngestCommons {
     pub data_store: Arc<DataStore>,
     pub insert_ivl_min: Arc<AtomicU64>,
     pub extra_inserts_conf: TokMx<ExtraInsertsConf>,
-    pub insert_frac: AtomicU64,
-    pub store_workers_rate: AtomicU64,
+    pub insert_frac: Arc<AtomicU64>,
+    pub store_workers_rate: Arc<AtomicU64>,
     pub ca_conn_set: CaConnSet,
-    pub insert_workers_running: atomic::AtomicUsize,
+    pub insert_workers_running: Arc<AtomicU64>,
+}
+
+impl From<&IngestCommons> for InsertWorkerOpts {
+    fn from(val: &IngestCommons) -> Self {
+        Self {
+            store_workers_rate: val.store_workers_rate.clone(),
+            insert_workers_running: val.insert_workers_running.clone(),
+            insert_frac: val.insert_frac.clone(),
+        }
+    }
 }
 
 pub trait SlowWarnable {

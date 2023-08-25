@@ -11,27 +11,28 @@ use netfetch::ca::conn::ConnCommand;
 use netfetch::ca::connset::CaConnSet;
 use netfetch::ca::findioc::FindIocRes;
 use netfetch::ca::findioc::FindIocStream;
-use netfetch::ca::store::DataStore;
 use netfetch::ca::IngestCommons;
 use netfetch::ca::SlowWarnable;
 use netfetch::conf::CaIngestOpts;
 use netfetch::daemon_common::Channel;
 use netfetch::daemon_common::DaemonEvent;
 use netfetch::errconv::ErrConv;
-use netfetch::insertworker::Ttls;
 use netfetch::metrics::ExtraInsertsConf;
 use netfetch::metrics::StatsSet;
 use netfetch::series::ChannelStatusSeriesId;
 use netfetch::series::Existence;
 use netfetch::series::SeriesId;
-use netfetch::store::ChannelStatus;
-use netfetch::store::ChannelStatusItem;
-use netfetch::store::CommonInsertItemQueue;
-use netfetch::store::ConnectionStatus;
-use netfetch::store::ConnectionStatusItem;
-use netfetch::store::QueryItem;
 use netpod::Database;
 use netpod::ScyllaConfig;
+use scywr::insertworker::Ttls;
+use scywr::iteminsertqueue as scywriiq;
+use scywr::store::DataStore;
+use scywriiq::ChannelStatus;
+use scywriiq::ChannelStatusItem;
+use scywriiq::CommonInsertItemQueue;
+use scywriiq::ConnectionStatus;
+use scywriiq::ConnectionStatusItem;
+use scywriiq::QueryItem;
 use serde::Serialize;
 use stats::DaemonStats;
 use std::collections::BTreeMap;
@@ -293,7 +294,7 @@ pub struct Daemon {
 
 impl Daemon {
     pub async fn new(opts: DaemonOpts) -> Result<Self, Error> {
-        let pg_client = Arc::new(make_pg_client(&opts.pgconf).await?);
+        // let pg_client = Arc::new(make_pg_client(&opts.pgconf).await?);
         let datastore = DataStore::new(&opts.scyconf)
             .await
             .map_err(|e| Error::with_msg_no_trace(e.to_string()))?;
@@ -333,7 +334,7 @@ impl Daemon {
                         insert_queue_counter.fetch_add(1, atomic::Ordering::AcqRel);
                         //trace!("insert queue item {item:?}");
                         match &item {
-                            netfetch::store::QueryItem::Insert(item) => {
+                            QueryItem::Insert(item) => {
                                 let shape_kind = match &item.shape {
                                     netpod::Shape::Scalar => 0 as u32,
                                     netpod::Shape::Wave(_) => 1,
@@ -394,10 +395,10 @@ impl Daemon {
             data_store: datastore.clone(),
             insert_ivl_min: Arc::new(AtomicU64::new(0)),
             extra_inserts_conf: tokio::sync::Mutex::new(ExtraInsertsConf::new()),
-            store_workers_rate: AtomicU64::new(20000),
-            insert_frac: AtomicU64::new(1000),
+            store_workers_rate: Arc::new(AtomicU64::new(20000)),
+            insert_frac: Arc::new(AtomicU64::new(1000)),
             ca_conn_set: CaConnSet::new(channel_info_query_tx.clone()),
-            insert_workers_running: atomic::AtomicUsize::new(0),
+            insert_workers_running: Arc::new(AtomicU64::new(0)),
         };
         let ingest_commons = Arc::new(ingest_commons);
 
@@ -426,13 +427,14 @@ impl Daemon {
         // TODO use a new stats type:
         let store_stats = Arc::new(stats::CaConnStats::new());
         let ttls = opts.ttls.clone();
-        let jh_insert_workers = netfetch::insertworker::spawn_scylla_insert_workers(
+        let insert_worker_opts = Arc::new(ingest_commons.as_ref().into());
+        use scywr::insertworker::spawn_scylla_insert_workers;
+        let jh_insert_workers = spawn_scylla_insert_workers(
             opts.scyconf.clone(),
             insert_scylla_sessions,
             insert_worker_count,
             common_insert_item_queue_2.clone(),
-            ingest_commons.clone(),
-            pg_client.clone(),
+            insert_worker_opts,
             store_stats.clone(),
             use_rate_limit_queue,
             ttls,
@@ -977,7 +979,7 @@ impl Daemon {
                                         if let Some(tx) = self.ingest_commons.insert_item_queue.sender() {
                                             let item = QueryItem::ChannelStatus(ChannelStatusItem {
                                                 ts: tsnow,
-                                                series: SeriesId::new(status_series_id.id()),
+                                                series: scywr::iteminsertqueue::SeriesId::new(status_series_id.id()),
                                                 status: ChannelStatus::AssignedToAddress,
                                             });
                                             match tx.send(item).await {
@@ -1551,7 +1553,9 @@ pub async fn run(opts: CaIngestOpts, channels: Vec<String>) -> Result<(), Error>
 
     netfetch::dbpg::schema_check(opts.postgresql()).await?;
 
-    netfetch::scylla::migrate_keyspace(opts.scylla()).await?;
+    scywr::schema::migrate_keyspace(opts.scylla())
+        .await
+        .map_err(|e| Error::with_msg_no_trace(e.to_string()))?;
 
     // TODO use a new stats type:
     //let store_stats = Arc::new(CaConnStats::new());

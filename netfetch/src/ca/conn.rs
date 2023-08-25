@@ -3,7 +3,6 @@ use super::proto::CaItem;
 use super::proto::CaMsg;
 use super::proto::CaMsgTy;
 use super::proto::CaProto;
-use super::store::DataStore;
 use super::ExtraInsertsConf;
 use crate::batchquery::series_by_channel::ChannelInfoQuery;
 use crate::bsread::ChannelDescDecoded;
@@ -12,17 +11,6 @@ use crate::ca::proto::EventAdd;
 use crate::series::ChannelStatusSeriesId;
 use crate::series::Existence;
 use crate::series::SeriesId;
-use crate::store::ChannelInfoItem;
-use crate::store::ChannelStatus;
-use crate::store::ChannelStatusClosedReason;
-use crate::store::ChannelStatusItem;
-use crate::store::CommonInsertItemQueueSender;
-use crate::store::ConnectionStatus;
-use crate::store::ConnectionStatusItem;
-use crate::store::InsertItem;
-use crate::store::IvlItem;
-use crate::store::MuteItem;
-use crate::store::QueryItem;
 use crate::timebin::ConnTimeBin;
 use async_channel::Sender;
 use err::Error;
@@ -37,6 +25,19 @@ use netpod::ScalarType;
 use netpod::Shape;
 use netpod::TS_MSP_GRID_SPACING;
 use netpod::TS_MSP_GRID_UNIT;
+use scywr::iteminsertqueue as scywriiq;
+use scywr::store::DataStore;
+use scywriiq::ChannelInfoItem;
+use scywriiq::ChannelStatus;
+use scywriiq::ChannelStatusClosedReason;
+use scywriiq::ChannelStatusItem;
+use scywriiq::CommonInsertItemQueueSender;
+use scywriiq::ConnectionStatus;
+use scywriiq::ConnectionStatusItem;
+use scywriiq::InsertItem;
+use scywriiq::IvlItem;
+use scywriiq::MuteItem;
+use scywriiq::QueryItem;
 use serde::Serialize;
 use stats::CaConnStats;
 use stats::IntervalEma;
@@ -763,7 +764,7 @@ impl CaConn {
                 ChannelState::Created(series, ..) => {
                     let item = QueryItem::ChannelStatus(ChannelStatusItem {
                         ts: SystemTime::now(),
-                        series: series.clone(),
+                        series: series.into(),
                         status: ChannelStatus::Closed(channel_reason.clone()),
                     });
                     self.insert_item_queue.push_back(item);
@@ -896,7 +897,7 @@ impl CaConn {
                         st.info_store_msp_last = msp;
                         let item = QueryItem::ChannelInfo(ChannelInfoItem {
                             ts_msp: msp,
-                            series: series.clone(),
+                            series: series.into(),
                             ivl: st.item_recv_ivl_ema.ema().ema(),
                             interest: 0.,
                             evsize: 0,
@@ -1029,7 +1030,7 @@ impl CaConn {
                     {
                         let item = QueryItem::ChannelStatus(ChannelStatusItem {
                             ts: SystemTime::now(),
-                            series: series.clone().into_inner(),
+                            series: series.clone().into_inner().into(),
                             status: ChannelStatus::Opened,
                         });
                         self.insert_item_queue.push_back(item);
@@ -1080,14 +1081,14 @@ impl CaConn {
         };
         let ts_lsp = ts - ts_msp;
         let item = InsertItem {
-            series,
+            series: series.into(),
             ts_msp,
             ts_lsp,
             msp_bump: ts_msp_changed,
             pulse: 0,
             scalar_type,
             shape,
-            val: ev.value.data,
+            val: ev.value.data.into(),
             ts_msp_grid,
         };
         item_queue.push_back(QueryItem::Insert(item));
@@ -1276,7 +1277,7 @@ impl CaConn {
                         st.insert_recv_ivl_last = tsnow;
                         let ema = st.insert_item_ivl_ema.ema();
                         let item = IvlItem {
-                            series: series.clone(),
+                            series: (&series).into(),
                             ts,
                             ema: ema.ema(),
                             emd: ema.emv().sqrt(),
@@ -1286,7 +1287,7 @@ impl CaConn {
                     if false && st.muted_before == 0 {
                         let ema = st.insert_item_ivl_ema.ema();
                         let item = MuteItem {
-                            series,
+                            series: series.into(),
                             ts,
                             ema: ema.ema(),
                             emd: ema.emv().sqrt(),

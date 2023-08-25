@@ -3,7 +3,6 @@ pub mod batchquery;
 pub mod bsread;
 pub mod bsreadclient;
 pub mod ca;
-pub mod channelwriter;
 pub mod conf;
 pub mod daemon_common;
 pub mod dbpg;
@@ -14,9 +13,7 @@ pub mod metrics;
 pub mod netbuf;
 pub mod patchcollect;
 pub mod rt;
-pub mod scylla;
 pub mod series;
-pub mod store;
 #[cfg(test)]
 pub mod test;
 pub mod timebin;

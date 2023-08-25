@@ -7,9 +7,6 @@ use crate::ca::proto::CaDataArrayValue;
 use crate::ca::proto::CaDataValue;
 use crate::ca::IngestCommons;
 use crate::series::SeriesId;
-use crate::store::CommonInsertItemQueueSender;
-use crate::store::InsertItem;
-use crate::store::QueryItem;
 use crate::zmtp::zmtpproto;
 use crate::zmtp::zmtpproto::SocketType;
 use crate::zmtp::zmtpproto::Zmtp;
@@ -28,7 +25,12 @@ use netpod::ScalarType;
 use netpod::Shape;
 use netpod::TS_MSP_GRID_SPACING;
 use netpod::TS_MSP_GRID_UNIT;
-use scylla::Session as ScySession;
+use scywr::iteminsertqueue::ArrayValue;
+use scywr::iteminsertqueue::CommonInsertItemQueueSender;
+use scywr::iteminsertqueue::DataValue;
+use scywr::iteminsertqueue::InsertItem;
+use scywr::iteminsertqueue::QueryItem;
+use scywr::session::ScySession;
 use stats::CheckEvery;
 use std::io;
 use std::net::SocketAddr;
@@ -184,7 +186,7 @@ impl BsreadClient {
                         None
                     };
                     let item = InsertItem {
-                        series,
+                        series: series.into(),
                         ts_msp,
                         ts_lsp,
                         msp_bump: ts_msp_changed,
@@ -192,7 +194,7 @@ impl BsreadClient {
                         pulse,
                         scalar_type,
                         shape,
-                        val: CaDataValue::Array(CaDataArrayValue::Bool(evtset)),
+                        val: DataValue::Array(ArrayValue::Bool(evtset)),
                     };
                     let item = QueryItem::Insert(item);
                     match self.insqtx.send(item).await {

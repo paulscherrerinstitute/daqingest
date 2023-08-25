@@ -36,6 +36,24 @@ impl SeriesId {
     }
 }
 
+impl From<&SeriesId> for scywr::iteminsertqueue::SeriesId {
+    fn from(value: &SeriesId) -> Self {
+        Self::new(value.id())
+    }
+}
+
+impl From<&mut SeriesId> for scywr::iteminsertqueue::SeriesId {
+    fn from(value: &mut SeriesId) -> Self {
+        Self::new(value.id())
+    }
+}
+
+impl From<SeriesId> for scywr::iteminsertqueue::SeriesId {
+    fn from(value: SeriesId) -> Self {
+        Self::new(value.id())
+    }
+}
+
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Serialize)]
 pub struct ChannelStatusSeriesId(u64);
 

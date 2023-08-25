@@ -1,7 +1,10 @@
-use async_channel::{RecvError, SendError};
+use async_channel::RecvError;
+use async_channel::SendError;
 use err::Error;
 use scylla::transport::errors::QueryError;
-use scylla::transport::query_result::{FirstRowError, RowsExpectedError};
+use scylla::transport::query_result::FirstRowError;
+use scylla::transport::query_result::RowsExpectedError;
+use scywr::scylla;
 
 pub trait ErrConv<T> {
     fn err_conv(self) -> Result<T, Error>;

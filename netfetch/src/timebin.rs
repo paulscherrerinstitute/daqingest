@@ -3,8 +3,6 @@ use crate::ca::proto::CaDataValue;
 use crate::ca::proto::CaEventValue;
 use crate::patchcollect::PatchCollect;
 use crate::series::SeriesId;
-use crate::store::QueryItem;
-use crate::store::TimeBinPatchSimpleF32;
 use err::Error;
 use items_0::scalar_ops::ScalarOps;
 use items_0::timebin::TimeBinner;
@@ -21,6 +19,8 @@ use netpod::BinnedRangeEnum;
 use netpod::ScalarType;
 use netpod::Shape;
 use netpod::TsNano;
+use scywr::iteminsertqueue::QueryItem;
+use scywr::iteminsertqueue::TimeBinPatchSimpleF32;
 use std::any;
 use std::any::Any;
 use std::collections::VecDeque;
@@ -187,7 +187,8 @@ fn store_patch(series: SeriesId, pc: &mut PatchCollect, iiq: &mut VecDeque<Query
             let off_msp = off / 1000;
             let off_lsp = off % 1000;
             let item = TimeBinPatchSimpleF32 {
-                series: series.clone(),
+                // TODO use the same SeriesId type
+                series: (&series).into(),
                 bin_len_sec: (pc.bin_len().ns() / SEC) as u32,
                 bin_count: pc.bin_count() as u32,
                 off_msp: off_msp as u32,
@@ -216,7 +217,7 @@ where
         Ok(x) => x,
         Err(e) => {
             let msg = format!(
-                "GetValHelp mismatch:  series {:?}  STY {}  data {:?}",
+                "GetValHelp mismatch:  series {:?}  STY {}  data {:?}  {e}",
                 series,
                 any::type_name::<STY>(),
                 ev.data
@@ -260,9 +261,10 @@ where
                         store_patch(params.series.clone(), pc, iiq)?;
                         for item in pc.take_outq() {
                             if let Some(k) = item.as_any_ref().downcast_ref::<BinsDim0<f32>>() {
+                                // TODO
                                 //let off_msp =
                                 let item = TimeBinPatchSimpleF32 {
-                                    series: params.series.clone(),
+                                    series: (&params.series).into(),
                                     bin_len_sec: (pc.bin_len().ns() / SEC) as u32,
                                     bin_count: pc.bin_count() as u32,
                                     off_msp: 0,

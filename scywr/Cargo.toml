@@ -6,6 +6,10 @@ edition = "2021"
 
 [dependencies]
 futures-util = "0.3"
+async-channel = "1.9.0"
 scylla = "0.9.0"
+log = { path = "../log" }
+stats = { path = "../stats" }
 err = { path = "../../daqbuffer/crates/err" }
 netpod = { path = "../../daqbuffer/crates/netpod" }
+taskrun = { path = "../../daqbuffer/crates/taskrun" }

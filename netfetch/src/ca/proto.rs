@@ -209,6 +209,22 @@ pub enum CaDataScalarValue {
     Bool(bool),
 }
 
+impl From<CaDataScalarValue> for scywr::iteminsertqueue::ScalarValue {
+    fn from(val: CaDataScalarValue) -> Self {
+        use scywr::iteminsertqueue::ScalarValue;
+        match val {
+            CaDataScalarValue::I8(x) => ScalarValue::I8(x),
+            CaDataScalarValue::I16(x) => ScalarValue::I16(x),
+            CaDataScalarValue::I32(x) => ScalarValue::I32(x),
+            CaDataScalarValue::F32(x) => ScalarValue::F32(x),
+            CaDataScalarValue::F64(x) => ScalarValue::F64(x),
+            CaDataScalarValue::Enum(x) => ScalarValue::Enum(x),
+            CaDataScalarValue::String(x) => ScalarValue::String(x),
+            CaDataScalarValue::Bool(x) => ScalarValue::Bool(x),
+        }
+    }
+}
+
 pub trait GetValHelp<T> {
     type ScalTy: Clone;
     fn get(&self) -> Result<&Self::ScalTy, Error>;
@@ -305,10 +321,34 @@ pub enum CaDataArrayValue {
     Bool(Vec<bool>),
 }
 
+impl From<CaDataArrayValue> for scywr::iteminsertqueue::ArrayValue {
+    fn from(val: CaDataArrayValue) -> Self {
+        use scywr::iteminsertqueue::ArrayValue;
+        match val {
+            CaDataArrayValue::I8(x) => ArrayValue::I8(x),
+            CaDataArrayValue::I16(x) => ArrayValue::I16(x),
+            CaDataArrayValue::I32(x) => ArrayValue::I32(x),
+            CaDataArrayValue::F32(x) => ArrayValue::F32(x),
+            CaDataArrayValue::F64(x) => ArrayValue::F64(x),
+            CaDataArrayValue::Bool(x) => ArrayValue::Bool(x),
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum CaDataValue {
     Scalar(CaDataScalarValue),
     Array(CaDataArrayValue),
+}
+
+impl From<CaDataValue> for scywr::iteminsertqueue::DataValue {
+    fn from(value: CaDataValue) -> Self {
+        use scywr::iteminsertqueue::DataValue;
+        match value {
+            CaDataValue::Scalar(x) => DataValue::Scalar(x.into()),
+            CaDataValue::Array(x) => DataValue::Array(x.into()),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]

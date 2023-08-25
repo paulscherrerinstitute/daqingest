@@ -1,138 +1,67 @@
-use crate::ca::proto::CaDataArrayValue;
-use crate::ca::proto::CaDataScalarValue;
-use crate::ca::proto::CaDataValue;
-use crate::ca::store::DataStore;
-use crate::errconv::ErrConv;
-use crate::series::SeriesId;
-use futures_util::Future;
-use futures_util::FutureExt;
+pub use netpod::CONNECTION_STATUS_DIV;
+
+use crate::store::DataStore;
+use err::thiserror;
+use err::ThisError;
 use log::*;
 use netpod::ScalarType;
 use netpod::Shape;
-use scylla::frame::value::ValueList;
 use scylla::prepared_statement::PreparedStatement;
 use scylla::transport::errors::DbError;
 use scylla::transport::errors::QueryError;
-use scylla::QueryResult;
-use scylla::Session as ScySession;
 use stats::CaConnStats;
 use std::net::SocketAddrV4;
-use std::pin::Pin;
-use std::task::Context;
-use std::task::Poll;
 use std::time::Duration;
-use std::time::Instant;
 use std::time::SystemTime;
 
-pub use netpod::CONNECTION_STATUS_DIV;
-
-#[derive(Debug)]
+#[derive(Debug, ThisError)]
 pub enum Error {
-    DbUnavailable,
-    DbOverload,
     DbTimeout,
-    DbError(String),
+    DbOverload,
+    DbUnavailable,
+    DbError(#[from] DbError),
+    QueryError(#[from] QueryError),
 }
 
-impl From<Error> for err::Error {
-    fn from(e: Error) -> Self {
-        err::Error::with_msg_no_trace(format!("{e:?}"))
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct SeriesId(u64);
+
+impl SeriesId {
+    pub fn new(id: u64) -> Self {
+        Self(id)
+    }
+
+    pub fn id(&self) -> u64 {
+        self.0
     }
 }
 
-pub trait IntoSimplerError {
-    fn into_simpler(self) -> Error;
+#[derive(Clone, Debug)]
+pub enum ScalarValue {
+    I8(i8),
+    I16(i16),
+    I32(i32),
+    F32(f32),
+    F64(f64),
+    Enum(i16),
+    String(String),
+    Bool(bool),
 }
 
-impl IntoSimplerError for QueryError {
-    fn into_simpler(self) -> Error {
-        let e = self;
-        match e {
-            QueryError::DbError(e, msg) => match e {
-                DbError::Unavailable { .. } => Error::DbUnavailable,
-                DbError::Overloaded => Error::DbOverload,
-                DbError::IsBootstrapping => Error::DbUnavailable,
-                DbError::ReadTimeout { .. } => Error::DbTimeout,
-                DbError::WriteTimeout { .. } => Error::DbTimeout,
-                _ => Error::DbError(format!("{e} {msg}")),
-            },
-            QueryError::BadQuery(e) => Error::DbError(e.to_string()),
-            QueryError::IoError(e) => Error::DbError(e.to_string()),
-            QueryError::ProtocolError(e) => Error::DbError(e.to_string()),
-            QueryError::InvalidMessage(e) => Error::DbError(e.to_string()),
-            QueryError::TimeoutError => Error::DbTimeout,
-            QueryError::TooManyOrphanedStreamIds(e) => Error::DbError(e.to_string()),
-            QueryError::UnableToAllocStreamId => Error::DbError(e.to_string()),
-            QueryError::RequestTimeout(e) => Error::DbError(e.to_string()),
-            QueryError::TranslationError(e) => Error::DbError(e.to_string()),
-        }
-    }
+#[derive(Clone, Debug)]
+pub enum ArrayValue {
+    I8(Vec<i8>),
+    I16(Vec<i16>),
+    I32(Vec<i32>),
+    F32(Vec<f32>),
+    F64(Vec<f64>),
+    Bool(Vec<bool>),
 }
 
-impl<T: IntoSimplerError> From<T> for Error {
-    fn from(e: T) -> Self {
-        e.into_simpler()
-    }
-}
-
-pub struct ScyInsertFut<'a> {
-    fut: Pin<Box<dyn Future<Output = Result<QueryResult, QueryError>> + Send + 'a>>,
-    polled: usize,
-    ts_create: Instant,
-    ts_poll_first: Instant,
-}
-
-impl<'a> ScyInsertFut<'a> {
-    const NAME: &'static str = "ScyInsertFut";
-
-    pub fn new<V>(scy: &'a ScySession, query: &'a PreparedStatement, values: V) -> Self
-    where
-        V: ValueList + Send + 'static,
-    {
-        let fut = scy.execute(query, values);
-        let fut = Box::pin(fut) as _;
-        let tsnow = Instant::now();
-        Self {
-            fut,
-            polled: 0,
-            ts_create: tsnow,
-            ts_poll_first: tsnow,
-        }
-    }
-}
-
-impl<'a> Future for ScyInsertFut<'a> {
-    type Output = Result<(), err::Error>;
-
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
-        use Poll::*;
-        if self.polled == 0 {
-            self.ts_poll_first = Instant::now();
-        }
-        self.polled += 1;
-        loop {
-            break match self.fut.poll_unpin(cx) {
-                Ready(k) => match k {
-                    Ok(_res) => Ready(Ok(())),
-                    Err(e) => {
-                        let tsnow = Instant::now();
-                        let dt_created = tsnow.duration_since(self.ts_create).as_secs_f32() * 1e3;
-                        let dt_poll_first = tsnow.duration_since(self.ts_poll_first).as_secs_f32() * 1e3;
-                        error!(
-                            "{}  polled {}  dt_created {:6.2} ms  dt_poll_first {:6.2} ms",
-                            Self::NAME,
-                            self.polled,
-                            dt_created,
-                            dt_poll_first
-                        );
-                        error!("{}  done Err  {:?}", Self::NAME, e);
-                        Ready(Err(e).err_conv())
-                    }
-                },
-                Pending => Pending,
-            };
-        }
-    }
+#[derive(Clone, Debug)]
+pub enum DataValue {
+    Scalar(ScalarValue),
+    Array(ArrayValue),
 }
 
 #[derive(Debug)]
@@ -267,7 +196,7 @@ pub struct InsertItem {
     pub pulse: u64,
     pub scalar_type: ScalarType,
     pub shape: Shape,
-    pub val: CaDataValue,
+    pub val: DataValue,
 }
 
 #[derive(Debug)]
@@ -415,11 +344,12 @@ where
         Ok(_) => Ok(()),
         Err(e) => match e {
             QueryError::TimeoutError => Err(Error::DbTimeout),
-            QueryError::DbError(e, msg) => match e {
+            // TODO use `msg`
+            QueryError::DbError(e, _msg) => match e {
                 DbError::Overloaded => Err(Error::DbOverload),
-                _ => Err(Error::DbError(format!("{e} {msg}"))),
+                _ => Err(e.into()),
             },
-            _ => Err(Error::DbError(format!("{e}"))),
+            _ => Err(e.into()),
         },
     }
 }
@@ -473,7 +403,7 @@ pub async fn insert_item(
             .await?;
         stats.inserts_msp_grid_inc();
     }
-    use CaDataValue::*;
+    use DataValue::*;
     match item.val {
         Scalar(val) => {
             let par = InsParCom {
@@ -483,7 +413,7 @@ pub async fn insert_item(
                 pulse: item.pulse,
                 ttl: ttl_0d.as_secs() as _,
             };
-            use CaDataScalarValue::*;
+            use ScalarValue::*;
             match val {
                 I8(val) => insert_scalar_gen(par, val, &data_store.qu_insert_scalar_i8, &data_store).await?,
                 I16(val) => insert_scalar_gen(par, val, &data_store.qu_insert_scalar_i16, &data_store).await?,
@@ -503,7 +433,7 @@ pub async fn insert_item(
                 pulse: item.pulse,
                 ttl: ttl_1d.as_secs() as _,
             };
-            use CaDataArrayValue::*;
+            use ArrayValue::*;
             match val {
                 I8(val) => insert_array_gen(par, val, &data_store.qu_insert_array_i8, &data_store).await?,
                 I16(val) => insert_array_gen(par, val, &data_store.qu_insert_array_i16, &data_store).await?,
