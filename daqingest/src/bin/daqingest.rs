@@ -19,9 +19,21 @@ pub fn main() -> Result<(), Error> {
             SubCmd::Bsread(k) => netfetch::zmtp::zmtp_client(k.into())
                 .await
                 .map_err(|e| Error::from(e.to_string()))?,
-            SubCmd::ListPkey => daqingest::query::list_pkey().await?,
-            SubCmd::ListPulses => daqingest::query::list_pulses().await?,
-            SubCmd::FetchEvents(k) => daqingest::query::fetch_events(k).await?,
+            SubCmd::ListPkey => {
+                // TODO must take scylla config from CLI
+                let scylla_conf = err::todoval();
+                scywr::tools::list_pkey(&scylla_conf).await?
+            }
+            SubCmd::ListPulses => {
+                // TODO must take scylla config from CLI
+                let scylla_conf = err::todoval();
+                scywr::tools::list_pulses(&scylla_conf).await?
+            }
+            SubCmd::FetchEvents(k) => {
+                // TODO must take scylla config from CLI
+                let scylla_conf = err::todoval();
+                scywr::tools::fetch_events(&k.backend, &k.channel, &scylla_conf).await?
+            }
             SubCmd::BsreadDump(k) => {
                 let mut f = netfetch::zmtp::dumper::BsreadDumper::new(k.source);
                 f.run().await.map_err(|e| Error::from(e.to_string()))?

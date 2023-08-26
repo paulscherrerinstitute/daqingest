@@ -55,11 +55,11 @@ impl CaIngestOpts {
         self.api_bind.clone().unwrap_or_else(|| "0.0.0.0:3011".into())
     }
 
-    pub fn postgresql(&self) -> &Database {
+    pub fn postgresql_config(&self) -> &Database {
         &self.postgresql
     }
 
-    pub fn scylla(&self) -> &ScyllaConfig {
+    pub fn scylla_config(&self) -> &ScyllaConfig {
         &self.scylla
     }
 

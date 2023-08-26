@@ -141,7 +141,7 @@ impl DbUpdateWorker {
 
 pub async fn ca_search(opts: CaIngestOpts, channels: &Vec<String>) -> Result<(), Error> {
     info!("ca_search begin");
-    crate::dbpg::schema_check(opts.postgresql()).await?;
+    crate::dbpg::schema_check(opts.postgresql_config()).await?;
     let mut addrs = Vec::new();
     for s in opts.search() {
         match resolve_address(s).await {
@@ -189,7 +189,7 @@ pub async fn ca_search(opts: CaIngestOpts, channels: &Vec<String>) -> Result<(),
 
     let mut dbworkers = Vec::new();
     for _ in 0..DB_WORKER_COUNT {
-        let w = DbUpdateWorker::new(dbrx.clone(), opts.backend().into(), opts.postgresql().clone());
+        let w = DbUpdateWorker::new(dbrx.clone(), opts.backend().into(), opts.postgresql_config().clone());
         dbworkers.push(w);
     }
     drop(dbrx);

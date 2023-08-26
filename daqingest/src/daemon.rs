@@ -1551,9 +1551,9 @@ pub async fn run(opts: CaIngestOpts, channels: Vec<String>) -> Result<(), Error>
     netfetch::linuxhelper::set_signal_handler(libc::SIGINT, handler_sigint)?;
     netfetch::linuxhelper::set_signal_handler(libc::SIGTERM, handler_sigterm)?;
 
-    netfetch::dbpg::schema_check(opts.postgresql()).await?;
+    netfetch::dbpg::schema_check(opts.postgresql_config()).await?;
 
-    scywr::schema::migrate_keyspace(opts.scylla())
+    scywr::schema::migrate_keyspace(opts.scylla_config())
         .await
         .map_err(|e| Error::with_msg_no_trace(e.to_string()))?;
 
@@ -1572,8 +1572,8 @@ pub async fn run(opts: CaIngestOpts, channels: Vec<String>) -> Result<(), Error>
         local_epics_hostname: opts.local_epics_hostname().into(),
         array_truncate: opts.array_truncate(),
         insert_item_queue_cap: opts.insert_item_queue_cap(),
-        pgconf: opts.postgresql().clone(),
-        scyconf: opts.scylla().clone(),
+        pgconf: opts.postgresql_config().clone(),
+        scyconf: opts.scylla_config().clone(),
         ttls: Ttls {
             index: opts.ttl_index(),
             d0: opts.ttl_d0(),
