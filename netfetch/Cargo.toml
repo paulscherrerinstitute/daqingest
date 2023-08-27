@@ -16,7 +16,6 @@ bytes = "1.4"
 arrayref = "0.3"
 byteorder = "1.4"
 futures-util = "0.3"
-tokio-postgres = "0.7.8"
 md-5 = "0.10"
 hex = "0.4"
 libc = "0.2"
@@ -33,6 +32,7 @@ lazy_static = "1"
 log = { path = "../log" }
 stats = { path = "../stats" }
 scywr = { path = "../scywr" }
+dbpg = { path = "../dbpg" }
 err = { path = "../../daqbuffer/crates/err" }
 netpod = { path = "../../daqbuffer/crates/netpod" }
 items_0 = { path = "../../daqbuffer/crates/items_0" }

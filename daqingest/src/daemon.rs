@@ -1553,9 +1553,13 @@ pub async fn run(opts: CaIngestOpts, channels: Vec<String>) -> Result<(), Error>
 
     netfetch::dbpg::schema_check(opts.postgresql_config()).await?;
 
-    scywr::schema::migrate_keyspace(opts.scylla_config())
+    scywr::schema::migrate_scylla_data_schema(opts.scylla_config())
         .await
         .map_err(|e| Error::with_msg_no_trace(e.to_string()))?;
+    info!("migrate_keyspace done");
+    if true {
+        return Ok(());
+    }
 
     // TODO use a new stats type:
     //let store_stats = Arc::new(CaConnStats::new());

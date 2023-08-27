@@ -1,0 +1,13 @@
+[package]
+name = "dbpg"
+version = "0.0.1"
+authors = ["Dominik Werder <dominik.werder@gmail.com>"]
+edition = "2021"
+
+[dependencies]
+log = { path = "../log" }
+err = { path = "../../daqbuffer/crates/err" }
+netpod = { path = "../../daqbuffer/crates/netpod" }
+taskrun = { path = "../../daqbuffer/crates/taskrun" }
+tokio-postgres = { version = "0.7.10", features = ["with-chrono-0_4"] }
+async-channel = "1.9.0"

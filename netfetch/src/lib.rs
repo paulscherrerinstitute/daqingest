@@ -5,7 +5,6 @@ pub mod bsreadclient;
 pub mod ca;
 pub mod conf;
 pub mod daemon_common;
-pub mod dbpg;
 pub mod errconv;
 pub mod insertworker;
 pub mod linuxhelper;

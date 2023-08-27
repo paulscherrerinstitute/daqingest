@@ -20,10 +20,9 @@ impl From<NewSessionError> for Error {
     }
 }
 
-pub async fn create_session(scyconf: &ScyllaConfig) -> Result<Arc<Session>, Error> {
+pub async fn create_session_no_ks(scyconf: &ScyllaConfig) -> Result<Arc<Session>, Error> {
     let scy = scylla::SessionBuilder::new()
         .known_nodes(&scyconf.hosts)
-        .use_keyspace(&scyconf.keyspace, true)
         .default_execution_profile_handle(
             ExecutionProfileBuilder::default()
                 .consistency(Consistency::LocalOne)
@@ -33,5 +32,13 @@ pub async fn create_session(scyconf: &ScyllaConfig) -> Result<Arc<Session>, Erro
         .build()
         .await?;
     let scy = Arc::new(scy);
+    Ok(scy)
+}
+
+pub async fn create_session(scyconf: &ScyllaConfig) -> Result<Arc<Session>, Error> {
+    let scy = create_session_no_ks(scyconf).await?;
+    scy.use_keyspace(&scyconf.keyspace, true)
+        .await
+        .map_err(|e| Error::NewSession(e.to_string()))?;
     Ok(scy)
 }

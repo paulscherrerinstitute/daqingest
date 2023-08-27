@@ -1,19 +1,19 @@
-use super::findioc::FindIocRes;
 use crate::ca::findioc::FindIocStream;
 use crate::conf::CaIngestOpts;
 use async_channel::Receiver;
 use async_channel::Sender;
+use dbpg::conn::PgClient;
+use dbpg::iocindex::IocItem;
+use dbpg::iocindex::IocSearchIndexWorker;
 use err::Error;
 use futures_util::StreamExt;
 use log::*;
-use netpod::Database;
 use std::net::IpAddr;
 use std::net::SocketAddr;
 use std::time::Duration;
 use std::time::Instant;
 use taskrun::tokio;
 use tokio::task::JoinHandle;
-use tokio_postgres::Client as PgClient;
 
 const DB_WORKER_COUNT: usize = 4;
 
@@ -59,89 +59,23 @@ struct DbUpdateWorker {
 }
 
 impl DbUpdateWorker {
-    fn new(rx: Receiver<FindIocRes>, backend: String, database: Database) -> Self {
-        let jh = tokio::spawn(Self::worker(rx, backend, database));
-        Self { jh }
-    }
-
-    async fn worker(rx: Receiver<FindIocRes>, backend: String, database: Database) {
-        let d = &database;
-        let (pg_client, pg_conn) = tokio_postgres::connect(
-            &format!("postgresql://{}:{}@{}:{}/{}", d.user, d.pass, d.host, d.port, d.name),
-            tokio_postgres::tls::NoTls,
-        )
-        .await
-        .unwrap();
-        let (pgconn_out_tx, pgconn_out_rx) = async_channel::bounded(16);
-        tokio::spawn(async move {
-            if let Err(e) = pgconn_out_tx.send(pg_conn.await).await {
-                error!("can not report status of pg conn {e}");
-            }
-        });
-        let pg_client: PgClient = pg_client;
-        let qu_select = {
-            let sql = "select channel, addr from ioc_by_channel_log where facility = $1 and channel = $2 and addr is not distinct from $3 and archived = 0";
-            pg_client.prepare(sql).await.unwrap()
-        };
-        let qu_update_tsmod = {
-            let sql = "update ioc_by_channel_log set tsmod = now(), responseaddr = $4 where facility = $1 and channel = $2 and addr is not distinct from $3 and archived = 0";
-            pg_client.prepare(sql).await.unwrap()
-        };
-        let qu_update_archived = {
-            let sql =
-                "update ioc_by_channel_log set archived = 1 where facility = $1 and channel = $2 and archived = 0";
-            pg_client.prepare(sql).await.unwrap()
-        };
-        let qu_insert = {
-            let sql = "insert into ioc_by_channel_log (facility, channel, addr, responseaddr) values ($1, $2, $3, $4)";
-            const TEXT: tokio_postgres::types::Type = tokio_postgres::types::Type::TEXT;
-            pg_client.prepare_typed(sql, &[TEXT, TEXT, TEXT, TEXT]).await.unwrap()
-        };
-        while let Ok(item) = rx.recv().await {
-            let responseaddr = item.response_addr.map(|x| x.to_string());
-            let addr = item.addr.map(|x| x.to_string());
-            let res = pg_client
-                .query(&qu_select, &[&backend, &item.channel, &addr])
-                .await
-                .unwrap();
-            if res.len() == 0 {
-                pg_client
-                    .execute(&qu_update_archived, &[&backend, &item.channel])
-                    .await
-                    .unwrap();
-                pg_client
-                    .execute(&qu_insert, &[&backend, &item.channel, &addr, &responseaddr])
-                    .await
-                    .unwrap();
-            } else if res.len() == 1 {
-                pg_client
-                    .execute(&qu_update_tsmod, &[&backend, &item.channel, &addr, &responseaddr])
-                    .await
-                    .unwrap();
-            } else {
-                warn!("Duplicate for {}", item.channel);
-                let sql = concat!(
-                    "with q1 as (select ctid from ioc_by_channel_log where facility = $1 and channel = $2 and addr is not distinct from $3 order by tsmod desc, ctid desc limit 1)",
-                    " update ioc_by_channel_log t set archived = 1 from q1 where t.facility = $1 and t.channel = $2 and t.ctid != q1.ctid and archived != 1",
-                );
-                pg_client.execute(sql, &[&backend, &item.channel, &addr]).await.unwrap();
-                pg_client
-                    .execute(&qu_update_tsmod, &[&backend, &item.channel, &addr, &responseaddr])
-                    .await
-                    .unwrap();
-            }
-        }
-        drop(pg_client);
-        let x = pgconn_out_rx.recv().await;
-        if let Err(e) = x {
-            error!("db worker sees: {e}");
-        }
+    async fn new(rx: Receiver<IocItem>, backend: String, pg: PgClient) -> Result<Self, Error> {
+        let worker = IocSearchIndexWorker::prepare(rx, backend, pg)
+            .await
+            .map_err(|e| Error::with_msg_no_trace(e.to_string()))?;
+        let jh = tokio::spawn(async move { worker.worker().await });
+        Ok(Self { jh })
     }
 }
 
 pub async fn ca_search(opts: CaIngestOpts, channels: &Vec<String>) -> Result<(), Error> {
     info!("ca_search begin");
-    crate::dbpg::schema_check(opts.postgresql_config()).await?;
+    let pg = dbpg::conn::make_pg_client(opts.postgresql_config())
+        .await
+        .map_err(|e| Error::with_msg_no_trace(e.to_string()))?;
+    dbpg::schema::schema_check(&pg)
+        .await
+        .map_err(|e| Error::with_msg_no_trace(e.to_string()))?;
     let mut addrs = Vec::new();
     for s in opts.search() {
         match resolve_address(s).await {
@@ -189,7 +123,10 @@ pub async fn ca_search(opts: CaIngestOpts, channels: &Vec<String>) -> Result<(),
 
     let mut dbworkers = Vec::new();
     for _ in 0..DB_WORKER_COUNT {
-        let w = DbUpdateWorker::new(dbrx.clone(), opts.backend().into(), opts.postgresql_config().clone());
+        let pg = dbpg::conn::make_pg_client(opts.postgresql_config())
+            .await
+            .map_err(|e| Error::with_msg_no_trace(e.to_string()))?;
+        let w = DbUpdateWorker::new(dbrx.clone(), opts.backend().into(), pg).await?;
         dbworkers.push(w);
     }
     drop(dbrx);
@@ -241,6 +178,7 @@ pub async fn ca_search(opts: CaIngestOpts, channels: &Vec<String>) -> Result<(),
             if do_block {
                 info!("blacklisting {item:?}");
             } else {
+                let item = IocItem::new(item.channel, item.response_addr, item.addr, item.dt);
                 match dbtx.send(item).await {
                     Ok(_) => {}
                     Err(_) => {
