@@ -1,5 +1,5 @@
 use async_channel::Receiver;
-use netpod::log::*;
+use log::*;
 use std::time::Duration;
 use taskrun::tokio;
 

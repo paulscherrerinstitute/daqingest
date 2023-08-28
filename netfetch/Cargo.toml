@@ -30,6 +30,7 @@ humantime-serde = "1.1"
 pin-project = "1"
 lazy_static = "1"
 log = { path = "../log" }
+series = { path = "../series" }
 stats = { path = "../stats" }
 scywr = { path = "../scywr" }
 dbpg = { path = "../dbpg" }

@@ -1,11 +1,12 @@
 use async_channel::Receiver;
 use async_channel::Sender;
 use async_channel::WeakReceiver;
+use dbpg::conn::make_pg_client;
+use dbpg::seriesbychannel::ChannelInfoQuery;
 use err::Error;
 use futures_util::FutureExt;
 use futures_util::StreamExt;
 use log::*;
-use netfetch::batchquery::series_by_channel::ChannelInfoQuery;
 use netfetch::ca::conn::CaConnEvent;
 use netfetch::ca::conn::ConnCommand;
 use netfetch::ca::connset::CaConnSet;
@@ -16,12 +17,8 @@ use netfetch::ca::SlowWarnable;
 use netfetch::conf::CaIngestOpts;
 use netfetch::daemon_common::Channel;
 use netfetch::daemon_common::DaemonEvent;
-use netfetch::errconv::ErrConv;
 use netfetch::metrics::ExtraInsertsConf;
 use netfetch::metrics::StatsSet;
-use netfetch::series::ChannelStatusSeriesId;
-use netfetch::series::Existence;
-use netfetch::series::SeriesId;
 use netpod::Database;
 use netpod::ScyllaConfig;
 use scywr::insertworker::Ttls;
@@ -34,6 +31,9 @@ use scywriiq::ConnectionStatus;
 use scywriiq::ConnectionStatusItem;
 use scywriiq::QueryItem;
 use serde::Serialize;
+use series::series::Existence;
+use series::ChannelStatusSeriesId;
+use series::SeriesId;
 use stats::DaemonStats;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
@@ -171,7 +171,7 @@ pub enum ActiveChannelState {
     },
     WaitForStatusSeriesId {
         since: SystemTime,
-        rx: Receiver<Result<Existence<SeriesId>, Error>>,
+        rx: Receiver<Result<Existence<SeriesId>, dbpg::seriesbychannel::Error>>,
     },
     WithStatusSeriesId {
         status_series_id: ChannelStatusSeriesId,
@@ -252,18 +252,6 @@ where
     }
 }
 
-pub async fn make_pg_client(d: &Database) -> Result<PgClient, Error> {
-    let (client, pg_conn) = tokio_postgres::connect(
-        &format!("postgresql://{}:{}@{}:{}/{}", d.user, d.pass, d.host, d.port, d.name),
-        tokio_postgres::tls::NoTls,
-    )
-    .await
-    .err_conv()?;
-    // TODO allow clean shutdown on ctrl-c and join the pg_conn in the end:
-    tokio::spawn(pg_conn);
-    Ok(client)
-}
-
 pub struct Daemon {
     opts: DaemonOpts,
     connection_states: BTreeMap<SocketAddrV4, CaConnState>,
@@ -303,14 +291,21 @@ impl Daemon {
         let pgcs = {
             let mut a = Vec::new();
             for _ in 0..SEARCH_DB_PIPELINE_LEN {
-                let pgc = Arc::new(make_pg_client(&opts.pgconf).await?);
+                let pgc = Arc::new(
+                    make_pg_client(&opts.pgconf)
+                        .await
+                        .map_err(|e| Error::with_msg_no_trace(e.to_string()))?,
+                );
                 a.push(pgc);
             }
             a
         };
         let (search_tx, ioc_finder_jh) = Self::start_finder(tx.clone(), opts.backend().into(), pgcs);
 
-        let channel_info_query_tx = netfetch::batchquery::series_by_channel::start_task(&opts.pgconf).await?;
+        // TODO keep join handles and await later
+        let (channel_info_query_tx, ..) = dbpg::seriesbychannel::start_lookup_workers(4, &opts.pgconf)
+            .await
+            .map_err(|e| Error::with_msg_no_trace(e.to_string()))?;
 
         let common_insert_item_queue = Arc::new(CommonInsertItemQueue::new(opts.insert_item_queue_cap));
         let common_insert_item_queue_2 = Arc::new(CommonInsertItemQueue::new(opts.insert_item_queue_cap));
@@ -539,7 +534,7 @@ impl Daemon {
         }
         let (qtx, qrx) = async_channel::bounded(CURRENT_SEARCH_PENDING_MAX);
         let fut = async move {
-            let (batch_rx, _jh) = netfetch::batcher::batch(
+            let (batch_rx, _jh) = batchtools::batcher::batch(
                 SEARCH_BATCH_MAX,
                 Duration::from_millis(200),
                 SEARCH_DB_PIPELINE_LEN,
@@ -979,7 +974,7 @@ impl Daemon {
                                         if let Some(tx) = self.ingest_commons.insert_item_queue.sender() {
                                             let item = QueryItem::ChannelStatus(ChannelStatusItem {
                                                 ts: tsnow,
-                                                series: scywr::iteminsertqueue::SeriesId::new(status_series_id.id()),
+                                                series: SeriesId::new(status_series_id.id()),
                                                 status: ChannelStatus::AssignedToAddress,
                                             });
                                             match tx.send(item).await {
@@ -1551,7 +1546,13 @@ pub async fn run(opts: CaIngestOpts, channels: Vec<String>) -> Result<(), Error>
     netfetch::linuxhelper::set_signal_handler(libc::SIGINT, handler_sigint)?;
     netfetch::linuxhelper::set_signal_handler(libc::SIGTERM, handler_sigterm)?;
 
-    netfetch::dbpg::schema_check(opts.postgresql_config()).await?;
+    let pg = dbpg::conn::make_pg_client(opts.postgresql_config())
+        .await
+        .map_err(|e| Error::with_msg_no_trace(e.to_string()))?;
+
+    dbpg::schema::schema_check(&pg)
+        .await
+        .map_err(|e| Error::with_msg_no_trace(e.to_string()))?;
 
     scywr::schema::migrate_scylla_data_schema(opts.scylla_config())
         .await

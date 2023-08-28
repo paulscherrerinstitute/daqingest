@@ -1,5 +1,3 @@
-pub mod batcher;
-pub mod batchquery;
 pub mod bsread;
 pub mod bsreadclient;
 pub mod ca;
@@ -12,7 +10,6 @@ pub mod metrics;
 pub mod netbuf;
 pub mod patchcollect;
 pub mod rt;
-pub mod series;
 #[cfg(test)]
 pub mod test;
 pub mod timebin;

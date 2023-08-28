@@ -4,15 +4,12 @@ use super::proto::CaMsg;
 use super::proto::CaMsgTy;
 use super::proto::CaProto;
 use super::ExtraInsertsConf;
-use crate::batchquery::series_by_channel::ChannelInfoQuery;
 use crate::bsread::ChannelDescDecoded;
 use crate::ca::proto::CreateChan;
 use crate::ca::proto::EventAdd;
-use crate::series::ChannelStatusSeriesId;
-use crate::series::Existence;
-use crate::series::SeriesId;
 use crate::timebin::ConnTimeBin;
 use async_channel::Sender;
+use dbpg::seriesbychannel::ChannelInfoQuery;
 use err::Error;
 use futures_util::stream::FuturesUnordered;
 use futures_util::Future;
@@ -39,6 +36,9 @@ use scywriiq::IvlItem;
 use scywriiq::MuteItem;
 use scywriiq::QueryItem;
 use serde::Serialize;
+use series::series::Existence;
+use series::ChannelStatusSeriesId;
+use series::SeriesId;
 use stats::CaConnStats;
 use stats::IntervalEma;
 use std::collections::BTreeMap;
@@ -764,7 +764,7 @@ impl CaConn {
                 ChannelState::Created(series, ..) => {
                     let item = QueryItem::ChannelStatus(ChannelStatusItem {
                         ts: SystemTime::now(),
-                        series: series.into(),
+                        series: series.clone(),
                         status: ChannelStatus::Closed(channel_reason.clone()),
                     });
                     self.insert_item_queue.push_back(item);
@@ -897,7 +897,7 @@ impl CaConn {
                         st.info_store_msp_last = msp;
                         let item = QueryItem::ChannelInfo(ChannelInfoItem {
                             ts_msp: msp,
-                            series: series.into(),
+                            series: series.clone(),
                             ivl: st.item_recv_ivl_ema.ema().ema(),
                             interest: 0.,
                             evsize: 0,
@@ -1277,7 +1277,7 @@ impl CaConn {
                         st.insert_recv_ivl_last = tsnow;
                         let ema = st.insert_item_ivl_ema.ema();
                         let item = IvlItem {
-                            series: (&series).into(),
+                            series: series.clone(),
                             ts,
                             ema: ema.ema(),
                             emd: ema.emv().sqrt(),
@@ -1287,7 +1287,7 @@ impl CaConn {
                     if false && st.muted_before == 0 {
                         let ema = st.insert_item_ivl_ema.ema();
                         let item = MuteItem {
-                            series: series.into(),
+                            series: series.clone(),
                             ts,
                             ema: ema.ema(),
                             emd: ema.emv().sqrt(),
@@ -1496,7 +1496,7 @@ impl CaConn {
                                         match rx.recv().await {
                                             Ok(item) => match item {
                                                 Ok(item) => Ok((cid, sid, k.data_type, k.data_count, item)),
-                                                Err(e) => Err(e),
+                                                Err(e) => Err(Error::with_msg_no_trace(e.to_string())),
                                             },
                                             Err(e) => {
                                                 // TODO count only

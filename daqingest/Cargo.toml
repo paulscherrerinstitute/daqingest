@@ -20,4 +20,7 @@ taskrun = { path = "../../daqbuffer/crates/taskrun" }
 log = { path = "../log" }
 stats = { path = "../stats" }
 scywr = { path = "../scywr" }
+dbpg = { path = "../dbpg" }
+series = { path = "../series" }
 netfetch = { path = "../netfetch" }
+batchtools = { path = "../batchtools" }

@@ -2,7 +2,6 @@ use crate::ca::proto;
 use crate::ca::proto::CaDataValue;
 use crate::ca::proto::CaEventValue;
 use crate::patchcollect::PatchCollect;
-use crate::series::SeriesId;
 use err::Error;
 use items_0::scalar_ops::ScalarOps;
 use items_0::timebin::TimeBinner;
@@ -21,6 +20,7 @@ use netpod::Shape;
 use netpod::TsNano;
 use scywr::iteminsertqueue::QueryItem;
 use scywr::iteminsertqueue::TimeBinPatchSimpleF32;
+use series::SeriesId;
 use std::any;
 use std::any::Any;
 use std::collections::VecDeque;
@@ -187,8 +187,7 @@ fn store_patch(series: SeriesId, pc: &mut PatchCollect, iiq: &mut VecDeque<Query
             let off_msp = off / 1000;
             let off_lsp = off % 1000;
             let item = TimeBinPatchSimpleF32 {
-                // TODO use the same SeriesId type
-                series: (&series).into(),
+                series: series.clone(),
                 bin_len_sec: (pc.bin_len().ns() / SEC) as u32,
                 bin_count: pc.bin_count() as u32,
                 off_msp: off_msp as u32,
@@ -264,7 +263,7 @@ where
                                 // TODO
                                 //let off_msp =
                                 let item = TimeBinPatchSimpleF32 {
-                                    series: (&params.series).into(),
+                                    series: params.series.clone(),
                                     bin_len_sec: (pc.bin_len().ns() / SEC) as u32,
                                     bin_count: pc.bin_count() as u32,
                                     off_msp: 0,

@@ -9,6 +9,7 @@ use netpod::Shape;
 use scylla::prepared_statement::PreparedStatement;
 use scylla::transport::errors::DbError;
 use scylla::transport::errors::QueryError;
+use series::SeriesId;
 use stats::CaConnStats;
 use std::net::SocketAddrV4;
 use std::time::Duration;
@@ -21,19 +22,6 @@ pub enum Error {
     DbUnavailable,
     DbError(#[from] DbError),
     QueryError(#[from] QueryError),
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct SeriesId(u64);
-
-impl SeriesId {
-    pub fn new(id: u64) -> Self {
-        Self(id)
-    }
-
-    pub fn id(&self) -> u64 {
-        self.0
-    }
 }
 
 #[derive(Clone, Debug)]

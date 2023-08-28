@@ -1,0 +1,9 @@
+[package]
+name = "series"
+version = "0.0.1"
+authors = ["Dominik Werder <dominik.werder@gmail.com>"]
+edition = "2021"
+
+[dependencies]
+log = { path = "../log" }
+serde = { version = "1.0", features = ["derive"] }

@@ -1,6 +1,22 @@
 use crate::conn::PgClient;
-use crate::err::Error;
+use err::thiserror;
+use err::ThisError;
 use log::*;
+
+#[derive(Debug, ThisError)]
+pub enum Error {
+    Postgres(#[from] tokio_postgres::Error),
+    LogicError(String),
+}
+
+impl Error {
+    pub fn from_logic_msg<T>(msg: T) -> Self
+    where
+        T: Into<String>,
+    {
+        Self::LogicError(msg.into())
+    }
+}
 
 async fn has_column(table: &str, column: &str, pgc: &PgClient) -> Result<bool, Error> {
     let rows = pgc
@@ -16,12 +32,15 @@ async fn has_column(table: &str, column: &str, pgc: &PgClient) -> Result<bool, E
         } else if c == 1 {
             Ok(true)
         } else {
-            Err(Error::from_msg(format!("has_columns bad count {}", c)))
+            Err(Error::from_logic_msg(format!("has_columns bad count {}", c)))
         }
     } else if rows.len() == 0 {
         Ok(false)
     } else {
-        Err(Error::from_msg(format!("has_columns bad row count {}", rows.len())))
+        Err(Error::from_logic_msg(format!(
+            "has_columns bad row count {}",
+            rows.len()
+        )))
     }
 }
 

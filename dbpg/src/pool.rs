@@ -14,7 +14,6 @@ pub enum Error {
     EndOfPool,
     ChannelRecv(#[from] RecvError),
     ChannelSend,
-    Msg(String),
 }
 
 impl From<crate::err::Error> for Error {
@@ -22,7 +21,6 @@ impl From<crate::err::Error> for Error {
         type G = crate::err::Error;
         match value {
             G::Postgres(e) => Error::Postgres(e),
-            G::Msg(e) => Error::Msg(e.0),
         }
     }
 }

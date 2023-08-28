@@ -23,12 +23,3 @@ impl<T> ErrConv<T> for Result<T, RecvError> {
         }
     }
 }
-
-impl<T> ErrConv<T> for Result<T, tokio_postgres::Error> {
-    fn err_conv(self) -> Result<T, Error> {
-        match self {
-            Ok(k) => Ok(k),
-            Err(e) => Err(Error::with_msg_no_trace(format!("{e:?}"))),
-        }
-    }
-}
