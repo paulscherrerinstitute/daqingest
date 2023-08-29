@@ -1,6 +1,8 @@
 pub use netpod::CONNECTION_STATUS_DIV;
 
 use crate::store::DataStore;
+use async_channel::Receiver;
+use async_channel::Sender;
 use err::thiserror;
 use err::ThisError;
 use log::*;
@@ -12,6 +14,7 @@ use scylla::transport::errors::QueryError;
 use series::SeriesId;
 use stats::CaConnStats;
 use std::net::SocketAddrV4;
+use std::sync::Mutex;
 use std::time::Duration;
 use std::time::SystemTime;
 
@@ -253,15 +256,22 @@ impl CommonInsertItemQueueSender {
 }
 
 pub struct CommonInsertItemQueue {
-    sender: std::sync::Mutex<Option<async_channel::Sender<QueryItem>>>,
-    recv: async_channel::Receiver<QueryItem>,
+    sender: Mutex<Option<Sender<QueryItem>>>,
+    recv: Receiver<QueryItem>,
 }
 
 impl CommonInsertItemQueue {
     pub fn new(cap: usize) -> Self {
         let (tx, rx) = async_channel::bounded(cap);
         Self {
-            sender: std::sync::Mutex::new(Some(tx)),
+            sender: Mutex::new(Some(tx)),
+            recv: rx,
+        }
+    }
+
+    pub fn from_tx_rx(tx: Sender<QueryItem>, rx: Receiver<QueryItem>) -> Self {
+        Self {
+            sender: Mutex::new(Some(tx)),
             recv: rx,
         }
     }
@@ -276,7 +286,7 @@ impl CommonInsertItemQueue {
         }
     }
 
-    pub fn receiver(&self) -> Option<async_channel::Receiver<QueryItem>> {
+    pub fn receiver(&self) -> Option<Receiver<QueryItem>> {
         let ret = self.recv.clone();
         Some(ret)
     }

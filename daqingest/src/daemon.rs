@@ -1,3 +1,6 @@
+pub mod inserthook;
+pub mod types;
+
 use async_channel::Receiver;
 use async_channel::Sender;
 use async_channel::WeakReceiver;
@@ -51,6 +54,7 @@ use tokio_postgres::Client as PgClient;
 use tokio_postgres::Row as PgRow;
 use tracing::info_span;
 use tracing::Instrument;
+use types::*;
 
 const SEARCH_BATCH_MAX: usize = 256;
 const CURRENT_SEARCH_PENDING_MAX: usize = SEARCH_BATCH_MAX * 4;
@@ -86,7 +90,7 @@ static SEARCH_ANS_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 #[allow(unused)]
 macro_rules! debug_batch {
-    (D$($arg:tt)*) => ();
+    // (D$($arg:tt)*) => ();
     ($($arg:tt)*) => (if false {
         info!($($arg)*);
     });
@@ -94,25 +98,10 @@ macro_rules! debug_batch {
 
 #[allow(unused)]
 macro_rules! trace_batch {
-    (D$($arg:tt)*) => ();
+    // (D$($arg:tt)*) => ();
     ($($arg:tt)*) => (if false {
         trace!($($arg)*);
     });
-}
-
-#[allow(non_snake_case)]
-mod serde_Instant {
-    use serde::Serializer;
-    use std::time::Instant;
-
-    #[allow(unused)]
-    pub fn serialize<S>(val: &Instant, ser: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        let dur = val.elapsed();
-        ser.serialize_u64(dur.as_secs() * 1000 + dur.subsec_millis() as u64)
-    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -287,7 +276,7 @@ impl Daemon {
             .await
             .map_err(|e| Error::with_msg_no_trace(e.to_string()))?;
         let datastore = Arc::new(datastore);
-        let (tx, rx) = async_channel::bounded(32);
+        let (tx, rx_daemon_ev) = async_channel::bounded(32);
         let pgcs = {
             let mut a = Vec::new();
             for _ in 0..SEARCH_DB_PIPELINE_LEN {
@@ -308,79 +297,12 @@ impl Daemon {
             .map_err(|e| Error::with_msg_no_trace(e.to_string()))?;
 
         let common_insert_item_queue = Arc::new(CommonInsertItemQueue::new(opts.insert_item_queue_cap));
-        let common_insert_item_queue_2 = Arc::new(CommonInsertItemQueue::new(opts.insert_item_queue_cap));
+        // let common_insert_item_queue_2 = Arc::new(CommonInsertItemQueue::new(opts.insert_item_queue_cap));
         let insert_queue_counter = Arc::new(AtomicUsize::new(0));
 
         // Insert queue hook
-        if true {
-            tokio::spawn({
-                let rx = common_insert_item_queue
-                    .receiver()
-                    .ok_or_else(|| Error::with_msg_no_trace("can not derive receiver for insert queue adapter"))?;
-                let tx = common_insert_item_queue_2
-                    .sender()
-                    .ok_or_else(|| Error::with_msg_no_trace("can not derive sender for insert queue adapter"))?;
-                let insert_queue_counter = insert_queue_counter.clone();
-                let common_insert_item_queue_2 = common_insert_item_queue_2.clone();
-                async move {
-                    let mut printed_last = Instant::now();
-                    let mut histo = BTreeMap::new();
-                    while let Ok(item) = rx.recv().await {
-                        insert_queue_counter.fetch_add(1, atomic::Ordering::AcqRel);
-                        //trace!("insert queue item {item:?}");
-                        match &item {
-                            QueryItem::Insert(item) => {
-                                let shape_kind = match &item.shape {
-                                    netpod::Shape::Scalar => 0 as u32,
-                                    netpod::Shape::Wave(_) => 1,
-                                    netpod::Shape::Image(_, _) => 2,
-                                };
-                                histo
-                                    .entry(item.series.clone())
-                                    .and_modify(|(c, msp, lsp, pulse, _shape_kind)| {
-                                        *c += 1;
-                                        *msp = item.ts_msp;
-                                        *lsp = item.ts_lsp;
-                                        *pulse = item.pulse;
-                                        // TODO should check that shape_kind stays the same.
-                                    })
-                                    .or_insert((0 as usize, item.ts_msp, item.ts_lsp, item.pulse, shape_kind));
-                            }
-                            _ => {}
-                        }
-                        match tx.send(item).await {
-                            Ok(_) => {}
-                            Err(e) => {
-                                error!("insert queue hook send {e}");
-                                break;
-                            }
-                        }
-                        let tsnow = Instant::now();
-                        if tsnow.duration_since(printed_last) >= PRINT_ACTIVE_INTERVAL {
-                            printed_last = tsnow;
-                            let mut all: Vec<_> = histo
-                                .iter()
-                                .map(|(k, (c, msp, lsp, pulse, shape_kind))| {
-                                    (usize::MAX - *c, k.clone(), *msp, *lsp, *pulse, *shape_kind)
-                                })
-                                .collect();
-                            all.sort_unstable();
-                            info!("Active scalar");
-                            for (c, sid, msp, lsp, pulse, _shape_kind) in all.iter().filter(|x| x.5 == 0).take(6) {
-                                info!("{:10}  {:20}  {:14}  {:20}  {:?}", usize::MAX - c, msp, lsp, pulse, sid);
-                            }
-                            info!("Active wave");
-                            for (c, sid, msp, lsp, pulse, _shape_kind) in all.iter().filter(|x| x.5 == 1).take(6) {
-                                info!("{:10}  {:20}  {:14}  {:20}  {:?}", usize::MAX - c, msp, lsp, pulse, sid);
-                            }
-                            histo.clear();
-                        }
-                    }
-                    info!("insert queue adapter ended");
-                    common_insert_item_queue_2.drop_sender();
-                }
-            });
-        }
+        let rx = inserthook::active_channel_insert_hook(common_insert_item_queue.receiver().unwrap());
+        let common_insert_item_queue_2 = rx;
 
         let ingest_commons = IngestCommons {
             pgconf: Arc::new(opts.pgconf.clone()),
@@ -416,8 +338,6 @@ impl Daemon {
         let insert_scylla_sessions = 1;
         let insert_worker_count = 1000;
         let use_rate_limit_queue = false;
-
-        let insert_rx_weak = common_insert_item_queue_2.receiver().unwrap().downgrade();
 
         // TODO use a new stats type:
         let store_stats = Arc::new(stats::CaConnStats::new());
@@ -473,7 +393,7 @@ impl Daemon {
             connection_states: BTreeMap::new(),
             channel_states: BTreeMap::new(),
             tx,
-            rx,
+            rx: rx_daemon_ev,
             chan_check_next: None,
             search_tx,
             ioc_finder_jh,
@@ -492,7 +412,7 @@ impl Daemon {
             caconn_last_channel_check: Instant::now(),
             stats: Arc::new(DaemonStats::new()),
             shutting_down: false,
-            insert_rx_weak,
+            insert_rx_weak: common_insert_item_queue_2.downgrade(),
             channel_info_query_tx,
         };
         Ok(ret)

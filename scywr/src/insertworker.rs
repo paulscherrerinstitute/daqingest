@@ -1,9 +1,10 @@
 use crate::iteminsertqueue::insert_channel_status;
 use crate::iteminsertqueue::insert_connection_status;
 use crate::iteminsertqueue::insert_item;
-use crate::iteminsertqueue::CommonInsertItemQueue;
 use crate::iteminsertqueue::QueryItem;
 use crate::store::DataStore;
+use async_channel::Receiver;
+use async_channel::Sender;
 use err::Error;
 use log::*;
 use netpod::timeunits::MS;
@@ -69,77 +70,80 @@ pub struct InsertWorkerOpts {
     pub insert_frac: Arc<AtomicU64>,
 }
 
+async fn rate_limiter_worker(
+    rate: Arc<AtomicU64>,
+    inp: Receiver<QueryItem>,
+    tx: Sender<QueryItem>,
+    stats: Arc<stats::CaConnStats>,
+) {
+    let mut ts_forward_last = Instant::now();
+    let mut ivl_ema = stats::Ema64::with_k(0.00001);
+    loop {
+        let item = if let Ok(x) = inp.recv().await {
+            x
+        } else {
+            break;
+        };
+        let ts_received = Instant::now();
+        let allowed_to_drop = match &item {
+            QueryItem::Insert(_) => true,
+            _ => false,
+        };
+        let dt_min = {
+            let rate2 = rate.load(Ordering::Acquire);
+            Duration::from_nanos(SEC / rate2)
+        };
+        let mut ema2 = ivl_ema.clone();
+        {
+            let dt = ts_received.duration_since(ts_forward_last);
+            let dt_ns = SEC * dt.as_secs() + dt.subsec_nanos() as u64;
+            ema2.update(dt_ns.min(MS * 100) as f32);
+        }
+        let ivl2 = Duration::from_nanos(ema2.ema() as u64);
+        if allowed_to_drop && ivl2 < dt_min {
+            //tokio::time::sleep_until(ts_recv_last.checked_add(dt_min).unwrap().into()).await;
+            stats.store_worker_ratelimit_drop_inc();
+        } else {
+            if tx.send(item).await.is_err() {
+                break;
+            } else {
+                let tsnow = Instant::now();
+                let dt = tsnow.duration_since(ts_forward_last);
+                let dt_ns = SEC * dt.as_secs() + dt.subsec_nanos() as u64;
+                ivl_ema.update(dt_ns.min(MS * 100) as f32);
+                ts_forward_last = tsnow;
+                stats.inter_ivl_ema.store(ivl_ema.ema() as u64, Ordering::Release);
+            }
+        }
+    }
+    info!("rate limiter done");
+}
+
+fn rate_limiter(
+    inp: Receiver<QueryItem>,
+    opts: Arc<InsertWorkerOpts>,
+    stats: Arc<stats::CaConnStats>,
+) -> Receiver<QueryItem> {
+    let (tx, rx) = async_channel::bounded(inp.capacity().unwrap_or(256));
+    tokio::spawn(rate_limiter_worker(opts.store_workers_rate.clone(), inp, tx, stats));
+    rx
+}
+
 pub async fn spawn_scylla_insert_workers(
     scyconf: ScyllaConfig,
     insert_scylla_sessions: usize,
     insert_worker_count: usize,
-    insert_item_queue: Arc<CommonInsertItemQueue>,
+    item_inp: Receiver<QueryItem>,
     insert_worker_opts: Arc<InsertWorkerOpts>,
     store_stats: Arc<stats::CaConnStats>,
     use_rate_limit_queue: bool,
     ttls: Ttls,
 ) -> Result<Vec<JoinHandle<()>>, Error> {
-    let (q2_tx, q2_rx) = async_channel::bounded(
-        insert_item_queue
-            .receiver()
-            .map_or(20000, |x| x.capacity().unwrap_or(20000)),
-    );
-    {
-        let insert_worker_opts = insert_worker_opts.clone();
-        let stats = store_stats.clone();
-        let recv = insert_item_queue
-            .receiver()
-            .ok_or_else(|| Error::with_msg_no_trace("can not derive insert queue receiver"))?;
-        let store_stats = store_stats.clone();
-        let fut = async move {
-            if !use_rate_limit_queue {
-                return;
-            }
-            let mut ts_forward_last = Instant::now();
-            let mut ivl_ema = stats::Ema64::with_k(0.00001);
-            loop {
-                let item = if let Ok(x) = recv.recv().await {
-                    x
-                } else {
-                    break;
-                };
-                let ts_received = Instant::now();
-                let allowed_to_drop = match &item {
-                    QueryItem::Insert(_) => true,
-                    _ => false,
-                };
-                let dt_min = {
-                    let rate = insert_worker_opts.store_workers_rate.load(Ordering::Acquire);
-                    Duration::from_nanos(SEC / rate)
-                };
-                let mut ema2 = ivl_ema.clone();
-                {
-                    let dt = ts_received.duration_since(ts_forward_last);
-                    let dt_ns = SEC * dt.as_secs() + dt.subsec_nanos() as u64;
-                    ema2.update(dt_ns.min(MS * 100) as f32);
-                }
-                let ivl2 = Duration::from_nanos(ema2.ema() as u64);
-                if allowed_to_drop && ivl2 < dt_min {
-                    //tokio::time::sleep_until(ts_recv_last.checked_add(dt_min).unwrap().into()).await;
-                    stats.store_worker_ratelimit_drop_inc();
-                } else {
-                    if q2_tx.send(item).await.is_err() {
-                        break;
-                    } else {
-                        let tsnow = Instant::now();
-                        let dt = tsnow.duration_since(ts_forward_last);
-                        let dt_ns = SEC * dt.as_secs() + dt.subsec_nanos() as u64;
-                        ivl_ema.update(dt_ns.min(MS * 100) as f32);
-                        ts_forward_last = tsnow;
-                        store_stats.inter_ivl_ema.store(ivl_ema.ema() as u64, Ordering::Release);
-                    }
-                }
-            }
-            info!("intermediate queue done");
-        };
-        tokio::spawn(fut);
-    }
-
+    let item_inp = if use_rate_limit_queue {
+        rate_limiter(item_inp, insert_worker_opts.clone(), store_stats.clone())
+    } else {
+        item_inp
+    };
     let mut jhs = Vec::new();
     let mut data_stores = Vec::new();
     for _ in 0..insert_scylla_sessions {
@@ -147,15 +151,9 @@ pub async fn spawn_scylla_insert_workers(
         data_stores.push(data_store);
     }
     for worker_ix in 0..insert_worker_count {
+        let item_inp = item_inp.clone();
         let data_store = data_stores[worker_ix * data_stores.len() / insert_worker_count].clone();
         let stats = store_stats.clone();
-        let recv = if use_rate_limit_queue {
-            q2_rx.clone()
-        } else {
-            insert_item_queue
-                .receiver()
-                .ok_or_else(|| Error::with_msg_no_trace("can not derive receiver"))?
-        };
         let insert_worker_opts = insert_worker_opts.clone();
         let fut = async move {
             insert_worker_opts
@@ -165,7 +163,7 @@ pub async fn spawn_scylla_insert_workers(
             let mut backoff = backoff_0.clone();
             let mut i1 = 0;
             loop {
-                let item = if let Ok(item) = recv.recv().await {
+                let item = if let Ok(item) = item_inp.recv().await {
                     stats.store_worker_item_recv_inc();
                     item
                 } else {
