@@ -51,6 +51,7 @@ use std::time::Duration;
 use std::time::Instant;
 use std::time::SystemTime;
 use taskrun::tokio;
+use tokio::task::JoinHandle;
 use tokio_postgres::Client as PgClient;
 use tokio_postgres::Row as PgRow;
 use tracing::info_span;
@@ -234,7 +235,7 @@ pub struct Daemon {
     rx: Receiver<DaemonEvent>,
     chan_check_next: Option<Channel>,
     search_tx: Sender<String>,
-    ioc_finder_jh: tokio::task::JoinHandle<()>,
+    ioc_finder_jh: JoinHandle<Result<(), Error>>,
     datastore: Arc<DataStore>,
     common_insert_item_queue: Arc<CommonInsertItemQueue>,
     insert_queue_counter: Arc<AtomicUsize>,
@@ -245,7 +246,7 @@ pub struct Daemon {
     count_unassigned: usize,
     count_assigned: usize,
     last_status_print: SystemTime,
-    insert_workers_jh: Vec<tokio::task::JoinHandle<()>>,
+    insert_workers_jh: Vec<JoinHandle<()>>,
     ingest_commons: Arc<IngestCommons>,
     caconn_last_channel_check: Instant,
     stats: Arc<DaemonStats>,
@@ -256,25 +257,12 @@ pub struct Daemon {
 
 impl Daemon {
     pub async fn new(opts: DaemonOpts) -> Result<Self, Error> {
-        // let pg_client = Arc::new(make_pg_client(&opts.pgconf).await?);
         let datastore = DataStore::new(&opts.scyconf)
             .await
             .map_err(|e| Error::with_msg_no_trace(e.to_string()))?;
         let datastore = Arc::new(datastore);
         let (tx, rx_daemon_ev) = async_channel::bounded(32);
-        let pgcs = {
-            let mut a = Vec::new();
-            for _ in 0..SEARCH_DB_PIPELINE_LEN {
-                let pgc = Arc::new(
-                    make_pg_client(&opts.pgconf)
-                        .await
-                        .map_err(|e| Error::with_msg_no_trace(e.to_string()))?,
-                );
-                a.push(pgc);
-            }
-            a
-        };
-        let (search_tx, ioc_finder_jh) = Self::start_finder(tx.clone(), opts.backend().into(), pgcs);
+        let (search_tx, ioc_finder_jh) = finder::start_finder(tx.clone(), opts.backend().into(), opts.pgconf.clone());
 
         // TODO keep join handles and await later
         let (channel_info_query_tx, ..) = dbpg::seriesbychannel::start_lookup_workers(4, &opts.pgconf)
@@ -401,14 +389,6 @@ impl Daemon {
             channel_info_query_tx,
         };
         Ok(ret)
-    }
-
-    fn start_finder(
-        tx: Sender<DaemonEvent>,
-        backend: String,
-        pgcs: Vec<Arc<PgClient>>,
-    ) -> (Sender<String>, tokio::task::JoinHandle<()>) {
-        finder::start_finder(tx, backend, pgcs)
     }
 
     #[allow(unused)]
