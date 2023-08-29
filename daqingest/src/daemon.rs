@@ -398,59 +398,102 @@ impl Daemon {
         Ok(())
     }
 
-    async fn check_channel_states(&mut self) -> Result<(), Error> {
+    fn update_channel_state_counts(&mut self) -> (u64,) {
+        let mut unknown_address_count = 0;
+        let mut with_address_count = 0;
         let mut search_pending_count = 0;
-        {
-            let mut unknown_address_count = 0;
-            let mut with_address_count = 0;
-            let mut no_address_count = 0;
-            for (_ch, st) in &self.channel_states {
-                match &st.value {
-                    ChannelStateValue::Active(st2) => match st2 {
-                        ActiveChannelState::Init { .. } => {
-                            unknown_address_count += 1;
-                        }
-                        ActiveChannelState::WaitForStatusSeriesId { .. } => {
-                            unknown_address_count += 1;
-                        }
-                        ActiveChannelState::WithStatusSeriesId { state, .. } => match &state.inner {
-                            WithStatusSeriesIdStateInner::UnknownAddress { .. } => {
-                                unknown_address_count += 1;
-                            }
-                            WithStatusSeriesIdStateInner::SearchPending { .. } => {
-                                search_pending_count += 1;
-                            }
-                            WithStatusSeriesIdStateInner::WithAddress { state, .. } => match state {
-                                WithAddressState::Unassigned { .. } => {
-                                    with_address_count += 1;
-                                }
-                                WithAddressState::Assigned(_) => {
-                                    with_address_count += 1;
-                                }
-                            },
-                            WithStatusSeriesIdStateInner::NoAddress { .. } => {
-                                no_address_count += 1;
-                            }
-                        },
-                    },
-                    ChannelStateValue::ToRemove { .. } => {
+        let mut no_address_count = 0;
+        for (_ch, st) in &self.channel_states {
+            match &st.value {
+                ChannelStateValue::Active(st2) => match st2 {
+                    ActiveChannelState::Init { .. } => {
                         unknown_address_count += 1;
                     }
+                    ActiveChannelState::WaitForStatusSeriesId { .. } => {
+                        unknown_address_count += 1;
+                    }
+                    ActiveChannelState::WithStatusSeriesId { state, .. } => match &state.inner {
+                        WithStatusSeriesIdStateInner::UnknownAddress { .. } => {
+                            unknown_address_count += 1;
+                        }
+                        WithStatusSeriesIdStateInner::SearchPending { .. } => {
+                            search_pending_count += 1;
+                        }
+                        WithStatusSeriesIdStateInner::WithAddress { state, .. } => match state {
+                            WithAddressState::Unassigned { .. } => {
+                                with_address_count += 1;
+                            }
+                            WithAddressState::Assigned(_) => {
+                                with_address_count += 1;
+                            }
+                        },
+                        WithStatusSeriesIdStateInner::NoAddress { .. } => {
+                            no_address_count += 1;
+                        }
+                    },
+                },
+                ChannelStateValue::ToRemove { .. } => {
+                    unknown_address_count += 1;
                 }
             }
-            self.stats
-                .channel_unknown_address
-                .store(unknown_address_count, atomic::Ordering::Release);
-            self.stats
-                .channel_with_address
-                .store(with_address_count, atomic::Ordering::Release);
-            self.stats
-                .channel_search_pending
-                .store(search_pending_count as u64, atomic::Ordering::Release);
-            self.stats
-                .channel_no_address
-                .store(no_address_count, atomic::Ordering::Release);
         }
+        self.stats
+            .channel_unknown_address
+            .store(unknown_address_count, atomic::Ordering::Release);
+        self.stats
+            .channel_with_address
+            .store(with_address_count, atomic::Ordering::Release);
+        self.stats
+            .channel_search_pending
+            .store(search_pending_count, atomic::Ordering::Release);
+        self.stats
+            .channel_no_address
+            .store(no_address_count, atomic::Ordering::Release);
+        (search_pending_count,)
+    }
+
+    fn channel_state_counts_2(&mut self) {
+        self.count_unknown_address = 0;
+        self.count_search_pending = 0;
+        self.count_search_sent = 0;
+        self.count_no_address = 0;
+        self.count_unassigned = 0;
+        self.count_assigned = 0;
+        for (_ch, st) in &self.channel_states {
+            match &st.value {
+                ChannelStateValue::Active(st) => match st {
+                    ActiveChannelState::Init { .. } => {}
+                    ActiveChannelState::WaitForStatusSeriesId { .. } => {}
+                    ActiveChannelState::WithStatusSeriesId { state, .. } => match &state.inner {
+                        WithStatusSeriesIdStateInner::UnknownAddress { .. } => {
+                            self.count_unknown_address += 1;
+                        }
+                        WithStatusSeriesIdStateInner::SearchPending { did_send, .. } => {
+                            self.count_search_pending += 1;
+                            if *did_send {
+                                self.count_search_sent += 1;
+                            }
+                        }
+                        WithStatusSeriesIdStateInner::WithAddress { state, .. } => match state {
+                            WithAddressState::Unassigned { .. } => {
+                                self.count_unassigned += 1;
+                            }
+                            WithAddressState::Assigned(_) => {
+                                self.count_assigned += 1;
+                            }
+                        },
+                        WithStatusSeriesIdStateInner::NoAddress { .. } => {
+                            self.count_no_address += 1;
+                        }
+                    },
+                },
+                ChannelStateValue::ToRemove { .. } => {}
+            }
+        }
+    }
+
+    async fn check_channel_states(&mut self) -> Result<(), Error> {
+        let (mut search_pending_count,) = self.update_channel_state_counts();
         let k = self.chan_check_next.take();
         trace!("------------   check_chans  start at {:?}", k);
         let it = if let Some(last) = k {
@@ -520,7 +563,7 @@ impl Daemon {
                             let dt = tsnow.duration_since(*since).unwrap_or(Duration::ZERO);
                             if dt > UNKNOWN_ADDRESS_STAY {
                                 //info!("UnknownAddress {} {:?}", i, ch);
-                                if search_pending_count < CURRENT_SEARCH_PENDING_MAX {
+                                if (search_pending_count as usize) < CURRENT_SEARCH_PENDING_MAX {
                                     search_pending_count += 1;
                                     state.inner = WithStatusSeriesIdStateInner::SearchPending {
                                         since: tsnow,
@@ -646,45 +689,7 @@ impl Daemon {
                 }
             }
         }
-        {
-            self.count_unknown_address = 0;
-            self.count_search_pending = 0;
-            self.count_search_sent = 0;
-            self.count_no_address = 0;
-            self.count_unassigned = 0;
-            self.count_assigned = 0;
-            for (_ch, st) in &self.channel_states {
-                match &st.value {
-                    ChannelStateValue::Active(st) => match st {
-                        ActiveChannelState::Init { .. } => {}
-                        ActiveChannelState::WaitForStatusSeriesId { .. } => {}
-                        ActiveChannelState::WithStatusSeriesId { state, .. } => match &state.inner {
-                            WithStatusSeriesIdStateInner::UnknownAddress { .. } => {
-                                self.count_unknown_address += 1;
-                            }
-                            WithStatusSeriesIdStateInner::SearchPending { did_send, .. } => {
-                                self.count_search_pending += 1;
-                                if *did_send {
-                                    self.count_search_sent += 1;
-                                }
-                            }
-                            WithStatusSeriesIdStateInner::WithAddress { state, .. } => match state {
-                                WithAddressState::Unassigned { .. } => {
-                                    self.count_unassigned += 1;
-                                }
-                                WithAddressState::Assigned(_) => {
-                                    self.count_assigned += 1;
-                                }
-                            },
-                            WithStatusSeriesIdStateInner::NoAddress { .. } => {
-                                self.count_no_address += 1;
-                            }
-                        },
-                    },
-                    ChannelStateValue::ToRemove { .. } => {}
-                }
-            }
-        }
+        self.channel_state_counts_2();
         Ok(())
     }
 
