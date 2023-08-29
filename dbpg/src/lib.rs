@@ -6,3 +6,5 @@ pub mod pool;
 pub mod schema;
 pub mod seriesbychannel;
 pub mod seriesid;
+
+pub use tokio_postgres as postgres;
