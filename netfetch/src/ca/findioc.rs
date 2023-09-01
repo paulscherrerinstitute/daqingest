@@ -279,7 +279,7 @@ impl FindIocStream {
                 error!("received packet too large");
                 panic!();
             }
-            let mut nb = crate::netbuf::NetBuf::new(2048);
+            let mut nb = slidebuf::SlideBuf::new(2048);
             nb.put_slice(&buf[..ec as usize]).map_err(|e| e.to_string())?;
             let mut msgs = Vec::new();
             let mut accounted = 0;

@@ -35,6 +35,7 @@ stats = { path = "../stats" }
 scywr = { path = "../scywr" }
 dbpg = { path = "../dbpg" }
 ingest-linux = { path = "../ingest-linux" }
+slidebuf = { path = "../slidebuf" }
 err = { path = "../../daqbuffer/crates/err" }
 netpod = { path = "../../daqbuffer/crates/netpod" }
 items_0 = { path = "../../daqbuffer/crates/items_0" }
