@@ -55,12 +55,12 @@ jobs:
       - run: ls -la /root
       - run: rustc --version
       - run: cargo --version
-      - run: mkdir /build
       - run: yum install -y git
-      - run: git clone https://github.com/paulscherrerinstitute/daqingest.git
+      - run: mkdir /build
+      - run: git clone --branch dev https://github.com/paulscherrerinstitute/daqbuffer.git
         working-directory: /build
-      - run: git checkout dev
-        working-directory: /build/daqingest
+      - run: git clone --branch dev https://github.com/paulscherrerinstitute/daqingest.git
+        working-directory: /build
       - run: cargo build
         working-directory: /build/daqingest
 
