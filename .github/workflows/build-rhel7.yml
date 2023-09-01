@@ -28,7 +28,7 @@ jobs:
       #   - 3456
     steps:
       - uses: actions/checkout@v3
-      - run: echo "Flags: ${{ github.event.inputs.flags }}"
+      - run: "echo Flags: ${{ github.event.inputs.flags }}"
       # - run: echo $HOME
       # - run: echo $PATH
       - run: echo $GITHUB_WORKSPACE
