@@ -15,8 +15,8 @@ jobs:
         CARGO_HOME: /root/.cargo
     steps:
       - uses: actions/checkout@v3
-      - run: echo $HOME
-      - run: echo $PATH
+      # - run: echo $HOME
+      # - run: echo $PATH
       - run: echo $GITHUB_WORKSPACE
       - run: /usr/bin/df -h
       - run: id
@@ -26,19 +26,21 @@ jobs:
       - run: ls -la /github
       - run: ls -la /github/home
       - run: ls -la /github/workflow
+      - run: find /github -type f
       - run: cat /github/workflow/event.json
       - run: ls -la /root
-      - run: source /root/.cargo/env
-      - run: echo "$HOME"
-      - run: echo "$PATH"
-      - run: /bin/bash -c 'PATH=/root/.cargo/bin && echo "$PATH"'
+      # - run: source /root/.cargo/env
+      # - run: echo $HOME
+      # - run: echo $PATH
+      - run: /bin/bash -c 'PATH=/root/.cargo/bin && echo $PATH'
       - run: /bin/bash -c 'PATH=/root/.cargo/bin && cargo --version'
       - run: /bin/bash -c 'PATH=/root/.cargo/bin && rustc --version'
       - run: rustc --version
       - run: cargo --version
       - run: pwd
-      - run: cd $GITHUB_WORKSPACE
+      - run: cd /
       - run: pwd
+      - run: mkdir /build
       # - uses: actions/upload-artifact@v2
       #   with:
       #     name: daqbufferbin
