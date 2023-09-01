@@ -56,6 +56,7 @@ jobs:
       - run: rustc --version
       - run: cargo --version
       - run: mkdir /build
+      - run: yum install -y git
       - run: git clone https://github.com/paulscherrerinstitute/daqingest.git
         working-directory: /build
       - run: git checkout dev
