@@ -12,6 +12,8 @@ jobs:
       image: ugnvc/psi:daqbuild01
     steps:
       - uses: actions/checkout@v3
+      - run: echo "$HOME"
+      - run: echo "$PATH"
       - run: /usr/bin/df -h
       - run: pwd
       - run: ls -la
@@ -21,11 +23,9 @@ jobs:
       - run: ls -la /github/workflow
       - run: cat /github/workflow/event.json
       - run: ls -la /root
-      - run: rustc --version
-      #- run: echo "${HOME}"
-      #- run: echo "${PATH}"
-      #- run: source /root/.cargo/env
-      #- run: echo "${PATH}"
+      - run: source /root/.cargo/env
+      - run: echo "$HOME"
+      - run: echo "$PATH"
       #- run: "/bin/bash -c 'echo $PATH && source /root/.cargo/env && echo $PATH && ls -la /root/.cargo/bin'"
       # - run: "/bin/bash -c 'export RUSTUP_HOME=/root/.rustup && export CARGO_HOME=/root/.cargo && export PATH=\"/root/.cargo/bin:$PATH\" && echo $PATH && cargo build --release'"
       - run: /bin/bash -c 'source $HOME/.cargo/env && echo $PATH'
