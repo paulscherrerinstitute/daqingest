@@ -90,6 +90,7 @@ struct ClientRun {
 }
 
 impl ClientRun {
+    #[allow(unused)]
     fn new(client: BsreadClient) -> Self {
         let mut client = Box::pin(client);
         let client2 = unsafe { &mut *(&mut client as &mut _ as *mut _) } as &mut BsreadClient;
@@ -114,7 +115,7 @@ pub enum ZmtpEvent {
 }
 
 pub async fn zmtp_client(opts: ZmtpClientOpts) -> Result<(), Error> {
-    let client = BsreadClient::new(opts.clone(), todo!(), todo!()).await?;
+    let client = BsreadClient::new(opts.clone(), err::todoval(), err::todoval()).await?;
     let fut = {
         async move {
             let mut client = client;

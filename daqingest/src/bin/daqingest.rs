@@ -16,9 +16,6 @@ pub fn main() -> Result<(), Error> {
         use daqingest::opts::ChannelAccess;
         use daqingest::opts::SubCmd;
         match opts.subcmd {
-            SubCmd::Bsread(k) => netfetch::zmtp::zmtp_client(k.into())
-                .await
-                .map_err(|e| Error::from(e.to_string()))?,
             SubCmd::ListPkey => {
                 // TODO must take scylla config from CLI
                 let scylla_conf = err::todoval();
@@ -34,10 +31,6 @@ pub fn main() -> Result<(), Error> {
                 let scylla_conf = err::todoval();
                 scywr::tools::fetch_events(&k.backend, &k.channel, &scylla_conf).await?
             }
-            SubCmd::BsreadDump(k) => {
-                let mut f = netfetch::zmtp::dumper::BsreadDumper::new(k.source);
-                f.run().await.map_err(|e| Error::from(e.to_string()))?
-            }
             SubCmd::ChannelAccess(k) => match k {
                 ChannelAccess::CaSearch(k) => {
                     info!("daqingest version {}", clap::crate_version!());
@@ -50,6 +43,15 @@ pub fn main() -> Result<(), Error> {
                     daqingest::daemon::run(conf, channels).await?
                 }
             },
+            #[cfg(feature = "bsread")]
+            SubCmd::Bsread(k) => ingest_bsread::zmtp::zmtp_client(k.into())
+                .await
+                .map_err(|e| Error::from(e.to_string()))?,
+            #[cfg(feature = "bsread")]
+            SubCmd::BsreadDump(k) => {
+                let mut f = ingest_bsread::zmtp::dumper::BsreadDumper::new(k.source);
+                f.run().await.map_err(|e| Error::from(e.to_string()))?
+            }
             SubCmd::Version => {
                 println!("{}", clap::crate_version!());
             }

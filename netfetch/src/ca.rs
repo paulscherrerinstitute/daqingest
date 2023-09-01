@@ -7,7 +7,6 @@ pub mod search;
 use crate::ca::connset::CaConnSet;
 use crate::metrics::ExtraInsertsConf;
 use crate::rt::TokMx;
-use err::Error;
 use futures_util::Future;
 use futures_util::FutureExt;
 use log::*;
@@ -16,7 +15,6 @@ use scywr::insertworker::InsertWorkerOpts;
 use scywr::iteminsertqueue::CommonInsertItemQueue;
 use scywr::store::DataStore;
 use stats::CaConnStatsAgg;
-use std::net::SocketAddrV4;
 use std::pin::Pin;
 use std::sync::atomic::AtomicU32;
 use std::sync::atomic::AtomicU64;
@@ -146,5 +144,5 @@ where
 
 fn handler_sigaction(_a: libc::c_int, _b: *const libc::siginfo_t, _c: *const libc::c_void) {
     crate::ca::SIGINT.store(1, Ordering::Release);
-    let _ = crate::linuxhelper::unset_signal_handler(libc::SIGINT);
+    let _ = ingest_linux::signal::unset_signal_handler(libc::SIGINT);
 }

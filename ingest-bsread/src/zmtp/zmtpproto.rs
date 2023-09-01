@@ -2,7 +2,6 @@ use crate::bsread::ChannelDesc;
 use crate::bsread::GlobalTimestamp;
 use crate::bsread::HeadA;
 use crate::bsread::HeadB;
-use crate::netbuf::NetBuf;
 use crate::zmtp::ZmtpEvent;
 use async_channel::Receiver;
 use async_channel::Sender;
@@ -14,6 +13,7 @@ use futures_util::StreamExt;
 use netpod::log::*;
 use netpod::timeunits::SEC;
 use serde_json::Value as JsVal;
+use slidebuf::SlideBuf;
 use std::fmt;
 use std::io;
 use std::mem;
@@ -32,7 +32,7 @@ pub enum Error {
     #[error("bad")]
     Bad,
     #[error("NetBuf({0})")]
-    NetBuf(#[from] crate::netbuf::Error),
+    NetBuf(#[from] slidebuf::Error),
     #[error("zmtp peer is not v3.x")]
     ZmtpInitPeerNot3x,
     #[error("zmtp peer is not v3.0 or v3.1")]
@@ -107,8 +107,8 @@ pub struct Zmtp {
     socket_type: SocketType,
     conn: TcpStream,
     conn_state: ConnState,
-    buf: NetBuf,
-    outbuf: NetBuf,
+    buf: SlideBuf,
+    outbuf: SlideBuf,
     out_enable: bool,
     msglen: usize,
     has_more: bool,
@@ -134,8 +134,8 @@ impl Zmtp {
             conn,
             //conn_state: ConnState::LockScan(1),
             conn_state: ConnState::InitSend,
-            buf: NetBuf::new(1024 * 128),
-            outbuf: NetBuf::new(1024 * 128),
+            buf: SlideBuf::new(1024 * 128),
+            outbuf: SlideBuf::new(1024 * 128),
             out_enable: false,
             msglen: 0,
             has_more: false,
@@ -156,8 +156,10 @@ impl Zmtp {
         self.data_tx.clone()
     }
 
-    fn inpbuf_conn(&mut self, need_min: usize) -> (&mut TcpStream, ReadBuf) {
-        (&mut self.conn, self.buf.read_buf_for_fill(need_min))
+    fn inpbuf_conn(&mut self, need_min: usize) -> Result<(&mut TcpStream, ReadBuf), Error> {
+        let buf = self.buf.available_writable_area(need_min)?;
+        let buf = ReadBuf::new(buf);
+        Ok((&mut self.conn, buf))
     }
 
     fn outbuf_conn(&mut self) -> (&mut TcpStream, &[u8]) {
@@ -268,7 +270,11 @@ impl Zmtp {
                 Int::Item(Err(e))
             } else if self.buf.len() < need_min {
                 self.record_input_state();
-                let (w, mut rbuf) = self.inpbuf_conn(need_min);
+                // TODO refactor error handling in this function
+                let (w, mut rbuf) = match self.inpbuf_conn(need_min) {
+                    Ok(x) => x,
+                    Err(e) => return Some(Ready(Err(e.into()))),
+                };
                 pin_mut!(w);
                 match w.poll_read(cx, &mut rbuf) {
                     Ready(k) => match k {
@@ -495,7 +501,7 @@ impl Zmtp {
                 Ok(None)
             }
             ConnState::ReadFrameLong => {
-                self.msglen = self.buf.read_u64()? as usize;
+                self.msglen = self.buf.read_u64_be()? as usize;
                 trace!("parse_item  ReadFrameLong  msglen {}", self.msglen);
                 self.conn_state = ConnState::ReadFrameBody(self.msglen);
                 if self.msglen > self.buf.cap() / 2 {
@@ -649,7 +655,7 @@ impl ZmtpMessage {
         &self.frames
     }
 
-    pub fn emit_to_buffer(&self, out: &mut NetBuf) -> Result<(), Error> {
+    pub fn emit_to_buffer(&self, out: &mut SlideBuf) -> Result<(), Error> {
         let n = self.frames.len();
         for (i, fr) in self.frames.iter().enumerate() {
             let mut flags: u8 = 2;
@@ -657,7 +663,7 @@ impl ZmtpMessage {
                 flags |= 1;
             }
             out.put_u8(flags)?;
-            out.put_u64(fr.data().len() as u64)?;
+            out.put_u64_be(fr.data().len() as u64)?;
             out.put_slice(fr.data())?;
         }
         Ok(())

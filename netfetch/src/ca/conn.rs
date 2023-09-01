@@ -4,7 +4,6 @@ use super::proto::CaMsg;
 use super::proto::CaMsgTy;
 use super::proto::CaProto;
 use super::ExtraInsertsConf;
-use crate::bsread::ChannelDescDecoded;
 use crate::ca::proto::CreateChan;
 use crate::ca::proto::EventAdd;
 use crate::timebin::ConnTimeBin;
@@ -58,6 +57,24 @@ use std::time::Instant;
 use std::time::SystemTime;
 use taskrun::tokio;
 use tokio::net::TcpStream;
+
+#[allow(unused)]
+macro_rules! trace3 {
+    ($($arg:tt)*) => {
+        if true {
+            trace!($($arg)*);
+        }
+    };
+}
+
+#[allow(unused)]
+macro_rules! trace4 {
+    ($($arg:tt)*) => {
+        if true {
+            trace!($($arg)*);
+        }
+    };
+}
 
 #[derive(Clone, Debug, Serialize)]
 pub enum ChannelConnectedInfo {
@@ -440,6 +457,7 @@ pub struct CaConn {
         Pin<Box<dyn Future<Output = Result<(Cid, u32, u16, u16, Existence<SeriesId>), Error>> + Send>>,
     >,
     time_binners: BTreeMap<Cid, ConnTimeBin>,
+    ts_earliest_warn_poll_slow: Instant,
 }
 
 impl CaConn {
@@ -493,6 +511,7 @@ impl CaConn {
             series_lookup_schedule: BTreeMap::new(),
             series_lookup_futs: FuturesUnordered::new(),
             time_binners: BTreeMap::new(),
+            ts_earliest_warn_poll_slow: Instant::now(),
         }
     }
 
@@ -988,15 +1007,6 @@ impl CaConn {
         *ch_s = ChannelState::Created(series, created_state);
         let scalar_type = ScalarType::from_ca_id(data_type)?;
         let shape = Shape::from_ca_count(data_count)?;
-        let _cd = ChannelDescDecoded {
-            name: name.to_string(),
-            scalar_type,
-            shape,
-            agg_kind: netpod::AggKind::Plain,
-            // TODO these play no role in series id:
-            byte_order: netpod::ByteOrder::Little,
-            compression: None,
-        };
         cx.waker().wake_by_ref();
         Ok(())
     }
@@ -1012,9 +1022,17 @@ impl CaConn {
                         entry.remove();
                         continue;
                     }
-                    Err(e) => {
-                        *entry.get_mut() = e.into_inner();
-                    }
+                    Err(e) => match e {
+                        async_channel::TrySendError::Full(_) => {
+                            warn!("series lookup channel full");
+                            *entry.get_mut() = e.into_inner();
+                        }
+                        async_channel::TrySendError::Closed(_) => {
+                            warn!("series lookup channel closed");
+                            // *entry.get_mut() = e.into_inner();
+                            entry.remove();
+                        }
+                    },
                 }
             } else {
                 ()
@@ -1473,24 +1491,15 @@ impl CaConn {
                                 };
                                 *ch_s = ChannelState::FetchingSeriesId(created_state);
                                 // TODO handle error in different way. Should most likely not abort.
-                                let _cd = ChannelDescDecoded {
-                                    name: name.clone(),
-                                    scalar_type: scalar_type.clone(),
-                                    shape: shape.clone(),
-                                    agg_kind: netpod::AggKind::Plain,
-                                    // TODO these play no role in series id:
-                                    byte_order: netpod::ByteOrder::Little,
-                                    compression: None,
-                                };
-                                let (tx, rx) = async_channel::bounded(1);
-                                let query = ChannelInfoQuery {
-                                    backend: self.backend.clone(),
-                                    channel: name.clone(),
-                                    scalar_type: scalar_type.to_scylla_i32(),
-                                    shape_dims: shape.to_scylla_vec(),
-                                    tx,
-                                };
                                 if !self.series_lookup_schedule.contains_key(&cid) {
+                                    let (tx, rx) = async_channel::bounded(1);
+                                    let query = ChannelInfoQuery {
+                                        backend: self.backend.clone(),
+                                        channel: name.clone(),
+                                        scalar_type: scalar_type.to_scylla_i32(),
+                                        shape_dims: shape.to_scylla_vec(),
+                                        tx,
+                                    };
                                     self.series_lookup_schedule.insert(cid, query);
                                     let fut = async move {
                                         match rx.recv().await {
@@ -1749,7 +1758,9 @@ impl CaConn {
         Self::apply_channel_ops_with_res(res)
     }
 
-    fn handle_own_ticker_tick(self: Pin<&mut Self>, _cx: &mut Context) -> Result<(), Error> {
+    fn handle_own_ticker_tick(mut self: Pin<&mut Self>, cx: &mut Context) -> Result<(), Error> {
+        self.emit_series_lookup(cx);
+        self.poll_channel_info_results(cx);
         let this = self.get_mut();
         for (_, tb) in this.time_binners.iter_mut() {
             let iiq = &mut this.insert_item_queue;
@@ -1769,12 +1780,12 @@ impl Stream for CaConn {
         if self.channel_set_ops.flag.load(atomic::Ordering::Acquire) > 0 {
             self.apply_channel_ops();
         }
-        self.emit_series_lookup(cx);
-        self.poll_channel_info_results(cx);
         match self.ticker.poll_unpin(cx) {
             Ready(()) => {
                 match self.as_mut().handle_own_ticker_tick(cx) {
-                    Ok(_) => {}
+                    Ok(_) => {
+                        let _ = self.ticker.poll_unpin(cx);
+                    }
                     Err(e) => {
                         error!("{e}");
                         self.trigger_shutdown(ChannelStatusClosedReason::InternalError);
@@ -1782,7 +1793,8 @@ impl Stream for CaConn {
                     }
                 }
                 self.ticker = Self::new_self_ticker();
-                cx.waker().wake_by_ref();
+                let _ = self.ticker.poll_unpin(cx);
+                // cx.waker().wake_by_ref();
             }
             Pending => {}
         }
@@ -1823,8 +1835,8 @@ impl Stream for CaConn {
                 }
                 if self.is_shutdown() {
                     if self.insert_item_queue.len() == 0 {
-                        trace!("no more items to flush");
                         if i1 >= 10 {
+                            trace!("no more items to flush");
                             break Ready(Ok(()));
                         }
                     } else {
@@ -1863,9 +1875,14 @@ impl Stream for CaConn {
             }
         };
         {
-            let dt = poll_ts1.elapsed();
+            let tsnow = Instant::now();
+            let dt = tsnow.saturating_duration_since(poll_ts1);
             if dt > Duration::from_millis(40) {
-                warn!("slow poll: {}ms", dt.as_secs_f32() * 1e3);
+                if poll_ts1 > self.ts_earliest_warn_poll_slow {
+                    // TODO factor out the rate limit logic in reusable type
+                    self.ts_earliest_warn_poll_slow = tsnow + Duration::from_millis(2000);
+                    warn!("slow poll: {}ms", dt.as_secs_f32() * 1e3);
+                }
             }
         }
         ret

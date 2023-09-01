@@ -1,5 +1,5 @@
-use crate::linuxhelper::local_hostname;
 use err::Error;
+use ingest_linux::net::local_hostname;
 use netpod::log::*;
 use netpod::Database;
 use netpod::ScyllaConfig;

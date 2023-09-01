@@ -1,0 +1,11 @@
+[package]
+name = "ingest-linux"
+version = "0.0.1"
+authors = ["Dominik Werder <dominik.werder@gmail.com>"]
+edition = "2021"
+
+[dependencies]
+libc = "0.2"
+thiserror = "1.0.47"
+log = { path = "../log" }
+taskrun = { path = "../../daqbuffer/crates/taskrun" }

@@ -2,7 +2,6 @@ use crate::bsread::BsreadMessage;
 use crate::bsread::ChannelDescDecoded;
 use crate::bsread::HeadB;
 use crate::bsread::Parser;
-use crate::ca::IngestCommons;
 use crate::zmtp::zmtpproto;
 use crate::zmtp::zmtpproto::SocketType;
 use crate::zmtp::zmtpproto::Zmtp;
@@ -23,7 +22,6 @@ use netpod::Shape;
 use netpod::TS_MSP_GRID_SPACING;
 use netpod::TS_MSP_GRID_UNIT;
 use scywr::iteminsertqueue::ArrayValue;
-use scywr::iteminsertqueue::CommonInsertItemQueueSender;
 use scywr::iteminsertqueue::DataValue;
 use scywr::iteminsertqueue::InsertItem;
 use scywr::iteminsertqueue::QueryItem;
@@ -32,7 +30,6 @@ use series::SeriesId;
 use stats::CheckEvery;
 use std::io;
 use std::net::SocketAddr;
-use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
 use taskrun::tokio;
@@ -51,10 +48,11 @@ pub enum Error {
     ZmtpProto(#[from] zmtpproto::Error),
     #[error("BadSlice")]
     BadSlice,
+    SystemNet(#[from] ingest_linux::net::Error),
 }
 
 impl<T> From<async_channel::SendError<T>> for Error {
-    fn from(value: async_channel::SendError<T>) -> Self {
+    fn from(_value: async_channel::SendError<T>) -> Self {
         Self::AsyncChannelSend
     }
 }
@@ -72,8 +70,7 @@ pub struct BsreadClient {
     rcvbuf: Option<usize>,
     print_stats: CheckEvery,
     parser: Parser,
-    ingest_commons: Arc<IngestCommons>,
-    insqtx: CommonInsertItemQueueSender,
+    insqtx: Sender<QueryItem>,
     tmp_evtset_series: Option<SeriesId>,
     channel_info_query_tx: Sender<ChannelInfoQuery>,
     inserted_in_ts_msp_count: u32,
@@ -84,13 +81,9 @@ pub struct BsreadClient {
 impl BsreadClient {
     pub async fn new(
         opts: ZmtpClientOpts,
-        ingest_commons: Arc<IngestCommons>,
+        insqtx: Sender<QueryItem>,
         channel_info_query_tx: Sender<ChannelInfoQuery>,
     ) -> Result<Self, Error> {
-        let insqtx = ingest_commons
-            .insert_item_queue
-            .sender()
-            .ok_or_else(|| Error::InsertQueueSenderMissing)?;
         let ret = Self {
             source_addr: opts.addr,
             do_pulse_id: opts.do_pulse_id,
@@ -98,7 +91,6 @@ impl BsreadClient {
             opts,
             print_stats: CheckEvery::new(Duration::from_millis(2000)),
             parser: Parser::new(),
-            ingest_commons,
             insqtx,
             tmp_evtset_series: None,
             channel_info_query_tx,
@@ -215,7 +207,7 @@ impl BsreadClient {
     pub async fn run(&mut self) -> Result<(), Error> {
         let mut conn = tokio::net::TcpStream::connect(&self.source_addr).await?;
         if let Some(v) = self.rcvbuf {
-            crate::linuxhelper::set_rcv_sock_opts(&mut conn, v as u32)?;
+            ingest_linux::net::set_rcv_sock_opts(&mut conn, v as u32)?;
         }
         let mut zmtp = Zmtp::new(conn, SocketType::PULL);
         let mut i1 = 0u64;
@@ -342,8 +334,8 @@ impl BsreadClient {
                                 for i1 in 0..nlim {
                                     // TODO skip decoding if header unchanged.
                                     let chn = &head_b.channels[i1];
-                                    let chd: ChannelDescDecoded = chn.try_into()?;
-                                    let fr = &msg.frames[2 + 2 * i1];
+                                    let _chd: ChannelDescDecoded = chn.try_into()?;
+                                    let _fr = &msg.frames[2 + 2 * i1];
                                     // TODO store the channel information together with series in struct.
                                 }
                             }
@@ -391,13 +383,14 @@ impl BsreadClient {
         Ok(())
     }
 
-    async fn setup_channel_writers(&mut self, scy: &ScySession, cd: &ChannelDescDecoded) -> Result<(), Error> {
+    #[allow(unused)]
+    async fn setup_channel_writers(&mut self, _scy: &ScySession, cd: &ChannelDescDecoded) -> Result<(), Error> {
         let has_comp = cd.compression.is_some();
         if has_comp {
             warn!("Compression not yet supported  [{}]", cd.name);
             return Ok(());
         }
-        let shape_dims = cd.shape.to_scylla_vec();
+        let _shape_dims = cd.shape.to_scylla_vec();
         Ok(())
     }
 

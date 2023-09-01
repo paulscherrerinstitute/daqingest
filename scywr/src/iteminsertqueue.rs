@@ -253,6 +253,10 @@ impl CommonInsertItemQueueSender {
     pub fn is_full(&self) -> bool {
         self.sender.is_full()
     }
+
+    pub fn inner(&self) -> &async_channel::Sender<QueryItem> {
+        &self.sender
+    }
 }
 
 pub struct CommonInsertItemQueue {

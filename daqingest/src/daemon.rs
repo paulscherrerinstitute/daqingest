@@ -1,21 +1,16 @@
 pub mod finder;
 pub mod inserthook;
-pub mod types;
 
 use async_channel::Receiver;
 use async_channel::Sender;
 use async_channel::WeakReceiver;
-use dbpg::conn::make_pg_client;
 use dbpg::seriesbychannel::ChannelInfoQuery;
 use err::Error;
-use futures_util::FutureExt;
-use futures_util::StreamExt;
 use log::*;
 use netfetch::ca::conn::CaConnEvent;
 use netfetch::ca::conn::ConnCommand;
 use netfetch::ca::connset::CaConnSet;
 use netfetch::ca::findioc::FindIocRes;
-use netfetch::ca::findioc::FindIocStream;
 use netfetch::ca::IngestCommons;
 use netfetch::ca::SlowWarnable;
 use netfetch::conf::CaIngestOpts;
@@ -40,7 +35,6 @@ use series::ChannelStatusSeriesId;
 use series::SeriesId;
 use stats::DaemonStats;
 use std::collections::BTreeMap;
-use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::net::SocketAddrV4;
 use std::sync::atomic;
@@ -52,11 +46,8 @@ use std::time::Instant;
 use std::time::SystemTime;
 use taskrun::tokio;
 use tokio::task::JoinHandle;
-use tokio_postgres::Client as PgClient;
-use tokio_postgres::Row as PgRow;
 use tracing::info_span;
 use tracing::Instrument;
-use types::*;
 
 const SEARCH_BATCH_MAX: usize = 256;
 const CURRENT_SEARCH_PENDING_MAX: usize = SEARCH_BATCH_MAX * 4;
@@ -186,7 +177,10 @@ pub struct DaemonOpts {
     pgconf: Database,
     scyconf: ScyllaConfig,
     ttls: Ttls,
+    #[allow(unused)]
     test_bsread_addr: Option<String>,
+    insert_worker_count: usize,
+    insert_scylla_sessions: usize,
 }
 
 impl DaemonOpts {
@@ -276,19 +270,16 @@ impl Daemon {
             }
         });
 
-        let insert_scylla_sessions = 1;
-        let insert_worker_count = 1000;
         let use_rate_limit_queue = false;
 
         // TODO use a new stats type:
         let store_stats = Arc::new(stats::CaConnStats::new());
         let ttls = opts.ttls.clone();
         let insert_worker_opts = Arc::new(ingest_commons.as_ref().into());
-        use scywr::insertworker::spawn_scylla_insert_workers;
-        let jh_insert_workers = spawn_scylla_insert_workers(
+        let jh_insert_workers = scywr::insertworker::spawn_scylla_insert_workers(
             opts.scyconf.clone(),
-            insert_scylla_sessions,
-            insert_worker_count,
+            opts.insert_scylla_sessions,
+            opts.insert_worker_count,
             common_insert_item_queue_2.clone(),
             insert_worker_opts,
             store_stats.clone(),
@@ -297,9 +288,10 @@ impl Daemon {
         )
         .await?;
 
+        #[cfg(feature = "bsread")]
         if let Some(bsaddr) = &opts.test_bsread_addr {
             //netfetch::zmtp::Zmtp;
-            let zmtpopts = netfetch::zmtp::ZmtpClientOpts {
+            let zmtpopts = ingest_bsread::zmtp::ZmtpClientOpts {
                 backend: opts.backend().into(),
                 addr: bsaddr.parse().unwrap(),
                 do_pulse_id: false,
@@ -307,9 +299,9 @@ impl Daemon {
                 array_truncate: Some(1024),
                 process_channel_count_limit: Some(32),
             };
-            let client = netfetch::bsreadclient::BsreadClient::new(
+            let client = ingest_bsread::bsreadclient::BsreadClient::new(
                 zmtpopts,
-                ingest_commons.clone(),
+                ingest_commons.insert_item_queue.sender().unwrap().inner().clone(),
                 channel_info_query_tx.clone(),
             )
             .await
@@ -495,8 +487,8 @@ impl Daemon {
     async fn check_channel_states(&mut self) -> Result<(), Error> {
         let (mut search_pending_count,) = self.update_channel_state_counts();
         let k = self.chan_check_next.take();
-        trace!("------------   check_chans  start at {:?}", k);
         let it = if let Some(last) = k {
+            trace!("check_chans  start at {:?}", last);
             self.channel_states.range_mut(last..)
         } else {
             self.channel_states.range_mut(..)
@@ -1084,14 +1076,12 @@ impl Daemon {
         ret
     }
 
-    pub async fn daemon(&mut self) -> Result<(), Error> {
+    fn spawn_ticker(tx: Sender<DaemonEvent>, stats: Arc<DaemonStats>) -> Sender<u32> {
         let (ticker_inp_tx, ticker_inp_rx) = async_channel::bounded::<u32>(1);
         let ticker = {
-            let tx = self.tx.clone();
-            let stats = self.stats.clone();
             async move {
                 loop {
-                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    tokio::time::sleep(Duration::from_millis(200)).await;
                     if SIGINT.load(atomic::Ordering::Acquire) != 0 || SIGTERM.load(atomic::Ordering::Acquire) != 0 {
                         if SHUTDOWN_SENT.load(atomic::Ordering::Acquire) == 0 {
                             if let Err(e) = tx.send(DaemonEvent::Shutdown).await {
@@ -1119,7 +1109,13 @@ impl Daemon {
                 }
             }
         };
+        // TODO use join handle
         taskrun::spawn(ticker);
+        ticker_inp_tx
+    }
+
+    pub async fn daemon(&mut self) -> Result<(), Error> {
+        let ticker_inp_tx = Self::spawn_ticker(self.tx.clone(), self.stats.clone());
         loop {
             match self.rx.recv().await {
                 Ok(item) => match self.handle_event(item, &ticker_inp_tx).await {
@@ -1150,34 +1146,30 @@ static SHUTDOWN_SENT: AtomicUsize = AtomicUsize::new(0);
 
 fn handler_sigint(_a: libc::c_int, _b: *const libc::siginfo_t, _c: *const libc::c_void) {
     SIGINT.store(1, atomic::Ordering::Release);
-    let _ = netfetch::linuxhelper::unset_signal_handler(libc::SIGINT);
+    let _ = ingest_linux::signal::unset_signal_handler(libc::SIGINT);
 }
 
 fn handler_sigterm(_a: libc::c_int, _b: *const libc::siginfo_t, _c: *const libc::c_void) {
     SIGTERM.store(1, atomic::Ordering::Release);
-    let _ = netfetch::linuxhelper::unset_signal_handler(libc::SIGTERM);
+    let _ = ingest_linux::signal::unset_signal_handler(libc::SIGTERM);
 }
 
 pub async fn run(opts: CaIngestOpts, channels: Vec<String>) -> Result<(), Error> {
     info!("start up {opts:?}");
-    netfetch::linuxhelper::set_signal_handler(libc::SIGINT, handler_sigint)?;
-    netfetch::linuxhelper::set_signal_handler(libc::SIGTERM, handler_sigterm)?;
+    ingest_linux::signal::set_signal_handler(libc::SIGINT, handler_sigint).map_err(Error::from_string)?;
+    ingest_linux::signal::set_signal_handler(libc::SIGTERM, handler_sigterm).map_err(Error::from_string)?;
 
     let pg = dbpg::conn::make_pg_client(opts.postgresql_config())
         .await
-        .map_err(|e| Error::with_msg_no_trace(e.to_string()))?;
+        .map_err(Error::from_string)?;
 
-    dbpg::schema::schema_check(&pg)
-        .await
-        .map_err(|e| Error::with_msg_no_trace(e.to_string()))?;
+    dbpg::schema::schema_check(&pg).await.map_err(Error::from_string)?;
 
     scywr::schema::migrate_scylla_data_schema(opts.scylla_config())
         .await
-        .map_err(|e| Error::with_msg_no_trace(e.to_string()))?;
-    info!("migrate_keyspace done");
-    if true {
-        return Ok(());
-    }
+        .map_err(Error::from_string)?;
+
+    info!("database check done");
 
     // TODO use a new stats type:
     //let store_stats = Arc::new(CaConnStats::new());
@@ -1203,6 +1195,8 @@ pub async fn run(opts: CaIngestOpts, channels: Vec<String>) -> Result<(), Error>
             binned: opts.ttl_binned(),
         },
         test_bsread_addr: opts.test_bsread_addr.clone(),
+        insert_worker_count: opts.insert_worker_count(),
+        insert_scylla_sessions: opts.insert_scylla_sessions(),
     };
     let mut daemon = Daemon::new(opts2).await?;
     let tx = daemon.tx.clone();
@@ -1223,7 +1217,7 @@ pub async fn run(opts: CaIngestOpts, channels: Vec<String>) -> Result<(), Error>
         let ch = Channel::new(s.into());
         tx.send(DaemonEvent::ChannelAdd(ch)).await?;
     }
-    info!("all channels sent to daemon");
+    info!("configured channels applied");
     daemon_jh.await.unwrap();
     if false {
         metrics_jh.await.unwrap();

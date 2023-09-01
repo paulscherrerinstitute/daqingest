@@ -25,6 +25,8 @@ impl<'a> InsertLoopFut<'a> {
     where
         V: ValueList + Send + Sync + 'static,
     {
+        let _ = scy;
+        let _ = query;
         let mut values = values;
         if skip_insert {
             values.clear();
@@ -34,8 +36,10 @@ impl<'a> InsertLoopFut<'a> {
         // Or is it acceptable to generate all insert futures right here and poll them later?
         let futs: Vec<_> = values
             .into_iter()
-            .map(|vs| {
-                todo!("InsertLoopFut");
+            .map(|_vs| {
+                if true {
+                    todo!("InsertLoopFut")
+                };
                 //let fut = scy.execute(query, vs);
                 let fut = futures_util::future::ready(Err(QueryError::TimeoutError));
                 Box::pin(fut) as _

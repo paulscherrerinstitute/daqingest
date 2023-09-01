@@ -15,6 +15,24 @@ use tokio::task::JoinHandle;
 use tokio_postgres::Client as PgClient;
 use tokio_postgres::Statement as PgStatement;
 
+#[allow(unused)]
+macro_rules! trace2 {
+    ($($arg:tt)*) => {
+        if true {
+            trace!($($arg)*);
+        }
+    };
+}
+
+#[allow(unused)]
+macro_rules! trace3 {
+    ($($arg:tt)*) => {
+        if true {
+            trace!($($arg)*);
+        }
+    };
+}
+
 #[derive(Debug, ThisError)]
 pub enum Error {
     Postgres(#[from] tokio_postgres::Error),
@@ -55,6 +73,8 @@ impl ChannelInfoQuery {
 struct ChannelInfoResult {
     series: Existence<SeriesId>,
     tx: Sender<Result<Existence<SeriesId>, Error>>,
+    // only for trace:
+    channel: String,
 }
 
 struct Worker {
@@ -70,7 +90,7 @@ impl Worker {
         let sql = concat!(
             "with q1 as (select * from unnest($1::text[], $2::text[], $3::int[], $4::text[], $5::int[])",
             " as inp (backend, channel, scalar_type, shape_dims, rid))",
-            " select t.series, q1.rid from series_by_channel t",
+            " select t.series, q1.rid, t.channel from series_by_channel t",
             " join q1 on t.facility = q1.backend and t.channel = q1.channel",
             " and t.scalar_type = q1.scalar_type and t.shape_dims = q1.shape_dims::int[]",
             " and t.agg_kind = 0",
@@ -138,12 +158,14 @@ impl Worker {
         for (qrid, tx) in tx {
             if let Some(row) = &e1 {
                 let rid: i32 = row.get(1);
+                let channel: String = row.get(2);
                 if rid as u32 == qrid {
                     let series: i64 = row.get(0);
                     let series = SeriesId::new(series as _);
                     let res = ChannelInfoResult {
                         series: Existence::Existing(series),
                         tx,
+                        channel,
                     };
                     result.push(res);
                 }
@@ -236,12 +258,23 @@ impl Worker {
     }
 
     async fn work(&mut self) -> Result<(), Error> {
-        'outer: while let Some(batch) = self.batch_rx.next().await {
+        while let Some(batch) = self.batch_rx.next().await {
+            trace2!("worker recv batch  len {}", batch.len());
+            for x in &batch {
+                trace3!(
+                    "search for {}  {}  {:?}  {:?}",
+                    x.backend,
+                    x.channel,
+                    x.scalar_type,
+                    x.shape_dims
+                );
+            }
             let (res1, missing) = self.select(batch).await?;
             let res3 = if missing.len() > 0 {
                 self.insert_missing(&missing).await?;
                 let (res2, missing2) = self.select(missing).await?;
                 if missing2.len() > 0 {
+                    warn!("series ids still missing after insert");
                     Err(Error::SeriesMissing)
                 } else {
                     Ok(res2)
@@ -251,11 +284,12 @@ impl Worker {
             };
             let res4 = res3?;
             for r in res4 {
+                trace3!("try to send result for  {}  {:?}", r.channel, r.series);
                 match r.tx.send(Ok(r.series)).await {
                     Ok(()) => {}
                     Err(_e) => {
                         warn!("can not deliver result");
-                        break 'outer;
+                        return Err(Error::ChannelError);
                     }
                 }
             }

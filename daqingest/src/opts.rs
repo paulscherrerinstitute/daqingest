@@ -1,6 +1,7 @@
 use clap::ArgAction::Count;
 use clap::Parser;
-use netfetch::zmtp::ZmtpClientOpts;
+#[cfg(feature = "bsread")]
+use ingest_bsread::zmtp::ZmtpClientOpts;
 use std::net::SocketAddr;
 
 #[derive(Debug, Parser)]
@@ -18,13 +19,15 @@ pub struct DaqIngestOpts {
 
 #[derive(Debug, Parser)]
 pub enum SubCmd {
-    Bsread(Bsread),
     ListPkey,
     ListPulses,
     FetchEvents(FetchEvents),
-    BsreadDump(BsreadDump),
     #[command(subcommand)]
     ChannelAccess(ChannelAccess),
+    #[cfg(feature = "bsread")]
+    Bsread(Bsread),
+    #[cfg(feature = "bsread")]
+    BsreadDump(BsreadDump),
     Version,
 }
 
@@ -44,6 +47,7 @@ pub struct Bsread {
     pub process_channel_count_limit: Option<usize>,
 }
 
+#[cfg(feature = "bsread")]
 impl From<Bsread> for ZmtpClientOpts {
     fn from(k: Bsread) -> Self {
         Self {

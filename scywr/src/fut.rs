@@ -19,7 +19,12 @@ impl<'a> ScyQueryFut<'a> {
     where
         V: ValueList + Send + 'static,
     {
-        todo!("ScyQueryFut");
+        let _ = scy;
+        let _ = query;
+        let _ = values;
+        if true {
+            todo!("ScyQueryFut")
+        };
         //let fut = scy.execute(query, values);
         let fut = futures_util::future::ready(Err(QueryError::TimeoutError));
         Self { fut: Box::pin(fut) }

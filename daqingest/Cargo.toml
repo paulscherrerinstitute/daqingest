@@ -4,6 +4,11 @@ version = "0.2.0-alpha.0"
 authors = ["Dominik Werder <dominik.werder@gmail.com>"]
 edition = "2021"
 
+[features]
+default = []
+# default = ["bsread"]
+bsread = []
+
 [dependencies]
 clap = { version = "4.3.24", features = ["derive", "cargo"] }
 tracing = "0.1"
@@ -24,3 +29,5 @@ dbpg = { path = "../dbpg" }
 series = { path = "../series" }
 netfetch = { path = "../netfetch" }
 batchtools = { path = "../batchtools" }
+ingest-bsread = { path = "../ingest-bsread" }
+ingest-linux = { path = "../ingest-linux" }

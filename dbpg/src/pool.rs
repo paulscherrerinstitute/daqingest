@@ -71,6 +71,7 @@ impl PgClientPooled {
 pub struct PgPool {
     tx: Sender<PgClientInner>,
     rx: Receiver<PgClientInner>,
+    #[allow(unused)]
     handout_count: u64,
 }
 
