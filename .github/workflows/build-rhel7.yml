@@ -1,0 +1,34 @@
+name: build-daqingest-rhel7
+# on:
+#   repository_dispatch:
+#     types:
+#       - trigger_build
+jobs:
+  build-daqbuffer-job:
+    runs-on: ubuntu-latest
+    container:
+      # image: "ugnvc/psi:daqbufferbuild-0.0.6"
+      image: ugnvc/psi:daqbuild01
+    steps:
+      - uses: actions/checkout@v2
+      - run: /usr/bin/df -h
+      - run: pwd
+      - run: ls -la
+      - run: ls -la /
+      - run: ls -la /github
+      - run: ls -la /github/home
+      - run: ls -la /github/workflow
+      - run: cat /github/workflow/event.json
+      - run: ls -la /root
+      - run: rustc --version
+      #- run: echo "${HOME}"
+      #- run: echo "${PATH}"
+      #- run: source /root/.cargo/env
+      #- run: echo "${PATH}"
+      #- run: "/bin/bash -c 'echo $PATH && source /root/.cargo/env && echo $PATH && ls -la /root/.cargo/bin'"
+      # - run: "/bin/bash -c 'export RUSTUP_HOME=/root/.rustup && export CARGO_HOME=/root/.cargo && export PATH=\"/root/.cargo/bin:$PATH\" && echo $PATH && cargo build --release'"
+      - run: /bin/bash -c 'source $HOME/.cargo/env && which cargo && which rustc && rustc --version'
+      # - uses: actions/upload-artifact@v2
+      #   with:
+      #     name: daqbufferbin
+      #     path: target/release/daqbuffer
