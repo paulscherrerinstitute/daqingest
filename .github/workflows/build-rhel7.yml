@@ -11,18 +11,18 @@ on:
         description: Additional flags
         default: ""
         required: false
-        # deprecationMessage:
-      debug:
-        description: Debug symbols
-        type: choice
-        options:
-          - Simple
-          - Detailed
-        default: Detailed
-      release:
-        description: Package
-        type: boolean
-        default: true
+        deprecationMessage: Not supported
+      # debug:
+      #   description: Debug symbols
+      #   type: choice
+      #   options:
+      #     - Simple
+      #     - Detailed
+      #   default: Detailed
+      # release:
+      #   description: Package
+      #   type: boolean
+      #   default: true
       # other:
       #   description: Other
       #   type: environment
@@ -42,34 +42,27 @@ jobs:
       # ports:
       #   - 3456
     steps:
-      - uses: actions/checkout@v3
-      - run: "echo Flags: ${{ github.event.inputs.flags }}"
+      # - uses: actions/checkout@v3
+      # - run: "echo Flags: ${{ github.event.inputs.flags }}"
       # - run: echo $HOME
       # - run: echo $PATH
-      - run: echo $GITHUB_WORKSPACE
-      - run: /usr/bin/df -h
-      - run: id
-      - run: pwd
-      - run: ls -la
-      - run: ls -la /
-      - run: ls -la /github
-      - run: ls -la /github/home
-      - run: ls -la /github/workflow
+      # - run: echo $GITHUB_WORKSPACE
+      # - run: /usr/bin/df -h
+      # - run: id
+      # - run: pwd
       - run: find /github -type f
       - run: cat /github/workflow/event.json
       - run: ls -la /root
-      # - run: source /root/.cargo/env
-      # - run: echo $HOME
-      # - run: echo $PATH
-      - run: /bin/bash -c 'PATH=/root/.cargo/bin && echo $PATH'
-      - run: /bin/bash -c 'PATH=/root/.cargo/bin && cargo --version'
-      - run: /bin/bash -c 'PATH=/root/.cargo/bin && rustc --version'
       - run: rustc --version
       - run: cargo --version
-      - run: pwd
-      - run: cd /
-      - run: pwd
       - run: mkdir /build
+      - run: git clone https://github.com/paulscherrerinstitute/daqingest.git
+        working-directory: /build
+      - run: git checkout dev
+        working-directory: /build/daqingest
+      - run: cargo build
+        working-directory: /build/daqingest
+
       # - uses: actions/upload-artifact@v2
       #   with:
       #     name: daqbufferbin
