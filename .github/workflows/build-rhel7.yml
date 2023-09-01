@@ -3,18 +3,32 @@ name: build-daqingest-rhel7
 #   repository_dispatch:
 #     types:
 #       - trigger_build
-on: workflow_dispatch
+# on: workflow_dispatch
+on:
+  workflow_dispatch:
+    inputs:
+      flags:
+        description: Additional flags
+        default: ""
+        required: false
+        # deprecationMessage:
 jobs:
   build-daqbuffer-job:
     runs-on: ubuntu-latest
     container:
       image: ugnvc/psi:daqbuild01
+      # credentials:
+      #   username: ${{ github.actor }}
+      #   password: ${{ secrets.github_token }}
       env:
         PATH: /root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
         RUSTUP_HOME: /root/.rustup
         CARGO_HOME: /root/.cargo
+      # ports:
+      #   - 3456
     steps:
       - uses: actions/checkout@v3
+      - run: echo "Flags: ${{ github.event.inputs.flags }}"
       # - run: echo $HOME
       # - run: echo $PATH
       - run: echo $GITHUB_WORKSPACE
