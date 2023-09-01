@@ -3,6 +3,7 @@ name: build-daqingest-rhel7
 #   repository_dispatch:
 #     types:
 #       - trigger_build
+on: workflow_dispatch
 jobs:
   build-daqbuffer-job:
     runs-on: ubuntu-latest
