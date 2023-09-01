@@ -16,17 +16,17 @@ on:
         description: Debug symbols
         type: choice
         options:
-          - no
-          - yes
-        default: no
+          - Simple
+          - Detailed
+        default: Detailed
       release:
         description: Package
         type: boolean
         default: true
-      other:
-        description: Other
-        type: environment
-        required: false
+      # other:
+      #   description: Other
+      #   type: environment
+      #   required: false
 jobs:
   build-daqbuffer-job:
     runs-on: ubuntu-latest
