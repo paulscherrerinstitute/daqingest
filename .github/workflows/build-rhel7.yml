@@ -62,7 +62,7 @@ jobs:
       - run: git clone --branch dev https://github.com/paulscherrerinstitute/daqingest.git
         working-directory: /build
       - run: find . -type f -and \( -name \*.rs -or -name \*.toml \)
-        working-directory: /build/daqingest
+        working-directory: /build
       - run: cargo build
         working-directory: /build/daqingest
 
