@@ -63,7 +63,7 @@ jobs:
         working-directory: /build
       - run: find . -type f -and \( -name \*.rs -or -name \*.toml \)
         working-directory: /build
-      - run: cargo build
+      - run: cargo build --release
         working-directory: /build/daqingest
       - run: daqingest --version
         working-directory: /build/daqingest/target/release
