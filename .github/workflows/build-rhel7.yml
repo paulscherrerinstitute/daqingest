@@ -65,6 +65,15 @@ jobs:
         working-directory: /build
       - run: cargo build
         working-directory: /build/daqingest
+      - run: daqingest --version
+        working-directory: /build/daqingest/target/release
+      - run: echo "daqingest_version=$(daqingest --version)" >> "$GITHUB_OUTPUT"
+        id: daqingest_version_set
+        working-directory: /build/daqingest/target/release
+      - uses: actions/upload-artifact@v3
+        with:
+          name: daqingest-${{ steps.daqingest_version_set.outputs.daqingest_version }}-amd64-rhel7
+          path: /build/daqingest/target/release/daqingest
 
       # - uses: actions/upload-artifact@v2
       #   with:
