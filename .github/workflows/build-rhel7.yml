@@ -65,9 +65,11 @@ jobs:
         working-directory: /build
       - run: cargo build --release
         working-directory: /build/daqingest
-      - run: daqingest --version
+      - run: ls -l
         working-directory: /build/daqingest/target/release
-      - run: echo "daqingest_version=$(daqingest --version)" >> "$GITHUB_OUTPUT"
+      - run: ./daqingest --version
+        working-directory: /build/daqingest/target/release
+      - run: echo "daqingest_version=$(./daqingest --version)" >> "$GITHUB_OUTPUT"
         id: daqingest_version_set
         working-directory: /build/daqingest/target/release
       - uses: actions/upload-artifact@v3
