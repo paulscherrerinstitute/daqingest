@@ -8,6 +8,7 @@ pub mod metrics;
 pub mod netbuf;
 pub mod patchcollect;
 pub mod rt;
+pub mod senderpolling;
 #[cfg(test)]
 pub mod test;
 pub mod timebin;
