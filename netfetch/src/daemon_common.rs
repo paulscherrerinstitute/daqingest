@@ -45,6 +45,7 @@ impl DaemonEvent {
                     None => format!("CaConnEvent/None"),
                     EchoTimeout => format!("CaConnEvent/EchoTimeout"),
                     ConnCommandResult(_) => format!("CaConnEvent/ConnCommandResult"),
+                    QueryItem(_) => format!("CaConnEvent/QueryItem"),
                     EndOfStream => format!("CaConnEvent/EndOfStream"),
                 }
             }

@@ -1,8 +1,8 @@
 name: build-daqingest-rhel7
 on:
-  push:
-    tags:
-      - buildaction
+  # push:
+  #   tags:
+  #     - buildaction
   workflow_dispatch:
     inputs:
       flags:
@@ -84,20 +84,20 @@ jobs:
       - run: find $GITHUB_WORKSPACE -type f -and \( -name \*.rs -or -name \*.toml \)
       - run: find ${{steps.wdset.outputs.gh}} -type f -and \( -name \*.rs -or -name \*.toml \)
         working-directory: ${{steps.wdset.outputs.gh}}/build
-      # - run: cargo build --release
-      #   working-directory: ${{steps.wdset.outputs.gh}}/build/daqingest
-      - run: mkdir -p target/release && cp /usr/bin/cat target/release/daqingest
-        working-directory: ${{steps.wdset.outputs.gh}}/build/daqingest/
+      - run: cargo build --release
+        working-directory: ${{steps.wdset.outputs.gh}}/build/daqingest
+      # - run: mkdir -p target/release && cp /usr/bin/cat target/release/daqingest
+      #   working-directory: ${{steps.wdset.outputs.gh}}/build/daqingest/
       - run: ls -l
         working-directory: ${{steps.wdset.outputs.gh}}/build/daqingest/target/release
       - run: ./daqingest --version
         working-directory: ${{steps.wdset.outputs.gh}}/build/daqingest/target/release
-      # - run: echo "daqingest_version=$(./daqingest --version)" >> "$GITHUB_OUTPUT"
-      #   id: daqingest_version_set
-      #   working-directory: ${{steps.wdset.outputs.gh}}/build/daqingest/target/release
-      - run: echo "daqingest_version=0.0.0-dummy.0" >> "$GITHUB_OUTPUT"
+      - run: echo "daqingest_version=$(./daqingest --version)" >> "$GITHUB_OUTPUT"
         id: daqingest_version_set
         working-directory: ${{steps.wdset.outputs.gh}}/build/daqingest/target/release
+      # - run: echo "daqingest_version=0.0.0-dummy.0" >> "$GITHUB_OUTPUT"
+      #   id: daqingest_version_set
+      #   working-directory: ${{steps.wdset.outputs.gh}}/build/daqingest/target/release
       - uses: actions/upload-artifact@v3
         with:
           name: daqingest-${{steps.daqingest_version_set.outputs.daqingest_version}}

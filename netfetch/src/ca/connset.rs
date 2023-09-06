@@ -94,6 +94,7 @@ pub struct CaConnSet {
     connset_tx: Sender<CaConnSetEvent>,
     connset_rx: Receiver<CaConnSetEvent>,
     channel_info_query_tx: Sender<ChannelInfoQuery>,
+    storage_insert_tx: Sender<QueryItem>,
     shutdown: bool,
 }
 
@@ -108,6 +109,7 @@ impl CaConnSet {
             connset_tx: connset_tx.clone(),
             connset_rx,
             channel_info_query_tx,
+            storage_insert_tx,
             shutdown: false,
         };
         // TODO await on jh

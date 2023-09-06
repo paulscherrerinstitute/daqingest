@@ -216,6 +216,7 @@ pub struct Daemon {
     insert_rx_weak: WeakReceiver<QueryItem>,
     channel_info_query_tx: Sender<ChannelInfoQuery>,
     connset_ctrl: CaConnSetCtrl,
+    query_item_tx: Sender<QueryItem>,
 }
 
 impl Daemon {
@@ -335,6 +336,7 @@ impl Daemon {
             insert_rx_weak: common_insert_item_queue_2.downgrade(),
             channel_info_query_tx,
             connset_ctrl: conn_set_ctrl,
+            query_item_tx: common_insert_item_queue.sender().unwrap().inner().clone(),
         };
         Ok(ret)
     }
@@ -1002,6 +1004,10 @@ impl Daemon {
                         }
                     }
                 }
+            }
+            QueryItem(item) => {
+                self.query_item_tx.send(item).await?;
+                Ok(())
             }
             EndOfStream => {
                 self.stats.ca_conn_status_done_inc();

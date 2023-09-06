@@ -373,6 +373,7 @@ pub enum CaConnEventValue {
     None,
     EchoTimeout,
     ConnCommandResult(ConnCommandResult),
+    QueryItem(QueryItem),
     EndOfStream,
 }
 
@@ -782,38 +783,6 @@ impl CaConn {
                 }
                 ChannelState::Ended => {}
             }
-        }
-    }
-
-    fn handle_insert_futs(&mut self, cx: &mut Context) -> Poll<Result<(), Error>> {
-        use Poll::*;
-        loop {
-            break {
-                self.stats.caconn_loop4_count_inc();
-                if self.sender_polling.is_sending() {
-                    match self.sender_polling.poll_unpin(cx) {
-                        Ready(Ok(())) => {
-                            self.stats.inserts_queue_push_inc();
-                            continue;
-                        }
-                        Ready(Err(e)) => {
-                            use crate::senderpolling::Error::*;
-                            match e {
-                                NoSendInProgress => break Ready(Err(Error::with_msg_no_trace("no send in progress"))),
-                                Closed(_item) => break Ready(Err(Error::with_msg_no_trace("insert channel closed"))),
-                            }
-                        }
-                        Pending => Pending,
-                    }
-                } else {
-                    if let Some(item) = self.insert_item_queue.pop_front() {
-                        self.sender_polling.send2(item);
-                        continue;
-                    } else {
-                        Ready(Ok(()))
-                    }
-                }
-            };
         }
     }
 
@@ -1784,6 +1753,12 @@ impl Stream for CaConn {
             })))
         } else if let Some(item) = self.ca_conn_event_out_queue.pop_front() {
             Ready(Some(Ok(item)))
+        } else if let Some(item) = self.insert_item_queue.pop_front() {
+            let ev = CaConnEvent {
+                ts: Instant::now(),
+                value: CaConnEventValue::QueryItem(item),
+            };
+            Ready(Some(Ok(ev)))
         } else {
             let ret = loop {
                 self.stats.caconn_loop1_count_inc();
@@ -1806,10 +1781,6 @@ impl Stream for CaConn {
                             Pending => (),
                         }
                     };
-                }
-                match self.handle_insert_futs(cx) {
-                    Ready(_) => {}
-                    Pending => break Pending,
                 }
                 if self.is_shutdown() {
                     if self.outgoing_queues_empty() {
