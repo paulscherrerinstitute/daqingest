@@ -85,20 +85,20 @@ jobs:
       - run: find $GITHUB_WORKSPACE -type f -and \( -name \*.rs -or -name \*.toml \)
       - run: find ${{steps.wdset.outputs.gh}} -type f -and \( -name \*.rs -or -name \*.toml \)
         working-directory: ${{steps.wdset.outputs.gh}}/build
-      - run: cargo build --release
-        working-directory: ${{steps.wdset.outputs.gh}}/build/daqingest
-      # - run: mkdir -p target/release && cp /usr/bin/cat target/release/daqingest
-      #   working-directory: ${{steps.wdset.outputs.gh}}/build/daqingest/
+      # - run: cargo build --release
+      #   working-directory: ${{steps.wdset.outputs.gh}}/build/daqingest
+      - run: mkdir -p target/release && cp /usr/bin/cat target/release/daqingest
+        working-directory: ${{steps.wdset.outputs.gh}}/build/daqingest/
       - run: ls -l
         working-directory: ${{steps.wdset.outputs.gh}}/build/daqingest/target/release
       - run: ./daqingest --version
         working-directory: ${{steps.wdset.outputs.gh}}/build/daqingest/target/release
-      - run: echo "daqingest_version=$(./daqingest --version)" >> "$GITHUB_OUTPUT"
-        id: daqingest_version_set
-        working-directory: ${{steps.wdset.outputs.gh}}/build/daqingest/target/release
-      # - run: echo "daqingest_version=0.0.0-dummy.0" >> "$GITHUB_OUTPUT"
+      # - run: echo "daqingest_version=$(./daqingest --version)" >> "$GITHUB_OUTPUT"
       #   id: daqingest_version_set
       #   working-directory: ${{steps.wdset.outputs.gh}}/build/daqingest/target/release
+      - run: echo "daqingest_version=0.0.0-dummy.0" >> "$GITHUB_OUTPUT"
+        id: daqingest_version_set
+        working-directory: ${{steps.wdset.outputs.gh}}/build/daqingest/target/release
       - uses: actions/upload-artifact@v3
         with:
           name: daqingest-${{steps.daqingest_version_set.outputs.daqingest_version}}
@@ -106,5 +106,5 @@ jobs:
       - run: echo "{\"tag_name\":\"buildaction\", \"name\":\"daqingest-${{steps.daqingest_version_set.outputs.daqingest_version}}\", \"draft\":true, \"prerelease\":true}" > create-rel.json
       - run: "curl -v -o rel.json -L -X POST -H content-type:application/json -H 'accept:application/vnd.github+json' -H 'authorization:bearer ${{secrets.github_token}}' -H 'x-github-api-version: 2022-11-28' -T create-rel.json https://api.github.com/repos/paulscherrerinstitute/daqingest/releases"
       - run: cat rel.json
-      - run: "curl -v -o relass.json -L -X POST -H content-type:application/octet-stream -H 'accept:application/vnd.github+json' -H 'authorization:Bearer ${{secrets.github_token}}' -H 'X-GitHub-Api-Version: 2022-11-28' -T ${{steps.wdset.outputs.gh}}/build/daqingest/target/release/daqingest https://uploads.github.com/repos/paulscherrerinstitute/daqingest/releases/$(<rel.json jq .id)/assets?name=daqingest-${{steps.daqingest_version_set.outputs.daqingest_version}}-amd64-rhel7"
+      - run: "RELID=$(python -c 'import json; x=json.load(open("rel.json")); print(x["id"])') && curl -v -o relass.json -L -X POST -H content-type:application/octet-stream -H 'accept:application/vnd.github+json' -H 'authorization:Bearer ${{secrets.github_token}}' -H 'X-GitHub-Api-Version: 2022-11-28' -T ${{steps.wdset.outputs.gh}}/build/daqingest/target/release/daqingest https://uploads.github.com/repos/paulscherrerinstitute/daqingest/releases/$RELID/assets?name=daqingest-${{steps.daqingest_version_set.outputs.daqingest_version}}-amd64-rhel7"
       - run: cat relass.json
