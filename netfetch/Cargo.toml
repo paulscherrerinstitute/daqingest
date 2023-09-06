@@ -43,3 +43,4 @@ items_2 = { path = "../../daqbuffer/crates/items_2" }
 streams = { path = "../../daqbuffer/crates/streams" }
 taskrun = { path = "../../daqbuffer/crates/taskrun" }
 bitshuffle = { path = "../../daqbuffer/crates/bitshuffle" }
+batchtools = { path = "../batchtools" }

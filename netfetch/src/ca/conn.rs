@@ -9,6 +9,7 @@ use crate::ca::proto::EventAdd;
 use crate::senderpolling::SenderPolling;
 use crate::timebin::ConnTimeBin;
 use async_channel::Sender;
+use dbpg::seriesbychannel::CanSendChannelInfoResult;
 use dbpg::seriesbychannel::ChannelInfoQuery;
 use err::Error;
 use futures_util::stream::FuturesUnordered;
@@ -306,6 +307,7 @@ fn info_store_msp_from_time(ts: SystemTime) -> u32 {
 
 #[derive(Debug)]
 pub enum ConnCommandKind {
+    SeriesLookupResult(Result<Existence<SeriesId>, dbpg::seriesbychannel::Error>),
     ChannelAdd(String, ChannelStatusSeriesId),
     ChannelRemove(String),
     CheckHealth,
@@ -319,6 +321,13 @@ pub struct ConnCommand {
 }
 
 impl ConnCommand {
+    pub fn series_lookup(qu: Result<Existence<SeriesId>, dbpg::seriesbychannel::Error>) -> Self {
+        Self {
+            id: Self::make_id(),
+            kind: ConnCommandKind::SeriesLookupResult(qu),
+        }
+    }
+
     pub fn channel_add(name: String, cssid: ChannelStatusSeriesId) -> Self {
         Self {
             id: Self::make_id(),
@@ -387,6 +396,21 @@ pub struct CaConnEvent {
 enum ChannelSetOp {
     Add(ChannelStatusSeriesId),
     Remove,
+}
+
+struct SendSeriesLookup {
+    tx: Sender<ConnCommand>,
+}
+
+impl CanSendChannelInfoResult for SendSeriesLookup {
+    fn make_send(
+        &self,
+        item: Result<Existence<SeriesId>, dbpg::seriesbychannel::Error>,
+    ) -> dbpg::seriesbychannel::BoxedSend {
+        let tx = self.tx.clone();
+        let fut = async move { tx.send(ConnCommand::series_lookup(item)).await.map_err(|_| ()) };
+        Box::pin(fut)
+    }
 }
 
 struct ChannelOpsResources<'a> {
@@ -639,6 +663,7 @@ impl CaConn {
                         self.cmd_shutdown();
                         Ready(Some(Ok(())))
                     }
+                    ConnCommandKind::SeriesLookupResult(_) => todo!("TODO handle SeriesLookupResult"),
                 }
             }
             Ready(None) => {
@@ -962,24 +987,28 @@ impl CaConn {
         let _ = cx;
         loop {
             break if let Some(mut entry) = self.series_lookup_schedule.first_entry() {
-                let dummy = entry.get().dummy();
-                let query = std::mem::replace(entry.get_mut(), dummy);
-                match self.channel_info_query_tx.try_send(query) {
-                    Ok(()) => {
-                        entry.remove();
-                        continue;
-                    }
-                    Err(e) => match e {
-                        async_channel::TrySendError::Full(_) => {
-                            warn!("series lookup channel full");
-                            *entry.get_mut() = e.into_inner();
-                        }
-                        async_channel::TrySendError::Closed(_) => {
-                            warn!("series lookup channel closed");
-                            // *entry.get_mut() = e.into_inner();
+                todo!("emit_series_lookup");
+                #[cfg(DISABLED)]
+                {
+                    let dummy = entry.get().dummy();
+                    let query = std::mem::replace(entry.get_mut(), dummy);
+                    match self.channel_info_query_tx.try_send(query) {
+                        Ok(()) => {
                             entry.remove();
+                            continue;
                         }
-                    },
+                        Err(e) => match e {
+                            async_channel::TrySendError::Full(_) => {
+                                warn!("series lookup channel full");
+                                *entry.get_mut() = e.into_inner();
+                            }
+                            async_channel::TrySendError::Closed(_) => {
+                                warn!("series lookup channel closed");
+                                // *entry.get_mut() = e.into_inner();
+                                entry.remove();
+                            }
+                        },
+                    }
                 }
             } else {
                 ()
@@ -1439,29 +1468,32 @@ impl CaConn {
                                 *ch_s = ChannelState::FetchingSeriesId(created_state);
                                 // TODO handle error in different way. Should most likely not abort.
                                 if !self.series_lookup_schedule.contains_key(&cid) {
-                                    let (tx, rx) = async_channel::bounded(1);
+                                    let tx = SendSeriesLookup {
+                                        tx: self.conn_command_tx.clone(),
+                                    };
                                     let query = ChannelInfoQuery {
                                         backend: self.backend.clone(),
                                         channel: name.clone(),
                                         scalar_type: scalar_type.to_scylla_i32(),
                                         shape_dims: shape.to_scylla_vec(),
-                                        tx,
+                                        tx: Box::pin(tx),
                                     };
                                     self.series_lookup_schedule.insert(cid, query);
-                                    let fut = async move {
-                                        match rx.recv().await {
-                                            Ok(item) => match item {
-                                                Ok(item) => Ok((cid, sid, k.data_type, k.data_count, item)),
-                                                Err(e) => Err(Error::with_msg_no_trace(e.to_string())),
-                                            },
-                                            Err(e) => {
-                                                // TODO count only
-                                                error!("can not receive series lookup result for {name} {e}");
-                                                Err(Error::with_msg_no_trace("can not receive lookup result"))
-                                            }
-                                        }
-                                    };
-                                    self.series_lookup_futs.push(Box::pin(fut));
+                                    todo!("TODO discover the series lookup from main command queue");
+                                    // let fut = async move {
+                                    //     match rx.recv().await {
+                                    //         Ok(item) => match item {
+                                    //             Ok(item) => Ok((cid, sid, k.data_type, k.data_count, item)),
+                                    //             Err(e) => Err(Error::with_msg_no_trace(e.to_string())),
+                                    //         },
+                                    //         Err(e) => {
+                                    //             // TODO count only
+                                    //             error!("can not receive series lookup result for {name} {e}");
+                                    //             Err(Error::with_msg_no_trace("can not receive lookup result"))
+                                    //         }
+                                    //     }
+                                    // };
+                                    // self.series_lookup_futs.push(Box::pin(fut));
                                 } else {
                                     // TODO count only
                                     warn!("series lookup for {name} already in progress");

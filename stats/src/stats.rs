@@ -209,6 +209,23 @@ impl IntervalEma {
 
 stats_proc::stats_struct!((
     stats_struct(
+        name(CaConnSetStats),
+        counters(
+            channel_unknown_address,
+            channel_with_address,
+            channel_search_pending,
+            search_pending_did_send,
+            channel_no_address,
+            unassigned,
+            assigned,
+        ),
+    ),
+    // agg(name(CaConnSetStatsAgg), parent(CaConnSetStats)),
+    diff(name(CaConnSetStatsDiff), input(CaConnSetStats)),
+));
+
+stats_proc::stats_struct!((
+    stats_struct(
         name(CaConnStats),
         counters(
             insert_item_create,

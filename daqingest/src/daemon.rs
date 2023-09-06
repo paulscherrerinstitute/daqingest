@@ -51,125 +51,11 @@ use tokio::task::JoinHandle;
 use tracing::info_span;
 use tracing::Instrument;
 
-const SEARCH_BATCH_MAX: usize = 256;
-const CURRENT_SEARCH_PENDING_MAX: usize = SEARCH_BATCH_MAX * 4;
-const SEARCH_DB_PIPELINE_LEN: usize = 4;
-const FINDER_JOB_QUEUE_LEN_MAX: usize = 10;
-const FINDER_IN_FLIGHT_MAX: usize = 800;
-const FINDER_BATCH_SIZE: usize = 8;
-const CHECK_CHANS_PER_TICK: usize = 10000;
 const CA_CONN_INSERT_QUEUE_MAX: usize = 256;
-const CHANNEL_STATUS_DUMMY_SCALAR_TYPE: i32 = i32::MIN + 1;
 
-const UNKNOWN_ADDRESS_STAY: Duration = Duration::from_millis(2000);
-const NO_ADDRESS_STAY: Duration = Duration::from_millis(20000);
-const SEARCH_PENDING_TIMEOUT: Duration = Duration::from_millis(30000);
-const SEARCH_PENDING_TIMEOUT_WARN: Duration = Duration::from_millis(8000);
-const FINDER_TIMEOUT: Duration = Duration::from_millis(100);
 const CHANNEL_CHECK_INTERVAL: Duration = Duration::from_millis(5000);
 const PRINT_ACTIVE_INTERVAL: Duration = Duration::from_millis(60000);
 const PRINT_STATUS_INTERVAL: Duration = Duration::from_millis(20000);
-
-const DO_ASSIGN_TO_CA_CONN: bool = true;
-
-static SEARCH_REQ_MARK_COUNT: AtomicUsize = AtomicUsize::new(0);
-static SEARCH_REQ_SEND_COUNT: AtomicUsize = AtomicUsize::new(0);
-static SEARCH_REQ_RECV_COUNT: AtomicUsize = AtomicUsize::new(0);
-static SEARCH_REQ_BATCH_SEND_COUNT: AtomicUsize = AtomicUsize::new(0);
-static SEARCH_REQ_BATCH_RECV_COUNT: AtomicUsize = AtomicUsize::new(0);
-static SEARCH_RES_0_COUNT: AtomicUsize = AtomicUsize::new(0);
-static SEARCH_RES_1_COUNT: AtomicUsize = AtomicUsize::new(0);
-static SEARCH_RES_2_COUNT: AtomicUsize = AtomicUsize::new(0);
-static SEARCH_RES_3_COUNT: AtomicUsize = AtomicUsize::new(0);
-static SEARCH_ANS_COUNT: AtomicUsize = AtomicUsize::new(0);
-
-#[derive(Clone, Debug, Serialize)]
-pub enum ConnectionStateValue {
-    Unconnected,
-    Connected {
-        //#[serde(with = "serde_Instant")]
-        since: SystemTime,
-    },
-}
-
-#[derive(Clone, Debug, Serialize)]
-pub struct ConnectionState {
-    //#[serde(with = "serde_Instant")]
-    updated: SystemTime,
-    value: ConnectionStateValue,
-}
-
-#[derive(Clone, Debug, Serialize)]
-pub enum WithAddressState {
-    Unassigned {
-        //#[serde(with = "serde_Instant")]
-        assign_at: SystemTime,
-    },
-    Assigned(ConnectionState),
-}
-
-#[derive(Clone, Debug, Serialize)]
-pub enum WithStatusSeriesIdStateInner {
-    UnknownAddress {
-        since: SystemTime,
-    },
-    SearchPending {
-        //#[serde(with = "serde_Instant")]
-        since: SystemTime,
-        did_send: bool,
-    },
-    WithAddress {
-        addr: SocketAddrV4,
-        state: WithAddressState,
-    },
-    NoAddress {
-        since: SystemTime,
-    },
-}
-
-#[derive(Clone, Debug, Serialize)]
-pub struct WithStatusSeriesIdState {
-    inner: WithStatusSeriesIdStateInner,
-}
-
-#[derive(Clone, Debug)]
-pub enum ActiveChannelState {
-    Init {
-        since: SystemTime,
-    },
-    WaitForStatusSeriesId {
-        since: SystemTime,
-        rx: Receiver<Result<Existence<SeriesId>, dbpg::seriesbychannel::Error>>,
-    },
-    WithStatusSeriesId {
-        status_series_id: ChannelStatusSeriesId,
-        state: WithStatusSeriesIdState,
-    },
-}
-
-#[derive(Debug)]
-pub enum ChannelStateValue {
-    Active(ActiveChannelState),
-    ToRemove { addr: Option<SocketAddrV4> },
-}
-
-#[derive(Debug)]
-pub struct ChannelState {
-    value: ChannelStateValue,
-}
-
-#[derive(Debug)]
-pub enum CaConnStateValue {
-    Fresh,
-    HadFeedback,
-    Shutdown { since: Instant },
-}
-
-#[derive(Debug)]
-pub struct CaConnState {
-    last_feedback: Instant,
-    value: CaConnStateValue,
-}
 
 pub struct DaemonOpts {
     backend: String,
@@ -193,13 +79,8 @@ impl DaemonOpts {
 
 pub struct Daemon {
     opts: DaemonOpts,
-    connection_states: BTreeMap<SocketAddrV4, CaConnState>,
-    channel_states: BTreeMap<Channel, ChannelState>,
     tx: Sender<DaemonEvent>,
     rx: Receiver<DaemonEvent>,
-    chan_check_next: Option<Channel>,
-    search_tx: Sender<String>,
-    ioc_finder_jh: JoinHandle<Result<(), Error>>,
     insert_queue_counter: Arc<AtomicUsize>,
     count_unknown_address: usize,
     count_search_pending: usize,
@@ -226,8 +107,6 @@ impl Daemon {
             .map_err(|e| Error::with_msg_no_trace(e.to_string()))?;
         let datastore = Arc::new(datastore);
         let (daemon_ev_tx, daemon_ev_rx) = async_channel::bounded(32);
-        let (search_tx, ioc_finder_jh) =
-            finder::start_finder(daemon_ev_tx.clone(), opts.backend().into(), opts.pgconf.clone());
 
         // TODO keep join handles and await later
         let (channel_info_query_tx, ..) = dbpg::seriesbychannel::start_lookup_workers(4, &opts.pgconf)
@@ -242,8 +121,11 @@ impl Daemon {
         let common_insert_item_queue_2 = rx;
 
         let conn_set_ctrl = CaConnSet::start(
+            opts.backend.clone(),
+            opts.local_epics_hostname.clone(),
             common_insert_item_queue.sender().unwrap().inner().clone(),
             channel_info_query_tx.clone(),
+            opts.pgconf.clone(),
         );
 
         let ingest_commons = IngestCommons {
@@ -313,13 +195,8 @@ impl Daemon {
 
         let ret = Self {
             opts,
-            connection_states: BTreeMap::new(),
-            channel_states: BTreeMap::new(),
             tx: daemon_ev_tx,
             rx: daemon_ev_rx,
-            chan_check_next: None,
-            search_tx,
-            ioc_finder_jh,
             insert_queue_counter,
             count_unknown_address: 0,
             count_search_pending: 0,
@@ -347,324 +224,6 @@ impl Daemon {
 
     fn allow_create_new_connections(&self) -> bool {
         !self.shutting_down
-    }
-
-    fn check_connection_states(&mut self) -> Result<(), Error> {
-        let tsnow = Instant::now();
-        for (k, v) in &mut self.connection_states {
-            match v.value {
-                CaConnStateValue::Fresh => {
-                    // TODO check for delta t since last issued status command.
-                    if tsnow.duration_since(v.last_feedback) > Duration::from_millis(20000) {
-                        error!("TODO Fresh timeout send connection-close for {k:?}");
-                        self.stats.ca_conn_status_feedback_timeout_inc();
-                        v.value = CaConnStateValue::Shutdown { since: tsnow };
-                    }
-                }
-                CaConnStateValue::HadFeedback => {
-                    // TODO check for delta t since last issued status command.
-                    if tsnow.duration_since(v.last_feedback) > Duration::from_millis(20000) {
-                        error!("TODO HadFeedback timeout send connection-close for {k:?}");
-                        self.stats.ca_conn_status_feedback_timeout_inc();
-                        v.value = CaConnStateValue::Shutdown { since: tsnow };
-                    }
-                }
-                CaConnStateValue::Shutdown { since } => {
-                    if tsnow.saturating_duration_since(since) > Duration::from_millis(10000) {
-                        self.stats.critical_error_inc();
-                        error!("Shutdown of CaConn to {} failed", k);
-                    }
-                }
-            }
-        }
-        Ok(())
-    }
-
-    fn update_channel_state_counts(&mut self) -> (u64,) {
-        let mut unknown_address_count = 0;
-        let mut with_address_count = 0;
-        let mut search_pending_count = 0;
-        let mut no_address_count = 0;
-        for (_ch, st) in &self.channel_states {
-            match &st.value {
-                ChannelStateValue::Active(st2) => match st2 {
-                    ActiveChannelState::Init { .. } => {
-                        unknown_address_count += 1;
-                    }
-                    ActiveChannelState::WaitForStatusSeriesId { .. } => {
-                        unknown_address_count += 1;
-                    }
-                    ActiveChannelState::WithStatusSeriesId { state, .. } => match &state.inner {
-                        WithStatusSeriesIdStateInner::UnknownAddress { .. } => {
-                            unknown_address_count += 1;
-                        }
-                        WithStatusSeriesIdStateInner::SearchPending { .. } => {
-                            search_pending_count += 1;
-                        }
-                        WithStatusSeriesIdStateInner::WithAddress { state, .. } => match state {
-                            WithAddressState::Unassigned { .. } => {
-                                with_address_count += 1;
-                            }
-                            WithAddressState::Assigned(_) => {
-                                with_address_count += 1;
-                            }
-                        },
-                        WithStatusSeriesIdStateInner::NoAddress { .. } => {
-                            no_address_count += 1;
-                        }
-                    },
-                },
-                ChannelStateValue::ToRemove { .. } => {
-                    unknown_address_count += 1;
-                }
-            }
-        }
-        self.stats
-            .channel_unknown_address
-            .store(unknown_address_count, atomic::Ordering::Release);
-        self.stats
-            .channel_with_address
-            .store(with_address_count, atomic::Ordering::Release);
-        self.stats
-            .channel_search_pending
-            .store(search_pending_count, atomic::Ordering::Release);
-        self.stats
-            .channel_no_address
-            .store(no_address_count, atomic::Ordering::Release);
-        (search_pending_count,)
-    }
-
-    fn channel_state_counts_2(&mut self) {
-        self.count_unknown_address = 0;
-        self.count_search_pending = 0;
-        self.count_search_sent = 0;
-        self.count_no_address = 0;
-        self.count_unassigned = 0;
-        self.count_assigned = 0;
-        for (_ch, st) in &self.channel_states {
-            match &st.value {
-                ChannelStateValue::Active(st) => match st {
-                    ActiveChannelState::Init { .. } => {}
-                    ActiveChannelState::WaitForStatusSeriesId { .. } => {}
-                    ActiveChannelState::WithStatusSeriesId { state, .. } => match &state.inner {
-                        WithStatusSeriesIdStateInner::UnknownAddress { .. } => {
-                            self.count_unknown_address += 1;
-                        }
-                        WithStatusSeriesIdStateInner::SearchPending { did_send, .. } => {
-                            self.count_search_pending += 1;
-                            if *did_send {
-                                self.count_search_sent += 1;
-                            }
-                        }
-                        WithStatusSeriesIdStateInner::WithAddress { state, .. } => match state {
-                            WithAddressState::Unassigned { .. } => {
-                                self.count_unassigned += 1;
-                            }
-                            WithAddressState::Assigned(_) => {
-                                self.count_assigned += 1;
-                            }
-                        },
-                        WithStatusSeriesIdStateInner::NoAddress { .. } => {
-                            self.count_no_address += 1;
-                        }
-                    },
-                },
-                ChannelStateValue::ToRemove { .. } => {}
-            }
-        }
-    }
-
-    async fn check_channel_states(&mut self) -> Result<(), Error> {
-        let (mut search_pending_count,) = self.update_channel_state_counts();
-        let k = self.chan_check_next.take();
-        let it = if let Some(last) = k {
-            trace!("check_chans  start at {:?}", last);
-            self.channel_states.range_mut(last..)
-        } else {
-            self.channel_states.range_mut(..)
-        };
-        let tsnow = SystemTime::now();
-        let mut attempt_series_search = true;
-        for (i, (ch, st)) in it.enumerate() {
-            match &mut st.value {
-                ChannelStateValue::Active(st2) => match st2 {
-                    ActiveChannelState::Init { since: _ } => {
-                        let (tx, rx) = async_channel::bounded(1);
-                        let q = ChannelInfoQuery {
-                            backend: self.ingest_commons.backend.clone(),
-                            channel: ch.id().into(),
-                            scalar_type: CHANNEL_STATUS_DUMMY_SCALAR_TYPE,
-                            shape_dims: Vec::new(),
-                            tx,
-                        };
-                        if attempt_series_search {
-                            match self.channel_info_query_tx.try_send(q) {
-                                Ok(()) => {
-                                    *st2 = ActiveChannelState::WaitForStatusSeriesId { since: tsnow, rx };
-                                }
-                                Err(e) => match e {
-                                    _ => {
-                                        attempt_series_search = false;
-                                    }
-                                },
-                            }
-                        }
-                    }
-                    ActiveChannelState::WaitForStatusSeriesId { since, rx } => {
-                        let dt = tsnow.duration_since(*since).unwrap_or(Duration::ZERO);
-                        if dt > Duration::from_millis(5000) {
-                            warn!("timeout can not get status series id for {ch:?}");
-                            *st2 = ActiveChannelState::Init { since: tsnow };
-                        } else {
-                            match rx.try_recv() {
-                                Ok(x) => match x {
-                                    Ok(x) => {
-                                        //info!("received status series id: {x:?}");
-                                        *st2 = ActiveChannelState::WithStatusSeriesId {
-                                            status_series_id: ChannelStatusSeriesId::new(x.into_inner().id()),
-                                            state: WithStatusSeriesIdState {
-                                                inner: WithStatusSeriesIdStateInner::UnknownAddress { since: tsnow },
-                                            },
-                                        };
-                                    }
-                                    Err(e) => {
-                                        error!("could not get a status series id  {ch:?}  {e}");
-                                    }
-                                },
-                                Err(_) => {
-                                    // TODO should maybe not attempt receive on each channel check.
-                                }
-                            }
-                        }
-                    }
-                    ActiveChannelState::WithStatusSeriesId {
-                        status_series_id,
-                        state,
-                    } => match &mut state.inner {
-                        WithStatusSeriesIdStateInner::UnknownAddress { since } => {
-                            let dt = tsnow.duration_since(*since).unwrap_or(Duration::ZERO);
-                            if dt > UNKNOWN_ADDRESS_STAY {
-                                //info!("UnknownAddress {} {:?}", i, ch);
-                                if (search_pending_count as usize) < CURRENT_SEARCH_PENDING_MAX {
-                                    search_pending_count += 1;
-                                    state.inner = WithStatusSeriesIdStateInner::SearchPending {
-                                        since: tsnow,
-                                        did_send: false,
-                                    };
-                                    SEARCH_REQ_MARK_COUNT.fetch_add(1, atomic::Ordering::AcqRel);
-                                }
-                            }
-                        }
-                        WithStatusSeriesIdStateInner::SearchPending { since, did_send: _ } => {
-                            //info!("SearchPending {} {:?}", i, ch);
-                            let dt = tsnow.duration_since(*since).unwrap_or(Duration::ZERO);
-                            if dt > SEARCH_PENDING_TIMEOUT {
-                                info!("Search timeout for {ch:?}");
-                                state.inner = WithStatusSeriesIdStateInner::NoAddress { since: tsnow };
-                                search_pending_count -= 1;
-                            }
-                        }
-                        WithStatusSeriesIdStateInner::WithAddress { addr, state } => {
-                            //info!("WithAddress {} {:?}", i, ch);
-                            use WithAddressState::*;
-                            match state {
-                                Unassigned { assign_at } => {
-                                    if DO_ASSIGN_TO_CA_CONN && *assign_at <= tsnow {
-                                        let backend = self.opts.backend().into();
-                                        let addr_v4 = SocketAddr::V4(*addr);
-                                        let name = ch.id().into();
-                                        let cssid = status_series_id.clone();
-                                        let local_epics_hostname = self.opts.local_epics_hostname.clone();
-                                        // This operation is meant to complete very quickly
-                                        self.connset_ctrl
-                                            .add_channel(backend, addr_v4, name, cssid, local_epics_hostname)
-                                            .slow_warn(500)
-                                            .instrument(info_span!("add_channel_to_addr"))
-                                            .await?;
-                                        let cs = ConnectionState {
-                                            updated: tsnow,
-                                            value: ConnectionStateValue::Unconnected,
-                                        };
-                                        *state = WithAddressState::Assigned(cs);
-                                        self.connection_states
-                                            .entry(*addr)
-                                            .and_modify(|_| {
-                                                // TODO may be count for metrics.
-                                                // Nothing else to do.
-                                            })
-                                            .or_insert_with(|| {
-                                                let t = CaConnState {
-                                                    last_feedback: Instant::now(),
-                                                    value: CaConnStateValue::Fresh,
-                                                };
-                                                t
-                                            });
-                                        // TODO move await out of here
-                                        if let Some(tx) = self.ingest_commons.insert_item_queue.sender() {
-                                            let item = QueryItem::ChannelStatus(ChannelStatusItem {
-                                                ts: tsnow,
-                                                series: SeriesId::new(status_series_id.id()),
-                                                status: ChannelStatus::AssignedToAddress,
-                                            });
-                                            match tx.send(item).await {
-                                                Ok(_) => {}
-                                                Err(_) => {
-                                                    // TODO feed into throttled log, or count as unlogged
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                                Assigned(_) => {
-                                    // TODO check if channel is healthy and alive
-                                }
-                            }
-                        }
-                        WithStatusSeriesIdStateInner::NoAddress { since } => {
-                            let dt = tsnow.duration_since(*since).unwrap_or(Duration::ZERO);
-                            if dt > NO_ADDRESS_STAY {
-                                state.inner = WithStatusSeriesIdStateInner::UnknownAddress { since: tsnow };
-                            }
-                        }
-                    },
-                },
-                ChannelStateValue::ToRemove { .. } => {
-                    // TODO if assigned to some address,
-                }
-            }
-            if i >= CHECK_CHANS_PER_TICK {
-                self.chan_check_next = Some(ch.clone());
-                break;
-            }
-        }
-        for (ch, st) in &mut self.channel_states {
-            if let ChannelStateValue::Active(ActiveChannelState::WithStatusSeriesId {
-                status_series_id: _,
-                state,
-            }) = &mut st.value
-            {
-                if let WithStatusSeriesIdStateInner::SearchPending { since: _, did_send } = &mut state.inner {
-                    if *did_send == false {
-                        match self.search_tx.try_send(ch.id().into()) {
-                            Ok(()) => {
-                                *did_send = true;
-                                SEARCH_REQ_SEND_COUNT.fetch_add(1, atomic::Ordering::AcqRel);
-                            }
-                            Err(e) => match e {
-                                async_channel::TrySendError::Full(_) => {}
-                                async_channel::TrySendError::Closed(_) => {
-                                    error!("Finder channel closed");
-                                    // TODO recover from this.
-                                    panic!();
-                                }
-                            },
-                        }
-                    }
-                }
-            }
-        }
-        self.channel_state_counts_2();
-        Ok(())
     }
 
     async fn check_caconn_chans(&mut self) -> Result<(), Error> {
@@ -709,8 +268,10 @@ impl Daemon {
             warn!("Received SIGTERM");
             SIGTERM.store(2, atomic::Ordering::Release);
         }
-        self.check_connection_states()?;
-        self.check_channel_states().await?;
+        warn!("TODO let CaConnSet check health");
+        // TODO
+        // self.check_connection_states()?;
+        // self.check_channel_states().await?;
         let dt = ts1.elapsed();
         if dt > Duration::from_millis(500) {
             info!("slow check_chans  {}ms", dt.as_secs_f32() * 1e3);
@@ -733,38 +294,24 @@ impl Daemon {
                 self.count_assigned,
                 self.insert_queue_counter.load(atomic::Ordering::Acquire),
             );
-            if false {
-                info!(
-                    "{:5} {:5} {:5} {:5} {:5} {:5} {:5} {:5} {:5} {:5}",
-                    SEARCH_REQ_MARK_COUNT.load(atomic::Ordering::Acquire),
-                    SEARCH_REQ_SEND_COUNT.load(atomic::Ordering::Acquire),
-                    SEARCH_REQ_RECV_COUNT.load(atomic::Ordering::Acquire),
-                    SEARCH_REQ_BATCH_SEND_COUNT.load(atomic::Ordering::Acquire),
-                    SEARCH_REQ_BATCH_RECV_COUNT.load(atomic::Ordering::Acquire),
-                    SEARCH_RES_0_COUNT.load(atomic::Ordering::Acquire),
-                    SEARCH_RES_1_COUNT.load(atomic::Ordering::Acquire),
-                    SEARCH_RES_2_COUNT.load(atomic::Ordering::Acquire),
-                    SEARCH_RES_3_COUNT.load(atomic::Ordering::Acquire),
-                    SEARCH_ANS_COUNT.load(atomic::Ordering::Acquire),
-                );
-            }
         }
         Ok(())
     }
 
-    fn handle_channel_add(&mut self, ch: Channel) -> Result<(), Error> {
-        if !self.channel_states.contains_key(&ch) {
-            let st = ChannelState {
-                value: ChannelStateValue::Active(ActiveChannelState::Init {
-                    since: SystemTime::now(),
-                }),
-            };
-            self.channel_states.insert(ch, st);
-        }
+    async fn handle_channel_add(&mut self, ch: Channel) -> Result<(), Error> {
+        self.connset_ctrl
+            .add_channel(
+                self.opts.backend.clone(),
+                ch.id().into(),
+                self.opts.local_epics_hostname.clone(),
+            )
+            .await?;
         Ok(())
     }
 
-    fn handle_channel_remove(&mut self, ch: Channel) -> Result<(), Error> {
+    async fn handle_channel_remove(&mut self, ch: Channel) -> Result<(), Error> {
+        warn!("TODO handle_channel_remove");
+        #[cfg(DISABLED)]
         if let Some(k) = self.channel_states.get_mut(&ch) {
             match &k.value {
                 ChannelStateValue::Active(j) => match j {
@@ -801,9 +348,11 @@ impl Daemon {
     }
 
     async fn handle_search_done(&mut self, item: Result<VecDeque<FindIocRes>, Error>) -> Result<(), Error> {
+        warn!("TODO handle_search_done");
         //debug!("handle SearchDone: {res:?}");
-        let allow_create_new_connections = self.allow_create_new_connections();
-        let tsnow = SystemTime::now();
+        // let allow_create_new_connections = self.allow_create_new_connections();
+        // let tsnow = SystemTime::now();
+        #[cfg(DISABLED)]
         match item {
             Ok(ress) => {
                 SEARCH_ANS_COUNT.fetch_add(ress.len(), atomic::Ordering::AcqRel);
@@ -917,6 +466,12 @@ impl Daemon {
     }
 
     async fn handle_ca_conn_done(&mut self, conn_addr: SocketAddrV4) -> Result<(), Error> {
+        warn!("TODO handle_ca_conn_done {conn_addr:?}");
+        Ok(())
+    }
+
+    #[cfg(DISABLED)]
+    async fn handle_ca_conn_done(&mut self, conn_addr: SocketAddrV4) -> Result<(), Error> {
         info!("handle_ca_conn_done {conn_addr:?}");
         self.connection_states.remove(&conn_addr);
         for (_k, v) in self.channel_states.iter_mut() {
@@ -984,6 +539,8 @@ impl Daemon {
                 use netfetch::ca::conn::ConnCommandResultKind::*;
                 match &item.kind {
                     CheckHealth => {
+                        todo!("TODO collect the CaConn health check in CaConnSet");
+                        #[cfg(DISABLED)]
                         if let Some(st) = self.connection_states.get_mut(&addr) {
                             self.stats.ca_conn_status_feedback_recv_inc();
                             st.last_feedback = Instant::now();
@@ -1006,6 +563,11 @@ impl Daemon {
         }
     }
 
+    async fn handle_shutdown(&mut self) -> Result<(), Error> {
+        todo!("handle_shutdown");
+    }
+
+    #[cfg(DISABLED)]
     async fn handle_shutdown(&mut self) -> Result<(), Error> {
         warn!("received shutdown event");
         if self.shutting_down {
@@ -1041,8 +603,8 @@ impl Daemon {
                 let _ = ts1.elapsed();
                 ret
             }
-            ChannelAdd(ch) => self.handle_channel_add(ch),
-            ChannelRemove(ch) => self.handle_channel_remove(ch),
+            ChannelAdd(ch) => self.handle_channel_add(ch).await,
+            ChannelRemove(ch) => self.handle_channel_remove(ch).await,
             SearchDone(item) => self.handle_search_done(item).await,
             CaConnEvent(addr, item) => self.handle_ca_conn_event(addr, item).await,
             Shutdown => self.handle_shutdown().await,
@@ -1108,8 +670,6 @@ impl Daemon {
                 }
             }
         }
-        warn!("TODO wait for IOC finder properly");
-        let _ = &self.ioc_finder_jh;
         warn!("TODO wait for insert workers");
         let _ = &self.insert_workers_jh;
         info!("daemon done");

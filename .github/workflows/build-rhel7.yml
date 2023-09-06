@@ -99,19 +99,16 @@ jobs:
       #   id: daqingest_version_set
       #   working-directory: ${{steps.wdset.outputs.gh}}/build/daqingest/target/release
       - run: "echo 'version: [${{steps.daqingest_version_set.outputs.daqingest_version}}]'"
-      - run: "mkdir daqingest-${{steps.daqingest_version_set.outputs.daqingest_version}}"
-      - run: "cp ${{steps.wdset.outputs.gh}}/build/daqingest/target/release/daqingest daqingest-${{steps.daqingest_version_set.outputs.daqingest_version}}/daqingest"
-      - run: "tar -czf daqingest-${{steps.daqingest_version_set.outputs.daqingest_version}}.tar.gz daqingest-${{steps.daqingest_version_set.outputs.daqingest_version}}"
+      - run: "mkdir daqingest-${{steps.daqingest_version_set.outputs.daqingest_version}}-amd64-rhel7"
+      - run: "cp ${{steps.wdset.outputs.gh}}/build/daqingest/target/release/daqingest daqingest-${{steps.daqingest_version_set.outputs.daqingest_version}}-amd64-rhel7/daqingest"
+      - run: "tar -czf daqingest-${{steps.daqingest_version_set.outputs.daqingest_version}}-amd64-rhel7.tar.gz daqingest-${{steps.daqingest_version_set.outputs.daqingest_version}}-amd64-rhel7"
       - uses: actions/upload-artifact@v3
         with:
           name: daqingest-${{steps.daqingest_version_set.outputs.daqingest_version}}
           path: ${{steps.wdset.outputs.gh}}/build/daqingest/target/release/daqingest
-      - uses: actions/upload-artifact@v3
-        with:
-          name: daqingest-${{steps.daqingest_version_set.outputs.daqingest_version}}.tar.gz
-          path: daqingest-${{steps.daqingest_version_set.outputs.daqingest_version}}.tar.gz
       - run: echo "{\"tag_name\":\"buildaction\", \"name\":\"daqingest-${{steps.daqingest_version_set.outputs.daqingest_version}}\", \"draft\":true, \"prerelease\":true}" > create-rel.json
-      - run: "curl -v -o rel.json -L -X POST -H content-type:application/json -H 'accept:application/vnd.github+json' -H 'authorization:bearer ${{secrets.github_token}}' -H 'x-github-api-version: 2022-11-28' -T create-rel.json https://api.github.com/repos/paulscherrerinstitute/daqingest/releases"
+      - run: "curl -v -o rel.json -L -X POST -H content-type:application/json -H 'accept:application/vnd.github+json' -H 'authorization:bearer ${{secrets.github_token}}' -H x-github-api-version:2022-11-28 -T create-rel.json https://api.github.com/repos/paulscherrerinstitute/daqingest/releases"
       - run: cat rel.json
-      - run: "RELID=$(python -c 'import json; x=json.load(open(\"rel.json\")); print(x[\"id\"])') && curl -v -o relass.json -L -X POST -H content-type:application/octet-stream -H 'accept:application/vnd.github+json' -H 'authorization:Bearer ${{secrets.github_token}}' -H 'X-GitHub-Api-Version: 2022-11-28' -T ${{steps.wdset.outputs.gh}}/build/daqingest/target/release/daqingest https://uploads.github.com/repos/paulscherrerinstitute/daqingest/releases/$RELID/assets?name=daqingest-${{steps.daqingest_version_set.outputs.daqingest_version}}-amd64-rhel7"
+      - run: "RELID=$(python -c 'import json; x=json.load(open(\"rel.json\")); print(x[\"id\"])') && curl -v -o relass.json -L -X POST -H content-type:application/octet-stream -H 'accept:application/vnd.github+json' -H 'authorization:Bearer ${{secrets.github_token}}' -H x-github-api-version:2022-11-28 -T ${{steps.wdset.outputs.gh}}/build/daqingest/target/release/daqingest https://uploads.github.com/repos/paulscherrerinstitute/daqingest/releases/$RELID/assets?name=daqingest-${{steps.daqingest_version_set.outputs.daqingest_version}}-amd64-rhel7"
+      - run: "RELID=$(python -c 'import json; x=json.load(open(\"rel.json\")); print(x[\"id\"])') && curl -v -o relass.json -L -X POST -H content-type:application/octet-stream -H 'accept:application/vnd.github+json' -H 'authorization:Bearer ${{secrets.github_token}}' -H x-github-api-version:2022-11-28 -T daqingest-${{steps.daqingest_version_set.outputs.daqingest_version}}-amd64-rhel7.tar.gz https://uploads.github.com/repos/paulscherrerinstitute/daqingest/releases/$RELID/assets?name=daqingest-${{steps.daqingest_version_set.outputs.daqingest_version}}-amd64-rhel7.tar.gz"
       - run: cat relass.json

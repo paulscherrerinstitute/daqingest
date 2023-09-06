@@ -1,13 +1,16 @@
 use async_channel::Receiver;
+use async_channel::SendError;
 use async_channel::Sender;
 use err::thiserror;
 use err::ThisError;
+use futures_util::Future;
 use futures_util::StreamExt;
 use log::*;
 use md5::Digest;
 use netpod::Database;
 use series::series::Existence;
 use series::SeriesId;
+use std::pin::Pin;
 use std::time::Duration;
 use std::time::Instant;
 use taskrun::tokio;
@@ -50,29 +53,23 @@ impl From<crate::err::Error> for Error {
     }
 }
 
+pub type BoxedSend = Pin<Box<dyn Future<Output = Result<(), ()>> + Send>>;
+
+pub trait CanSendChannelInfoResult: Sync {
+    fn make_send(&self, item: Result<Existence<SeriesId>, Error>) -> BoxedSend;
+}
+
 pub struct ChannelInfoQuery {
     pub backend: String,
     pub channel: String,
     pub scalar_type: i32,
     pub shape_dims: Vec<i32>,
-    pub tx: Sender<Result<Existence<SeriesId>, Error>>,
-}
-
-impl ChannelInfoQuery {
-    pub fn dummy(&self) -> Self {
-        Self {
-            backend: String::new(),
-            channel: String::new(),
-            scalar_type: -1,
-            shape_dims: Vec::new(),
-            tx: self.tx.clone(),
-        }
-    }
+    pub tx: Pin<Box<dyn CanSendChannelInfoResult + Send>>,
 }
 
 struct ChannelInfoResult {
     series: Existence<SeriesId>,
-    tx: Sender<Result<Existence<SeriesId>, Error>>,
+    tx: Pin<Box<dyn CanSendChannelInfoResult + Send>>,
     // only for trace:
     channel: String,
 }
@@ -285,7 +282,8 @@ impl Worker {
             let res4 = res3?;
             for r in res4 {
                 trace3!("try to send result for  {}  {:?}", r.channel, r.series);
-                match r.tx.send(Ok(r.series)).await {
+                let fut = r.tx.make_send(Ok(r.series));
+                match fut.await {
                     Ok(()) => {}
                     Err(_e) => {
                         warn!("can not deliver result");

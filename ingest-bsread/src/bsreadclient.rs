@@ -125,6 +125,10 @@ impl BsreadClient {
                 let evtset: Vec<_> = fr.data.iter().map(|&x| x != 0).collect();
                 let scalar_type = ScalarType::BOOL;
                 let shape = Shape::Wave(256);
+                if true {
+                    todo!("TODO bsreadclient try to fetch series id");
+                }
+                #[cfg(DISABLED)]
                 if self.tmp_evtset_series.is_none() {
                     debug!("try to fetch series id");
                     let (tx, rx) = async_channel::bounded(8);

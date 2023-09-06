@@ -1,8 +1,10 @@
 pub mod conn;
 pub mod connset;
+pub mod finder;
 pub mod findioc;
 pub mod proto;
 pub mod search;
+pub mod statemap;
 
 use self::connset::CaConnSetCtrl;
 use crate::ca::connset::CaConnSet;

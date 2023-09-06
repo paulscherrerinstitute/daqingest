@@ -28,6 +28,5 @@ scywr = { path = "../scywr" }
 dbpg = { path = "../dbpg" }
 series = { path = "../series" }
 netfetch = { path = "../netfetch" }
-batchtools = { path = "../batchtools" }
 ingest-bsread = { path = "../ingest-bsread" }
 ingest-linux = { path = "../ingest-linux" }
