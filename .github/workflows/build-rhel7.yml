@@ -62,6 +62,8 @@ jobs:
       - run: echo RUNNER_WORKSPACE "$RUNNER_WORKSPACE"
       - run: echo github.workspace ${{github.workspace}}
       - run: echo runner.workspace ${{runner.workspace}}
+      - run: echo "gh=$GITHUB_WORKSPACE" >> "$GITHUB_OUTPUT"
+        id: wdset
       - run: find "$GITHUB_WORKSPACE"
       # - uses: actions/checkout@v4
       #   with:
@@ -73,26 +75,26 @@ jobs:
       #     repository: paulscherrerinstitute/daqingest.git
       #     path: build
       - run: git clone --branch dev https://github.com/paulscherrerinstitute/daqbuffer.git
-        working-directory: ${{github.workspace}}/build
+        working-directory: ${{steps.wdset.gh}}/build
       - run: git clone --branch dev https://github.com/paulscherrerinstitute/daqingest.git
-        working-directory: ${{github.workspace}}/build
+        working-directory: ${{steps.wdset.gh}}/build
       - run: ls -la $GITHUB_WORKSPACE
       - run: find $GITHUB_WORKSPACE -type f -and \( -name \*.rs -or -name \*.toml \)
-      - run: find ${{github.workspace}} -type f -and \( -name \*.rs -or -name \*.toml \)
-        working-directory: ${{github.workspace}}/build
+      - run: find ${{steps.wdset.gh}} -type f -and \( -name \*.rs -or -name \*.toml \)
+        working-directory: ${{steps.wdset.gh}}/build
       - run: cargo build --release
-        working-directory: ${{github.workspace}}/build/daqingest
+        working-directory: ${{steps.wdset.gh}}/build/daqingest
       - run: ls -l
-        working-directory: ${{github.workspace}}/build/daqingest/target/release
+        working-directory: ${{steps.wdset.gh}}/build/daqingest/target/release
       - run: ./daqingest --version
-        working-directory: ${{github.workspace}}/build/daqingest/target/release
+        working-directory: ${{steps.wdset.gh}}/build/daqingest/target/release
       - run: echo "daqingest_version=$(./daqingest --version)" >> "$GITHUB_OUTPUT"
         id: daqingest_version_set
-        working-directory: ${{github.workspace}}/build/daqingest/target/release
+        working-directory: ${{steps.wdset.gh}}/build/daqingest/target/release
       - uses: actions/upload-artifact@v3
         with:
           name: daqingest-${{ steps.daqingest_version_set.outputs.daqingest_version }}-amd64-rhel7
-          path: ${{github.workspace}}/build/daqingest/target/release/daqingest
+          path: ${{steps.wdset.gh}}/build/daqingest/target/release/daqingest
       - run: curl -o rel.json -L \
           -H accept:application/vnd.github+json \
           -H authorization:Bearer\\ ${{secrets.github_token}} \
