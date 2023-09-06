@@ -45,8 +45,6 @@ jobs:
       # - run: ls -la /root
       - run: ls -la /
       - run: ls -la /__w
-      - run: ls -la /home/runner
-      - run: ls -la /home/runner/work
       - run: git --version
       - run: rustc --version
       - run: cargo --version
