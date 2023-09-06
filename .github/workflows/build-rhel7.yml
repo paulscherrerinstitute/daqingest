@@ -50,7 +50,6 @@ jobs:
       - run: cargo --version
       - run: python --version
       - run: python -c 'import json; print(json)'
-      - run: false
       - run: mkdir /build
       # - run: "echo Flags: ${{ github.event.inputs.flags }}"
       # - run: echo $HOME
