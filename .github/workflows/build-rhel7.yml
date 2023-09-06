@@ -60,12 +60,14 @@ jobs:
       - run: echo runner.workspace ${{runner.workspace}}
       - run: find "$GITHUB_WORKSPACE"
       - uses: actions/checkout@v4
-        repository: paulscherrerinstitute/daqbuffer.git
-        ref: dev
-        path: build
+        with:
+          repository: paulscherrerinstitute/daqbuffer.git
+          ref: dev
+          path: build
       - uses: actions/checkout@v4
-        repository: paulscherrerinstitute/daqingest.git
-        path: build
+        with:
+          repository: paulscherrerinstitute/daqingest.git
+          path: build
       - run: find "$GITHUB_WORKSPACE"
       # - run: git clone --branch dev https://github.com/paulscherrerinstitute/daqbuffer.git
       #   working-directory: /build
