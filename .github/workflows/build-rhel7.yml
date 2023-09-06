@@ -43,6 +43,10 @@ jobs:
       # - run: find /github -type f
       # - run: cat /github/workflow/event.json
       # - run: ls -la /root
+      - run: ls -la /
+      - run: ls -la /__w
+      - run: ls -la /home/runner
+      - run: ls -la /home/runner/work
       - run: git --version
       - run: rustc --version
       - run: cargo --version
@@ -59,21 +63,22 @@ jobs:
       - run: echo github.workspace ${{github.workspace}}
       - run: echo runner.workspace ${{runner.workspace}}
       - run: find "$GITHUB_WORKSPACE"
-      - uses: actions/checkout@v4
-        with:
-          repository: paulscherrerinstitute/daqbuffer.git
-          ref: dev
-          path: build
-      - uses: actions/checkout@v4
-        with:
-          repository: paulscherrerinstitute/daqingest.git
-          path: build
-      - run: find "$GITHUB_WORKSPACE"
-      # - run: git clone --branch dev https://github.com/paulscherrerinstitute/daqbuffer.git
-      #   working-directory: /build
-      # - run: git clone --branch dev https://github.com/paulscherrerinstitute/daqingest.git
-      #   working-directory: /build
-      - run: find . -type f -and \( -name \*.rs -or -name \*.toml \)
+      # - uses: actions/checkout@v4
+      #   with:
+      #     repository: paulscherrerinstitute/daqbuffer.git
+      #     ref: dev
+      #     path: build
+      # - uses: actions/checkout@v4
+      #   with:
+      #     repository: paulscherrerinstitute/daqingest.git
+      #     path: build
+      - run: git clone --branch dev https://github.com/paulscherrerinstitute/daqbuffer.git
+        working-directory: ${{github.workspace}}/build
+      - run: git clone --branch dev https://github.com/paulscherrerinstitute/daqingest.git
+        working-directory: ${{github.workspace}}/build
+      - run: ls -la $GITHUB_WORKSPACE
+      - run: find $GITHUB_WORKSPACE -type f -and \( -name \*.rs -or -name \*.toml \)
+      - run: find ${{github.workspace}} -type f -and \( -name \*.rs -or -name \*.toml \)
         working-directory: ${{github.workspace}}/build
       - run: cargo build --release
         working-directory: ${{github.workspace}}/build/daqingest
