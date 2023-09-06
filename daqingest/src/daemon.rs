@@ -200,8 +200,6 @@ pub struct Daemon {
     chan_check_next: Option<Channel>,
     search_tx: Sender<String>,
     ioc_finder_jh: JoinHandle<Result<(), Error>>,
-    datastore: Arc<DataStore>,
-    common_insert_item_queue: Arc<CommonInsertItemQueue>,
     insert_queue_counter: Arc<AtomicUsize>,
     count_unknown_address: usize,
     count_search_pending: usize,
@@ -236,14 +234,16 @@ impl Daemon {
             .map_err(|e| Error::with_msg_no_trace(e.to_string()))?;
 
         let common_insert_item_queue = Arc::new(CommonInsertItemQueue::new(opts.insert_item_queue_cap));
-        // let common_insert_item_queue_2 = Arc::new(CommonInsertItemQueue::new(opts.insert_item_queue_cap));
         let insert_queue_counter = Arc::new(AtomicUsize::new(0));
 
         // Insert queue hook
         let rx = inserthook::active_channel_insert_hook(common_insert_item_queue.receiver().unwrap());
         let common_insert_item_queue_2 = rx;
 
-        let conn_set_ctrl = CaConnSet::start(channel_info_query_tx.clone());
+        let conn_set_ctrl = CaConnSet::start(
+            common_insert_item_queue.sender().unwrap().inner().clone(),
+            channel_info_query_tx.clone(),
+        );
 
         let ingest_commons = IngestCommons {
             pgconf: Arc::new(opts.pgconf.clone()),
@@ -319,8 +319,6 @@ impl Daemon {
             chan_check_next: None,
             search_tx,
             ioc_finder_jh,
-            datastore,
-            common_insert_item_queue,
             insert_queue_counter,
             count_unknown_address: 0,
             count_search_pending: 0,

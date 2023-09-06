@@ -13,6 +13,7 @@ use err::Error;
 use futures_util::FutureExt;
 use futures_util::StreamExt;
 use netpod::log::*;
+use scywr::iteminsertqueue::QueryItem;
 use series::ChannelStatusSeriesId;
 use stats::CaConnStats;
 use std::collections::BTreeMap;
@@ -30,6 +31,7 @@ pub struct CmdId(SocketAddrV4, usize);
 pub struct CaConnRes {
     sender: Sender<ConnCommand>,
     stats: Arc<CaConnStats>,
+    // TODO await on jh
     jh: JoinHandle<Result<(), Error>>,
 }
 
@@ -96,7 +98,10 @@ pub struct CaConnSet {
 }
 
 impl CaConnSet {
-    pub fn start(channel_info_query_tx: Sender<ChannelInfoQuery>) -> CaConnSetCtrl {
+    pub fn start(
+        storage_insert_tx: Sender<QueryItem>,
+        channel_info_query_tx: Sender<ChannelInfoQuery>,
+    ) -> CaConnSetCtrl {
         let (connset_tx, connset_rx) = async_channel::bounded(10000);
         let connset = Self {
             ca_conn_ress: BTreeMap::new(),
@@ -105,7 +110,7 @@ impl CaConnSet {
             channel_info_query_tx,
             shutdown: false,
         };
-        // TODO use jh
+        // TODO await on jh
         let jh = tokio::spawn(CaConnSet::run(connset));
         CaConnSetCtrl { tx: connset_tx }
     }
