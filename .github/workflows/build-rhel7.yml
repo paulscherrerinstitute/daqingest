@@ -102,5 +102,6 @@ jobs:
         with:
           name: daqingest-${{ steps.daqingest_version_set.outputs.daqingest_version }}-amd64-rhel7
           path: ${{steps.wdset.outputs.gh}}/build/daqingest/target/release/daqingest
-      - run: "curl -v -o rel.json -L -X POST -H 'accept:application/vnd.github+json' -H 'authorization:Bearer ${{secrets.github_token}}' -H 'X-GitHub-Api-Version: 2022-11-28' https://api.github.com/repos/paulscherrerinstitute/daqingest/releases"
+      - run: echo "{\"tag_name\":\"buildaction\", \"name\":\"relname-daqingest-${{steps.daqingest_version_set.outputs.daqingest_version}}\", \"draft\":true, \"prerelease\":true}" > create-rel.json
+      - run: "curl -v -o rel.json -L -X POST -H 'accept:application/vnd.github+json' -H 'authorization:Bearer ${{secrets.github_token}}' -H 'X-GitHub-Api-Version: 2022-11-28' -T create-rel.json https://api.github.com/repos/paulscherrerinstitute/daqingest/releases"
       - run: cat rel.json
