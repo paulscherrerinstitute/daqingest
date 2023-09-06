@@ -72,6 +72,8 @@ jobs:
       #   with:
       #     repository: paulscherrerinstitute/daqingest.git
       #     path: build
+      - run: mkdir -p build
+        working-directory: ${{steps.wdset.outputs.gh}}
       - run: git clone --branch dev https://github.com/paulscherrerinstitute/daqbuffer.git
         working-directory: ${{steps.wdset.outputs.gh}}/build
       - run: git clone --branch dev https://github.com/paulscherrerinstitute/daqingest.git
