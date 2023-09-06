@@ -53,6 +53,7 @@ pub struct ChannelAdd {
 #[derive(Debug)]
 pub enum ConnSetCmd {
     ChannelAdd(ChannelAdd),
+    CheckHealth,
     Shutdown,
 }
 
@@ -84,6 +85,18 @@ impl CaConnSetCtrl {
             local_epics_hostname,
         };
         let cmd = ConnSetCmd::ChannelAdd(cmd);
+        self.tx.send(CaConnSetEvent::ConnSetCmd(cmd)).await?;
+        Ok(())
+    }
+
+    pub async fn shutdown(&self) -> Result<(), Error> {
+        let cmd = ConnSetCmd::Shutdown;
+        self.tx.send(CaConnSetEvent::ConnSetCmd(cmd)).await?;
+        Ok(())
+    }
+
+    pub async fn check_health(&self) -> Result<(), Error> {
+        let cmd = ConnSetCmd::CheckHealth;
         self.tx.send(CaConnSetEvent::ConnSetCmd(cmd)).await?;
         Ok(())
     }
@@ -138,7 +151,12 @@ impl CaConnSet {
         match ev {
             CaConnSetEvent::ConnSetCmd(cmd) => match cmd {
                 ConnSetCmd::ChannelAdd(x) => self.add_channel_to_addr(x).await,
+                ConnSetCmd::CheckHealth => {
+                    error!("TODO implement check health");
+                    Ok(())
+                }
                 ConnSetCmd::Shutdown => {
+                    debug!("shutdown received");
                     self.shutdown = true;
                     Ok(())
                 }

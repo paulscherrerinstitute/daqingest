@@ -669,24 +669,14 @@ impl Daemon {
 
     async fn check_caconn_chans(&mut self) -> Result<(), Error> {
         if self.caconn_last_channel_check.elapsed() > CHANNEL_CHECK_INTERVAL {
-            debug!("Issue channel check to all CaConn");
-            todo!();
-            // self.ingest_commons
-            //     .ca_conn_set
-            //     .enqueue_command_to_all(|| ConnCommand::check_health())
-            //     .await?;
+            self.connset_ctrl.check_health().await?;
             self.caconn_last_channel_check = Instant::now();
         }
         Ok(())
     }
 
     async fn ca_conn_send_shutdown(&mut self) -> Result<(), Error> {
-        warn!("send shutdown to all ca connections");
-        todo!();
-        // self.ingest_commons
-        // .ca_conn_set
-        // .enqueue_command_to_all(|| ConnCommand::shutdown())
-        // .await?;
+        self.connset_ctrl.shutdown().await?;
         Ok(())
     }
 
