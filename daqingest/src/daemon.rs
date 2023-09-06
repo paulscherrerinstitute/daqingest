@@ -10,6 +10,7 @@ use log::*;
 use netfetch::ca::conn::CaConnEvent;
 use netfetch::ca::conn::ConnCommand;
 use netfetch::ca::connset::CaConnSet;
+use netfetch::ca::connset::CaConnSetCtrl;
 use netfetch::ca::findioc::FindIocRes;
 use netfetch::ca::IngestCommons;
 use netfetch::ca::SlowWarnable;
@@ -36,6 +37,7 @@ use series::SeriesId;
 use stats::DaemonStats;
 use std::collections::BTreeMap;
 use std::collections::VecDeque;
+use std::net::SocketAddr;
 use std::net::SocketAddrV4;
 use std::sync::atomic;
 use std::sync::atomic::AtomicU64;
@@ -215,6 +217,7 @@ pub struct Daemon {
     shutting_down: bool,
     insert_rx_weak: WeakReceiver<QueryItem>,
     channel_info_query_tx: Sender<ChannelInfoQuery>,
+    connset_ctrl: CaConnSetCtrl,
 }
 
 impl Daemon {
@@ -223,8 +226,9 @@ impl Daemon {
             .await
             .map_err(|e| Error::with_msg_no_trace(e.to_string()))?;
         let datastore = Arc::new(datastore);
-        let (tx, rx_daemon_ev) = async_channel::bounded(32);
-        let (search_tx, ioc_finder_jh) = finder::start_finder(tx.clone(), opts.backend().into(), opts.pgconf.clone());
+        let (daemon_ev_tx, daemon_ev_rx) = async_channel::bounded(32);
+        let (search_tx, ioc_finder_jh) =
+            finder::start_finder(daemon_ev_tx.clone(), opts.backend().into(), opts.pgconf.clone());
 
         // TODO keep join handles and await later
         let (channel_info_query_tx, ..) = dbpg::seriesbychannel::start_lookup_workers(4, &opts.pgconf)
@@ -239,6 +243,8 @@ impl Daemon {
         let rx = inserthook::active_channel_insert_hook(common_insert_item_queue.receiver().unwrap());
         let common_insert_item_queue_2 = rx;
 
+        let conn_set_ctrl = CaConnSet::new(channel_info_query_tx.clone());
+
         let ingest_commons = IngestCommons {
             pgconf: Arc::new(opts.pgconf.clone()),
             backend: opts.backend().into(),
@@ -249,26 +255,9 @@ impl Daemon {
             extra_inserts_conf: tokio::sync::Mutex::new(ExtraInsertsConf::new()),
             store_workers_rate: Arc::new(AtomicU64::new(20000)),
             insert_frac: Arc::new(AtomicU64::new(1000)),
-            ca_conn_set: CaConnSet::new(channel_info_query_tx.clone()),
             insert_workers_running: Arc::new(AtomicU64::new(0)),
         };
         let ingest_commons = Arc::new(ingest_commons);
-
-        tokio::task::spawn({
-            let rx = ingest_commons.ca_conn_set.conn_item_rx();
-            let tx = tx.clone();
-            async move {
-                while let Ok(item) = rx.recv().await {
-                    match tx.send(DaemonEvent::CaConnEvent(item.0, item.1)).await {
-                        Ok(_) => {}
-                        Err(e) => {
-                            error!("{e}");
-                            break;
-                        }
-                    }
-                }
-            }
-        });
 
         let use_rate_limit_queue = false;
 
@@ -325,8 +314,8 @@ impl Daemon {
             opts,
             connection_states: BTreeMap::new(),
             channel_states: BTreeMap::new(),
-            tx,
-            rx: rx_daemon_ev,
+            tx: daemon_ev_tx,
+            rx: daemon_ev_rx,
             chan_check_next: None,
             search_tx,
             ioc_finder_jh,
@@ -347,6 +336,7 @@ impl Daemon {
             shutting_down: false,
             insert_rx_weak: common_insert_item_queue_2.downgrade(),
             channel_info_query_tx,
+            connset_ctrl: conn_set_ctrl,
         };
         Ok(ret)
     }
@@ -581,22 +571,14 @@ impl Daemon {
                                 Unassigned { assign_at } => {
                                     if DO_ASSIGN_TO_CA_CONN && *assign_at <= tsnow {
                                         let backend = self.opts.backend().into();
-                                        let channel_name = ch.id().into();
+                                        let addr_v4 = SocketAddr::V4(*addr);
+                                        let name = ch.id().into();
+                                        let cssid = status_series_id.clone();
+                                        let local_epics_hostname = self.opts.local_epics_hostname.clone();
                                         // This operation is meant to complete very quickly
-                                        self.ingest_commons
-                                            .ca_conn_set
-                                            .add_channel_to_addr(
-                                                backend,
-                                                *addr,
-                                                channel_name,
-                                                status_series_id.clone(),
-                                                &self.common_insert_item_queue,
-                                                &self.datastore,
-                                                CA_CONN_INSERT_QUEUE_MAX,
-                                                self.opts.array_truncate,
-                                                self.opts.local_epics_hostname.clone(),
-                                            )
-                                            .slow_warn(2000)
+                                        self.connset_ctrl
+                                            .add_channel(backend, addr_v4, name, cssid, local_epics_hostname)
+                                            .slow_warn(500)
                                             .instrument(info_span!("add_channel_to_addr"))
                                             .await?;
                                         let cs = ConnectionState {
@@ -688,10 +670,11 @@ impl Daemon {
     async fn check_caconn_chans(&mut self) -> Result<(), Error> {
         if self.caconn_last_channel_check.elapsed() > CHANNEL_CHECK_INTERVAL {
             debug!("Issue channel check to all CaConn");
-            self.ingest_commons
-                .ca_conn_set
-                .enqueue_command_to_all(|| ConnCommand::check_health())
-                .await?;
+            todo!();
+            // self.ingest_commons
+            //     .ca_conn_set
+            //     .enqueue_command_to_all(|| ConnCommand::check_health())
+            //     .await?;
             self.caconn_last_channel_check = Instant::now();
         }
         Ok(())
@@ -699,10 +682,11 @@ impl Daemon {
 
     async fn ca_conn_send_shutdown(&mut self) -> Result<(), Error> {
         warn!("send shutdown to all ca connections");
-        self.ingest_commons
-            .ca_conn_set
-            .enqueue_command_to_all(|| ConnCommand::shutdown())
-            .await?;
+        todo!();
+        // self.ingest_commons
+        // .ca_conn_set
+        // .enqueue_command_to_all(|| ConnCommand::shutdown())
+        // .await?;
         Ok(())
     }
 
@@ -1042,16 +1026,16 @@ impl Daemon {
         }
     }
 
-    async fn handle_event(&mut self, item: DaemonEvent, ticker_inp_tx: &Sender<u32>) -> Result<(), Error> {
+    async fn handle_event(&mut self, item: DaemonEvent) -> Result<(), Error> {
         use DaemonEvent::*;
         self.stats.events_inc();
         let ts1 = Instant::now();
         let item_summary = item.summary();
         let ret = match item {
-            TimerTick => {
+            TimerTick(i, tx) => {
                 let ts1 = Instant::now();
                 let ret = self.handle_timer_tick().await;
-                match ticker_inp_tx.send(42).await {
+                match tx.send(i.wrapping_add(1)).await {
                     Ok(_) => {}
                     Err(_) => {
                         self.stats.ticker_token_release_error_inc();
@@ -1076,7 +1060,7 @@ impl Daemon {
         ret
     }
 
-    fn spawn_ticker(tx: Sender<DaemonEvent>, stats: Arc<DaemonStats>) -> Sender<u32> {
+    fn spawn_ticker(tx: Sender<DaemonEvent>, stats: Arc<DaemonStats>) {
         let (ticker_inp_tx, ticker_inp_rx) = async_channel::bounded::<u32>(1);
         let ticker = {
             async move {
@@ -1092,7 +1076,7 @@ impl Daemon {
                             }
                         }
                     }
-                    if let Err(e) = tx.send(DaemonEvent::TimerTick).await {
+                    if let Err(e) = tx.send(DaemonEvent::TimerTick(0, ticker_inp_tx.clone())).await {
                         error!("can not send TimerTick {e}");
                         break;
                     }
@@ -1111,14 +1095,13 @@ impl Daemon {
         };
         // TODO use join handle
         taskrun::spawn(ticker);
-        ticker_inp_tx
     }
 
     pub async fn daemon(&mut self) -> Result<(), Error> {
-        let ticker_inp_tx = Self::spawn_ticker(self.tx.clone(), self.stats.clone());
+        Self::spawn_ticker(self.tx.clone(), self.stats.clone());
         loop {
             match self.rx.recv().await {
-                Ok(item) => match self.handle_event(item, &ticker_inp_tx).await {
+                Ok(item) => match self.handle_event(item).await {
                     Ok(_) => {}
                     Err(e) => {
                         error!("daemon: {e}");

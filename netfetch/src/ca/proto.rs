@@ -1026,7 +1026,7 @@ impl CaProto {
                     error!("got output buffer but too small");
                     break;
                 } else {
-                    msg.place_into(buf);
+                    msg.place_into(&mut buf[..msglen]);
                     self.outbuf.wadv(msglen)?;
                     self.out.pop_front();
                 }

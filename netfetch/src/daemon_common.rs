@@ -1,5 +1,6 @@
 use crate::ca::conn::CaConnEvent;
 use crate::ca::findioc::FindIocRes;
+use async_channel::Sender;
 use err::Error;
 use serde::Serialize;
 use std::collections::VecDeque;
@@ -22,7 +23,7 @@ impl Channel {
 
 #[derive(Debug)]
 pub enum DaemonEvent {
-    TimerTick,
+    TimerTick(u32, Sender<u32>),
     ChannelAdd(Channel),
     ChannelRemove(Channel),
     SearchDone(Result<VecDeque<FindIocRes>, Error>),
@@ -34,7 +35,7 @@ impl DaemonEvent {
     pub fn summary(&self) -> String {
         use DaemonEvent::*;
         match self {
-            TimerTick => format!("TimerTick"),
+            TimerTick(_, _) => format!("TimerTick"),
             ChannelAdd(x) => format!("ChannelAdd {x:?}"),
             ChannelRemove(x) => format!("ChannelRemove {x:?}"),
             SearchDone(_x) => format!("SearchDone"),

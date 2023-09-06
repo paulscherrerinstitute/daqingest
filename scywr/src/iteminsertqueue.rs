@@ -240,7 +240,7 @@ pub enum QueryItem {
 }
 
 pub struct CommonInsertItemQueueSender {
-    sender: async_channel::Sender<QueryItem>,
+    sender: Sender<QueryItem>,
 }
 
 impl CommonInsertItemQueueSender {
@@ -254,7 +254,7 @@ impl CommonInsertItemQueueSender {
         self.sender.is_full()
     }
 
-    pub fn inner(&self) -> &async_channel::Sender<QueryItem> {
+    pub fn inner(&self) -> &Sender<QueryItem> {
         &self.sender
     }
 }

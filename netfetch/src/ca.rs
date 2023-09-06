@@ -1,9 +1,11 @@
 pub mod conn;
 pub mod connset;
+pub mod connset_consume;
 pub mod findioc;
 pub mod proto;
 pub mod search;
 
+use self::connset::CaConnSetCtrl;
 use crate::ca::connset::CaConnSet;
 use crate::metrics::ExtraInsertsConf;
 use crate::rt::TokMx;
@@ -42,7 +44,6 @@ pub struct IngestCommons {
     pub extra_inserts_conf: TokMx<ExtraInsertsConf>,
     pub insert_frac: Arc<AtomicU64>,
     pub store_workers_rate: Arc<AtomicU64>,
-    pub ca_conn_set: CaConnSet,
     pub insert_workers_running: Arc<AtomicU64>,
 }
 

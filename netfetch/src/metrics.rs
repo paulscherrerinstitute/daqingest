@@ -261,6 +261,8 @@ pub async fn metrics_agg_task(
         let agg = CaConnStatsAgg::new();
         agg.push(&local_stats);
         agg.push(&store_stats);
+        trace!("TODO metrics_agg_task");
+        #[cfg(DISABLED)]
         {
             let conn_stats_guard = ingest_commons.ca_conn_set.ca_conn_ress().lock().await;
             for (_, g) in conn_stats_guard.iter() {

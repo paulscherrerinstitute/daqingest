@@ -22,7 +22,7 @@ pub struct SenderPolling<T>
 where
     T: 'static,
 {
-    sender: Sender<T>,
+    sender: Box<Sender<T>>,
     sender_ptr: NonNull<Sender<T>>,
     fut: Option<Send<'static, T>>,
     _pin: PhantomPinned,
@@ -33,12 +33,12 @@ unsafe impl<T> core::marker::Send for SenderPolling<T> where T: core::marker::Se
 impl<T> SenderPolling<T> {
     pub fn new(sender: Sender<T>) -> Self {
         let mut ret = Self {
-            sender,
+            sender: Box::new(sender),
             sender_ptr: NonNull::dangling(),
             fut: None,
             _pin: PhantomPinned,
         };
-        ret.sender_ptr = NonNull::from(&ret.sender);
+        ret.sender_ptr = NonNull::from(ret.sender.as_ref());
         ret
     }
 
