@@ -1,6 +1,5 @@
 pub mod conn;
 pub mod connset;
-pub mod connset_consume;
 pub mod findioc;
 pub mod proto;
 pub mod search;

@@ -243,7 +243,7 @@ impl Daemon {
         let rx = inserthook::active_channel_insert_hook(common_insert_item_queue.receiver().unwrap());
         let common_insert_item_queue_2 = rx;
 
-        let conn_set_ctrl = CaConnSet::new(channel_info_query_tx.clone());
+        let conn_set_ctrl = CaConnSet::start(channel_info_query_tx.clone());
 
         let ingest_commons = IngestCommons {
             pgconf: Arc::new(opts.pgconf.clone()),
