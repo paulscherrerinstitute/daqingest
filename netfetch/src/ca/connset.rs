@@ -20,6 +20,7 @@ use atomic::AtomicUsize;
 use dbpg::seriesbychannel::BoxedSend;
 use dbpg::seriesbychannel::CanSendChannelInfoResult;
 use dbpg::seriesbychannel::ChannelInfoQuery;
+use dbpg::seriesbychannel::ChannelInfoResult;
 use err::Error;
 use futures_util::FutureExt;
 use futures_util::StreamExt;
@@ -110,7 +111,7 @@ pub struct ChannelAdd {
 
 #[derive(Debug)]
 pub enum ConnSetCmd {
-    SeriesLookupResult(Result<Existence<SeriesId>, dbpg::seriesbychannel::Error>),
+    SeriesLookupResult(Result<ChannelInfoResult, dbpg::seriesbychannel::Error>),
     ChannelAdd(ChannelAdd),
     ChannelAddWithStatusId(ChannelAddWithStatusId),
     ChannelAddWithAddr(ChannelAddWithAddr),
@@ -165,7 +166,7 @@ struct SeriesLookupSender {
 }
 
 impl CanSendChannelInfoResult for SeriesLookupSender {
-    fn make_send(&self, item: Result<Existence<SeriesId>, dbpg::seriesbychannel::Error>) -> BoxedSend {
+    fn make_send(&self, item: Result<ChannelInfoResult, dbpg::seriesbychannel::Error>) -> BoxedSend {
         let tx = self.tx.clone();
         let fut = async move {
             tx.send(CaConnSetEvent::ConnSetCmd(ConnSetCmd::SeriesLookupResult(item)))
@@ -242,9 +243,11 @@ impl CaConnSet {
             CaConnSetEvent::ConnSetCmd(cmd) => match cmd {
                 ConnSetCmd::ChannelAdd(x) => self.handle_add_channel(x).await,
                 ConnSetCmd::ChannelAddWithStatusId(x) => self.handle_add_channel_with_status_id(x).await,
+                ConnSetCmd::ChannelAddWithAddr(x) => self.handle_add_channel_with_addr(x).await,
                 ConnSetCmd::IocAddrQueryResult(res) => {
                     for e in res {
                         if let Some(addr) = e.addr {
+                            debug!("ioc found {e:?}");
                             let ch = Channel::new(e.channel.clone());
                             if let Some(chst) = self.channel_states.inner().get(&ch) {
                                 if let ChannelStateValue::Active(ast) = &chst.value {
@@ -273,7 +276,6 @@ impl CaConnSet {
                     }
                     Ok(())
                 }
-                ConnSetCmd::ChannelAddWithAddr(x) => self.handle_add_channel_with_addr(x).await,
                 ConnSetCmd::CheckHealth => {
                     error!("TODO implement check health");
                     Ok(())
@@ -283,7 +285,7 @@ impl CaConnSet {
                     self.shutdown = true;
                     Ok(())
                 }
-                ConnSetCmd::SeriesLookupResult(_) => todo!(),
+                ConnSetCmd::SeriesLookupResult(x) => self.handle_series_lookup_result(x).await,
             },
             CaConnSetEvent::CaConnEvent((addr, ev)) => match ev.value {
                 CaConnEventValue::None => Ok(()),
@@ -296,6 +298,30 @@ impl CaConnSet {
                 CaConnEventValue::EndOfStream => todo!(),
             },
         }
+    }
+
+    async fn handle_series_lookup_result(
+        &mut self,
+        res: Result<ChannelInfoResult, dbpg::seriesbychannel::Error>,
+    ) -> Result<(), Error> {
+        debug!("handle_series_lookup_result  {res:?}");
+        match res {
+            Ok(res) => {
+                let add = ChannelAddWithStatusId {
+                    backend: res.backend,
+                    name: res.channel,
+                    local_epics_hostname: self.local_epics_hostname.clone(),
+                    cssid: ChannelStatusSeriesId::new(res.series.into_inner().id()),
+                };
+                self.connset_tx
+                    .send(CaConnSetEvent::ConnSetCmd(ConnSetCmd::ChannelAddWithStatusId(add)))
+                    .await?;
+            }
+            Err(e) => {
+                warn!("TODO handle error {e}");
+            }
+        }
+        Ok(())
     }
 
     async fn handle_add_channel(&mut self, add: ChannelAdd) -> Result<(), Error> {
@@ -320,6 +346,7 @@ impl CaConnSet {
     }
 
     async fn handle_add_channel_with_status_id(&mut self, add: ChannelAddWithStatusId) -> Result<(), Error> {
+        debug!("handle_add_channel_with_status_id  {add:?}");
         let ch = Channel::new(add.name.clone());
         if let Some(chst) = self.channel_states.inner().get_mut(&ch) {
             if let ChannelStateValue::Active(chst2) = &mut chst.value {
@@ -332,6 +359,8 @@ impl CaConnSet {
                             },
                         },
                     };
+                    let qu = IocAddrQuery { name: add.name };
+                    self.search_tx.send(qu).await?;
                 } else {
                     warn!("TODO have a status series id but no more channel");
                 }

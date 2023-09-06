@@ -56,7 +56,7 @@ impl From<crate::err::Error> for Error {
 pub type BoxedSend = Pin<Box<dyn Future<Output = Result<(), ()>> + Send>>;
 
 pub trait CanSendChannelInfoResult: Sync {
-    fn make_send(&self, item: Result<Existence<SeriesId>, Error>) -> BoxedSend;
+    fn make_send(&self, item: Result<ChannelInfoResult, Error>) -> BoxedSend;
 }
 
 pub struct ChannelInfoQuery {
@@ -67,11 +67,18 @@ pub struct ChannelInfoQuery {
     pub tx: Pin<Box<dyn CanSendChannelInfoResult + Send>>,
 }
 
-struct ChannelInfoResult {
+struct ChannelInfoResult2 {
+    backend: String,
+    channel: String,
     series: Existence<SeriesId>,
     tx: Pin<Box<dyn CanSendChannelInfoResult + Send>>,
-    // only for trace:
-    channel: String,
+}
+
+#[derive(Debug)]
+pub struct ChannelInfoResult {
+    pub backend: String,
+    pub channel: String,
+    pub series: Existence<SeriesId>,
 }
 
 struct Worker {
@@ -114,7 +121,7 @@ impl Worker {
     async fn select(
         &self,
         batch: Vec<ChannelInfoQuery>,
-    ) -> Result<(Vec<ChannelInfoResult>, Vec<ChannelInfoQuery>), Error> {
+    ) -> Result<(Vec<ChannelInfoResult2>, Vec<ChannelInfoQuery>), Error> {
         let mut backend = Vec::new();
         let mut channel = Vec::new();
         let mut scalar_type = Vec::new();
@@ -159,10 +166,12 @@ impl Worker {
                 if rid as u32 == qrid {
                     let series: i64 = row.get(0);
                     let series = SeriesId::new(series as _);
-                    let res = ChannelInfoResult {
+                    let res = ChannelInfoResult2 {
+                        // TODO take from database query. Needs test.
+                        backend: backend[0].clone(),
+                        channel,
                         series: Existence::Existing(series),
                         tx,
-                        channel,
                     };
                     result.push(res);
                 }
@@ -281,8 +290,13 @@ impl Worker {
             };
             let res4 = res3?;
             for r in res4 {
-                trace3!("try to send result for  {}  {:?}", r.channel, r.series);
-                let fut = r.tx.make_send(Ok(r.series));
+                let item = ChannelInfoResult {
+                    backend: r.backend,
+                    channel: r.channel,
+                    series: r.series,
+                };
+                trace3!("try to send result for  {:?}", item);
+                let fut = r.tx.make_send(Ok(item));
                 match fut.await {
                     Ok(()) => {}
                     Err(_e) => {

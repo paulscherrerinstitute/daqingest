@@ -11,6 +11,7 @@ use crate::timebin::ConnTimeBin;
 use async_channel::Sender;
 use dbpg::seriesbychannel::CanSendChannelInfoResult;
 use dbpg::seriesbychannel::ChannelInfoQuery;
+use dbpg::seriesbychannel::ChannelInfoResult;
 use err::Error;
 use futures_util::stream::FuturesUnordered;
 use futures_util::Future;
@@ -307,7 +308,7 @@ fn info_store_msp_from_time(ts: SystemTime) -> u32 {
 
 #[derive(Debug)]
 pub enum ConnCommandKind {
-    SeriesLookupResult(Result<Existence<SeriesId>, dbpg::seriesbychannel::Error>),
+    SeriesLookupResult(Result<ChannelInfoResult, dbpg::seriesbychannel::Error>),
     ChannelAdd(String, ChannelStatusSeriesId),
     ChannelRemove(String),
     CheckHealth,
@@ -321,7 +322,7 @@ pub struct ConnCommand {
 }
 
 impl ConnCommand {
-    pub fn series_lookup(qu: Result<Existence<SeriesId>, dbpg::seriesbychannel::Error>) -> Self {
+    pub fn series_lookup(qu: Result<ChannelInfoResult, dbpg::seriesbychannel::Error>) -> Self {
         Self {
             id: Self::make_id(),
             kind: ConnCommandKind::SeriesLookupResult(qu),
@@ -405,7 +406,7 @@ struct SendSeriesLookup {
 impl CanSendChannelInfoResult for SendSeriesLookup {
     fn make_send(
         &self,
-        item: Result<Existence<SeriesId>, dbpg::seriesbychannel::Error>,
+        item: Result<ChannelInfoResult, dbpg::seriesbychannel::Error>,
     ) -> dbpg::seriesbychannel::BoxedSend {
         let tx = self.tx.clone();
         let fut = async move { tx.send(ConnCommand::series_lookup(item)).await.map_err(|_| ()) };
