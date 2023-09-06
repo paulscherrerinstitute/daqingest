@@ -48,7 +48,9 @@ jobs:
       - run: git --version
       - run: rustc --version
       - run: cargo --version
-      - run: yum install -y jq
+      - run: python --version
+      - run: python -c 'import json; print(json)'
+      - run: false
       - run: mkdir /build
       # - run: "echo Flags: ${{ github.event.inputs.flags }}"
       # - run: echo $HOME
