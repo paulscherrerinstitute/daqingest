@@ -143,7 +143,16 @@ impl CaConnSet {
                     Ok(())
                 }
             },
-            CaConnSetEvent::CaConnEvent((addr, ev)) => todo!(),
+            CaConnSetEvent::CaConnEvent((addr, ev)) => match ev.value {
+                CaConnEventValue::None => Ok(()),
+                CaConnEventValue::EchoTimeout => todo!(),
+                CaConnEventValue::ConnCommandResult(_) => todo!(),
+                CaConnEventValue::QueryItem(item) => {
+                    self.storage_insert_tx.send(item).await?;
+                    Ok(())
+                }
+                CaConnEventValue::EndOfStream => todo!(),
+            },
         }
     }
 

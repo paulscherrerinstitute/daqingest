@@ -1,8 +1,8 @@
 name: build-daqingest-rhel7
 on:
-  # push:
-  #   tags:
-  #     - buildaction
+  push:
+    tags:
+      - buildaction
   workflow_dispatch:
     inputs:
       flags:
