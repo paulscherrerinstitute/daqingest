@@ -244,38 +244,7 @@ impl CaConnSet {
                 ConnSetCmd::ChannelAdd(x) => self.handle_add_channel(x).await,
                 ConnSetCmd::ChannelAddWithStatusId(x) => self.handle_add_channel_with_status_id(x).await,
                 ConnSetCmd::ChannelAddWithAddr(x) => self.handle_add_channel_with_addr(x).await,
-                ConnSetCmd::IocAddrQueryResult(res) => {
-                    for e in res {
-                        if let Some(addr) = e.addr {
-                            debug!("ioc found {e:?}");
-                            let ch = Channel::new(e.channel.clone());
-                            if let Some(chst) = self.channel_states.inner().get(&ch) {
-                                if let ChannelStateValue::Active(ast) = &chst.value {
-                                    if let ActiveChannelState::WithStatusSeriesId {
-                                        status_series_id,
-                                        state,
-                                    } = ast
-                                    {
-                                        let add = ChannelAddWithAddr {
-                                            backend: self.backend.clone(),
-                                            name: e.channel,
-                                            addr: SocketAddr::V4(addr),
-                                            cssid: status_series_id.clone(),
-                                            local_epics_hostname: self.local_epics_hostname.clone(),
-                                        };
-                                    } else {
-                                        warn!("TODO got address but no longer active");
-                                    }
-                                } else {
-                                    warn!("TODO got address but no longer active");
-                                }
-                            } else {
-                                warn!("ioc addr lookup done but channel no longer here");
-                            }
-                        }
-                    }
-                    Ok(())
-                }
+                ConnSetCmd::IocAddrQueryResult(x) => self.handle_ioc_query_result(x).await,
                 ConnSetCmd::CheckHealth => {
                     error!("TODO implement check health");
                     Ok(())
@@ -354,7 +323,7 @@ impl CaConnSet {
                     *chst2 = ActiveChannelState::WithStatusSeriesId {
                         status_series_id: add.cssid,
                         state: WithStatusSeriesIdState {
-                            inner: WithStatusSeriesIdStateInner::NoAddress {
+                            inner: WithStatusSeriesIdStateInner::SearchPending {
                                 since: SystemTime::now(),
                             },
                         },
@@ -381,6 +350,51 @@ impl CaConnSet {
         let conn_ress = self.ca_conn_ress.get_mut(&add.addr).unwrap();
         let cmd = ConnCommand::channel_add(add.name, add.cssid);
         conn_ress.sender.send(cmd).await?;
+        Ok(())
+    }
+
+    async fn handle_ioc_query_result(&mut self, res: VecDeque<FindIocRes>) -> Result<(), Error> {
+        for e in res {
+            let ch = Channel::new(e.channel.clone());
+            if let Some(chst) = self.channel_states.inner().get_mut(&ch) {
+                if let ChannelStateValue::Active(ast) = &mut chst.value {
+                    if let ActiveChannelState::WithStatusSeriesId {
+                        status_series_id,
+                        state,
+                    } = ast
+                    {
+                        if let Some(addr) = e.addr {
+                            debug!("ioc found {e:?}");
+                            let add = ChannelAddWithAddr {
+                                backend: self.backend.clone(),
+                                name: e.channel,
+                                addr: SocketAddr::V4(addr),
+                                cssid: status_series_id.clone(),
+                                local_epics_hostname: self.local_epics_hostname.clone(),
+                            };
+                            self.connset_tx
+                                .send(CaConnSetEvent::ConnSetCmd(ConnSetCmd::ChannelAddWithAddr(add)))
+                                .await?;
+                            let since = SystemTime::now();
+                            state.inner = WithStatusSeriesIdStateInner::WithAddress {
+                                addr,
+                                state: WithAddressState::Unassigned { since },
+                            }
+                        } else {
+                            debug!("ioc not found {e:?}");
+                            let since = SystemTime::now();
+                            state.inner = WithStatusSeriesIdStateInner::UnknownAddress { since };
+                        }
+                    } else {
+                        warn!("TODO got address but no longer active");
+                    }
+                } else {
+                    warn!("TODO got address but no longer active");
+                }
+            } else {
+                warn!("ioc addr lookup done but channel no longer here");
+            }
+        }
         Ok(())
     }
 
@@ -629,15 +643,12 @@ impl CaConnSet {
                                 //info!("UnknownAddress {} {:?}", i, ch);
                                 if (search_pending_count as usize) < CURRENT_SEARCH_PENDING_MAX {
                                     search_pending_count += 1;
-                                    state.inner = WithStatusSeriesIdStateInner::SearchPending {
-                                        since: tsnow,
-                                        did_send: false,
-                                    };
+                                    state.inner = WithStatusSeriesIdStateInner::SearchPending { since: tsnow };
                                     SEARCH_REQ_MARK_COUNT.fetch_add(1, atomic::Ordering::AcqRel);
                                 }
                             }
                         }
-                        WithStatusSeriesIdStateInner::SearchPending { since, did_send: _ } => {
+                        WithStatusSeriesIdStateInner::SearchPending { since } => {
                             //info!("SearchPending {} {:?}", i, ch);
                             let dt = tsnow.duration_since(*since).unwrap_or(Duration::ZERO);
                             if dt > SEARCH_PENDING_TIMEOUT {
@@ -650,7 +661,7 @@ impl CaConnSet {
                             //info!("WithAddress {} {:?}", i, ch);
                             use WithAddressState::*;
                             match state {
-                                Unassigned { assign_at } => {
+                                Unassigned { since } => {
                                     // TODO do I need this case anymore?
                                     #[cfg(DISABLED)]
                                     if DO_ASSIGN_TO_CA_CONN && *assign_at <= tsnow {
@@ -716,59 +727,51 @@ impl CaConnSet {
     }
 
     fn update_channel_state_counts(&mut self) -> (u64,) {
-        let mut unknown_address_count = 0;
-        let mut search_pending_count = 0;
-        let mut search_pending_did_send_count = 0;
-        let mut unassigned_count = 0;
-        let mut assigned_count = 0;
-        let mut no_address_count = 0;
+        let mut unknown_address = 0;
+        let mut search_pending = 0;
+        let mut unassigned = 0;
+        let mut assigned = 0;
+        let mut no_address = 0;
         for (_ch, st) in self.channel_states.inner().iter() {
             match &st.value {
                 ChannelStateValue::Active(st2) => match st2 {
                     ActiveChannelState::Init { .. } => {
-                        unknown_address_count += 1;
+                        unknown_address += 1;
                     }
                     ActiveChannelState::WaitForStatusSeriesId { .. } => {
-                        unknown_address_count += 1;
+                        unknown_address += 1;
                     }
                     ActiveChannelState::WithStatusSeriesId { state, .. } => match &state.inner {
                         WithStatusSeriesIdStateInner::UnknownAddress { .. } => {
-                            unknown_address_count += 1;
+                            unknown_address += 1;
                         }
-                        WithStatusSeriesIdStateInner::SearchPending { did_send, .. } => {
-                            if *did_send {
-                                search_pending_did_send_count += 1;
-                            } else {
-                                search_pending_count += 1;
-                            }
+                        WithStatusSeriesIdStateInner::SearchPending { .. } => {
+                            search_pending += 1;
                         }
                         WithStatusSeriesIdStateInner::WithAddress { state, .. } => match state {
                             WithAddressState::Unassigned { .. } => {
-                                unassigned_count += 1;
+                                unassigned += 1;
                             }
                             WithAddressState::Assigned(_) => {
-                                assigned_count += 1;
+                                assigned += 1;
                             }
                         },
                         WithStatusSeriesIdStateInner::NoAddress { .. } => {
-                            no_address_count += 1;
+                            no_address += 1;
                         }
                     },
                 },
                 ChannelStateValue::ToRemove { .. } => {
-                    unknown_address_count += 1;
+                    unknown_address += 1;
                 }
             }
         }
         use atomic::Ordering::Release;
-        self.stats.channel_unknown_address.store(unknown_address_count, Release);
-        self.stats.channel_search_pending.store(search_pending_count, Release);
-        self.stats
-            .search_pending_did_send
-            .store(search_pending_did_send_count, Release);
-        self.stats.unassigned.store(unassigned_count, Release);
-        self.stats.assigned.store(assigned_count, Release);
-        self.stats.channel_no_address.store(no_address_count, Release);
-        (search_pending_count,)
+        self.stats.channel_unknown_address.store(unknown_address, Release);
+        self.stats.channel_search_pending.store(search_pending, Release);
+        self.stats.channel_no_address.store(no_address, Release);
+        self.stats.channel_unassigned.store(unassigned, Release);
+        self.stats.channel_assigned.store(assigned, Release);
+        (search_pending,)
     }
 }

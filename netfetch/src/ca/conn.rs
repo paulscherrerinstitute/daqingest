@@ -159,6 +159,8 @@ struct CreatedState {
     cid: Cid,
     #[allow(unused)]
     sid: u32,
+    data_type: u16,
+    data_count: u16,
     scalar_type: ScalarType,
     shape: Shape,
     #[allow(unused)]
@@ -468,11 +470,8 @@ pub struct CaConn {
     ioc_ping_start: Option<Instant>,
     cmd_res_queue: VecDeque<ConnCommandResult>,
     ca_conn_event_out_queue: VecDeque<CaConnEvent>,
-    channel_info_query_tx: Sender<ChannelInfoQuery>,
-    series_lookup_schedule: BTreeMap<Cid, ChannelInfoQuery>,
-    series_lookup_futs: FuturesUnordered<
-        Pin<Box<dyn Future<Output = Result<(Cid, u32, u16, u16, Existence<SeriesId>), Error>> + Send>>,
-    >,
+    channel_info_query_queue: VecDeque<ChannelInfoQuery>,
+    channel_info_query_sending: SenderPolling<ChannelInfoQuery>,
     time_binners: BTreeMap<Cid, ConnTimeBin>,
     ts_earliest_warn_poll_slow: Instant,
 }
@@ -521,9 +520,8 @@ impl CaConn {
             ioc_ping_start: None,
             cmd_res_queue: VecDeque::new(),
             ca_conn_event_out_queue: VecDeque::new(),
-            channel_info_query_tx,
-            series_lookup_schedule: BTreeMap::new(),
-            series_lookup_futs: FuturesUnordered::new(),
+            channel_info_query_queue: VecDeque::new(),
+            channel_info_query_sending: SenderPolling::new(channel_info_query_tx),
             time_binners: BTreeMap::new(),
             ts_earliest_warn_poll_slow: Instant::now(),
         }
@@ -639,6 +637,49 @@ impl CaConn {
         // TODO return the result
     }
 
+    fn handle_series_lookup_result(
+        &mut self,
+        res: Result<ChannelInfoResult, dbpg::seriesbychannel::Error>,
+    ) -> Result<(), Error> {
+        match res {
+            Ok(res) => {
+                let series = res.series.into_inner();
+                let item = QueryItem::ChannelStatus(ChannelStatusItem {
+                    ts: SystemTime::now(),
+                    series: series.clone(),
+                    status: ChannelStatus::Opened,
+                });
+                self.insert_item_queue.push_back(item);
+                if let Some(cid) = self.cid_by_name.get(&res.channel) {
+                    if let Some(chst) = self.channels.get(cid) {
+                        if let ChannelState::FetchingSeriesId(st2) = chst {
+                            let cid = st2.cid.clone();
+                            let sid = st2.sid;
+                            let data_type = st2.data_type;
+                            let data_count = st2.data_count;
+                            match self.channel_to_evented(cid, sid, data_type, data_count, series) {
+                                Ok(_) => {}
+                                Err(e) => {
+                                    error!("channel_to_evented {e}");
+                                }
+                            }
+                        } else {
+                            warn!("TODO channel in bad state, reset");
+                        }
+                    } else {
+                        warn!("TODO channel in bad state, reset");
+                    }
+                } else {
+                    warn!("TODO channel in bad state, reset");
+                }
+            }
+            Err(e) => {
+                error!("handle_series_lookup_result got error {e}");
+            }
+        }
+        Ok(())
+    }
+
     fn handle_conn_command(&mut self, cx: &mut Context) -> Poll<Option<Result<(), Error>>> {
         // TODO if this loops for too long time, yield and make sure we get wake up again.
         use Poll::*;
@@ -664,7 +705,10 @@ impl CaConn {
                         self.cmd_shutdown();
                         Ready(Some(Ok(())))
                     }
-                    ConnCommandKind::SeriesLookupResult(_) => todo!("TODO handle SeriesLookupResult"),
+                    ConnCommandKind::SeriesLookupResult(x) => match self.handle_series_lookup_result(x) {
+                        Ok(()) => Ready(Some(Ok(()))),
+                        Err(e) => Ready(Some(Err(e))),
+                    },
                 }
             }
             Ready(None) => {
@@ -912,15 +956,10 @@ impl CaConn {
         sid: u32,
         data_type: u16,
         data_count: u16,
-        series: Existence<SeriesId>,
-        cx: &mut Context,
+        series: SeriesId,
     ) -> Result<(), Error> {
         let tsnow = Instant::now();
         self.stats.get_series_id_ok_inc();
-        let series = match series {
-            Existence::Created(k) => k,
-            Existence::Existing(k) => k,
-        };
         if series.id() == 0 {
             warn!("Weird series id: {series:?}");
         }
@@ -962,6 +1001,8 @@ impl CaConn {
             cssid,
             cid,
             sid,
+            data_type,
+            data_count,
             scalar_type,
             shape,
             ts_created: tsnow,
@@ -980,70 +1021,8 @@ impl CaConn {
         *ch_s = ChannelState::Created(series, created_state);
         let scalar_type = ScalarType::from_ca_id(data_type)?;
         let shape = Shape::from_ca_count(data_count)?;
-        cx.waker().wake_by_ref();
+        error!("TODO channel_to_evented make sure we get polled again?");
         Ok(())
-    }
-
-    fn emit_series_lookup(&mut self, cx: &mut Context) {
-        let _ = cx;
-        loop {
-            break if let Some(mut entry) = self.series_lookup_schedule.first_entry() {
-                todo!("emit_series_lookup");
-                #[cfg(DISABLED)]
-                {
-                    let dummy = entry.get().dummy();
-                    let query = std::mem::replace(entry.get_mut(), dummy);
-                    match self.channel_info_query_tx.try_send(query) {
-                        Ok(()) => {
-                            entry.remove();
-                            continue;
-                        }
-                        Err(e) => match e {
-                            async_channel::TrySendError::Full(_) => {
-                                warn!("series lookup channel full");
-                                *entry.get_mut() = e.into_inner();
-                            }
-                            async_channel::TrySendError::Closed(_) => {
-                                warn!("series lookup channel closed");
-                                // *entry.get_mut() = e.into_inner();
-                                entry.remove();
-                            }
-                        },
-                    }
-                }
-            } else {
-                ()
-            };
-        }
-    }
-
-    fn poll_channel_info_results(&mut self, cx: &mut Context) {
-        use Poll::*;
-        loop {
-            break match self.series_lookup_futs.poll_next_unpin(cx) {
-                Ready(Some(Ok((cid, sid, data_type, data_count, series)))) => {
-                    {
-                        let item = QueryItem::ChannelStatus(ChannelStatusItem {
-                            ts: SystemTime::now(),
-                            series: series.clone().into_inner().into(),
-                            status: ChannelStatus::Opened,
-                        });
-                        self.insert_item_queue.push_back(item);
-                    }
-                    match self.channel_to_evented(cid, sid, data_type, data_count, series, cx) {
-                        Ok(_) => {}
-                        Err(e) => {
-                            error!("poll_channel_info_results {e}");
-                        }
-                    }
-                }
-                Ready(Some(Err(e))) => {
-                    error!("poll_channel_info_results {e}");
-                }
-                Ready(None) => {}
-                Pending => {}
-            };
-        }
     }
 
     fn event_add_insert(
@@ -1451,6 +1430,8 @@ impl CaConn {
                                     cssid,
                                     cid,
                                     sid,
+                                    data_type: k.data_type,
+                                    data_count: k.data_count,
                                     scalar_type: scalar_type.clone(),
                                     shape: shape.clone(),
                                     ts_created: tsnow,
@@ -1468,37 +1449,17 @@ impl CaConn {
                                 };
                                 *ch_s = ChannelState::FetchingSeriesId(created_state);
                                 // TODO handle error in different way. Should most likely not abort.
-                                if !self.series_lookup_schedule.contains_key(&cid) {
-                                    let tx = SendSeriesLookup {
-                                        tx: self.conn_command_tx.clone(),
-                                    };
-                                    let query = ChannelInfoQuery {
-                                        backend: self.backend.clone(),
-                                        channel: name.clone(),
-                                        scalar_type: scalar_type.to_scylla_i32(),
-                                        shape_dims: shape.to_scylla_vec(),
-                                        tx: Box::pin(tx),
-                                    };
-                                    self.series_lookup_schedule.insert(cid, query);
-                                    todo!("TODO discover the series lookup from main command queue");
-                                    // let fut = async move {
-                                    //     match rx.recv().await {
-                                    //         Ok(item) => match item {
-                                    //             Ok(item) => Ok((cid, sid, k.data_type, k.data_count, item)),
-                                    //             Err(e) => Err(Error::with_msg_no_trace(e.to_string())),
-                                    //         },
-                                    //         Err(e) => {
-                                    //             // TODO count only
-                                    //             error!("can not receive series lookup result for {name} {e}");
-                                    //             Err(Error::with_msg_no_trace("can not receive lookup result"))
-                                    //         }
-                                    //     }
-                                    // };
-                                    // self.series_lookup_futs.push(Box::pin(fut));
-                                } else {
-                                    // TODO count only
-                                    warn!("series lookup for {name} already in progress");
-                                }
+                                let tx = SendSeriesLookup {
+                                    tx: self.conn_command_tx.clone(),
+                                };
+                                let query = ChannelInfoQuery {
+                                    backend: self.backend.clone(),
+                                    channel: name.clone(),
+                                    scalar_type: scalar_type.to_scylla_i32(),
+                                    shape_dims: shape.to_scylla_vec(),
+                                    tx: Box::pin(tx),
+                                };
+                                self.channel_info_query_queue.push_back(query);
                                 do_wake_again = true;
                             }
                             CaMsgTy::EventAddRes(k) => {
@@ -1739,8 +1700,6 @@ impl CaConn {
     }
 
     fn handle_own_ticker_tick(mut self: Pin<&mut Self>, cx: &mut Context) -> Result<(), Error> {
-        self.emit_series_lookup(cx);
-        self.poll_channel_info_results(cx);
         let this = self.get_mut();
         for (_, tb) in this.time_binners.iter_mut() {
             let iiq = &mut this.insert_item_queue;
@@ -1793,6 +1752,22 @@ impl Stream for CaConn {
             };
             Ready(Some(Ok(ev)))
         } else {
+            let _ = loop {
+                let sd = &mut self.channel_info_query_sending;
+                break if sd.is_sending() {
+                    match sd.poll_unpin(cx) {
+                        Ready(Ok(())) => continue,
+                        Ready(Err(e)) => Ready(Some(e)),
+                        Pending => Pending,
+                    }
+                } else if let Some(item) = self.channel_info_query_queue.pop_front() {
+                    let sd = &mut self.channel_info_query_sending;
+                    sd.send2(item);
+                    continue;
+                } else {
+                    Ready(None)
+                };
+            };
             let ret = loop {
                 self.stats.caconn_loop1_count_inc();
                 loop {

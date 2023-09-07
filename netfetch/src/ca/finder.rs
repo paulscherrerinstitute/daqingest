@@ -53,9 +53,6 @@ macro_rules! trace_batch {
     });
 }
 
-#[derive(Debug)]
-pub struct IocAddrQueryResult {}
-
 fn transform_pgres(rows: Vec<PgRow>) -> VecDeque<FindIocRes> {
     let mut ret = VecDeque::new();
     for row in rows {

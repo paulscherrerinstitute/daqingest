@@ -53,7 +53,7 @@ pub struct ConnectionState {
 pub enum WithAddressState {
     Unassigned {
         //#[serde(with = "serde_Instant")]
-        assign_at: SystemTime,
+        since: SystemTime,
     },
     Assigned(ConnectionState),
 }
@@ -66,7 +66,6 @@ pub enum WithStatusSeriesIdStateInner {
     SearchPending {
         //#[serde(with = "serde_Instant")]
         since: SystemTime,
-        did_send: bool,
     },
     WithAddress {
         addr: SocketAddrV4,

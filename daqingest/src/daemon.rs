@@ -564,7 +564,16 @@ impl Daemon {
     }
 
     async fn handle_shutdown(&mut self) -> Result<(), Error> {
-        todo!("handle_shutdown");
+        error!("TODO handle_shutdown");
+        // TODO make sure we:
+        // set a flag so that we don't attempt to use resources any longer (why could that happen?)
+        // does anybody might still want to communicate with us? can't be excluded.
+        // send shutdown signal to everyone.
+        // drop our ends of channels to workers (gate them behind option?).
+        // await the connection sets.
+        // await other workers that we've spawned.
+        self.connset_ctrl.shutdown().await?;
+        Ok(())
     }
 
     #[cfg(DISABLED)]
