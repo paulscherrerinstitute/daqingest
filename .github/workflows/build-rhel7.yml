@@ -80,25 +80,27 @@ jobs:
         working-directory: ${{steps.wdset.outputs.gh}}/build
       - run: git clone --branch dev https://github.com/paulscherrerinstitute/daqingest.git
         working-directory: ${{steps.wdset.outputs.gh}}/build
-      - run: ls -la $GITHUB_WORKSPACE
-      - run: find $GITHUB_WORKSPACE -type f -and \( -name \*.rs -or -name \*.toml \)
-      - run: find ${{steps.wdset.outputs.gh}} -type f -and \( -name \*.rs -or -name \*.toml \)
-        working-directory: ${{steps.wdset.outputs.gh}}/build
+      # - run: ls -la $GITHUB_WORKSPACE
+      # - run: find $GITHUB_WORKSPACE -type f -and \( -name \*.rs -or -name \*.toml \)
+      # - run: find ${{steps.wdset.outputs.gh}} -type f -and \( -name \*.rs -or -name \*.toml \)
+        # working-directory: ${{steps.wdset.outputs.gh}}/build
+      - run: mkdir -p target/release && cp /usr/bin/cat target/release/daqingest
+        working-directory: ${{steps.wdset.outputs.gh}}/build/daqingest/
+        if: false
       - run: cargo build --release
         working-directory: ${{steps.wdset.outputs.gh}}/build/daqingest
-      # - run: mkdir -p target/release && cp /usr/bin/cat target/release/daqingest
-      #   working-directory: ${{steps.wdset.outputs.gh}}/build/daqingest/
       - run: ls -l
         working-directory: ${{steps.wdset.outputs.gh}}/build/daqingest/target/release
       - run: ./daqingest version
         working-directory: ${{steps.wdset.outputs.gh}}/build/daqingest/target/release
-      - run: echo "daqingest_version=$(./daqingest version)" >> "$GITHUB_OUTPUT"
+      - run: echo "daqingest_version=0.0.0-alpha.00" >> "$GITHUB_OUTPUT"
         id: daqingest_version_set
-        working-directory: ${{steps.wdset.outputs.gh}}/build/daqingest/target/release
-      # - run: echo "daqingest_version=0.0.0-alpha.00" >> "$GITHUB_OUTPUT"
-      #   id: daqingest_version_set
-      #   working-directory: ${{steps.wdset.outputs.gh}}/build/daqingest/target/release
+        if: false
+      - run: echo $(${{steps.wdset.outputs.gh}}/build/daqingest/target/release/daqingest version) > daqver && echo "daqingest_version=$(cat daqver)" >> "$GITHUB_OUTPUT" && echo "DAQVER=$(cat daqver)" >> "$GITHUB_ENV"
+        id: daqingest_version_set
+      - run: echo version: TT$(cat daqver)TT
       - run: "echo 'version: [${{steps.daqingest_version_set.outputs.daqingest_version}}]'"
+      - run: "echo 'version: [${{env.DAQVER}}]'"
       - run: "mkdir daqingest-${{steps.daqingest_version_set.outputs.daqingest_version}}-amd64-rhel7"
       - run: "cp ${{steps.wdset.outputs.gh}}/build/daqingest/target/release/daqingest daqingest-${{steps.daqingest_version_set.outputs.daqingest_version}}-amd64-rhel7/daqingest"
       - run: "tar -czf daqingest-${{steps.daqingest_version_set.outputs.daqingest_version}}-amd64-rhel7.tar.gz daqingest-${{steps.daqingest_version_set.outputs.daqingest_version}}-amd64-rhel7"
@@ -110,5 +112,6 @@ jobs:
       - run: "curl -v -o rel.json -L -X POST -H content-type:application/json -H 'accept:application/vnd.github+json' -H 'authorization:bearer ${{secrets.github_token}}' -H x-github-api-version:2022-11-28 -T create-rel.json https://api.github.com/repos/paulscherrerinstitute/daqingest/releases"
       - run: cat rel.json
       - run: "RELID=$(python -c 'import json; x=json.load(open(\"rel.json\")); print(x[\"id\"])') && curl -v -o relass.json -L -X POST -H content-type:application/octet-stream -H 'accept:application/vnd.github+json' -H 'authorization:Bearer ${{secrets.github_token}}' -H x-github-api-version:2022-11-28 -T ${{steps.wdset.outputs.gh}}/build/daqingest/target/release/daqingest https://uploads.github.com/repos/paulscherrerinstitute/daqingest/releases/$RELID/assets?name=daqingest-${{steps.daqingest_version_set.outputs.daqingest_version}}-amd64-rhel7"
+        if: false
       - run: "RELID=$(python -c 'import json; x=json.load(open(\"rel.json\")); print(x[\"id\"])') && curl -v -o relass.json -L -X POST -H content-type:application/octet-stream -H 'accept:application/vnd.github+json' -H 'authorization:Bearer ${{secrets.github_token}}' -H x-github-api-version:2022-11-28 -T daqingest-${{steps.daqingest_version_set.outputs.daqingest_version}}-amd64-rhel7.tar.gz https://uploads.github.com/repos/paulscherrerinstitute/daqingest/releases/$RELID/assets?name=daqingest-${{steps.daqingest_version_set.outputs.daqingest_version}}-amd64-rhel7.tar.gz"
       - run: cat relass.json
