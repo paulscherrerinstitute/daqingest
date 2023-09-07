@@ -98,7 +98,7 @@ jobs:
         if: false
       - run: echo $(${{steps.wdset.outputs.gh}}/build/daqingest/target/release/daqingest version) > daqver && echo "daqingest_version=$(cat daqver)" >> "$GITHUB_OUTPUT" && echo "DAQVER=$(cat daqver)" >> "$GITHUB_ENV"
         id: daqingest_version_set
-      - run: echo version: TT$(cat daqver)TT
+      - run: "echo version: TT$(cat daqver)TT"
       - run: "echo 'version: [${{steps.daqingest_version_set.outputs.daqingest_version}}]'"
       - run: "echo 'version: [${{env.DAQVER}}]'"
       - run: "mkdir daqingest-${{steps.daqingest_version_set.outputs.daqingest_version}}-amd64-rhel7"
