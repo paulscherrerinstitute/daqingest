@@ -78,8 +78,10 @@ jobs:
         working-directory: ${{steps.wdset.outputs.gh}}
       - run: git clone --branch dev https://github.com/paulscherrerinstitute/daqbuffer.git
         working-directory: ${{steps.wdset.outputs.gh}}/build
-      - run: git clone --branch dev https://github.com/paulscherrerinstitute/daqingest.git
+      - run: git clone https://github.com/paulscherrerinstitute/daqingest.git
         working-directory: ${{steps.wdset.outputs.gh}}/build
+      - run: git reset --hard $GITHUB_SHA
+        working-directory: ${{steps.wdset.outputs.gh}}/build/daqingest
       # - run: ls -la $GITHUB_WORKSPACE
       # - run: find $GITHUB_WORKSPACE -type f -and \( -name \*.rs -or -name \*.toml \)
       # - run: find ${{steps.wdset.outputs.gh}} -type f -and \( -name \*.rs -or -name \*.toml \)
@@ -102,8 +104,9 @@ jobs:
       - run: "echo 'version: [${{env.DAQVER}}]'"
       - run: echo "SELFPKG=daqingest-$DAQVER" >> $GITHUB_ENV
       - run: echo "SELFPKGTGT=$SELFPKG-amd64-rhel7" >> $GITHUB_ENV
-      - run: echo SELFPKG $SELFPKG
-      - run: echo SELFPKGTGT $SELFPKGTGT
+      - run: echo DAQVER ..$DAQVER..
+      - run: echo SELFPKG ..$SELFPKG..
+      - run: echo SELFPKGTGT ..$SELFPKGTGT..
       - run: mkdir $SELFPKGTGT
       - run: cp ${{steps.wdset.outputs.gh}}/build/daqingest/target/release/daqingest $SELFPKGTGT/daqingest
       - run: tar -czf $SELFPKGTGT.tar.gz $SELFPKGTGT

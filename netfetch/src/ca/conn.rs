@@ -13,7 +13,6 @@ use dbpg::seriesbychannel::CanSendChannelInfoResult;
 use dbpg::seriesbychannel::ChannelInfoQuery;
 use dbpg::seriesbychannel::ChannelInfoResult;
 use err::Error;
-use futures_util::stream::FuturesUnordered;
 use futures_util::Future;
 use futures_util::FutureExt;
 use futures_util::Stream;
@@ -36,7 +35,6 @@ use scywriiq::IvlItem;
 use scywriiq::MuteItem;
 use scywriiq::QueryItem;
 use serde::Serialize;
-use series::series::Existence;
 use series::ChannelStatusSeriesId;
 use series::SeriesId;
 use stats::CaConnStats;
@@ -455,7 +453,6 @@ pub struct CaConn {
     cid_by_subid: BTreeMap<u32, Cid>,
     name_by_cid: BTreeMap<Cid, String>,
     insert_item_queue: VecDeque<QueryItem>,
-    sender_polling: SenderPolling<QueryItem>,
     remote_addr_dbg: SocketAddrV4,
     local_epics_hostname: String,
     stats: Arc<CaConnStats>,
@@ -473,7 +470,6 @@ pub struct CaConn {
     channel_info_query_queue: VecDeque<ChannelInfoQuery>,
     channel_info_query_sending: SenderPolling<ChannelInfoQuery>,
     time_binners: BTreeMap<Cid, ConnTimeBin>,
-    ts_earliest_warn_poll_slow: Instant,
 }
 
 impl Drop for CaConn {
@@ -505,7 +501,6 @@ impl CaConn {
             cid_by_subid: BTreeMap::new(),
             name_by_cid: BTreeMap::new(),
             insert_item_queue: VecDeque::new(),
-            sender_polling: SenderPolling::new(async_channel::bounded(1).0),
             remote_addr_dbg,
             local_epics_hostname,
             stats: Arc::new(CaConnStats::new()),
@@ -523,12 +518,11 @@ impl CaConn {
             channel_info_query_queue: VecDeque::new(),
             channel_info_query_sending: SenderPolling::new(channel_info_query_tx),
             time_binners: BTreeMap::new(),
-            ts_earliest_warn_poll_slow: Instant::now(),
         }
     }
 
     fn new_self_ticker() -> Pin<Box<tokio::time::Sleep>> {
-        Box::pin(tokio::time::sleep(Duration::from_millis(1000)))
+        Box::pin(tokio::time::sleep(Duration::from_millis(500)))
     }
 
     pub fn conn_command_tx(&self) -> async_channel::Sender<ConnCommand> {
@@ -623,6 +617,7 @@ impl CaConn {
     }
 
     fn cmd_shutdown(&mut self) {
+        debug!("cmd_shutdown {}", self.remote_addr_dbg);
         self.trigger_shutdown(ChannelStatusClosedReason::ShutdownCommand);
     }
 
@@ -660,17 +655,17 @@ impl CaConn {
                             match self.channel_to_evented(cid, sid, data_type, data_count, series) {
                                 Ok(_) => {}
                                 Err(e) => {
-                                    error!("channel_to_evented {e}");
+                                    error!("handle_series_lookup_result {e}");
                                 }
                             }
                         } else {
-                            warn!("TODO channel in bad state, reset");
+                            warn!("TODO handle_series_lookup_result channel in bad state, reset");
                         }
                     } else {
-                        warn!("TODO channel in bad state, reset");
+                        warn!("TODO handle_series_lookup_result channel in bad state, reset");
                     }
                 } else {
-                    warn!("TODO channel in bad state, reset");
+                    warn!("TODO handle_series_lookup_result channel in bad state, reset");
                 }
             }
             Err(e) => {
@@ -683,11 +678,10 @@ impl CaConn {
     fn handle_conn_command(&mut self, cx: &mut Context) -> Poll<Option<Result<(), Error>>> {
         // TODO if this loops for too long time, yield and make sure we get wake up again.
         use Poll::*;
-        trace!("handle_conn_command  {}", self.remote_addr_dbg);
         self.stats.caconn_loop3_count_inc();
         match self.conn_command_rx.poll_next_unpin(cx) {
             Ready(Some(a)) => {
-                trace!("handle_conn_command received a command");
+                trace!("handle_conn_command received a command  {}", self.remote_addr_dbg);
                 match a.kind {
                     ConnCommandKind::ChannelAdd(name, cssid) => {
                         self.cmd_channel_add(name, cssid);
@@ -1019,9 +1013,6 @@ impl CaConn {
             info_store_msp_last: info_store_msp_from_time(SystemTime::now()),
         };
         *ch_s = ChannelState::Created(series, created_state);
-        let scalar_type = ScalarType::from_ca_id(data_type)?;
-        let shape = Shape::from_ca_count(data_count)?;
-        error!("TODO channel_to_evented make sure we get polled again?");
         Ok(())
     }
 
@@ -1534,8 +1525,7 @@ impl CaConn {
         Break(Pending)
     }
 
-    // `?` works not in here.
-    fn handle_conn_state(&mut self, cx: &mut Context) -> Option<Poll<Result<(), Error>>> {
+    fn handle_conn_state(&mut self, cx: &mut Context) -> Result<Option<Poll<()>>, Error> {
         use Poll::*;
         match &mut self.state {
             CaConnState::Unconnected => {
@@ -1543,7 +1533,7 @@ impl CaConn {
                 trace!("create tcp connection to {:?}", (addr.ip(), addr.port()));
                 let fut = tokio::time::timeout(Duration::from_millis(1000), TcpStream::connect(addr));
                 self.state = CaConnState::Connecting(addr, Box::pin(fut));
-                None
+                Ok(None)
             }
             CaConnState::Connecting(ref addr, ref mut fut) => {
                 match fut.poll_unpin(cx) {
@@ -1561,7 +1551,7 @@ impl CaConn {
                                 let proto = CaProto::new(tcp, self.remote_addr_dbg.clone(), self.opts.array_truncate);
                                 self.state = CaConnState::Init;
                                 self.proto = Some(proto);
-                                None
+                                Ok(None)
                             }
                             Ok(Err(_e)) => {
                                 // TODO log with exponential backoff
@@ -1575,7 +1565,7 @@ impl CaConn {
                                 let dt = self.backoff_next();
                                 self.state = CaConnState::Wait(wait_fut(dt));
                                 self.proto = None;
-                                None
+                                Ok(None)
                             }
                             Err(e) => {
                                 // TODO log with exponential backoff
@@ -1590,11 +1580,11 @@ impl CaConn {
                                 let dt = self.backoff_next();
                                 self.state = CaConnState::Wait(wait_fut(dt));
                                 self.proto = None;
-                                None
+                                Ok(None)
                             }
                         }
                     }
-                    Pending => Some(Pending),
+                    Pending => Ok(Some(Pending)),
                 }
             }
             CaConnState::Init => {
@@ -1611,49 +1601,52 @@ impl CaConn {
                 };
                 proto.push_out(msg);
                 self.state = CaConnState::Listen;
-                None
+                Ok(None)
             }
             CaConnState::Listen => match {
                 let res = self.handle_conn_listen(cx);
                 res
             } {
-                Ready(Some(Ok(()))) => Some(Ready(Ok(()))),
-                Ready(Some(Err(e))) => Some(Ready(Err(e))),
-                Ready(None) => None,
-                Pending => Some(Pending),
+                Ready(Some(Ok(()))) => Ok(Some(Ready(()))),
+                Ready(Some(Err(e))) => Err(e),
+                Ready(None) => Ok(None),
+                Pending => Ok(Some(Pending)),
             },
             CaConnState::PeerReady => {
                 let res = self.handle_peer_ready(cx);
                 match res {
-                    Ready(Some(Ok(()))) => None,
-                    Ready(Some(Err(e))) => Some(Ready(Err(e))),
-                    Ready(None) => None,
-                    Pending => Some(Pending),
+                    Ready(Some(Ok(()))) => Ok(None),
+                    Ready(Some(Err(e))) => Err(e),
+                    Ready(None) => Ok(None),
+                    Pending => Ok(Some(Pending)),
                 }
             }
             CaConnState::Wait(inst) => match inst.poll_unpin(cx) {
                 Ready(_) => {
                     self.state = CaConnState::Unconnected;
                     self.proto = None;
-                    None
+                    Ok(None)
                 }
-                Pending => Some(Pending),
+                Pending => Ok(Some(Pending)),
             },
-            CaConnState::Shutdown => None,
+            CaConnState::Shutdown => Ok(None),
         }
     }
 
-    fn loop_inner(&mut self, cx: &mut Context) -> Option<Poll<Result<(), Error>>> {
+    fn loop_inner(&mut self, cx: &mut Context) -> Result<Option<Poll<()>>, Error> {
+        use Poll::*;
         loop {
             self.stats.caconn_loop2_count_inc();
-            if let Some(v) = self.handle_conn_state(cx) {
-                break Some(v);
+            if self.is_shutdown() {
+                break Ok(None);
             }
             if self.insert_item_queue.len() >= self.opts.insert_queue_max {
-                break None;
+                break Ok(None);
             }
-            if self.is_shutdown() {
-                break None;
+            match self.handle_conn_state(cx)? {
+                Some(Ready(_)) => continue,
+                Some(Pending) => break Ok(Some(Pending)),
+                None => break Ok(None),
             }
         }
     }
@@ -1699,7 +1692,31 @@ impl CaConn {
         Self::apply_channel_ops_with_res(res)
     }
 
-    fn handle_own_ticker_tick(mut self: Pin<&mut Self>, cx: &mut Context) -> Result<(), Error> {
+    fn handle_own_ticker(mut self: Pin<&mut Self>, cx: &mut Context) -> Result<(), Error> {
+        use Poll::*;
+        match self.ticker.poll_unpin(cx) {
+            Ready(()) => {
+                match self.as_mut().handle_own_ticker_tick(cx) {
+                    Ok(_) => {
+                        if !self.is_shutdown() {
+                            self.ticker = Self::new_self_ticker();
+                            let _ = self.ticker.poll_unpin(cx);
+                            // cx.waker().wake_by_ref();
+                        }
+                        Ok(())
+                    }
+                    Err(e) => {
+                        error!("handle_own_ticker {e}");
+                        self.trigger_shutdown(ChannelStatusClosedReason::InternalError);
+                        Err(e)
+                    }
+                }
+            }
+            Pending => Ok(()),
+        }
+    }
+
+    fn handle_own_ticker_tick(self: Pin<&mut Self>, _cx: &mut Context) -> Result<(), Error> {
         let this = self.get_mut();
         for (_, tb) in this.time_binners.iter_mut() {
             let iiq = &mut this.insert_item_queue;
@@ -1709,7 +1726,27 @@ impl CaConn {
     }
 
     fn outgoing_queues_empty(&self) -> bool {
-        self.insert_item_queue.is_empty() && !self.sender_polling.is_sending()
+        self.channel_info_query_queue.is_empty() && !self.channel_info_query_sending.is_sending()
+    }
+
+    fn attempt_flush_channel_info_query(mut self: Pin<&mut Self>, cx: &mut Context) -> Result<(), Error> {
+        use Poll::*;
+        loop {
+            let sd = &mut self.channel_info_query_sending;
+            break if sd.is_sending() {
+                match sd.poll_unpin(cx) {
+                    Ready(Ok(())) => continue,
+                    Ready(Err(e)) => Err(Error::with_msg_no_trace("can not send into channel")),
+                    Pending => Ok(()),
+                }
+            } else if let Some(item) = self.channel_info_query_queue.pop_front() {
+                let sd = &mut self.channel_info_query_sending;
+                sd.send2(item);
+                continue;
+            } else {
+                Ok(())
+            };
+        }
     }
 }
 
@@ -1718,127 +1755,88 @@ impl Stream for CaConn {
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
         use Poll::*;
-        let poll_ts1 = Instant::now();
         self.stats.caconn_poll_count_inc();
-        match self.ticker.poll_unpin(cx) {
-            Ready(()) => {
-                match self.as_mut().handle_own_ticker_tick(cx) {
-                    Ok(_) => {
-                        let _ = self.ticker.poll_unpin(cx);
-                    }
-                    Err(e) => {
-                        error!("{e}");
-                        self.trigger_shutdown(ChannelStatusClosedReason::InternalError);
-                        return Ready(Some(Err(e)));
-                    }
-                }
-                self.ticker = Self::new_self_ticker();
-                let _ = self.ticker.poll_unpin(cx);
-                // cx.waker().wake_by_ref();
-            }
-            Pending => {}
-        }
-        let ret = if let Some(item) = self.cmd_res_queue.pop_front() {
-            Ready(Some(Ok(CaConnEvent {
-                ts: Instant::now(),
-                value: CaConnEventValue::ConnCommandResult(item),
-            })))
-        } else if let Some(item) = self.ca_conn_event_out_queue.pop_front() {
-            Ready(Some(Ok(item)))
-        } else if let Some(item) = self.insert_item_queue.pop_front() {
-            let ev = CaConnEvent {
-                ts: Instant::now(),
-                value: CaConnEventValue::QueryItem(item),
-            };
-            Ready(Some(Ok(ev)))
-        } else {
-            let _ = loop {
-                let sd = &mut self.channel_info_query_sending;
-                break if sd.is_sending() {
-                    match sd.poll_unpin(cx) {
-                        Ready(Ok(())) => continue,
-                        Ready(Err(e)) => Ready(Some(e)),
-                        Pending => Pending,
-                    }
-                } else if let Some(item) = self.channel_info_query_queue.pop_front() {
-                    let sd = &mut self.channel_info_query_sending;
-                    sd.send2(item);
-                    continue;
-                } else {
-                    Ready(None)
+        loop {
+            let mut have_pending = false;
+            break if let Err(e) = self.as_mut().handle_own_ticker(cx) {
+                Ready(Some(Err(e)))
+            } else if let Some(item) = self.cmd_res_queue.pop_front() {
+                let item = CaConnEvent {
+                    ts: Instant::now(),
+                    value: CaConnEventValue::ConnCommandResult(item),
                 };
-            };
-            let ret = loop {
-                self.stats.caconn_loop1_count_inc();
-                loop {
-                    break if self.is_shutdown() {
-                        ()
-                    } else {
-                        match self.handle_conn_command(cx) {
-                            Ready(Some(Ok(_))) => (),
-                            Ready(Some(Err(e))) => {
-                                error!("{e}");
-                                self.trigger_shutdown(ChannelStatusClosedReason::InternalError);
-                                ()
-                            }
-                            Ready(None) => {
-                                warn!("command input queue closed, do shutdown");
-                                self.trigger_shutdown(ChannelStatusClosedReason::InternalError);
-                                ()
-                            }
-                            Pending => (),
-                        }
-                    };
-                }
+                Ready(Some(Ok(item)))
+            } else if let Some(item) = self.ca_conn_event_out_queue.pop_front() {
+                Ready(Some(Ok(item)))
+            } else if let Some(item) = self.insert_item_queue.pop_front() {
+                let ev = CaConnEvent {
+                    ts: Instant::now(),
+                    value: CaConnEventValue::QueryItem(item),
+                };
+                Ready(Some(Ok(ev)))
+            } else if let Err(e) = self.as_mut().attempt_flush_channel_info_query(cx) {
+                Ready(Some(Err(e)))
+            } else if let Ready(Some(Err(e))) = self.as_mut().handle_conn_command(cx) {
+                Ready(Some(Err(e)))
+            } else if let Some(item) = {
                 if self.is_shutdown() {
-                    if self.outgoing_queues_empty() {
-                        debug!("shut down and all items flushed {}", self.remote_addr_dbg);
-                        break Ready(Ok(()));
-                    } else {
-                        // trace!("more items {}", self.insert_item_queue.len());
+                    None
+                } else {
+                    match self.loop_inner(cx) {
+                        // TODO what does this mean: should we re-loop or yield something?
+                        Ok(Some(Ready(()))) => None,
+                        // This is the last step, so we yield Pending.
+                        // But in general, this does not compose well when we would add another step.
+                        Ok(Some(Pending)) => {
+                            have_pending = true;
+                            None
+                        }
+                        Ok(None) => None,
+                        Err(e) => Some(Err(e)),
                     }
                 }
-                if self.insert_item_queue.len() >= self.opts.insert_queue_max {
-                    break Pending;
-                }
-                if !self.is_shutdown() {
-                    if let Some(v) = self.loop_inner(cx) {
-                        break v;
-                    }
+            } {
+                Ready(Some(item))
+            } else {
+                // Ready(_) => self.stats.conn_stream_ready_inc(),
+                // Pending => self.stats.conn_stream_pending_inc(),
+                let _item = CaConnEvent {
+                    ts: Instant::now(),
+                    value: CaConnEventValue::None,
+                };
+                if have_pending {
+                    Pending
+                } else {
+                    continue;
                 }
             };
-            match &ret {
-                Ready(_) => self.stats.conn_stream_ready_inc(),
-                Pending => self.stats.conn_stream_pending_inc(),
-            }
-            if self.is_shutdown() && self.outgoing_queues_empty() {
-                debug!("end stream {}", self.remote_addr_dbg);
-                Ready(None)
-            } else {
-                match ret {
-                    Ready(Ok(())) => {
-                        let item = CaConnEvent {
-                            ts: Instant::now(),
-                            value: CaConnEventValue::None,
-                        };
-                        Ready(Some(Ok(item)))
-                    }
-                    Ready(Err(e)) => Ready(Some(Err(e))),
-                    Pending => Pending,
-                }
-            }
-        };
-        {
-            let tsnow = Instant::now();
-            let dt = tsnow.saturating_duration_since(poll_ts1);
-            if dt > Duration::from_millis(40) {
-                if poll_ts1 > self.ts_earliest_warn_poll_slow {
-                    // TODO factor out the rate limit logic in reusable type
-                    self.ts_earliest_warn_poll_slow = tsnow + Duration::from_millis(2000);
-                    warn!("slow poll: {}ms", dt.as_secs_f32() * 1e3);
-                }
-            }
         }
+    }
+}
+
+pub struct PollTimer<INP> {
+    inp: INP,
+}
+
+impl<INP> PollTimer<INP> {
+    pub fn new(inp: INP) -> Self {
+        Self { inp }
+    }
+}
+
+impl<INP> Stream for PollTimer<INP>
+where
+    INP: Stream + Unpin,
+{
+    type Item = <INP as Stream>::Item;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
+        let poll_ts1 = Instant::now();
+        let inp = &mut self.inp;
+        let ret = inp.poll_next_unpin(cx);
+        let poll_ts2 = Instant::now();
+        let dt = poll_ts2.saturating_duration_since(poll_ts1);
+        if dt > Duration::from_millis(40) {}
         ret
     }
 }

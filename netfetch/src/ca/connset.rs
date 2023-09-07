@@ -126,9 +126,15 @@ pub enum CaConnSetEvent {
     CaConnEvent((SocketAddr, CaConnEvent)),
 }
 
+#[derive(Debug)]
+pub enum CaConnSetItem {
+    Healthy,
+}
+
 #[derive(Clone)]
 pub struct CaConnSetCtrl {
     tx: Sender<CaConnSetEvent>,
+    pub rx: Receiver<CaConnSetItem>,
 }
 
 impl CaConnSetCtrl {
@@ -187,9 +193,11 @@ pub struct CaConnSet {
     connset_rx: Receiver<CaConnSetEvent>,
     channel_info_query_tx: Sender<ChannelInfoQuery>,
     storage_insert_tx: Sender<QueryItem>,
-    shutdown: bool,
+    shutdown_stopping: bool,
+    shutdown_done: bool,
     chan_check_next: Option<Channel>,
     stats: CaConnSetStats,
+    connset_out_tx: Sender<CaConnSetItem>,
 }
 
 impl CaConnSet {
@@ -200,6 +208,7 @@ impl CaConnSet {
         channel_info_query_tx: Sender<ChannelInfoQuery>,
         pgconf: Database,
     ) -> CaConnSetCtrl {
+        let (connset_out_tx, connset_out_rx) = async_channel::bounded(256);
         let (connset_tx, connset_rx) = async_channel::bounded(10000);
         let (search_tx, ioc_finder_jh) = super::finder::start_finder(connset_tx.clone(), backend.clone(), pgconf);
         let connset = Self {
@@ -212,13 +221,18 @@ impl CaConnSet {
             connset_rx,
             channel_info_query_tx,
             storage_insert_tx,
-            shutdown: false,
+            shutdown_stopping: false,
+            shutdown_done: false,
             chan_check_next: None,
             stats: CaConnSetStats::new(),
+            connset_out_tx,
         };
         // TODO await on jh
         let jh = tokio::spawn(CaConnSet::run(connset));
-        CaConnSetCtrl { tx: connset_tx }
+        CaConnSetCtrl {
+            tx: connset_tx,
+            rx: connset_out_rx,
+        }
     }
 
     async fn run(mut this: CaConnSet) -> Result<(), Error> {
@@ -227,11 +241,11 @@ impl CaConnSet {
             match x {
                 Ok(ev) => this.handle_event(ev).await?,
                 Err(_) => {
-                    if this.shutdown {
+                    if this.shutdown_done {
                         // all fine
                         break Ok(());
                     } else {
-                        error!("channel closed without shutdown");
+                        error!("channel closed without shutdown_done");
                     }
                 }
             }
@@ -245,16 +259,9 @@ impl CaConnSet {
                 ConnSetCmd::ChannelAddWithStatusId(x) => self.handle_add_channel_with_status_id(x).await,
                 ConnSetCmd::ChannelAddWithAddr(x) => self.handle_add_channel_with_addr(x).await,
                 ConnSetCmd::IocAddrQueryResult(x) => self.handle_ioc_query_result(x).await,
-                ConnSetCmd::CheckHealth => {
-                    error!("TODO implement check health");
-                    Ok(())
-                }
-                ConnSetCmd::Shutdown => {
-                    debug!("shutdown received");
-                    self.shutdown = true;
-                    Ok(())
-                }
                 ConnSetCmd::SeriesLookupResult(x) => self.handle_series_lookup_result(x).await,
+                ConnSetCmd::CheckHealth => self.handle_check_health().await,
+                ConnSetCmd::Shutdown => self.handle_shutdown().await,
             },
             CaConnSetEvent::CaConnEvent((addr, ev)) => match ev.value {
                 CaConnEventValue::None => Ok(()),
@@ -264,7 +271,7 @@ impl CaConnSet {
                     self.storage_insert_tx.send(item).await?;
                     Ok(())
                 }
-                CaConnEventValue::EndOfStream => todo!(),
+                CaConnEventValue::EndOfStream => self.handle_ca_conn_eos(addr).await,
             },
         }
     }
@@ -394,6 +401,44 @@ impl CaConnSet {
             } else {
                 warn!("ioc addr lookup done but channel no longer here");
             }
+        }
+        Ok(())
+    }
+
+    async fn handle_check_health(&mut self) -> Result<(), Error> {
+        debug!("TODO handle_check_health");
+        let item = CaConnSetItem::Healthy;
+        self.connset_out_tx.send(item).await?;
+        Ok(())
+    }
+
+    async fn handle_shutdown(&mut self) -> Result<(), Error> {
+        debug!("TODO handle_shutdown");
+        debug!("shutdown received");
+        self.shutdown_stopping = true;
+        for (addr, res) in self.ca_conn_ress.iter() {
+            let item = ConnCommand::shutdown();
+            res.sender.send(item).await?;
+        }
+        Ok(())
+    }
+
+    async fn handle_ca_conn_eos(&mut self, addr: SocketAddr) -> Result<(), Error> {
+        debug!("handle_ca_conn_eos {addr}");
+        if let Some(e) = self.ca_conn_ress.remove(&addr) {
+            match e.jh.await {
+                Ok(Ok(())) => {
+                    debug!("CaConn {addr} finished well");
+                }
+                Ok(Err(e)) => {
+                    error!("CaConn {addr} task error: {e}");
+                }
+                Err(e) => {
+                    error!("CaConn {addr} join error: {e}");
+                }
+            }
+        } else {
+            warn!("end-of-stream received for non-existent CaConn {addr}");
         }
         Ok(())
     }

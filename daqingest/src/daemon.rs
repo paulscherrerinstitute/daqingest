@@ -11,6 +11,7 @@ use netfetch::ca::conn::CaConnEvent;
 use netfetch::ca::conn::ConnCommand;
 use netfetch::ca::connset::CaConnSet;
 use netfetch::ca::connset::CaConnSetCtrl;
+use netfetch::ca::connset::CaConnSetItem;
 use netfetch::ca::findioc::FindIocRes;
 use netfetch::ca::IngestCommons;
 use netfetch::ca::SlowWarnable;
@@ -95,8 +96,8 @@ pub struct Daemon {
     stats: Arc<DaemonStats>,
     shutting_down: bool,
     insert_rx_weak: WeakReceiver<QueryItem>,
-    channel_info_query_tx: Sender<ChannelInfoQuery>,
     connset_ctrl: CaConnSetCtrl,
+    connset_status_last: Instant,
     query_item_tx: Sender<QueryItem>,
 }
 
@@ -124,9 +125,26 @@ impl Daemon {
             opts.backend.clone(),
             opts.local_epics_hostname.clone(),
             common_insert_item_queue.sender().unwrap().inner().clone(),
-            channel_info_query_tx.clone(),
+            channel_info_query_tx,
             opts.pgconf.clone(),
         );
+
+        // TODO remove
+        tokio::spawn({
+            let rx = conn_set_ctrl.rx.clone();
+            let tx = daemon_ev_tx.clone();
+            async move {
+                loop {
+                    match rx.recv().await {
+                        Ok(item) => {
+                            let item = DaemonEvent::CaConnSetItem(item);
+                            tx.send(item).await;
+                        }
+                        Err(e) => break,
+                    }
+                }
+            }
+        });
 
         let ingest_commons = IngestCommons {
             pgconf: Arc::new(opts.pgconf.clone()),
@@ -211,8 +229,8 @@ impl Daemon {
             stats: Arc::new(DaemonStats::new()),
             shutting_down: false,
             insert_rx_weak: common_insert_item_queue_2.downgrade(),
-            channel_info_query_tx,
             connset_ctrl: conn_set_ctrl,
+            connset_status_last: Instant::now(),
             query_item_tx: common_insert_item_queue.sender().unwrap().inner().clone(),
         };
         Ok(ret)
@@ -268,10 +286,12 @@ impl Daemon {
             warn!("Received SIGTERM");
             SIGTERM.store(2, atomic::Ordering::Release);
         }
-        warn!("TODO let CaConnSet check health");
-        // TODO
-        // self.check_connection_states()?;
-        // self.check_channel_states().await?;
+        if self.connset_status_last + Duration::from_millis(2000) < ts1 {
+            self.connset_ctrl.check_health().await?;
+        }
+        if self.connset_status_last + Duration::from_millis(10000) < ts1 {
+            error!("CaConnSet has not reported health status");
+        }
         let dt = ts1.elapsed();
         if dt > Duration::from_millis(500) {
             info!("slow check_chans  {}ms", dt.as_secs_f32() * 1e3);
@@ -563,16 +583,31 @@ impl Daemon {
         }
     }
 
+    async fn handle_ca_conn_set_item(&mut self, item: CaConnSetItem) -> Result<(), Error> {
+        use CaConnSetItem::*;
+        match item {
+            Healthy => {
+                self.connset_status_last = Instant::now();
+            }
+        }
+        Ok(())
+    }
+
     async fn handle_shutdown(&mut self) -> Result<(), Error> {
         error!("TODO handle_shutdown");
-        // TODO make sure we:
-        // set a flag so that we don't attempt to use resources any longer (why could that happen?)
-        // does anybody might still want to communicate with us? can't be excluded.
-        // send shutdown signal to everyone.
-        // drop our ends of channels to workers (gate them behind option?).
-        // await the connection sets.
-        // await other workers that we've spawned.
-        self.connset_ctrl.shutdown().await?;
+        if self.shutting_down {
+            warn!("already shutting down");
+        } else {
+            self.shutting_down = true;
+            // TODO make sure we:
+            // set a flag so that we don't attempt to use resources any longer (why could that happen?)
+            // does anybody might still want to communicate with us? can't be excluded.
+            // send shutdown signal to everyone.
+            // drop our ends of channels to workers (gate them behind option?).
+            // await the connection sets.
+            // await other workers that we've spawned.
+            self.connset_ctrl.shutdown().await?;
+        }
         Ok(())
     }
 
@@ -580,10 +615,8 @@ impl Daemon {
     async fn handle_shutdown(&mut self) -> Result<(), Error> {
         warn!("received shutdown event");
         if self.shutting_down {
-            info!("already shutting down");
             Ok(())
         } else {
-            self.shutting_down = true;
             self.channel_states.clear();
             self.ca_conn_send_shutdown().await?;
             self.ingest_commons.insert_item_queue.drop_sender();
@@ -616,6 +649,7 @@ impl Daemon {
             ChannelRemove(ch) => self.handle_channel_remove(ch).await,
             SearchDone(item) => self.handle_search_done(item).await,
             CaConnEvent(addr, item) => self.handle_ca_conn_event(addr, item).await,
+            CaConnSetItem(item) => self.handle_ca_conn_set_item(item).await,
             Shutdown => self.handle_shutdown().await,
         };
         let dt = ts1.elapsed();

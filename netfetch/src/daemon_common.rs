@@ -1,4 +1,5 @@
 use crate::ca::conn::CaConnEvent;
+use crate::ca::connset::CaConnSetItem;
 use crate::ca::findioc::FindIocRes;
 use async_channel::Sender;
 use err::Error;
@@ -28,6 +29,7 @@ pub enum DaemonEvent {
     ChannelRemove(Channel),
     SearchDone(Result<VecDeque<FindIocRes>, Error>),
     CaConnEvent(SocketAddrV4, CaConnEvent),
+    CaConnSetItem(CaConnSetItem),
     Shutdown,
 }
 
@@ -49,6 +51,7 @@ impl DaemonEvent {
                     EndOfStream => format!("CaConnEvent/EndOfStream"),
                 }
             }
+            CaConnSetItem(_) => format!("CaConnSetItem"),
             Shutdown => format!("Shutdown"),
         }
     }
