@@ -6,8 +6,6 @@ pub mod proto;
 pub mod search;
 pub mod statemap;
 
-use self::connset::CaConnSetCtrl;
-use crate::ca::connset::CaConnSet;
 use crate::metrics::ExtraInsertsConf;
 use crate::rt::TokMx;
 use futures_util::Future;
@@ -15,7 +13,6 @@ use futures_util::FutureExt;
 use log::*;
 use netpod::Database;
 use scywr::insertworker::InsertWorkerOpts;
-use scywr::iteminsertqueue::CommonInsertItemQueue;
 use scywr::store::DataStore;
 use stats::CaConnStatsAgg;
 use std::pin::Pin;
@@ -39,7 +36,6 @@ pub struct IngestCommons {
     pub pgconf: Arc<Database>,
     pub backend: String,
     pub local_epics_hostname: String,
-    pub insert_item_queue: Arc<CommonInsertItemQueue>,
     pub data_store: Arc<DataStore>,
     pub insert_ivl_min: Arc<AtomicU64>,
     pub extra_inserts_conf: TokMx<ExtraInsertsConf>,

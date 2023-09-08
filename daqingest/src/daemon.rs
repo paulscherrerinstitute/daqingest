@@ -4,17 +4,12 @@ pub mod inserthook;
 use async_channel::Receiver;
 use async_channel::Sender;
 use async_channel::WeakReceiver;
-use dbpg::seriesbychannel::ChannelInfoQuery;
 use err::Error;
 use log::*;
-use netfetch::ca::conn::CaConnEvent;
-use netfetch::ca::conn::ConnCommand;
 use netfetch::ca::connset::CaConnSet;
 use netfetch::ca::connset::CaConnSetCtrl;
 use netfetch::ca::connset::CaConnSetItem;
-use netfetch::ca::findioc::FindIocRes;
 use netfetch::ca::IngestCommons;
-use netfetch::ca::SlowWarnable;
 use netfetch::conf::CaIngestOpts;
 use netfetch::daemon_common::Channel;
 use netfetch::daemon_common::DaemonEvent;
@@ -25,14 +20,8 @@ use netpod::ScyllaConfig;
 use scywr::insertworker::Ttls;
 use scywr::iteminsertqueue as scywriiq;
 use scywr::store::DataStore;
-use scywriiq::ChannelStatus;
-use scywriiq::ChannelStatusItem;
-use scywriiq::CommonInsertItemQueue;
-use scywriiq::ConnectionStatus;
-use scywriiq::ConnectionStatusItem;
 use scywriiq::QueryItem;
 use serde::Serialize;
-use series::series::Existence;
 use series::ChannelStatusSeriesId;
 use series::SeriesId;
 use stats::DaemonStats;
@@ -49,8 +38,6 @@ use std::time::Instant;
 use std::time::SystemTime;
 use taskrun::tokio;
 use tokio::task::JoinHandle;
-use tracing::info_span;
-use tracing::Instrument;
 
 const CA_CONN_INSERT_QUEUE_MAX: usize = 256;
 
@@ -90,7 +77,7 @@ pub struct Daemon {
     count_unassigned: usize,
     count_assigned: usize,
     last_status_print: SystemTime,
-    insert_workers_jh: Vec<JoinHandle<()>>,
+    insert_workers_jh: Vec<JoinHandle<Result<(), Error>>>,
     ingest_commons: Arc<IngestCommons>,
     caconn_last_channel_check: Instant,
     stats: Arc<DaemonStats>,
@@ -98,7 +85,6 @@ pub struct Daemon {
     insert_rx_weak: WeakReceiver<QueryItem>,
     connset_ctrl: CaConnSetCtrl,
     connset_status_last: Instant,
-    query_item_tx: Sender<QueryItem>,
 }
 
 impl Daemon {
@@ -114,33 +100,38 @@ impl Daemon {
             .await
             .map_err(|e| Error::with_msg_no_trace(e.to_string()))?;
 
-        let common_insert_item_queue = Arc::new(CommonInsertItemQueue::new(opts.insert_item_queue_cap));
+        let (query_item_tx, query_item_rx) = async_channel::bounded(opts.insert_item_queue_cap);
         let insert_queue_counter = Arc::new(AtomicUsize::new(0));
 
         // Insert queue hook
-        let rx = inserthook::active_channel_insert_hook(common_insert_item_queue.receiver().unwrap());
-        let common_insert_item_queue_2 = rx;
+        let query_item_rx = inserthook::active_channel_insert_hook(query_item_rx);
 
         let conn_set_ctrl = CaConnSet::start(
             opts.backend.clone(),
             opts.local_epics_hostname.clone(),
-            common_insert_item_queue.sender().unwrap().inner().clone(),
+            query_item_tx,
             channel_info_query_tx,
             opts.pgconf.clone(),
         );
 
         // TODO remove
         tokio::spawn({
-            let rx = conn_set_ctrl.rx.clone();
+            let rx = conn_set_ctrl.receiver().clone();
             let tx = daemon_ev_tx.clone();
             async move {
                 loop {
                     match rx.recv().await {
                         Ok(item) => {
                             let item = DaemonEvent::CaConnSetItem(item);
-                            tx.send(item).await;
+                            if let Err(_) = tx.send(item).await {
+                                debug!("CaConnSet to Daemon adapter: tx closed, break");
+                                break;
+                            }
                         }
-                        Err(e) => break,
+                        Err(_) => {
+                            debug!("CaConnSet to Daemon adapter: rx done, break");
+                            break;
+                        }
                     }
                 }
             }
@@ -150,7 +141,6 @@ impl Daemon {
             pgconf: Arc::new(opts.pgconf.clone()),
             backend: opts.backend().into(),
             local_epics_hostname: opts.local_epics_hostname.clone(),
-            insert_item_queue: common_insert_item_queue.clone(),
             data_store: datastore.clone(),
             insert_ivl_min: Arc::new(AtomicU64::new(0)),
             extra_inserts_conf: tokio::sync::Mutex::new(ExtraInsertsConf::new()),
@@ -166,11 +156,11 @@ impl Daemon {
         let store_stats = Arc::new(stats::CaConnStats::new());
         let ttls = opts.ttls.clone();
         let insert_worker_opts = Arc::new(ingest_commons.as_ref().into());
-        let jh_insert_workers = scywr::insertworker::spawn_scylla_insert_workers(
+        let insert_workers_jh = scywr::insertworker::spawn_scylla_insert_workers(
             opts.scyconf.clone(),
             opts.insert_scylla_sessions,
             opts.insert_worker_count,
-            common_insert_item_queue_2.clone(),
+            query_item_rx.clone(),
             insert_worker_opts,
             store_stats.clone(),
             use_rate_limit_queue,
@@ -223,25 +213,20 @@ impl Daemon {
             count_unassigned: 0,
             count_assigned: 0,
             last_status_print: SystemTime::now(),
-            insert_workers_jh: jh_insert_workers,
+            insert_workers_jh,
             ingest_commons,
             caconn_last_channel_check: Instant::now(),
             stats: Arc::new(DaemonStats::new()),
             shutting_down: false,
-            insert_rx_weak: common_insert_item_queue_2.downgrade(),
+            insert_rx_weak: query_item_rx.downgrade(),
             connset_ctrl: conn_set_ctrl,
             connset_status_last: Instant::now(),
-            query_item_tx: common_insert_item_queue.sender().unwrap().inner().clone(),
         };
         Ok(ret)
     }
 
     fn stats(&self) -> &Arc<DaemonStats> {
         &self.stats
-    }
-
-    fn allow_create_new_connections(&self) -> bool {
-        !self.shutting_down
     }
 
     async fn check_caconn_chans(&mut self) -> Result<(), Error> {
@@ -252,24 +237,17 @@ impl Daemon {
         Ok(())
     }
 
-    async fn ca_conn_send_shutdown(&mut self) -> Result<(), Error> {
-        self.connset_ctrl.shutdown().await?;
-        Ok(())
-    }
-
     async fn handle_timer_tick(&mut self) -> Result<(), Error> {
         if self.shutting_down {
-            let sa1 = self.ingest_commons.insert_item_queue.sender_count();
-            let sa2 = self.ingest_commons.insert_item_queue.sender_count_2();
             let nworkers = self
                 .ingest_commons
                 .insert_workers_running
                 .load(atomic::Ordering::Acquire);
-            let nitems = self.insert_rx_weak.upgrade().map(|x| x.len());
-            info!(
-                "qu senders A {:?} {:?}  nworkers {}  nitems {:?}",
-                sa1, sa2, nworkers, nitems
-            );
+            let nitems = self
+                .insert_rx_weak
+                .upgrade()
+                .map(|x| (x.sender_count(), x.receiver_count(), x.len()));
+            info!("qu senders A  nworkers {}  nitems {:?}", nworkers, nitems);
             if nworkers == 0 {
                 info!("goodbye");
                 std::process::exit(0);
@@ -330,163 +308,7 @@ impl Daemon {
     }
 
     async fn handle_channel_remove(&mut self, ch: Channel) -> Result<(), Error> {
-        warn!("TODO handle_channel_remove");
-        #[cfg(DISABLED)]
-        if let Some(k) = self.channel_states.get_mut(&ch) {
-            match &k.value {
-                ChannelStateValue::Active(j) => match j {
-                    ActiveChannelState::Init { .. } => {
-                        k.value = ChannelStateValue::ToRemove { addr: None };
-                    }
-                    ActiveChannelState::WaitForStatusSeriesId { .. } => {
-                        k.value = ChannelStateValue::ToRemove { addr: None };
-                    }
-                    ActiveChannelState::WithStatusSeriesId {
-                        status_series_id: _,
-                        state,
-                    } => match state.inner {
-                        WithStatusSeriesIdStateInner::UnknownAddress { .. } => {
-                            k.value = ChannelStateValue::ToRemove { addr: None };
-                        }
-                        WithStatusSeriesIdStateInner::SearchPending { .. } => {
-                            k.value = ChannelStateValue::ToRemove { addr: None };
-                        }
-                        WithStatusSeriesIdStateInner::WithAddress { addr, .. } => {
-                            k.value = ChannelStateValue::ToRemove {
-                                addr: Some(addr.clone()),
-                            };
-                        }
-                        WithStatusSeriesIdStateInner::NoAddress { .. } => {
-                            k.value = ChannelStateValue::ToRemove { addr: None };
-                        }
-                    },
-                },
-                ChannelStateValue::ToRemove { .. } => {}
-            }
-        }
-        Ok(())
-    }
-
-    async fn handle_search_done(&mut self, item: Result<VecDeque<FindIocRes>, Error>) -> Result<(), Error> {
-        warn!("TODO handle_search_done");
-        //debug!("handle SearchDone: {res:?}");
-        // let allow_create_new_connections = self.allow_create_new_connections();
-        // let tsnow = SystemTime::now();
-        #[cfg(DISABLED)]
-        match item {
-            Ok(ress) => {
-                SEARCH_ANS_COUNT.fetch_add(ress.len(), atomic::Ordering::AcqRel);
-                for res in ress {
-                    if let Some(addr) = &res.addr {
-                        self.stats.ioc_search_some_inc();
-
-                        let ch = Channel::new(res.channel);
-                        if let Some(st) = self.channel_states.get_mut(&ch) {
-                            match &st.value {
-                                ChannelStateValue::Active(st2) => match st2 {
-                                    ActiveChannelState::Init { .. } => {}
-                                    ActiveChannelState::WaitForStatusSeriesId { .. } => {}
-                                    ActiveChannelState::WithStatusSeriesId {
-                                        status_series_id,
-                                        state,
-                                    } => match state.inner {
-                                        WithStatusSeriesIdStateInner::SearchPending { since, did_send: _ } => {
-                                            if allow_create_new_connections {
-                                                let dt = tsnow.duration_since(since).unwrap();
-                                                if dt > SEARCH_PENDING_TIMEOUT_WARN {
-                                                    warn!(
-                                                        "    FOUND {:5.0}  {:5.0}  {addr}",
-                                                        1e3 * dt.as_secs_f32(),
-                                                        1e3 * res.dt.as_secs_f32()
-                                                    );
-                                                }
-                                                let stnew =
-                                                    ChannelStateValue::Active(ActiveChannelState::WithStatusSeriesId {
-                                                        status_series_id: status_series_id.clone(),
-                                                        state: WithStatusSeriesIdState {
-                                                            inner: WithStatusSeriesIdStateInner::WithAddress {
-                                                                addr: addr.clone(),
-                                                                state: WithAddressState::Unassigned {
-                                                                    assign_at: tsnow,
-                                                                },
-                                                            },
-                                                        },
-                                                    });
-                                                st.value = stnew;
-                                            } else {
-                                                // Emit something here?
-                                            }
-                                        }
-                                        _ => {
-                                            warn!(
-                                                "address found, but state for {ch:?} is not SearchPending: {:?}",
-                                                st.value
-                                            );
-                                        }
-                                    },
-                                },
-                                ChannelStateValue::ToRemove { addr: _ } => {}
-                            }
-                        } else {
-                            warn!("can not find channel state for {ch:?}");
-                        }
-                    } else {
-                        //debug!("no addr from search in {res:?}");
-                        let ch = Channel::new(res.channel);
-                        if let Some(st) = self.channel_states.get_mut(&ch) {
-                            let mut unexpected_state = true;
-                            match &st.value {
-                                ChannelStateValue::Active(st2) => match st2 {
-                                    ActiveChannelState::Init { .. } => {}
-                                    ActiveChannelState::WaitForStatusSeriesId { .. } => {}
-                                    ActiveChannelState::WithStatusSeriesId {
-                                        status_series_id,
-                                        state: st3,
-                                    } => match &st3.inner {
-                                        WithStatusSeriesIdStateInner::UnknownAddress { .. } => {}
-                                        WithStatusSeriesIdStateInner::SearchPending { since, .. } => {
-                                            unexpected_state = false;
-                                            let dt = tsnow.duration_since(*since).unwrap();
-                                            if dt > SEARCH_PENDING_TIMEOUT_WARN {
-                                                warn!(
-                                                    "NOT FOUND {:5.0}  {:5.0}",
-                                                    1e3 * dt.as_secs_f32(),
-                                                    1e3 * res.dt.as_secs_f32()
-                                                );
-                                            }
-                                            st.value =
-                                                ChannelStateValue::Active(ActiveChannelState::WithStatusSeriesId {
-                                                    status_series_id: status_series_id.clone(),
-                                                    state: WithStatusSeriesIdState {
-                                                        inner: WithStatusSeriesIdStateInner::NoAddress { since: tsnow },
-                                                    },
-                                                });
-                                        }
-                                        WithStatusSeriesIdStateInner::WithAddress { .. } => {}
-                                        WithStatusSeriesIdStateInner::NoAddress { .. } => {}
-                                    },
-                                },
-                                ChannelStateValue::ToRemove { .. } => {}
-                            }
-                            if unexpected_state {
-                                warn!("no address, but state for {ch:?} is not SearchPending: {:?}", st.value);
-                            }
-                        } else {
-                            warn!("can not find channel state for {ch:?}");
-                        }
-                    }
-                }
-            }
-            Err(e) => {
-                self.stats.ioc_search_err_inc();
-                error!("error from search: {e}");
-            }
-        }
-        Ok(())
-    }
-
-    async fn handle_ca_conn_done(&mut self, conn_addr: SocketAddrV4) -> Result<(), Error> {
-        warn!("TODO handle_ca_conn_done {conn_addr:?}");
+        self.connset_ctrl.remove_channel(ch.id().into()).await?;
         Ok(())
     }
 
@@ -539,48 +361,6 @@ impl Daemon {
             error!("can not emit CaConn done event");
         }
         Ok(())
-    }
-
-    async fn handle_ca_conn_event(&mut self, addr: SocketAddrV4, item: CaConnEvent) -> Result<(), Error> {
-        self.stats.event_ca_conn_inc();
-        use netfetch::ca::conn::CaConnEventValue::*;
-        match item.value {
-            None => {
-                // TODO count, maybe reduce.
-                Ok(())
-            }
-            EchoTimeout => {
-                self.stats.ca_echo_timeout_total_inc();
-                error!("TODO on EchoTimeout remove the CaConn and reset channels");
-                Ok(())
-            }
-            ConnCommandResult(item) => {
-                self.stats.todo_mark_inc();
-                use netfetch::ca::conn::ConnCommandResultKind::*;
-                match &item.kind {
-                    CheckHealth => {
-                        todo!("TODO collect the CaConn health check in CaConnSet");
-                        #[cfg(DISABLED)]
-                        if let Some(st) = self.connection_states.get_mut(&addr) {
-                            self.stats.ca_conn_status_feedback_recv_inc();
-                            st.last_feedback = Instant::now();
-                            Ok(())
-                        } else {
-                            self.stats.ca_conn_status_feedback_no_dst_inc();
-                            Ok(())
-                        }
-                    }
-                }
-            }
-            QueryItem(item) => {
-                self.query_item_tx.send(item).await?;
-                Ok(())
-            }
-            EndOfStream => {
-                self.stats.ca_conn_status_done_inc();
-                self.handle_ca_conn_done(addr).await
-            }
-        }
     }
 
     async fn handle_ca_conn_set_item(&mut self, item: CaConnSetItem) -> Result<(), Error> {
@@ -647,8 +427,6 @@ impl Daemon {
             }
             ChannelAdd(ch) => self.handle_channel_add(ch).await,
             ChannelRemove(ch) => self.handle_channel_remove(ch).await,
-            SearchDone(item) => self.handle_search_done(item).await,
-            CaConnEvent(addr, item) => self.handle_ca_conn_event(addr, item).await,
             CaConnSetItem(item) => self.handle_ca_conn_set_item(item).await,
             Shutdown => self.handle_shutdown().await,
         };
@@ -696,14 +474,17 @@ impl Daemon {
         taskrun::spawn(ticker);
     }
 
-    pub async fn daemon(&mut self) -> Result<(), Error> {
+    pub async fn daemon(mut self) -> Result<(), Error> {
         Self::spawn_ticker(self.tx.clone(), self.stats.clone());
         loop {
+            if self.shutting_down {
+                break;
+            }
             match self.rx.recv().await {
-                Ok(item) => match self.handle_event(item).await {
-                    Ok(_) => {}
+                Ok(item) => match self.handle_event(item.clone()).await {
+                    Ok(()) => {}
                     Err(e) => {
-                        error!("daemon: {e}");
+                        error!("fn daemon:  error from handle_event {item:?}  {e}");
                         break;
                     }
                 },
@@ -713,8 +494,23 @@ impl Daemon {
                 }
             }
         }
+        warn!("TODO should not have to close the channel");
         warn!("TODO wait for insert workers");
-        let _ = &self.insert_workers_jh;
+        while let Some(jh) = self.insert_workers_jh.pop() {
+            match jh.await.map_err(Error::from_string) {
+                Ok(x) => match x {
+                    Ok(()) => {
+                        debug!("joined insert worker");
+                    }
+                    Err(e) => {
+                        error!("joined insert worker, error  {e}");
+                    }
+                },
+                Err(e) => {
+                    error!("insert worker join error {e}");
+                }
+            }
+        }
         info!("daemon done");
         Ok(())
     }
@@ -778,7 +574,7 @@ pub async fn run(opts: CaIngestOpts, channels: Vec<String>) -> Result<(), Error>
         insert_worker_count: opts.insert_worker_count(),
         insert_scylla_sessions: opts.insert_scylla_sessions(),
     };
-    let mut daemon = Daemon::new(opts2).await?;
+    let daemon = Daemon::new(opts2).await?;
     let tx = daemon.tx.clone();
     let daemon_stats = daemon.stats().clone();
 
@@ -789,16 +585,13 @@ pub async fn run(opts: CaIngestOpts, channels: Vec<String>) -> Result<(), Error>
         tokio::task::spawn(fut)
     };
 
-    let daemon_jh = taskrun::spawn(async move {
-        // TODO handle Err
-        daemon.daemon().await.unwrap();
-    });
+    let daemon_jh = taskrun::spawn(daemon.daemon());
     for s in &channels {
         let ch = Channel::new(s.into());
         tx.send(DaemonEvent::ChannelAdd(ch)).await?;
     }
-    info!("configured channels applied");
-    daemon_jh.await.unwrap();
+    debug!("{} configured channels applied", channels.len());
+    daemon_jh.await.map_err(|e| Error::with_msg_no_trace(e.to_string()))??;
     if false {
         metrics_jh.await.unwrap();
     }

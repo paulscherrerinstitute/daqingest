@@ -338,14 +338,9 @@ fn start_finder_ca(tx: Sender<DaemonEvent>, tgts: Vec<SocketAddrV4>) -> (Sender<
     taskrun::spawn({
         async move {
             while let Ok(item) = arx.recv().await {
-                match tx.send(DaemonEvent::SearchDone(item)).await {
-                    Ok(_) => {}
-                    Err(e) => {
-                        error!("search res fwd {e}");
-                    }
-                }
+                todo!("send the result item");
             }
-            warn!("search res fwd nput broken");
+            warn!("search res fwd inp closed");
         }
     });
     (qtx, ioc_finder_jh)

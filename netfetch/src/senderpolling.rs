@@ -42,11 +42,15 @@ impl<T> SenderPolling<T> {
         ret
     }
 
+    pub fn is_idle(&self) -> bool {
+        self.fut.is_none()
+    }
+
     pub fn is_sending(&self) -> bool {
         self.fut.is_some()
     }
 
-    pub fn send(self: Pin<&mut Self>, item: T) {
+    pub fn send_pin(self: Pin<&mut Self>, item: T) {
         let (tx, fut) = unsafe {
             let x = Pin::get_unchecked_mut(self);
             (x.sender_ptr.as_mut(), &mut x.fut)
@@ -55,7 +59,7 @@ impl<T> SenderPolling<T> {
         *fut = Some(s);
     }
 
-    pub fn send2(&mut self, item: T) {
+    pub fn send(&mut self, item: T) {
         let sender = unsafe { self.sender_ptr.as_mut() };
         let s = sender.send(item);
         self.fut = Some(s);

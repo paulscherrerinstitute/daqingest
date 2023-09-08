@@ -270,11 +270,10 @@ pub async fn metrics_agg_task(
             }
         }
         {
-            let val = ingest_commons
-                .insert_item_queue
-                .receiver()
-                .map_or(0, |x| x.len() as u64);
-            agg.store_worker_recv_queue_len.store(val, Ordering::Release);
+            warn!("TODO provide metrics with a weak ref to the query_item_channel");
+            let nitems = 0;
+            // let nitems = weak.upgrade()..len();
+            agg.store_worker_recv_queue_len.store(nitems, Ordering::Release);
         }
         let mut m = METRICS.lock().unwrap();
         *m = Some(agg.clone());

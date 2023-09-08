@@ -262,6 +262,7 @@ enum CaConnState {
     PeerReady,
     Wait(Pin<Box<dyn Future<Output = ()> + Send>>),
     Shutdown,
+    EndOfStream,
 }
 
 fn wait_fut(dt: u64) -> Pin<Box<dyn Future<Output = ()> + Send>> {
@@ -852,11 +853,11 @@ impl CaConn {
 
     fn check_channels_alive(&mut self) -> Result<(), Error> {
         let tsnow = Instant::now();
-        trace!("CheckChannelsAlive  {addr:?}", addr = &self.remote_addr_dbg);
+        trace!("check_channels_alive  {addr:?}", addr = &self.remote_addr_dbg);
         if self.ioc_ping_last.elapsed() > Duration::from_millis(20000) {
             if let Some(started) = self.ioc_ping_start {
                 if started.elapsed() > Duration::from_millis(4000) {
-                    warn!("Echo timeout {addr:?}", addr = self.remote_addr_dbg);
+                    warn!("pong timeout {addr:?}", addr = self.remote_addr_dbg);
                     let item = CaConnEvent {
                         ts: Instant::now(),
                         value: CaConnEventValue::EchoTimeout,
@@ -867,11 +868,11 @@ impl CaConn {
             } else {
                 self.ioc_ping_start = Some(Instant::now());
                 if let Some(proto) = &mut self.proto {
-                    debug!("push echo to {}", self.remote_addr_dbg);
+                    debug!("ping to {}", self.remote_addr_dbg);
                     let msg = CaMsg { ty: CaMsgTy::Echo };
                     proto.push_out(msg);
                 } else {
-                    warn!("can not push echo, no proto {}", self.remote_addr_dbg);
+                    warn!("can not ping {}  no proto", self.remote_addr_dbg);
                     self.trigger_shutdown(ChannelStatusClosedReason::NoProtocol);
                 }
             }
@@ -1630,6 +1631,7 @@ impl CaConn {
                 Pending => Ok(Some(Pending)),
             },
             CaConnState::Shutdown => Ok(None),
+            CaConnState::EndOfStream => Ok(None),
         }
     }
 
@@ -1725,8 +1727,8 @@ impl CaConn {
         Ok(())
     }
 
-    fn outgoing_queues_empty(&self) -> bool {
-        self.channel_info_query_queue.is_empty() && !self.channel_info_query_sending.is_sending()
+    fn queues_async_out_flushed(&self) -> bool {
+        self.channel_info_query_queue.is_empty() && self.channel_info_query_sending.is_idle()
     }
 
     fn attempt_flush_channel_info_query(mut self: Pin<&mut Self>, cx: &mut Context) -> Result<(), Error> {
@@ -1741,7 +1743,7 @@ impl CaConn {
                 }
             } else if let Some(item) = self.channel_info_query_queue.pop_front() {
                 let sd = &mut self.channel_info_query_sending;
-                sd.send2(item);
+                sd.send(item);
                 continue;
             } else {
                 Ok(())
@@ -1758,7 +1760,9 @@ impl Stream for CaConn {
         self.stats.caconn_poll_count_inc();
         loop {
             let mut have_pending = false;
-            break if let Err(e) = self.as_mut().handle_own_ticker(cx) {
+            break if let CaConnState::EndOfStream = self.state {
+                Ready(None)
+            } else if let Err(e) = self.as_mut().handle_own_ticker(cx) {
                 Ready(Some(Err(e)))
             } else if let Some(item) = self.cmd_res_queue.pop_front() {
                 let item = CaConnEvent {
@@ -1779,21 +1783,17 @@ impl Stream for CaConn {
             } else if let Ready(Some(Err(e))) = self.as_mut().handle_conn_command(cx) {
                 Ready(Some(Err(e)))
             } else if let Some(item) = {
-                if self.is_shutdown() {
-                    None
-                } else {
-                    match self.loop_inner(cx) {
-                        // TODO what does this mean: should we re-loop or yield something?
-                        Ok(Some(Ready(()))) => None,
-                        // This is the last step, so we yield Pending.
-                        // But in general, this does not compose well when we would add another step.
-                        Ok(Some(Pending)) => {
-                            have_pending = true;
-                            None
-                        }
-                        Ok(None) => None,
-                        Err(e) => Some(Err(e)),
+                match self.loop_inner(cx) {
+                    // TODO what does this mean: should we re-loop or yield something?
+                    Ok(Some(Ready(()))) => None,
+                    // This is the last step, so we yield Pending.
+                    // But in general, this does not compose well when we would add another step.
+                    Ok(Some(Pending)) => {
+                        have_pending = true;
+                        None
                     }
+                    Ok(None) => None,
+                    Err(e) => Some(Err(e)),
                 }
             } {
                 Ready(Some(item))
@@ -1804,7 +1804,10 @@ impl Stream for CaConn {
                     ts: Instant::now(),
                     value: CaConnEventValue::None,
                 };
-                if have_pending {
+                if self.is_shutdown() && self.queues_async_out_flushed() {
+                    self.state = CaConnState::EndOfStream;
+                    Ready(None)
+                } else if have_pending {
                     Pending
                 } else {
                     continue;
