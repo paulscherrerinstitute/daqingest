@@ -520,20 +520,20 @@ impl CaConnSet {
         if let Some(e) = self.ca_conn_ress.remove(&addr) {
             match e.jh.await {
                 Ok(Ok(())) => {
-                    self.stats.ca_conn_task_join_done_ok_inc();
+                    self.stats.ca_conn_task_join_done_ok.inc();
                     debug!("CaConn {addr} finished well");
                 }
                 Ok(Err(e)) => {
-                    self.stats.ca_conn_task_join_done_err_inc();
+                    self.stats.ca_conn_task_join_done_err.inc();
                     error!("CaConn {addr} task error: {e}");
                 }
                 Err(e) => {
-                    self.stats.ca_conn_task_join_err_inc();
+                    self.stats.ca_conn_task_join_err.inc();
                     error!("CaConn {addr} join error: {e}");
                 }
             }
         } else {
-            self.stats.ca_conn_task_eos_non_exist_inc();
+            self.stats.ca_conn_task_eos_non_exist.inc();
             warn!("end-of-stream received for non-existent CaConn {addr}");
         }
         Ok(())
@@ -581,7 +581,7 @@ impl CaConnSet {
         while let Some(item) = conn.next().await {
             match item {
                 Ok(item) => {
-                    stats.conn_item_count_inc();
+                    stats.conn_item_count.inc();
                     conn_item_tx
                         .send(CaConnSetEvent::CaConnEvent((SocketAddr::V4(addr), item)))
                         .await?;
@@ -721,7 +721,7 @@ impl CaConnSet {
                     if tsnow.duration_since(state.last_feedback) > Duration::from_millis(20000) {
                         error!("TODO Fresh timeout send connection-close for {addr}");
                         // TODO collect in metrics
-                        // self.stats.ca_conn_status_feedback_timeout_inc();
+                        // self.stats.ca_conn_status_feedback_timeout.inc();
                         // TODO send shutdown to this CaConn, check that we've received
                         // a 'shutdown' state from it. (see below)
                         *v = CaConnStateValue::Shutdown { since: tsnow };
@@ -732,14 +732,14 @@ impl CaConnSet {
                     if tsnow.duration_since(state.last_feedback) > Duration::from_millis(20000) {
                         error!("TODO HadFeedback timeout send connection-close for {addr}");
                         // TODO collect in metrics
-                        // self.stats.ca_conn_status_feedback_timeout_inc();
+                        // self.stats.ca_conn_status_feedback_timeout.inc();
                         *v = CaConnStateValue::Shutdown { since: tsnow };
                     }
                 }
                 CaConnStateValue::Shutdown { since } => {
                     if tsnow.saturating_duration_since(*since) > Duration::from_millis(10000) {
                         // TODO collect in metrics as severe error, this would be a bug.
-                        // self.stats.critical_error_inc();
+                        // self.stats.critical_error.inc();
                         error!("Shutdown of CaConn failed for {addr}");
                     }
                 }
@@ -908,11 +908,11 @@ impl CaConnSet {
             }
         }
         use atomic::Ordering::Release;
-        self.stats.channel_unknown_address.store(unknown_address, Release);
-        self.stats.channel_search_pending.store(search_pending, Release);
-        self.stats.channel_no_address.store(no_address, Release);
-        self.stats.channel_unassigned.store(unassigned, Release);
-        self.stats.channel_assigned.store(assigned, Release);
+        self.stats.channel_unknown_address.__set(unknown_address);
+        self.stats.channel_search_pending.__set(search_pending);
+        self.stats.channel_no_address.__set(no_address);
+        self.stats.channel_unassigned.__set(unassigned);
+        self.stats.channel_assigned.__set(assigned);
         (search_pending,)
     }
 }

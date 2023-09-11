@@ -207,6 +207,7 @@ impl IntervalEma {
     }
 }
 
+// #[cfg(DISABLED)]
 stats_proc::stats_struct!((
     stats_struct(
         name(CaConnSetStats),
@@ -224,9 +225,10 @@ stats_proc::stats_struct!((
         ),
     ),
     // agg(name(CaConnSetStatsAgg), parent(CaConnSetStats)),
-    diff(name(CaConnSetStatsDiff), input(CaConnSetStats)),
+    // diff(name(CaConnSetStatsDiff), input(CaConnSetStats)),
 ));
 
+// #[cfg(DISABLED)]
 stats_proc::stats_struct!((
     stats_struct(
         name(CaConnStats),
@@ -280,13 +282,14 @@ stats_proc::stats_struct!((
             ca_ts_off_2,
             ca_ts_off_3,
             ca_ts_off_4,
-            inter_ivl_ema,
         ),
+        values(inter_ivl_ema)
     ),
     agg(name(CaConnStatsAgg), parent(CaConnStats)),
     diff(name(CaConnStatsAggDiff), input(CaConnStatsAgg)),
 ));
 
+// #[cfg(DISABLED)]
 stats_proc::stats_struct!((
     stats_struct(
         name(DaemonStats),
@@ -320,3 +323,23 @@ stats_proc::stats_struct!((
     agg(name(DaemonStatsAgg), parent(DaemonStats)),
     diff(name(DaemonStatsAggDiff), input(DaemonStatsAgg)),
 ));
+
+stats_proc::stats_struct!((
+    stats_struct(name(TestStats0), counters(count0,), values(val0),),
+    diff(name(TestStats0Diff), input(TestStats0)),
+    agg(name(TestStats0Agg), parent(TestStats0)),
+    diff(name(TestStats0AggDiff), input(TestStats0Agg)),
+));
+
+#[test]
+fn test0_diff() {
+    let stats_a = TestStats0::new();
+    stats_a.count0().inc();
+    stats_a.val0().set(43);
+    let stats_b = stats_a.snapshot();
+    stats_b.count0().inc();
+    stats_b.count0().inc();
+    stats_b.count0().inc();
+    let diff = TestStats0Diff::diff_from(&stats_a, &stats_b);
+    assert_eq!(diff.count0.load(), 3);
+}

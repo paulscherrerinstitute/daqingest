@@ -9,7 +9,6 @@ use log::*;
 use netfetch::ca::connset::CaConnSet;
 use netfetch::ca::connset::CaConnSetCtrl;
 use netfetch::ca::connset::CaConnSetItem;
-use netfetch::ca::IngestCommons;
 use netfetch::conf::CaIngestOpts;
 use netfetch::daemon_common::Channel;
 use netfetch::daemon_common::DaemonEvent;
@@ -17,6 +16,7 @@ use netfetch::metrics::ExtraInsertsConf;
 use netfetch::metrics::StatsSet;
 use netpod::Database;
 use netpod::ScyllaConfig;
+use scywr::insertworker::InsertWorkerOpts;
 use scywr::insertworker::Ttls;
 use scywr::iteminsertqueue as scywriiq;
 use scywr::store::DataStore;
@@ -78,13 +78,14 @@ pub struct Daemon {
     count_assigned: usize,
     last_status_print: SystemTime,
     insert_workers_jh: Vec<JoinHandle<Result<(), Error>>>,
-    ingest_commons: Arc<IngestCommons>,
     caconn_last_channel_check: Instant,
     stats: Arc<DaemonStats>,
     shutting_down: bool,
     insert_rx_weak: WeakReceiver<QueryItem>,
     connset_ctrl: CaConnSetCtrl,
     connset_status_last: Instant,
+    // TODO should be a stats object?
+    insert_workers_running: AtomicU64,
 }
 
 impl Daemon {
@@ -137,25 +138,17 @@ impl Daemon {
             }
         });
 
-        let ingest_commons = IngestCommons {
-            pgconf: Arc::new(opts.pgconf.clone()),
-            backend: opts.backend().into(),
-            local_epics_hostname: opts.local_epics_hostname.clone(),
-            data_store: datastore.clone(),
-            insert_ivl_min: Arc::new(AtomicU64::new(0)),
-            extra_inserts_conf: tokio::sync::Mutex::new(ExtraInsertsConf::new()),
-            store_workers_rate: Arc::new(AtomicU64::new(20000)),
-            insert_frac: Arc::new(AtomicU64::new(1000)),
-            insert_workers_running: Arc::new(AtomicU64::new(0)),
-        };
-        let ingest_commons = Arc::new(ingest_commons);
-
         let use_rate_limit_queue = false;
 
         // TODO use a new stats type:
         let store_stats = Arc::new(stats::CaConnStats::new());
         let ttls = opts.ttls.clone();
-        let insert_worker_opts = Arc::new(ingest_commons.as_ref().into());
+        let insert_worker_opts = InsertWorkerOpts {
+            store_workers_rate: Arc::new(AtomicU64::new(20000000)),
+            insert_workers_running: Arc::new(AtomicU64::new(0)),
+            insert_frac: Arc::new(AtomicU64::new(1000)),
+        };
+        let insert_worker_opts = Arc::new(insert_worker_opts);
         let insert_workers_jh = scywr::insertworker::spawn_scylla_insert_workers(
             opts.scyconf.clone(),
             opts.insert_scylla_sessions,
@@ -214,13 +207,13 @@ impl Daemon {
             count_assigned: 0,
             last_status_print: SystemTime::now(),
             insert_workers_jh,
-            ingest_commons,
             caconn_last_channel_check: Instant::now(),
             stats: Arc::new(DaemonStats::new()),
             shutting_down: false,
             insert_rx_weak: query_item_rx.downgrade(),
             connset_ctrl: conn_set_ctrl,
             connset_status_last: Instant::now(),
+            insert_workers_running: AtomicU64::new(0),
         };
         Ok(ret)
     }
@@ -239,10 +232,7 @@ impl Daemon {
 
     async fn handle_timer_tick(&mut self) -> Result<(), Error> {
         if self.shutting_down {
-            let nworkers = self
-                .ingest_commons
-                .insert_workers_running
-                .load(atomic::Ordering::Acquire);
+            let nworkers = self.insert_workers_running.load(atomic::Ordering::Acquire);
             let nitems = self
                 .insert_rx_weak
                 .upgrade()
@@ -253,7 +243,7 @@ impl Daemon {
                 std::process::exit(0);
             }
         }
-        self.stats.handle_timer_tick_count_inc();
+        self.stats.handle_timer_tick_count.inc();
         let ts1 = Instant::now();
         let tsnow = SystemTime::now();
         if SIGINT.load(atomic::Ordering::Acquire) == 1 {
@@ -406,7 +396,7 @@ impl Daemon {
 
     async fn handle_event(&mut self, item: DaemonEvent) -> Result<(), Error> {
         use DaemonEvent::*;
-        self.stats.events_inc();
+        self.stats.events.inc();
         let ts1 = Instant::now();
         let item_summary = item.summary();
         let ret = match item {
@@ -416,7 +406,7 @@ impl Daemon {
                 match tx.send(i.wrapping_add(1)).await {
                     Ok(_) => {}
                     Err(_) => {
-                        self.stats.ticker_token_release_error_inc();
+                        self.stats.ticker_token_release_error.inc();
                         error!("can not send ticker token");
                         return Err(Error::with_msg_no_trace("can not send ticker token"));
                     }
@@ -462,7 +452,7 @@ impl Daemon {
                         match ticker_inp_rx.recv().await {
                             Ok(_) => {}
                             Err(_) => {
-                                stats.ticker_token_acquire_error_inc();
+                                stats.ticker_token_acquire_error.inc();
                                 break;
                             }
                         }
@@ -494,7 +484,6 @@ impl Daemon {
                 }
             }
         }
-        warn!("TODO should not have to close the channel");
         warn!("TODO wait for insert workers");
         while let Some(jh) = self.insert_workers_jh.pop() {
             match jh.await.map_err(Error::from_string) {

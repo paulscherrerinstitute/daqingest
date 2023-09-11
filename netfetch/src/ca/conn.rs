@@ -415,17 +415,6 @@ impl CanSendChannelInfoResult for SendSeriesLookup {
     }
 }
 
-struct ChannelOpsResources<'a> {
-    channel_set_ops: &'a StdMutex<BTreeMap<String, ChannelSetOp>>,
-    channels: &'a mut BTreeMap<Cid, ChannelState>,
-    cid_by_name: &'a mut BTreeMap<String, Cid>,
-    name_by_cid: &'a mut BTreeMap<Cid, String>,
-    cid_store: &'a mut CidStore,
-    init_state_count: &'a mut u64,
-    channel_set_ops_flag: &'a AtomicUsize,
-    time_binners: &'a mut BTreeMap<Cid, ConnTimeBin>,
-}
-
 pub struct CaConnOpts {
     insert_queue_max: usize,
     array_truncate: usize,
@@ -558,7 +547,7 @@ impl CaConn {
             kind: ConnCommandResultKind::CheckHealth,
         };
         self.cmd_res_queue.push_back(res);
-        //self.stats.caconn_command_can_not_reply_inc();
+        //self.stats.caconn_command_can_not_reply.inc();
     }
 
     fn cmd_find_channel(&self, pattern: &str) {
@@ -608,13 +597,13 @@ impl CaConn {
     fn cmd_channel_add(&mut self, name: String, cssid: ChannelStatusSeriesId) {
         self.channel_add(name, cssid);
         // TODO return the result
-        //self.stats.caconn_command_can_not_reply_inc();
+        //self.stats.caconn_command_can_not_reply.inc();
     }
 
     fn cmd_channel_remove(&mut self, name: String) {
         self.channel_remove(name);
         // TODO return the result
-        //self.stats.caconn_command_can_not_reply_inc();
+        //self.stats.caconn_command_can_not_reply.inc();
     }
 
     fn cmd_shutdown(&mut self) {
@@ -679,7 +668,7 @@ impl CaConn {
     fn handle_conn_command(&mut self, cx: &mut Context) -> Poll<Option<Result<(), Error>>> {
         // TODO if this loops for too long time, yield and make sure we get wake up again.
         use Poll::*;
-        self.stats.caconn_loop3_count_inc();
+        self.stats.caconn_loop3_count.inc();
         match self.conn_command_rx.poll_next_unpin(cx) {
             Ready(Some(a)) => {
                 trace!("handle_conn_command received a command  {}", self.remote_addr_dbg);
@@ -891,15 +880,9 @@ impl CaConn {
                 _ => {}
             }
         }
-        self.stats
-            .channel_all_count
-            .store(self.channels.len() as _, Ordering::Release);
-        self.stats
-            .channel_alive_count
-            .store(alive_count as _, Ordering::Release);
-        self.stats
-            .channel_not_alive_count
-            .store(not_alive_count as _, Ordering::Release);
+        self.stats.channel_all_count.__set(self.channels.len() as _);
+        self.stats.channel_alive_count.__set(alive_count as _);
+        self.stats.channel_not_alive_count.__set(not_alive_count as _);
         Ok(())
     }
 
@@ -954,7 +937,7 @@ impl CaConn {
         series: SeriesId,
     ) -> Result<(), Error> {
         let tsnow = Instant::now();
-        self.stats.get_series_id_ok_inc();
+        self.stats.get_series_id_ok.inc();
         if series.id() == 0 {
             warn!("Weird series id: {series:?}");
         }
@@ -1058,7 +1041,7 @@ impl CaConn {
             ts_msp_grid,
         };
         item_queue.push_back(QueryItem::Insert(item));
-        stats.insert_item_create_inc();
+        stats.insert_item_create.inc();
         Ok(())
     }
 
@@ -1172,15 +1155,15 @@ impl CaConn {
                 let ts = ev.value.ts.map_or(0, |x| x.get());
                 let ts_diff = ts.abs_diff(ts_local);
                 if ts_diff > SEC * 300 {
-                    self.stats.ca_ts_off_4_inc();
+                    self.stats.ca_ts_off_4.inc();
                     //warn!("Bad time for {name}  {ts} vs {ts_local}  diff {}", ts_diff / SEC);
                     // TODO mute this channel for some time, discard the event.
                 } else if ts_diff > SEC * 120 {
-                    self.stats.ca_ts_off_3_inc();
+                    self.stats.ca_ts_off_3.inc();
                 } else if ts_diff > SEC * 20 {
-                    self.stats.ca_ts_off_2_inc();
+                    self.stats.ca_ts_off_2.inc();
                 } else if ts_diff > SEC * 3 {
-                    self.stats.ca_ts_off_1_inc();
+                    self.stats.ca_ts_off_1.inc();
                 }
                 if tsnow >= st.insert_next_earliest {
                     //let channel_state = self.channels.get_mut(&cid).unwrap();
@@ -1238,7 +1221,7 @@ impl CaConn {
                         extra_inserts_conf,
                     )?;
                 } else {
-                    self.stats.channel_fast_item_drop_inc();
+                    self.stats.channel_fast_item_drop.inc();
                     if tsnow.duration_since(st.insert_recv_ivl_last) >= Duration::from_millis(10000) {
                         st.insert_recv_ivl_last = tsnow;
                         let ema = st.insert_item_ivl_ema.ema();
@@ -1369,7 +1352,7 @@ impl CaConn {
         let ts2 = Instant::now();
         self.stats
             .time_check_channels_state_init
-            .fetch_add((ts2.duration_since(ts1) * MS as u32).as_secs(), Ordering::Release);
+            .add((ts2.duration_since(ts1) * MS as u32).as_secs());
         ts1 = ts2;
         let mut do_wake_again = false;
         if msgs_tmp.len() > 0 {
@@ -1456,12 +1439,12 @@ impl CaConn {
                             }
                             CaMsgTy::EventAddRes(k) => {
                                 trace!("got EventAddRes: {k:?}");
-                                self.stats.caconn_recv_data_inc();
+                                self.stats.caconn_recv_data.inc();
                                 let res = Self::handle_event_add_res(self, k, tsnow);
                                 let ts2 = Instant::now();
                                 self.stats
                                     .time_handle_event_add_res
-                                    .fetch_add((ts2.duration_since(ts1) * MS as u32).as_secs(), Ordering::AcqRel);
+                                    .add((ts2.duration_since(ts1) * MS as u32).as_secs());
                                 ts1 = ts2;
                                 let _ = ts1;
                                 res?
@@ -1638,7 +1621,7 @@ impl CaConn {
     fn loop_inner(&mut self, cx: &mut Context) -> Result<Option<Poll<()>>, Error> {
         use Poll::*;
         loop {
-            self.stats.caconn_loop2_count_inc();
+            self.stats.caconn_loop2_count.inc();
             if self.is_shutdown() {
                 break Ok(None);
             }
@@ -1651,47 +1634,6 @@ impl CaConn {
                 None => break Ok(None),
             }
         }
-    }
-
-    fn apply_channel_ops_with_res(res: ChannelOpsResources) {
-        let mut g = res.channel_set_ops.lock().unwrap();
-        let map = std::mem::replace(&mut *g, BTreeMap::new());
-        for (ch, op) in map {
-            match op {
-                ChannelSetOp::Add(cssid) => Self::channel_add_expl(
-                    ch,
-                    cssid,
-                    res.channels,
-                    res.cid_by_name,
-                    res.name_by_cid,
-                    res.cid_store,
-                    res.init_state_count,
-                ),
-                ChannelSetOp::Remove => Self::channel_remove_expl(
-                    ch,
-                    res.channels,
-                    res.cid_by_name,
-                    res.name_by_cid,
-                    res.cid_store,
-                    res.time_binners,
-                ),
-            }
-        }
-        res.channel_set_ops_flag.store(0, atomic::Ordering::Release);
-    }
-
-    fn apply_channel_ops(&mut self) {
-        let res = ChannelOpsResources {
-            channel_set_ops: err::todoval(),
-            channels: &mut self.channels,
-            cid_by_name: &mut self.cid_by_name,
-            name_by_cid: &mut self.name_by_cid,
-            cid_store: &mut self.cid_store,
-            init_state_count: &mut self.init_state_count,
-            channel_set_ops_flag: err::todoval(),
-            time_binners: &mut self.time_binners,
-        };
-        Self::apply_channel_ops_with_res(res)
     }
 
     fn handle_own_ticker(mut self: Pin<&mut Self>, cx: &mut Context) -> Result<(), Error> {
@@ -1757,7 +1699,7 @@ impl Stream for CaConn {
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
         use Poll::*;
-        self.stats.caconn_poll_count_inc();
+        self.stats.caconn_poll_count.inc();
         loop {
             let mut have_pending = false;
             break if let CaConnState::EndOfStream = self.state {
@@ -1798,8 +1740,8 @@ impl Stream for CaConn {
             } {
                 Ready(Some(item))
             } else {
-                // Ready(_) => self.stats.conn_stream_ready_inc(),
-                // Pending => self.stats.conn_stream_pending_inc(),
+                // Ready(_) => self.stats.conn_stream_ready.inc(),
+                // Pending => self.stats.conn_stream_pending.inc(),
                 let _item = CaConnEvent {
                     ts: Instant::now(),
                     value: CaConnEventValue::None,

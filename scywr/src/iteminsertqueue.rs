@@ -388,7 +388,7 @@ pub async fn insert_item(
     if item.msp_bump {
         let params = (item.series.id() as i64, item.ts_msp as i64, ttl_index.as_secs() as i32);
         data_store.scy.execute(&data_store.qu_insert_ts_msp, params).await?;
-        stats.inserts_msp_inc();
+        stats.inserts_msp.inc();
     }
     if let Some(ts_msp_grid) = item.ts_msp_grid {
         let params = (
@@ -403,7 +403,7 @@ pub async fn insert_item(
             .scy
             .execute(&data_store.qu_insert_series_by_ts_msp, params)
             .await?;
-        stats.inserts_msp_grid_inc();
+        stats.inserts_msp_grid.inc();
     }
     use DataValue::*;
     match item.val {
@@ -446,7 +446,7 @@ pub async fn insert_item(
             }
         }
     }
-    stats.inserts_val_inc();
+    stats.inserts_val.inc();
     Ok(())
 }
 

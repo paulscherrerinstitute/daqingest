@@ -1,7 +1,8 @@
 use proc_macro::TokenStream;
 use quote::quote;
 use syn::parse::ParseStream;
-use syn::{parse_macro_input, Ident};
+use syn::parse_macro_input;
+use syn::Ident;
 
 type PunctExpr = syn::punctuated::Punctuated<syn::Expr, syn::token::Comma>;
 
@@ -43,11 +44,11 @@ fn stats_struct_impl(st: &StatsStructDef) -> String {
     let inits1 = st
         .counters
         .iter()
-        .map(|x| format!("{:12}{}: AtomicU64::new(0)", "", x.to_string()));
+        .map(|x| format!("{:12}{}: stats_types::Counter::new()", "", x.to_string()));
     let inits2 = st
         .values
         .iter()
-        .map(|x| format!("{:12}{}: AtomicU64::new(0)", "", x.to_string()));
+        .map(|x| format!("{:12}{}: stats_types::Value::new()", "", x.to_string()));
     let inits: Vec<_> = inits1.into_iter().chain(inits2).collect();
     let inits = inits.join(",\n");
     let incers: String = st
@@ -56,15 +57,12 @@ fn stats_struct_impl(st: &StatsStructDef) -> String {
         .map(|nn| {
             format!(
                 "
-    pub fn {nn}_inc(&self) {{
-        self.{nn}.fetch_add(1, Ordering::AcqRel);
+    pub fn {nn}(&self) -> &stats_types::Counter {{
+        &self.{nn}
     }}
-    pub fn {nn}_add(&self, v: u64) {{
-        self.{nn}.fetch_add(v, Ordering::AcqRel);
-    }}
-    pub fn {nn}_dur(&self, v: Duration) {{
-        self.{nn}.fetch_add((v * 1000000).as_secs(), Ordering::AcqRel);
-    }}
+    //pub fn {nn}_dur(&self, v: Duration) {{
+    //    self.{nn}.fetch_add((v * 1000000).as_secs(), Ordering::AcqRel);
+    //}}
 "
             )
         })
@@ -78,8 +76,8 @@ fn stats_struct_impl(st: &StatsStructDef) -> String {
             write!(
                 buf,
                 "
-    pub fn {nn}_set(&self, v: u64) {{
-        self.{nn}.store(v, Ordering::Release);
+    pub fn {nn}(&self) -> &stats_types::Value {{
+        &self.{nn}
     }}
 "
             )
@@ -97,7 +95,7 @@ fn stats_struct_impl(st: &StatsStructDef) -> String {
                 String::new()
             };
             buf.push_str(&format!(
-                "ret.push_str(&format!(\"daqingest{}_{} {{}}\\n\", self.{}.load(Ordering::Acquire)));\n",
+                "ret.push_str(&format!(\"daqingest{}_{} {{}}\\n\", self.{}.load()));\n",
                 pre, n, n
             ));
         }
@@ -109,7 +107,7 @@ fn stats_struct_impl(st: &StatsStructDef) -> String {
                 n.to_string()
             };
             buf.push_str(&format!(
-                "ret.push_str(&format!(\"daqingest_{} {{}}\\n\", self.{}.load(Ordering::Acquire)));\n",
+                "ret.push_str(&format!(\"daqingest_{} {{}}\\n\", self.{}.load()));\n",
                 nn, n
             ));
         }
@@ -123,12 +121,35 @@ fn stats_struct_impl(st: &StatsStructDef) -> String {
         "
         )
     };
+    let fn_snapshot = {
+        let mut init_counters = String::new();
+        for x in &st.counters {
+            let n = x.to_string();
+            init_counters.push_str(&format!("ret.{}.__set(self.{}.load());\n", n, n));
+        }
+        let mut init_values = String::new();
+        for x in &st.values {
+            let n = x.to_string();
+            init_values.push_str(&format!("ret.{}.set(self.{}.load());\n", n, n));
+        }
+        format!(
+            "
+            pub fn snapshot(&self) -> Self {{
+                let ret = Self::new();
+                {init_counters}
+                {init_values}
+                ret
+            }}
+        "
+        )
+    };
     format!(
         "
 impl {name} {{
     pub fn new() -> Self {{
         Self {{
             ts_create: Instant::now(),
+            dropped: stats_types::Value::new(),
 {inits}
         }}
     }}
@@ -138,8 +159,17 @@ impl {name} {{
     {values}
 
     {fn_prometheus}
+
+    {fn_snapshot}
 }}
-    "
+
+impl stats_types::DropMark for {name} {{
+    fn field(&self) -> &stats_types::Value {{
+        &self.dropped
+    }}
+}}
+
+"
     )
 }
 
@@ -148,17 +178,18 @@ fn stats_struct_decl_impl(st: &StatsStructDef) -> String {
     let counters_decl = st
         .counters
         .iter()
-        .map(|x| format!("{:4}pub {}: AtomicU64,\n", "", x.to_string()))
+        .map(|x| format!("{:4}pub {}: stats_types::Counter,\n", "", x.to_string()))
         .fold(String::new(), extend_str);
     let values_decl = st
         .values
         .iter()
-        .map(|x| format!("{:4}pub {}: AtomicU64,\n", "", x.to_string()))
+        .map(|x| format!("{:4}pub {}: stats_types::Value,\n", "", x.to_string()))
         .fold(String::new(), extend_str);
     let structt = format!(
         "
 pub struct {name} {{
     pub ts_create: Instant,
+    dropped: stats_types::Value,
 {counters_decl}
 {values_decl}
 }}
@@ -175,7 +206,7 @@ fn agg_decl_impl(st: &StatsStructDef, ag: &AggStructDef) -> String {
     let counters_decl = st
         .counters
         .iter()
-        .map(|x| format!("{:4}pub {}: AtomicU64,\n", "", x.to_string()))
+        .map(|x| format!("{:4}pub {}: stats_types::Counter,\n", "", x.to_string()))
         .fold(String::new(), extend_str);
     let mut code = String::new();
     let s = format!(
@@ -183,7 +214,7 @@ fn agg_decl_impl(st: &StatsStructDef, ag: &AggStructDef) -> String {
 // Agg decl
 pub struct {name} {{
     pub ts_create: Instant,
-    pub aggcount: AtomicU64,
+    pub aggcount: stats_types::Counter,
 {counters_decl}
 }}
 "
@@ -194,7 +225,7 @@ pub struct {name} {{
         .iter()
         .map(|x| {
             let n = x.to_string();
-            format!("{:12}{}: AtomicU64::new(self.{}.load(Ordering::Acquire)),\n", "", n, n)
+            format!("{:12}{}: stats_types::Counter::init(self.{}.load()),\n", "", n, n)
         })
         .fold(String::new(), extend_str);
     let s = format!(
@@ -203,7 +234,7 @@ impl Clone for {name} {{
     fn clone(&self) -> Self {{
         Self {{
             ts_create: self.ts_create.clone(),
-            aggcount: AtomicU64::new(self.aggcount.load(Ordering::Acquire)),
+            aggcount: stats_types::Counter::init(self.aggcount.load()),
 {clone_counters}
         }}
     }}
@@ -214,7 +245,7 @@ impl Clone for {name} {{
     let inits = st
         .counters
         .iter()
-        .map(|x| format!("{:12}{}: AtomicU64::new(0),\n", "", x.to_string()))
+        .map(|x| format!("{:12}{}: stats_types::Counter::new(),\n", "", x.to_string()))
         .fold(String::new(), extend_str);
     let s = format!(
         "
@@ -223,7 +254,7 @@ impl {name} {{
     pub fn new() -> Self {{
         Self {{
             ts_create: Instant::now(),
-            aggcount: AtomicU64::new(0),
+            aggcount: stats_types::Counter::new(),
 {inits}
         }}
     }}
@@ -233,18 +264,12 @@ impl {name} {{
     let counters_add = st
         .counters
         .iter()
-        .map(|x| {
-            format!(
-                "self.{}.fetch_add(inp.{}.load(Ordering::Acquire), Ordering::AcqRel);\n",
-                x.to_string(),
-                x.to_string()
-            )
-        })
+        .map(|x| format!("self.{}.add(inp.{}.load());\n", x.to_string(), x.to_string()))
         .fold(String::new(), extend_str);
     let s = format!(
         "
     pub fn push(&self, inp: &{name_inp}) {{
-        self.aggcount.fetch_add(1, Ordering::AcqRel);
+        self.aggcount.inc();
         {counters_add}
     }}
 "
@@ -255,7 +280,7 @@ impl {name} {{
         for x in &st.counters {
             let n = x.to_string();
             buf.push_str(&format!(
-                "ret.push_str(&format!(\"daqingest_{} {{}}\\n\", self.{}.load(Ordering::Acquire)));\n",
+                "ret.push_str(&format!(\"daqingest_{} {{}}\\n\", self.{}.load()));\n",
                 n, n
             ));
         }
@@ -263,7 +288,7 @@ impl {name} {{
             "
         pub fn prometheus(&self) -> String {{
             let mut ret = String::new();
-            ret.push_str(&format!(\"daqingest_aggcount {{}}\\n\", self.aggcount.load(Ordering::Acquire)));
+            ret.push_str(&format!(\"daqingest_aggcount {{}}\\n\", self.aggcount.load()));
 {buf}
             ret
         }}
@@ -287,7 +312,7 @@ fn diff_decl_impl(st: &DiffStructDef, inp: &StatsStructDef) -> String {
     let decl = inp
         .counters
         .iter()
-        .map(|x| format!("{:4}pub {}: AtomicU64,\n", "", x.to_string()))
+        .map(|x| format!("{:4}pub {}: stats_types::Counter,\n", "", x.to_string()))
         .fold(String::new(), extend_str);
     let mut code = String::new();
     let s = format!(
@@ -309,7 +334,7 @@ pub struct {name} {{
         .map(|x| {
             let n = x.to_string();
             format!(
-                "{:12}let {} = AtomicU64::new(b.{}.load(Ordering::Acquire) - a.{}.load(Ordering::Acquire));\n",
+                "{:12}let {} = stats_types::Counter::init(b.{}.load() - a.{}.load());\n",
                 "", n, n, n
             )
         })
@@ -339,7 +364,7 @@ pub struct {name} {{
     let mut b = String::new();
     for h in &inp.counters {
         a.push_str(&format!("{} {{}}  ", h.to_string()));
-        b.push_str(&format!("self.{}.load(Ordering::Acquire), ", h.to_string()));
+        b.push_str(&format!("self.{}.load(), ", h.to_string()));
     }
     let s = format!(
         "

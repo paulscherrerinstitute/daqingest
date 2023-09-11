@@ -1,11 +1,12 @@
-use crate::ca::IngestCommons;
 use crate::ca::METRICS;
 use crate::daemon_common::DaemonEvent;
 use async_channel::Sender;
+use async_channel::WeakSender;
 use axum::extract::Query;
 use err::Error;
 use http::Request;
 use log::*;
+use scywr::iteminsertqueue::QueryItem;
 use serde::Deserialize;
 use serde::Serialize;
 use stats::CaConnStats;
@@ -251,7 +252,7 @@ pub async fn start_metrics_service(bind_to: String, dcom: Arc<DaemonComm>, stats
 }
 
 pub async fn metrics_agg_task(
-    ingest_commons: Arc<IngestCommons>,
+    query_item_chn: WeakSender<QueryItem>,
     local_stats: Arc<CaConnStats>,
     store_stats: Arc<CaConnStats>,
 ) -> Result<(), Error> {
@@ -262,6 +263,14 @@ pub async fn metrics_agg_task(
         agg.push(&local_stats);
         agg.push(&store_stats);
         trace!("TODO metrics_agg_task");
+        // TODO when a CaConn is closed, I'll lose the so far collected counts, which creates a jump
+        // in the metrics.
+        // To make this sound:
+        // Let CaConn keep a stats and just count.
+        // At the tick, create a snapshot: all atomics are copied after each other.
+        // Diff this new snapshot with an older snapshot and send that.
+        // Note: some stats are counters, but some are current values.
+        // e.g. the number of active channels should go down when a CaConn stops.
         #[cfg(DISABLED)]
         {
             let conn_stats_guard = ingest_commons.ca_conn_set.ca_conn_ress().lock().await;
@@ -271,9 +280,8 @@ pub async fn metrics_agg_task(
         }
         {
             warn!("TODO provide metrics with a weak ref to the query_item_channel");
-            let nitems = 0;
-            // let nitems = weak.upgrade()..len();
-            agg.store_worker_recv_queue_len.store(nitems, Ordering::Release);
+            let nitems = query_item_chn.upgrade().map_or(0, |x| x.len());
+            agg.store_worker_recv_queue_len.__set(nitems as u64);
         }
         let mut m = METRICS.lock().unwrap();
         *m = Some(agg.clone());

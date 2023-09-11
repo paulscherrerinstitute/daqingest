@@ -24,22 +24,22 @@ fn stats_inc_for_err(stats: &stats::CaConnStats, err: &crate::iteminsertqueue::E
     use crate::iteminsertqueue::Error;
     match err {
         Error::DbOverload => {
-            stats.store_worker_insert_overload_inc();
+            stats.store_worker_insert_overload.inc();
         }
         Error::DbTimeout => {
-            stats.store_worker_insert_timeout_inc();
+            stats.store_worker_insert_timeout.inc();
         }
         Error::DbUnavailable => {
-            stats.store_worker_insert_unavailable_inc();
+            stats.store_worker_insert_unavailable.inc();
         }
         Error::DbError(e) => {
             if false {
                 warn!("db error {e}");
             }
-            stats.store_worker_insert_error_inc();
+            stats.store_worker_insert_error.inc();
         }
         Error::QueryError(_) => {
-            stats.store_worker_insert_error_inc();
+            stats.store_worker_insert_error.inc();
         }
     }
 }
@@ -103,7 +103,7 @@ async fn rate_limiter_worker(
         let ivl2 = Duration::from_nanos(ema2.ema() as u64);
         if allowed_to_drop && ivl2 < dt_min {
             //tokio::time::sleep_until(ts_recv_last.checked_add(dt_min).unwrap().into()).await;
-            stats.store_worker_ratelimit_drop_inc();
+            stats.store_worker_ratelimit_drop.inc();
         } else {
             if tx.send(item).await.is_err() {
                 break;
@@ -113,7 +113,7 @@ async fn rate_limiter_worker(
                 let dt_ns = SEC * dt.as_secs() + dt.subsec_nanos() as u64;
                 ivl_ema.update(dt_ns.min(MS * 100) as f32);
                 ts_forward_last = tsnow;
-                stats.inter_ivl_ema.store(ivl_ema.ema() as u64, Ordering::Release);
+                stats.inter_ivl_ema.set(ivl_ema.ema() as u64);
             }
         }
     }
@@ -146,7 +146,7 @@ async fn worker(
     let mut i1 = 0;
     loop {
         let item = if let Ok(item) = item_inp.recv().await {
-            stats.store_worker_item_recv_inc();
+            stats.store_worker_item_recv.inc();
             item
         } else {
             break;
@@ -155,7 +155,7 @@ async fn worker(
             QueryItem::ConnectionStatus(item) => {
                 match insert_connection_status(item, ttls.index, &data_store, &stats).await {
                     Ok(_) => {
-                        stats.connection_status_insert_done_inc();
+                        stats.connection_status_insert_done.inc();
                         backoff = backoff_0;
                     }
                     Err(e) => {
@@ -167,7 +167,7 @@ async fn worker(
             QueryItem::ChannelStatus(item) => {
                 match insert_channel_status(item, ttls.index, &data_store, &stats).await {
                     Ok(_) => {
-                        stats.channel_status_insert_done_inc();
+                        stats.channel_status_insert_done.inc();
                         backoff = backoff_0;
                     }
                     Err(e) => {
@@ -181,7 +181,7 @@ async fn worker(
                 if i1 % 1000 < insert_frac {
                     match insert_item(item, ttls.index, ttls.d0, ttls.d1, &data_store, &stats).await {
                         Ok(_) => {
-                            stats.store_worker_insert_done_inc();
+                            stats.store_worker_insert_done.inc();
                             backoff = backoff_0;
                         }
                         Err(e) => {
@@ -190,7 +190,7 @@ async fn worker(
                         }
                     }
                 } else {
-                    stats.store_worker_fraction_drop_inc();
+                    stats.store_worker_fraction_drop.inc();
                 }
                 i1 += 1;
             }
@@ -206,7 +206,7 @@ async fn worker(
                 let qres = data_store.scy.execute(&data_store.qu_insert_muted, values).await;
                 match qres {
                     Ok(_) => {
-                        stats.mute_insert_done_inc();
+                        stats.mute_insert_done.inc();
                         backoff = backoff_0;
                     }
                     Err(e) => {
@@ -230,7 +230,7 @@ async fn worker(
                     .await;
                 match qres {
                     Ok(_) => {
-                        stats.ivl_insert_done_inc();
+                        stats.ivl_insert_done.inc();
                         backoff = backoff_0;
                     }
                     Err(e) => {
@@ -252,7 +252,7 @@ async fn worker(
                 let qres = data_store.scy.execute(&data_store.qu_insert_channel_ping, params).await;
                 match qres {
                     Ok(_) => {
-                        stats.channel_info_insert_done_inc();
+                        stats.channel_info_insert_done.inc();
                         backoff = backoff_0;
                     }
                     Err(e) => {
@@ -281,7 +281,7 @@ async fn worker(
                     .await;
                 match qres {
                     Ok(_) => {
-                        stats.store_worker_insert_binned_done_inc();
+                        stats.store_worker_insert_binned_done.inc();
                         backoff = backoff_0;
                     }
                     Err(e) => {

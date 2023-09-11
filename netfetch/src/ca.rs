@@ -32,28 +32,6 @@ lazy_static::lazy_static! {
     pub static ref METRICS: Mutex<Option<CaConnStatsAgg>> = Mutex::new(None);
 }
 
-pub struct IngestCommons {
-    pub pgconf: Arc<Database>,
-    pub backend: String,
-    pub local_epics_hostname: String,
-    pub data_store: Arc<DataStore>,
-    pub insert_ivl_min: Arc<AtomicU64>,
-    pub extra_inserts_conf: TokMx<ExtraInsertsConf>,
-    pub insert_frac: Arc<AtomicU64>,
-    pub store_workers_rate: Arc<AtomicU64>,
-    pub insert_workers_running: Arc<AtomicU64>,
-}
-
-impl From<&IngestCommons> for InsertWorkerOpts {
-    fn from(val: &IngestCommons) -> Self {
-        Self {
-            store_workers_rate: val.store_workers_rate.clone(),
-            insert_workers_running: val.insert_workers_running.clone(),
-            insert_frac: val.insert_frac.clone(),
-        }
-    }
-}
-
 pub trait SlowWarnable {
     fn slow_warn(self, ms: u64) -> SlowWarn<Pin<Box<Self>>>
     where
