@@ -1,3 +1,4 @@
+use super::connset_input_merge::InputMerge;
 use super::findioc::FindIocRes;
 use super::statemap;
 use super::statemap::ChannelState;
@@ -68,6 +69,33 @@ static SEARCH_REQ_RECV_COUNT: AtomicUsize = AtomicUsize::new(0);
 static SEARCH_REQ_BATCH_SEND_COUNT: AtomicUsize = AtomicUsize::new(0);
 static SEARCH_ANS_COUNT: AtomicUsize = AtomicUsize::new(0);
 
+#[allow(unused)]
+macro_rules! trace2 {
+    ($($arg:tt)*) => {
+        if false {
+            trace!($($arg)*);
+        }
+    };
+}
+
+#[allow(unused)]
+macro_rules! trace3 {
+    ($($arg:tt)*) => {
+        if false {
+            trace!($($arg)*);
+        }
+    };
+}
+
+#[allow(unused)]
+macro_rules! trace4 {
+    ($($arg:tt)*) => {
+        if false {
+            trace!($($arg)*);
+        }
+    };
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub struct CmdId(SocketAddrV4, usize);
 
@@ -122,7 +150,7 @@ pub enum ConnSetCmd {
     ChannelAddWithAddr(ChannelAddWithAddr),
     ChannelRemove(ChannelRemove),
     IocAddrQueryResult(VecDeque<FindIocRes>),
-    CheckHealth,
+    CheckHealth(Instant),
     Shutdown,
 }
 
@@ -134,7 +162,7 @@ pub enum CaConnSetEvent {
 
 #[derive(Debug, Clone)]
 pub enum CaConnSetItem {
-    Healthy,
+    Healthy(Instant, Instant),
 }
 
 pub struct CaConnSetCtrl {
@@ -173,7 +201,7 @@ impl CaConnSetCtrl {
     }
 
     pub async fn check_health(&self) -> Result<(), Error> {
-        let cmd = ConnSetCmd::CheckHealth;
+        let cmd = ConnSetCmd::CheckHealth(Instant::now());
         self.tx.send(CaConnSetEvent::ConnSetCmd(cmd)).await?;
         Ok(())
     }
@@ -212,7 +240,8 @@ pub struct CaConnSet {
     ca_conn_ress: BTreeMap<SocketAddr, CaConnRes>,
     channel_states: ChannelStateMap,
     connset_tx: Sender<CaConnSetEvent>,
-    connset_rx: Receiver<CaConnSetEvent>,
+    // connset_rx: Receiver<CaConnSetEvent>,
+    connset_rx: crate::ca::connset_input_merge::InputMerge,
     channel_info_query_tx: Sender<ChannelInfoQuery>,
     storage_insert_tx: Sender<QueryItem>,
     shutdown_stopping: bool,
@@ -231,17 +260,20 @@ impl CaConnSet {
         channel_info_query_tx: Sender<ChannelInfoQuery>,
         pgconf: Database,
     ) -> CaConnSetCtrl {
+        let (connset_inp_tx, connset_inp_rx) = async_channel::bounded(256);
         let (connset_out_tx, connset_out_rx) = async_channel::bounded(256);
-        let (connset_tx, connset_rx) = async_channel::bounded(10000);
-        let (search_tx, ioc_finder_jh) = super::finder::start_finder(connset_tx.clone(), backend.clone(), pgconf);
+        let (find_ioc_res_tx, find_ioc_res_rx) = async_channel::bounded(10000);
+        let (search_tx, ioc_finder_jh) = super::finder::start_finder(find_ioc_res_tx.clone(), backend.clone(), pgconf);
+        let input_merge = InputMerge::new(todo!(), find_ioc_res_rx);
         let connset = Self {
             backend,
             local_epics_hostname,
             search_tx,
             ca_conn_ress: BTreeMap::new(),
             channel_states: ChannelStateMap::new(),
-            connset_tx: connset_tx.clone(),
-            connset_rx,
+            connset_tx: connset_inp_tx,
+            // connset_rx: find_ioc_res_rx,
+            connset_rx: todo!(),
             channel_info_query_tx,
             storage_insert_tx,
             shutdown_stopping: false,
@@ -254,7 +286,7 @@ impl CaConnSet {
         // TODO await on jh
         let jh = tokio::spawn(CaConnSet::run(connset));
         CaConnSetCtrl {
-            tx: connset_tx,
+            tx: connset_inp_tx,
             rx: connset_out_rx,
             jh,
         }
@@ -262,10 +294,10 @@ impl CaConnSet {
 
     async fn run(mut this: CaConnSet) -> Result<(), Error> {
         loop {
-            let x = this.connset_rx.recv().await;
+            let x = this.connset_rx.next().await;
             match x {
-                Ok(ev) => this.handle_event(ev).await?,
-                Err(_) => {
+                Some(ev) => this.handle_event(ev).await?,
+                None => {
                     if this.shutdown_stopping {
                         // all fine
                         break;
@@ -302,7 +334,7 @@ impl CaConnSet {
                 ConnSetCmd::ChannelRemove(x) => self.handle_remove_channel(x).await,
                 ConnSetCmd::IocAddrQueryResult(x) => self.handle_ioc_query_result(x).await,
                 ConnSetCmd::SeriesLookupResult(x) => self.handle_series_lookup_result(x).await,
-                ConnSetCmd::CheckHealth => self.handle_check_health().await,
+                ConnSetCmd::CheckHealth(ts1) => self.handle_check_health(ts1).await,
                 ConnSetCmd::Shutdown => self.handle_shutdown().await,
             },
             CaConnSetEvent::CaConnEvent((addr, ev)) => match ev.value {
@@ -322,7 +354,7 @@ impl CaConnSet {
         &mut self,
         res: Result<ChannelInfoResult, dbpg::seriesbychannel::Error>,
     ) -> Result<(), Error> {
-        debug!("handle_series_lookup_result  {res:?}");
+        trace3!("handle_series_lookup_result  {res:?}");
         match res {
             Ok(res) => {
                 let add = ChannelAddWithStatusId {
@@ -372,7 +404,7 @@ impl CaConnSet {
             debug!("handle_add_channel but shutdown_stopping");
             return Ok(());
         }
-        debug!("handle_add_channel_with_status_id  {add:?}");
+        trace3!("handle_add_channel_with_status_id  {add:?}");
         let ch = Channel::new(add.name.clone());
         if let Some(chst) = self.channel_states.inner().get_mut(&ch) {
             if let ChannelStateValue::Active(chst2) = &mut chst.value {
@@ -462,7 +494,7 @@ impl CaConnSet {
                     } = ast
                     {
                         if let Some(addr) = e.addr {
-                            debug!("ioc found {e:?}");
+                            trace3!("ioc found {e:?}");
                             let add = ChannelAddWithAddr {
                                 backend: self.backend.clone(),
                                 name: e.channel,
@@ -496,9 +528,10 @@ impl CaConnSet {
         Ok(())
     }
 
-    async fn handle_check_health(&mut self) -> Result<(), Error> {
+    async fn handle_check_health(&mut self, ts1: Instant) -> Result<(), Error> {
         debug!("TODO handle_check_health");
-        let item = CaConnSetItem::Healthy;
+        let ts2 = Instant::now();
+        let item = CaConnSetItem::Healthy(ts1, ts2);
         self.connset_out_tx.send(item).await?;
         Ok(())
     }
@@ -907,7 +940,6 @@ impl CaConnSet {
                 }
             }
         }
-        use atomic::Ordering::Release;
         self.stats.channel_unknown_address.__set(unknown_address);
         self.stats.channel_search_pending.__set(search_pending);
         self.stats.channel_no_address.__set(no_address);

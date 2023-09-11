@@ -1,6 +1,6 @@
 use async_channel::Receiver;
-use async_channel::SendError;
 use async_channel::Sender;
+use core::fmt;
 use err::thiserror;
 use err::ThisError;
 use futures_util::Future;
@@ -21,7 +21,7 @@ use tokio_postgres::Statement as PgStatement;
 #[allow(unused)]
 macro_rules! trace2 {
     ($($arg:tt)*) => {
-        if true {
+        if false {
             trace!($($arg)*);
         }
     };
@@ -30,7 +30,7 @@ macro_rules! trace2 {
 #[allow(unused)]
 macro_rules! trace3 {
     ($($arg:tt)*) => {
-        if true {
+        if false {
             trace!($($arg)*);
         }
     };
@@ -65,6 +65,17 @@ pub struct ChannelInfoQuery {
     pub scalar_type: i32,
     pub shape_dims: Vec<i32>,
     pub tx: Pin<Box<dyn CanSendChannelInfoResult + Send>>,
+}
+
+impl fmt::Debug for ChannelInfoQuery {
+    fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+        fmt.debug_struct("ChannelInfoQuery")
+            .field("backend", &self.backend)
+            .field("channel", &self.channel)
+            .field("scalar_type", &self.scalar_type)
+            .field("shape_dims", &self.shape_dims)
+            .finish()
+    }
 }
 
 struct ChannelInfoResult2 {
@@ -160,24 +171,30 @@ impl Worker {
         let mut it1 = rows.into_iter();
         let mut e1 = it1.next();
         for (qrid, tx) in tx {
-            if let Some(row) = &e1 {
+            let i = qrid as usize;
+            let found = if let Some(row) = &e1 {
                 let rid: i32 = row.get(1);
-                let channel: String = row.get(2);
                 if rid as u32 == qrid {
                     let series: i64 = row.get(0);
+                    let ch2: String = row.get(2);
                     let series = SeriesId::new(series as _);
                     let res = ChannelInfoResult2 {
                         // TODO take from database query. Needs test.
                         backend: backend[0].clone(),
-                        channel,
+                        channel: ch2,
                         series: Existence::Existing(series),
                         tx,
                     };
                     result.push(res);
+                    e1 = it1.next();
+                    None
+                } else {
+                    Some(tx)
                 }
-                e1 = it1.next();
             } else {
-                let i = qrid as usize;
+                Some(tx)
+            };
+            if let Some(tx) = found {
                 let k = ChannelInfoQuery {
                     backend: backend[i].clone(),
                     channel: channel[i].clone(),
@@ -265,7 +282,7 @@ impl Worker {
 
     async fn work(&mut self) -> Result<(), Error> {
         while let Some(batch) = self.batch_rx.next().await {
-            trace2!("worker recv batch  len {}", batch.len());
+            trace!("worker recv batch  len {}", batch.len());
             for x in &batch {
                 trace3!(
                     "search for {}  {}  {:?}  {:?}",
@@ -277,19 +294,26 @@ impl Worker {
             }
             let (res1, missing) = self.select(batch).await?;
             let res3 = if missing.len() > 0 {
+                trace2!("missing {}", missing.len());
+                for x in &missing {
+                    trace2!("insert missing {x:?}");
+                }
+                let missing_count = missing.len();
                 self.insert_missing(&missing).await?;
                 let (res2, missing2) = self.select(missing).await?;
                 if missing2.len() > 0 {
-                    warn!("series ids still missing after insert");
+                    for x in &missing2 {
+                        warn!("series ids still missing after insert  {}", x.channel);
+                    }
                     Err(Error::SeriesMissing)
                 } else {
-                    Ok(res2)
+                    trace2!("select missing after insert  {} of {}", missing_count, res2.len());
+                    Ok((res1, res2))
                 }
             } else {
-                Ok(res1)
-            };
-            let res4 = res3?;
-            for r in res4 {
+                Ok((res1, Vec::new()))
+            }?;
+            for r in res3.0.into_iter().chain(res3.1.into_iter()) {
                 let item = ChannelInfoResult {
                     backend: r.backend,
                     channel: r.channel,
@@ -306,7 +330,7 @@ impl Worker {
                 }
             }
         }
-        info!("Worker done");
+        debug!("Worker done");
         Ok(())
     }
 }

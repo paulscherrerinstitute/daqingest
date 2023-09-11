@@ -1,5 +1,6 @@
 pub mod conn;
 pub mod connset;
+pub mod connset_input_merge;
 pub mod finder;
 pub mod findioc;
 pub mod proto;

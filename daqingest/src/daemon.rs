@@ -4,6 +4,7 @@ pub mod inserthook;
 use async_channel::Receiver;
 use async_channel::Sender;
 use async_channel::WeakReceiver;
+use async_channel::WeakSender;
 use err::Error;
 use log::*;
 use netfetch::ca::connset::CaConnSet;
@@ -45,6 +46,12 @@ const CHANNEL_CHECK_INTERVAL: Duration = Duration::from_millis(5000);
 const PRINT_ACTIVE_INTERVAL: Duration = Duration::from_millis(60000);
 const PRINT_STATUS_INTERVAL: Duration = Duration::from_millis(20000);
 
+#[derive(Debug)]
+enum CheckPeriodic {
+    Waiting(Instant),
+    Ongoing(Instant),
+}
+
 pub struct DaemonOpts {
     backend: String,
     local_epics_hostname: String,
@@ -78,30 +85,28 @@ pub struct Daemon {
     count_assigned: usize,
     last_status_print: SystemTime,
     insert_workers_jh: Vec<JoinHandle<Result<(), Error>>>,
-    caconn_last_channel_check: Instant,
     stats: Arc<DaemonStats>,
     shutting_down: bool,
     insert_rx_weak: WeakReceiver<QueryItem>,
     connset_ctrl: CaConnSetCtrl,
-    connset_status_last: Instant,
+    connset_status_last: CheckPeriodic,
     // TODO should be a stats object?
     insert_workers_running: AtomicU64,
+    query_item_tx_weak: WeakSender<QueryItem>,
 }
 
 impl Daemon {
     pub async fn new(opts: DaemonOpts) -> Result<Self, Error> {
-        let datastore = DataStore::new(&opts.scyconf)
-            .await
-            .map_err(|e| Error::with_msg_no_trace(e.to_string()))?;
-        let datastore = Arc::new(datastore);
         let (daemon_ev_tx, daemon_ev_rx) = async_channel::bounded(32);
 
         // TODO keep join handles and await later
-        let (channel_info_query_tx, ..) = dbpg::seriesbychannel::start_lookup_workers(4, &opts.pgconf)
+        let (channel_info_query_tx, jhs, jh) = dbpg::seriesbychannel::start_lookup_workers(4, &opts.pgconf)
             .await
             .map_err(|e| Error::with_msg_no_trace(e.to_string()))?;
 
         let (query_item_tx, query_item_rx) = async_channel::bounded(opts.insert_item_queue_cap);
+        let query_item_tx_weak = query_item_tx.downgrade();
+
         let insert_queue_counter = Arc::new(AtomicUsize::new(0));
 
         // Insert queue hook
@@ -207,13 +212,13 @@ impl Daemon {
             count_assigned: 0,
             last_status_print: SystemTime::now(),
             insert_workers_jh,
-            caconn_last_channel_check: Instant::now(),
             stats: Arc::new(DaemonStats::new()),
             shutting_down: false,
             insert_rx_weak: query_item_rx.downgrade(),
             connset_ctrl: conn_set_ctrl,
-            connset_status_last: Instant::now(),
+            connset_status_last: CheckPeriodic::Waiting(Instant::now()),
             insert_workers_running: AtomicU64::new(0),
+            query_item_tx_weak,
         };
         Ok(ret)
     }
@@ -222,10 +227,24 @@ impl Daemon {
         &self.stats
     }
 
-    async fn check_caconn_chans(&mut self) -> Result<(), Error> {
-        if self.caconn_last_channel_check.elapsed() > CHANNEL_CHECK_INTERVAL {
-            self.connset_ctrl.check_health().await?;
-            self.caconn_last_channel_check = Instant::now();
+    async fn check_caconn_chans(&mut self, ts1: Instant) -> Result<(), Error> {
+        match &self.connset_status_last {
+            CheckPeriodic::Waiting(since) => {
+                if *since + Duration::from_millis(2000) < ts1 {
+                    debug!("========================================   issue health check CaConn");
+                    self.connset_ctrl.check_health().await?;
+                    self.connset_status_last = CheckPeriodic::Ongoing(ts1);
+                    if let Some(tx) = self.query_item_tx_weak.upgrade() {
+                        info!("query_item_tx  len {}", tx.len());
+                    }
+                }
+            }
+            CheckPeriodic::Ongoing(since) => {
+                let dt = ts1.saturating_duration_since(*since);
+                if dt > Duration::from_millis(4000) {
+                    error!("========================================   CaConnSet has not reported health status  since {:.0}", dt.as_secs_f32() * 1e3);
+                }
+            }
         }
         Ok(())
     }
@@ -244,7 +263,6 @@ impl Daemon {
             }
         }
         self.stats.handle_timer_tick_count.inc();
-        let ts1 = Instant::now();
         let tsnow = SystemTime::now();
         if SIGINT.load(atomic::Ordering::Acquire) == 1 {
             warn!("Received SIGINT");
@@ -254,18 +272,8 @@ impl Daemon {
             warn!("Received SIGTERM");
             SIGTERM.store(2, atomic::Ordering::Release);
         }
-        if self.connset_status_last + Duration::from_millis(2000) < ts1 {
-            self.connset_ctrl.check_health().await?;
-        }
-        if self.connset_status_last + Duration::from_millis(10000) < ts1 {
-            error!("CaConnSet has not reported health status");
-        }
-        let dt = ts1.elapsed();
-        if dt > Duration::from_millis(500) {
-            info!("slow check_chans  {}ms", dt.as_secs_f32() * 1e3);
-        }
         let ts1 = Instant::now();
-        self.check_caconn_chans().await?;
+        self.check_caconn_chans(ts1).await?;
         let dt = ts1.elapsed();
         if dt > Duration::from_millis(500) {
             info!("slow check_chans  {}ms", dt.as_secs_f32() * 1e3);
@@ -287,6 +295,7 @@ impl Daemon {
     }
 
     async fn handle_channel_add(&mut self, ch: Channel) -> Result<(), Error> {
+        debug!("handle_channel_add {ch:?}");
         self.connset_ctrl
             .add_channel(
                 self.opts.backend.clone(),
@@ -356,8 +365,20 @@ impl Daemon {
     async fn handle_ca_conn_set_item(&mut self, item: CaConnSetItem) -> Result<(), Error> {
         use CaConnSetItem::*;
         match item {
-            Healthy => {
-                self.connset_status_last = Instant::now();
+            Healthy(ts1, ts2) => {
+                let ts3 = Instant::now();
+                let dt1 = ts2.duration_since(ts1).as_secs_f32() * 1e3;
+                let dt2 = ts3.duration_since(ts2).as_secs_f32() * 1e3;
+                match &self.connset_status_last {
+                    CheckPeriodic::Waiting(_since) => {
+                        error!("========================================   received CaConnSet health report without having asked  {dt1:.0} ms  {dt2:.0} ms");
+                    }
+                    CheckPeriodic::Ongoing(since) => {
+                        let dtsince = ts3.duration_since(*since).as_secs_f32() * 1e3;
+                        debug!("========================================   received CaConnSet healthy  dtsince {dtsince:.0} ms  {dt1:.0} ms  {dt2:.0} ms");
+                        self.connset_status_last = CheckPeriodic::Waiting(ts3);
+                    }
+                }
             }
         }
         Ok(())
@@ -404,7 +425,7 @@ impl Daemon {
                 let ts1 = Instant::now();
                 let ret = self.handle_timer_tick().await;
                 match tx.send(i.wrapping_add(1)).await {
-                    Ok(_) => {}
+                    Ok(()) => {}
                     Err(_) => {
                         self.stats.ticker_token_release_error.inc();
                         error!("can not send ticker token");
@@ -575,9 +596,16 @@ pub async fn run(opts: CaIngestOpts, channels: Vec<String>) -> Result<(), Error>
     };
 
     let daemon_jh = taskrun::spawn(daemon.daemon());
+
+    debug!("will configure {} channels", channels.len());
+    let mut i = 0;
     for s in &channels {
         let ch = Channel::new(s.into());
         tx.send(DaemonEvent::ChannelAdd(ch)).await?;
+        i += 1;
+        if i % 1000 == 0 {
+            debug!("sent {} ChannelAdd", i);
+        }
     }
     debug!("{} configured channels applied", channels.len());
     daemon_jh.await.map_err(|e| Error::with_msg_no_trace(e.to_string()))??;

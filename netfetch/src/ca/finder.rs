@@ -85,7 +85,7 @@ fn transform_pgres(rows: Vec<PgRow>) -> VecDeque<FindIocRes> {
 
 async fn finder_worker_single(
     inp: Receiver<Vec<IocAddrQuery>>,
-    tx: Sender<CaConnSetEvent>,
+    tx: Sender<VecDeque<FindIocRes>>,
     backend: String,
     db: Database,
 ) -> Result<(), Error> {
@@ -164,11 +164,7 @@ async fn finder_worker_single(
                             error!("STILL NOT MATCHING LEN");
                         }
                         SEARCH_RES_3_COUNT.fetch_add(items.len(), atomic::Ordering::AcqRel);
-                        let x = tx
-                            .send(CaConnSetEvent::ConnSetCmd(
-                                crate::ca::connset::ConnSetCmd::IocAddrQueryResult(items),
-                            ))
-                            .await;
+                        let x = tx.send(items).await;
                         match x {
                             Ok(_) => {}
                             Err(e) => {
@@ -191,7 +187,7 @@ async fn finder_worker_single(
 
 async fn finder_worker(
     qrx: Receiver<IocAddrQuery>,
-    tx: Sender<CaConnSetEvent>,
+    tx: Sender<VecDeque<FindIocRes>>,
     backend: String,
     db: Database,
 ) -> Result<(), Error> {
@@ -215,7 +211,7 @@ async fn finder_worker(
 }
 
 pub fn start_finder(
-    tx: Sender<CaConnSetEvent>,
+    tx: Sender<VecDeque<FindIocRes>>,
     backend: String,
     db: Database,
 ) -> (Sender<IocAddrQuery>, JoinHandle<Result<(), Error>>) {

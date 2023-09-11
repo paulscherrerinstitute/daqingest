@@ -26,6 +26,15 @@ use std::any::Any;
 use std::collections::VecDeque;
 use std::time::SystemTime;
 
+#[allow(unused)]
+macro_rules! trace2 {
+    ($($arg:tt)*) => {
+        if false {
+            trace!($($arg)*);
+        }
+    };
+}
+
 struct TickParams<'a> {
     series: SeriesId,
     acc: &'a mut Box<dyn Any + Send>,
@@ -77,7 +86,7 @@ impl ConnTimeBin {
                 match scalar_type {
                     I8 => {
                         type ST = i8;
-                        info!("SCALAR {}", any::type_name::<ST>());
+                        trace2!("SCALAR {}", any::type_name::<ST>());
                         let cont = Cont::<ST>::empty();
                         self.events_binner =
                             Some(cont.as_time_binnable_ref().time_binner_new(binrange, do_time_weight));
@@ -88,7 +97,7 @@ impl ConnTimeBin {
                     }
                     I16 => {
                         type ST = i16;
-                        info!("SCALAR {}", std::any::type_name::<ST>());
+                        trace2!("SCALAR {}", std::any::type_name::<ST>());
                         let cont = Cont::<ST>::empty();
                         self.events_binner =
                             Some(cont.as_time_binnable_ref().time_binner_new(binrange, do_time_weight));
@@ -99,7 +108,7 @@ impl ConnTimeBin {
                     }
                     I32 => {
                         type ST = i32;
-                        info!("SCALAR {}", std::any::type_name::<ST>());
+                        trace2!("SCALAR {}", std::any::type_name::<ST>());
                         let cont = Cont::<ST>::empty();
                         self.events_binner =
                             Some(cont.as_time_binnable_ref().time_binner_new(binrange, do_time_weight));
@@ -110,7 +119,7 @@ impl ConnTimeBin {
                     }
                     F32 => {
                         type ST = f32;
-                        info!("SCALAR {}", std::any::type_name::<ST>());
+                        trace2!("SCALAR {}", std::any::type_name::<ST>());
                         let cont = Cont::<ST>::empty();
                         self.events_binner =
                             Some(cont.as_time_binnable_ref().time_binner_new(binrange, do_time_weight));
@@ -121,7 +130,7 @@ impl ConnTimeBin {
                     }
                     F64 => {
                         type ST = f64;
-                        info!("SCALAR {}", std::any::type_name::<ST>());
+                        trace2!("SCALAR {}", std::any::type_name::<ST>());
                         let cont = Cont::<ST>::empty();
                         self.events_binner =
                             Some(cont.as_time_binnable_ref().time_binner_new(binrange, do_time_weight));
