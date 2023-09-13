@@ -12,4 +12,5 @@ pub mod rt;
 pub mod senderpolling;
 #[cfg(test)]
 pub mod test;
+pub mod throttletrace;
 pub mod timebin;

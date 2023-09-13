@@ -75,6 +75,10 @@ impl<T> SenderPolling<T> {
         self.sender = None;
         self.fut = None;
     }
+
+    pub fn len(&self) -> Option<usize> {
+        self.sender.as_ref().map(|x| x.len())
+    }
 }
 
 impl<T> Future for SenderPolling<T> {

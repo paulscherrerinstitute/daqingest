@@ -1,5 +1,6 @@
 use crate::ca::METRICS;
 use crate::daemon_common::DaemonEvent;
+use async_channel::Receiver;
 use async_channel::Sender;
 use async_channel::WeakSender;
 use axum::extract::Query;
@@ -244,9 +245,19 @@ fn make_routes(dcom: Arc<DaemonComm>, stats_set: StatsSet) -> axum::Router {
         )
 }
 
-pub async fn start_metrics_service(bind_to: String, dcom: Arc<DaemonComm>, stats_set: StatsSet) {
-    axum::Server::bind(&bind_to.parse().unwrap())
-        .serve(make_routes(dcom, stats_set).into_make_service())
+pub async fn metrics_service(
+    bind_to: String,
+    dcom: Arc<DaemonComm>,
+    stats_set: StatsSet,
+    shutdown_signal: Receiver<u32>,
+) {
+    let addr = bind_to.parse().unwrap();
+    let router = make_routes(dcom, stats_set).into_make_service();
+    axum::Server::bind(&addr)
+        .serve(router)
+        .with_graceful_shutdown(async move {
+            let _ = shutdown_signal.recv().await;
+        })
         .await
         .unwrap()
 }

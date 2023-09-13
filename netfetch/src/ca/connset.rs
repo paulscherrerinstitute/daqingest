@@ -1,4 +1,3 @@
-use super::connset_input_merge::InputMerge;
 use super::findioc::FindIocRes;
 use super::statemap;
 use super::statemap::ChannelState;
@@ -16,6 +15,7 @@ use crate::errconv::ErrConv;
 use crate::rt::JoinHandle;
 use crate::rt::TokMx;
 use crate::senderpolling::SenderPolling;
+use crate::throttletrace::ThrottleTrace;
 use async_channel::Receiver;
 use async_channel::Sender;
 use atomic::AtomicUsize;
@@ -260,6 +260,8 @@ pub struct CaConnSet {
     stats: CaConnSetStats,
     ioc_finder_jh: JoinHandle<Result<(), Error>>,
     await_ca_conn_jhs: VecDeque<(SocketAddr, JoinHandle<Result<(), Error>>)>,
+    thr_msg_poll_1: ThrottleTrace,
+    thr_msg_storage_len: ThrottleTrace,
 }
 
 impl CaConnSet {
@@ -304,6 +306,8 @@ impl CaConnSet {
             // connset_out_sender: SenderPolling::new(connset_out_tx),
             ioc_finder_jh,
             await_ca_conn_jhs: VecDeque::new(),
+            thr_msg_poll_1: ThrottleTrace::new(Duration::from_millis(2000)),
+            thr_msg_storage_len: ThrottleTrace::new(Duration::from_millis(1000)),
         };
         // TODO await on jh
         let jh = tokio::spawn(CaConnSet::run(connset));
@@ -555,6 +559,8 @@ impl CaConnSet {
         if self.shutdown_stopping {
             return Ok(());
         }
+        self.thr_msg_storage_len
+            .trigger_fmt("msg", &[&self.storage_insert_sender.len()]);
         debug!("TODO handle_check_health");
         let ts2 = Instant::now();
         let item = CaConnSetItem::Healthy(ts1, ts2);
@@ -636,7 +642,7 @@ impl CaConnSet {
         tx: Sender<(SocketAddr, CaConnEvent)>,
         addr: SocketAddr,
     ) -> Result<(), Error> {
-        debug!("ca_conn_consumer  begin  {}", addr);
+        trace2!("ca_conn_consumer  begin  {}", addr);
         let stats = conn.stats();
         let mut conn = conn;
         let mut ret = Ok(());
@@ -652,7 +658,7 @@ impl CaConnSet {
                 }
             }
         }
-        debug!("ca_conn_consumer  ended {}", addr);
+        trace2!("ca_conn_consumer  ended {}", addr);
         tx.send((
             addr,
             CaConnEvent {
@@ -661,7 +667,7 @@ impl CaConnSet {
             },
         ))
         .await?;
-        debug!("ca_conn_consumer  signaled {}", addr);
+        trace!("ca_conn_consumer  signaled {}", addr);
         ret
     }
 
@@ -980,8 +986,9 @@ impl Stream for CaConnSet {
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
         use Poll::*;
-        debug!("CaConnSet::poll");
         loop {
+            self.thr_msg_poll_1.trigger("CaConnSet");
+
             let mut have_pending = false;
 
             if let Some(item) = self.connset_out_queue.pop_front() {

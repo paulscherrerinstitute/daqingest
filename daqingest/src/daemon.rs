@@ -15,6 +15,7 @@ use netfetch::daemon_common::Channel;
 use netfetch::daemon_common::DaemonEvent;
 use netfetch::metrics::ExtraInsertsConf;
 use netfetch::metrics::StatsSet;
+use netfetch::throttletrace::ThrottleTrace;
 use netpod::Database;
 use netpod::ScyllaConfig;
 use scywr::insertworker::InsertWorkerOpts;
@@ -592,16 +593,19 @@ pub async fn run(opts: CaIngestOpts, channels: Vec<String>) -> Result<(), Error>
     let tx = daemon.tx.clone();
     let daemon_stats = daemon.stats().clone();
 
+    let (metrics_shutdown_tx, metrics_shutdown_rx) = async_channel::bounded(8);
+
     let dcom = Arc::new(netfetch::metrics::DaemonComm::new(tx.clone()));
     let metrics_jh = {
         let stats_set = StatsSet::new(daemon_stats);
-        let fut = netfetch::metrics::start_metrics_service(opts.api_bind(), dcom, stats_set);
+        let fut = netfetch::metrics::metrics_service(opts.api_bind(), dcom, stats_set, metrics_shutdown_rx);
         tokio::task::spawn(fut)
     };
 
     let daemon_jh = taskrun::spawn(daemon.daemon());
 
     debug!("will configure {} channels", channels.len());
+    let mut thr_msg = ThrottleTrace::new(Duration::from_millis(1000));
     let mut i = 0;
     for s in &channels {
         let ch = Channel::new(s.into());
@@ -609,15 +613,17 @@ pub async fn run(opts: CaIngestOpts, channels: Vec<String>) -> Result<(), Error>
             Ok(()) => {}
             Err(_) => break,
         }
+        thr_msg.trigger_fmt("sent ChannelAdd", &[&i as &_]);
         i += 1;
-        if i % 100 == 0 {
-            debug!("sent {} ChannelAdd", i);
-        }
+        // if i % 100 == 0 {
+        //     debug!("sent {} ChannelAdd", i);
+        // }
     }
     debug!("{} configured channels applied", channels.len());
     daemon_jh.await.map_err(|e| Error::with_msg_no_trace(e.to_string()))??;
-    if false {
-        metrics_jh.await.unwrap();
-    }
+    info!("Daemon joined.");
+    metrics_shutdown_tx.send(1).await?;
+    metrics_jh.await.unwrap();
+    info!("Metrics joined.");
     Ok(())
 }

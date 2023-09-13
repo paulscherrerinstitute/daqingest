@@ -1,6 +1,7 @@
 use super::proto;
 use super::ExtraInsertsConf;
 use crate::senderpolling::SenderPolling;
+use crate::throttletrace::ThrottleTrace;
 use crate::timebin::ConnTimeBin;
 use async_channel::Sender;
 use core::fmt;
@@ -477,6 +478,7 @@ pub struct CaConn {
     channel_info_query_queue: VecDeque<ChannelInfoQuery>,
     channel_info_query_sending: SenderPolling<ChannelInfoQuery>,
     time_binners: BTreeMap<Cid, ConnTimeBin>,
+    thr_msg_poll: ThrottleTrace,
 }
 
 impl Drop for CaConn {
@@ -525,6 +527,7 @@ impl CaConn {
             channel_info_query_queue: VecDeque::new(),
             channel_info_query_sending: SenderPolling::new(channel_info_query_tx),
             time_binners: BTreeMap::new(),
+            thr_msg_poll: ThrottleTrace::new(Duration::from_millis(10000)),
         }
     }
 
@@ -1708,7 +1711,7 @@ impl CaConn {
     }
 
     fn handle_own_ticker_tick(self: Pin<&mut Self>, _cx: &mut Context) -> Result<(), Error> {
-        debug!("tick  CaConn  {}", self.remote_addr_dbg);
+        // debug!("tick  CaConn  {}", self.remote_addr_dbg);
         let this = self.get_mut();
         if false {
             for (_, tb) in this.time_binners.iter_mut() {
@@ -1759,6 +1762,7 @@ impl Stream for CaConn {
         self.stats.caconn_poll_count.inc();
         let poll_ts1 = Instant::now();
         let ret = loop {
+            self.thr_msg_poll.trigger("CaConn::poll_next");
             break if let CaConnState::EndOfStream = self.state {
                 Ready(None)
             } else if let Err(e) = self.as_mut().handle_own_ticker(cx) {
@@ -1819,7 +1823,7 @@ impl Stream for CaConn {
             warn!("long poll duration {:.0} ms", dt.as_secs_f32() * 1e3)
         } else if dt > Duration::from_millis(40) {
             info!("long poll duration {:.0} ms", dt.as_secs_f32() * 1e3)
-        } else if dt > Duration::from_millis(5) {
+        } else if false && dt > Duration::from_millis(5) {
             debug!("long poll duration {:.0} ms", dt.as_secs_f32() * 1e3)
         }
         ret
