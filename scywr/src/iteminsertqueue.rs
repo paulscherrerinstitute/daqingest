@@ -14,8 +14,11 @@ use scylla::transport::errors::QueryError;
 use series::SeriesId;
 use stats::CaConnStats;
 use std::net::SocketAddrV4;
+use std::sync::atomic;
+use std::sync::atomic::AtomicU64;
 use std::sync::Mutex;
 use std::time::Duration;
+use std::time::Instant;
 use std::time::SystemTime;
 
 #[derive(Debug, ThisError)]
@@ -377,6 +380,8 @@ where
     Ok(())
 }
 
+static warn_last: AtomicU64 = AtomicU64::new(0);
+
 pub async fn insert_item(
     item: InsertItem,
     ttl_index: Duration,
@@ -423,8 +428,24 @@ pub async fn insert_item(
                 I32(val) => insert_scalar_gen(par, val, &data_store.qu_insert_scalar_i32, &data_store).await?,
                 F32(val) => insert_scalar_gen(par, val, &data_store.qu_insert_scalar_f32, &data_store).await?,
                 F64(val) => insert_scalar_gen(par, val, &data_store.qu_insert_scalar_f64, &data_store).await?,
-                String(_) => warn!("TODO string insert"),
-                Bool(_v) => warn!("TODO bool insert"),
+                String(val) => {
+                    let ts = SystemTime::now()
+                        .duration_since(SystemTime::UNIX_EPOCH)
+                        .map_or(0, |x| x.as_secs());
+                    if ts > warn_last.load(atomic::Ordering::Acquire) + 10 {
+                        warn_last.store(ts, atomic::Ordering::Release);
+                        warn!("TODO string insert {val}");
+                    }
+                }
+                Bool(val) => {
+                    let ts = SystemTime::now()
+                        .duration_since(SystemTime::UNIX_EPOCH)
+                        .map_or(0, |x| x.as_secs());
+                    if ts > warn_last.load(atomic::Ordering::Acquire) + 10 {
+                        warn_last.store(ts, atomic::Ordering::Release);
+                        warn!("TODO bool insert {val}");
+                    }
+                }
             }
         }
         Array(val) => {

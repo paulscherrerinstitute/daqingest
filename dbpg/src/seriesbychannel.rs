@@ -321,11 +321,14 @@ impl Worker {
                 };
                 trace3!("try to send result for  {:?}", item);
                 let fut = r.tx.make_send(Ok(item));
-                match fut.await {
-                    Ok(()) => {}
-                    Err(_e) => {
+                match tokio::time::timeout(Duration::from_millis(2000), fut).await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(_e)) => {
                         warn!("can not deliver result");
                         return Err(Error::ChannelError);
+                    }
+                    Err(_) => {
+                        debug!("timeout can not deliver result");
                     }
                 }
             }

@@ -295,7 +295,7 @@ impl Daemon {
     }
 
     async fn handle_channel_add(&mut self, ch: Channel) -> Result<(), Error> {
-        debug!("handle_channel_add {ch:?}");
+        // debug!("handle_channel_add {ch:?}");
         self.connset_ctrl
             .add_channel(
                 self.opts.backend.clone(),
@@ -380,12 +380,15 @@ impl Daemon {
                     }
                 }
             }
+            Error(e) => {
+                error!("error from CaConnSet: {e}");
+                self.handle_shutdown().await?;
+            }
         }
         Ok(())
     }
 
     async fn handle_shutdown(&mut self) -> Result<(), Error> {
-        error!("TODO handle_shutdown");
         if self.shutting_down {
             warn!("already shutting down");
         } else {
@@ -398,6 +401,7 @@ impl Daemon {
             // await the connection sets.
             // await other workers that we've spawned.
             self.connset_ctrl.shutdown().await?;
+            self.rx.close();
         }
         Ok(())
     }
@@ -601,9 +605,12 @@ pub async fn run(opts: CaIngestOpts, channels: Vec<String>) -> Result<(), Error>
     let mut i = 0;
     for s in &channels {
         let ch = Channel::new(s.into());
-        tx.send(DaemonEvent::ChannelAdd(ch)).await?;
+        match tx.send(DaemonEvent::ChannelAdd(ch)).await {
+            Ok(()) => {}
+            Err(_) => break,
+        }
         i += 1;
-        if i % 1000 == 0 {
+        if i % 100 == 0 {
             debug!("sent {} ChannelAdd", i);
         }
     }

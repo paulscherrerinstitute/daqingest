@@ -3,6 +3,7 @@ use super::ExtraInsertsConf;
 use crate::senderpolling::SenderPolling;
 use crate::timebin::ConnTimeBin;
 use async_channel::Sender;
+use core::fmt;
 use dbpg::seriesbychannel::CanSendChannelInfoResult;
 use dbpg::seriesbychannel::ChannelInfoQuery;
 use dbpg::seriesbychannel::ChannelInfoResult;
@@ -270,6 +271,21 @@ enum CaConnState {
     Wait(Pin<Box<dyn Future<Output = ()> + Send>>),
     Shutdown,
     EndOfStream,
+}
+
+impl fmt::Debug for CaConnState {
+    fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            Self::Unconnected => write!(fmt, "Unconnected"),
+            Self::Connecting(arg0, _) => fmt.debug_tuple("Connecting").field(arg0).finish(),
+            Self::Init => write!(fmt, "Init"),
+            Self::Listen => write!(fmt, "Listen"),
+            Self::PeerReady => write!(fmt, "PeerReady"),
+            Self::Wait(_) => fmt.debug_tuple("Wait").finish(),
+            Self::Shutdown => write!(fmt, "Shutdown"),
+            Self::EndOfStream => write!(fmt, "EndOfStream"),
+        }
+    }
 }
 
 fn wait_fut(dt: u64) -> Pin<Box<dyn Future<Output = ()> + Send>> {
@@ -672,37 +688,41 @@ impl CaConn {
         use Poll::*;
         loop {
             self.stats.caconn_loop3_count.inc();
-            break match self.conn_command_rx.poll_next_unpin(cx) {
-                Ready(Some(a)) => {
-                    trace3!("handle_conn_command received a command  {}", self.remote_addr_dbg);
-                    match a.kind {
-                        ConnCommandKind::ChannelAdd(name, cssid) => {
-                            self.cmd_channel_add(name, cssid);
-                            Ready(Some(Ok(())))
+            break if self.is_shutdown() {
+                Ready(None)
+            } else {
+                match self.conn_command_rx.poll_next_unpin(cx) {
+                    Ready(Some(a)) => {
+                        trace3!("handle_conn_command received a command  {}", self.remote_addr_dbg);
+                        match a.kind {
+                            ConnCommandKind::ChannelAdd(name, cssid) => {
+                                self.cmd_channel_add(name, cssid);
+                                Ready(Some(Ok(())))
+                            }
+                            ConnCommandKind::ChannelRemove(name) => {
+                                self.cmd_channel_remove(name);
+                                Ready(Some(Ok(())))
+                            }
+                            ConnCommandKind::CheckHealth => {
+                                self.cmd_check_health();
+                                Ready(Some(Ok(())))
+                            }
+                            ConnCommandKind::Shutdown => {
+                                self.cmd_shutdown();
+                                Ready(Some(Ok(())))
+                            }
+                            ConnCommandKind::SeriesLookupResult(x) => match self.handle_series_lookup_result(x) {
+                                Ok(()) => Ready(Some(Ok(()))),
+                                Err(e) => Ready(Some(Err(e))),
+                            },
                         }
-                        ConnCommandKind::ChannelRemove(name) => {
-                            self.cmd_channel_remove(name);
-                            Ready(Some(Ok(())))
-                        }
-                        ConnCommandKind::CheckHealth => {
-                            self.cmd_check_health();
-                            Ready(Some(Ok(())))
-                        }
-                        ConnCommandKind::Shutdown => {
-                            self.cmd_shutdown();
-                            Ready(Some(Ok(())))
-                        }
-                        ConnCommandKind::SeriesLookupResult(x) => match self.handle_series_lookup_result(x) {
-                            Ok(()) => Ready(Some(Ok(()))),
-                            Err(e) => Ready(Some(Err(e))),
-                        },
                     }
+                    Ready(None) => {
+                        error!("Command queue closed");
+                        Ready(None)
+                    }
+                    Pending => Pending,
                 }
-                Ready(None) => {
-                    error!("Command queue closed");
-                    Ready(None)
-                }
-                Pending => Pending,
             };
         }
     }
@@ -1688,6 +1708,7 @@ impl CaConn {
     }
 
     fn handle_own_ticker_tick(self: Pin<&mut Self>, _cx: &mut Context) -> Result<(), Error> {
+        debug!("tick  CaConn  {}", self.remote_addr_dbg);
         let this = self.get_mut();
         if false {
             for (_, tb) in this.time_binners.iter_mut() {
@@ -1699,26 +1720,32 @@ impl CaConn {
     }
 
     fn queues_async_out_flushed(&self) -> bool {
-        self.channel_info_query_queue.is_empty() && self.channel_info_query_sending.is_idle()
+        // self.channel_info_query_queue.is_empty() && self.channel_info_query_sending.is_idle()
+        // TODO re-enable later
+        true
     }
 
     fn attempt_flush_channel_info_query(mut self: Pin<&mut Self>, cx: &mut Context) -> Result<(), Error> {
         use Poll::*;
         loop {
-            let sd = &mut self.channel_info_query_sending;
-            break if sd.is_sending() {
-                match sd.poll_unpin(cx) {
-                    Ready(Ok(())) => continue,
-                    Ready(Err(_)) => Err(Error::with_msg_no_trace("can not send into channel")),
-                    Pending => Ok(()),
-                }
-            } else if let Some(item) = self.channel_info_query_queue.pop_front() {
-                trace3!("send series query {item:?}");
-                let sd = &mut self.channel_info_query_sending;
-                sd.send(item);
-                continue;
-            } else {
+            break if self.is_shutdown() {
                 Ok(())
+            } else {
+                let sd = &mut self.channel_info_query_sending;
+                if sd.is_sending() {
+                    match sd.poll_unpin(cx) {
+                        Ready(Ok(())) => continue,
+                        Ready(Err(_)) => Err(Error::with_msg_no_trace("can not send into channel")),
+                        Pending => Ok(()),
+                    }
+                } else if let Some(item) = self.channel_info_query_queue.pop_front() {
+                    trace3!("send series query {item:?}");
+                    let sd = &mut self.channel_info_query_sending;
+                    sd.send(item);
+                    continue;
+                } else {
+                    Ok(())
+                }
             };
         }
     }
@@ -1764,10 +1791,15 @@ impl Stream for CaConn {
                             ts: Instant::now(),
                             value: CaConnEventValue::None,
                         };
-                        if self.is_shutdown() && self.queues_async_out_flushed() {
-                            debug!("end of stream {}", self.remote_addr_dbg);
-                            self.state = CaConnState::EndOfStream;
-                            Ready(None)
+                        if self.is_shutdown() {
+                            if self.queues_async_out_flushed() == false {
+                                debug!("shutdown, but async queues not flushed");
+                                continue;
+                            } else {
+                                debug!("end of stream {}", self.remote_addr_dbg);
+                                self.state = CaConnState::EndOfStream;
+                                Ready(None)
+                            }
                         } else {
                             continue;
                         }

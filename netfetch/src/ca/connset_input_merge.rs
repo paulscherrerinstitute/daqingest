@@ -2,6 +2,8 @@ use super::connset::CaConnSetEvent;
 use super::findioc::FindIocRes;
 use crate::ca::connset::ConnSetCmd;
 use async_channel::Receiver;
+use dbpg::seriesbychannel::ChannelInfoResult;
+use err::Error;
 use futures_util::StreamExt;
 use std::collections::VecDeque;
 use std::pin::Pin;
@@ -11,13 +13,19 @@ use std::task::Poll;
 pub struct InputMerge {
     inp1: Option<Receiver<CaConnSetEvent>>,
     inp2: Option<Receiver<VecDeque<FindIocRes>>>,
+    inp3: Option<Receiver<Result<ChannelInfoResult, Error>>>,
 }
 
 impl InputMerge {
-    pub fn new(inp1: Receiver<CaConnSetEvent>, inp2: Receiver<VecDeque<FindIocRes>>) -> Self {
+    pub fn new(
+        inp1: Receiver<CaConnSetEvent>,
+        inp2: Receiver<VecDeque<FindIocRes>>,
+        inp3: Receiver<Result<ChannelInfoResult, Error>>,
+    ) -> Self {
         Self {
             inp1: Some(inp1),
             inp2: Some(inp2),
+            inp3: Some(inp3),
         }
     }
 
@@ -33,18 +41,35 @@ impl futures_util::Stream for InputMerge {
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
         use Poll::*;
-        let mut poll_next = false;
-        let ret = if let Some(inp) = &mut self.inp2 {
-            match inp.poll_next_unpin(cx) {
-                Ready(Some(x)) => Some(CaConnSetEvent::ConnSetCmd(ConnSetCmd::IocAddrQueryResult(x))),
-                Ready(None) => {
-                    self.inp2 = None;
-                    None
+        let ret = {
+            if let Some(inp) = &mut self.inp3 {
+                match inp.poll_next_unpin(cx) {
+                    Ready(Some(x)) => Some(CaConnSetEvent::ConnSetCmd(todo!())),
+                    Ready(None) => {
+                        self.inp2 = None;
+                        None
+                    }
+                    Pending => None,
                 }
-                Pending => None,
+            } else {
+                None
             }
+        };
+        let ret = if let Some(x) = ret {
+            Some(x)
         } else {
-            None
+            if let Some(inp) = &mut self.inp2 {
+                match inp.poll_next_unpin(cx) {
+                    Ready(Some(x)) => Some(CaConnSetEvent::ConnSetCmd(todo!())),
+                    Ready(None) => {
+                        self.inp2 = None;
+                        None
+                    }
+                    Pending => None,
+                }
+            } else {
+                None
+            }
         };
         if let Some(x) = ret {
             Ready(Some(x))
