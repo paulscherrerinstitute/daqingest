@@ -79,7 +79,7 @@ impl PgPool {
     pub async fn new(cap: usize, dbconf: &Database) -> Result<Self, Error> {
         let (tx, rx) = async_channel::bounded(2 + cap);
         for _ in 0..cap {
-            let pgc = crate::conn::make_pg_client(dbconf).await?;
+            let (pgc, jh) = crate::conn::make_pg_client(dbconf).await?;
             let pgc = PgClientInner { pgc, handout_count: 0 };
             tx.send(pgc).await?;
         }

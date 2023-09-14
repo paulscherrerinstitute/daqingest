@@ -10,7 +10,6 @@ use log::*;
 use netpod::timeunits::MS;
 use netpod::timeunits::SEC;
 use netpod::ScyllaConfig;
-use stats::CaConnStats;
 use stats::InsertWorkerStats;
 use std::sync::atomic;
 use std::sync::atomic::AtomicU64;
@@ -18,8 +17,18 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
+use std::time::SystemTime;
 use taskrun::tokio;
 use taskrun::tokio::task::JoinHandle;
+
+#[allow(unused)]
+macro_rules! trace2 {
+    ($($arg:tt)*) => {
+        if false {
+            trace!($($arg)*);
+        }
+    };
+}
 
 fn stats_inc_for_err(stats: &stats::InsertWorkerStats, err: &crate::iteminsertqueue::Error) {
     use crate::iteminsertqueue::Error;
@@ -70,6 +79,7 @@ pub struct InsertWorkerOpts {
     pub store_workers_rate: Arc<AtomicU64>,
     pub insert_workers_running: Arc<AtomicU64>,
     pub insert_frac: Arc<AtomicU64>,
+    pub array_truncate: Arc<AtomicU64>,
 }
 
 async fn rate_limiter_worker(
@@ -139,6 +149,7 @@ async fn worker(
     data_store: Arc<DataStore>,
     stats: Arc<InsertWorkerStats>,
 ) -> Result<(), Error> {
+    stats.worker_start().inc();
     insert_worker_opts
         .insert_workers_running
         .fetch_add(1, atomic::Ordering::AcqRel);
@@ -178,23 +189,43 @@ async fn worker(
                 }
             }
             QueryItem::Insert(item) => {
-                if true {
+                let tsnow = {
+                    let ts = SystemTime::now();
+                    let epoch = ts.duration_since(std::time::UNIX_EPOCH).unwrap();
+                    epoch.as_secs() * SEC + epoch.subsec_nanos() as u64
+                };
+                let dt = (tsnow / 1000) as i64 - (item.ts_local / 1000) as i64;
+                if dt < 0 {
+                    stats.item_latency_neg().inc();
+                } else if dt <= 1000 * 25 {
+                    stats.item_latency_025ms().inc();
+                } else if dt <= 1000 * 50 {
+                    stats.item_latency_050ms().inc();
+                } else if dt <= 1000 * 100 {
+                    stats.item_latency_100ms().inc();
+                } else if dt <= 1000 * 200 {
+                    stats.item_latency_200ms().inc();
+                } else if dt <= 1000 * 400 {
+                    stats.item_latency_400ms().inc();
+                } else if dt <= 1000 * 800 {
+                    stats.item_latency_800ms().inc();
+                } else {
+                    stats.item_latency_large().inc();
+                }
+                if false {
                     stats.inserted_values().inc();
                 } else {
                     let insert_frac = insert_worker_opts.insert_frac.load(Ordering::Acquire);
-                    if i1 % 1000 < insert_frac {
-                        match insert_item(item, ttls.index, ttls.d0, ttls.d1, &data_store, &stats).await {
-                            Ok(_) => {
-                                stats.inserted_values().inc();
-                                backoff = backoff_0;
-                            }
-                            Err(e) => {
-                                stats_inc_for_err(&stats, &e);
-                                back_off_sleep(&mut backoff).await;
-                            }
+                    let do_insert = i1 % 1000 < insert_frac;
+                    match insert_item(item, ttls.index, ttls.d0, ttls.d1, &data_store, &stats, do_insert).await {
+                        Ok(_) => {
+                            stats.inserted_values().inc();
+                            backoff = backoff_0;
                         }
-                    } else {
-                        stats.fraction_drop().inc();
+                        Err(e) => {
+                            stats_inc_for_err(&stats, &e);
+                            back_off_sleep(&mut backoff).await;
+                        }
                     }
                     i1 += 1;
                 }
@@ -297,10 +328,11 @@ async fn worker(
             }
         }
     }
+    stats.worker_finish().inc();
     insert_worker_opts
         .insert_workers_running
         .fetch_sub(1, atomic::Ordering::AcqRel);
-    trace!("insert worker {worker_ix} done");
+    trace2!("insert worker {worker_ix} done");
     Ok(())
 }
 

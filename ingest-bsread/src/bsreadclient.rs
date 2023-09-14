@@ -189,6 +189,7 @@ impl BsreadClient {
                         scalar_type,
                         shape,
                         val: DataValue::Array(ArrayValue::Bool(evtset)),
+                        ts_local: ts,
                     };
                     let item = QueryItem::Insert(item);
                     match self.insqtx.send(item).await {

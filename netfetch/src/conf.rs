@@ -26,7 +26,7 @@ pub struct CaIngestOpts {
     timeout: Option<Duration>,
     postgresql: Database,
     scylla: ScyllaConfig,
-    array_truncate: Option<usize>,
+    array_truncate: Option<u64>,
     insert_worker_count: Option<usize>,
     insert_scylla_sessions: Option<usize>,
     insert_queue_max: Option<usize>,
@@ -87,7 +87,7 @@ impl CaIngestOpts {
         self.insert_queue_max.unwrap_or(64)
     }
 
-    pub fn array_truncate(&self) -> usize {
+    pub fn array_truncate(&self) -> u64 {
         self.array_truncate.unwrap_or(512)
     }
 

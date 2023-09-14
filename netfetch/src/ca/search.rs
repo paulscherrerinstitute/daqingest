@@ -70,7 +70,7 @@ impl DbUpdateWorker {
 
 pub async fn ca_search(opts: CaIngestOpts, channels: &Vec<String>) -> Result<(), Error> {
     info!("ca_search begin");
-    let pg = dbpg::conn::make_pg_client(opts.postgresql_config())
+    let (pg, jh) = dbpg::conn::make_pg_client(opts.postgresql_config())
         .await
         .map_err(|e| Error::with_msg_no_trace(e.to_string()))?;
     dbpg::schema::schema_check(&pg)
@@ -123,7 +123,7 @@ pub async fn ca_search(opts: CaIngestOpts, channels: &Vec<String>) -> Result<(),
 
     let mut dbworkers = Vec::new();
     for _ in 0..DB_WORKER_COUNT {
-        let pg = dbpg::conn::make_pg_client(opts.postgresql_config())
+        let (pg, jh) = dbpg::conn::make_pg_client(opts.postgresql_config())
             .await
             .map_err(|e| Error::with_msg_no_trace(e.to_string()))?;
         let w = DbUpdateWorker::new(dbrx.clone(), opts.backend().into(), pg).await?;

@@ -196,6 +196,7 @@ pub struct CaConnSetCtrl {
     tx: Sender<CaConnSetEvent>,
     rx: Receiver<CaConnSetItem>,
     stats: Arc<CaConnSetStats>,
+    ca_conn_stats: Arc<CaConnStats>,
     jh: JoinHandle<Result<(), Error>>,
 }
 
@@ -246,6 +247,10 @@ impl CaConnSetCtrl {
     pub fn stats(&self) -> &Arc<CaConnSetStats> {
         &self.stats
     }
+
+    pub fn ca_conn_stats(&self) -> &Arc<CaConnStats> {
+        &self.ca_conn_stats
+    }
 }
 
 #[derive(Debug)]
@@ -295,6 +300,7 @@ pub struct CaConnSet {
     shutdown_done: bool,
     chan_check_next: Option<Channel>,
     stats: Arc<CaConnSetStats>,
+    ca_conn_stats: Arc<CaConnStats>,
     ioc_finder_jh: JoinHandle<Result<(), Error>>,
     await_ca_conn_jhs: VecDeque<(SocketAddr, JoinHandle<Result<(), Error>>)>,
     thr_msg_poll_1: ThrottleTrace,
@@ -318,6 +324,10 @@ impl CaConnSet {
             super::finder::start_finder(find_ioc_res_tx.clone(), backend.clone(), pgconf);
         let (channel_info_res_tx, channel_info_res_rx) = async_channel::bounded(400);
         let stats = Arc::new(CaConnSetStats::new());
+        let ca_conn_stats = Arc::new(CaConnStats::new());
+        stats.test_1().inc();
+        stats.test_1().inc();
+        stats.test_1().inc();
         let connset = Self {
             backend,
             local_epics_hostname,
@@ -342,6 +352,7 @@ impl CaConnSet {
             shutdown_done: false,
             chan_check_next: None,
             stats: stats.clone(),
+            ca_conn_stats: ca_conn_stats.clone(),
             connset_out_tx,
             connset_out_queue: VecDeque::new(),
             // connset_out_sender: SenderPolling::new(connset_out_tx),
@@ -357,6 +368,7 @@ impl CaConnSet {
             tx: connset_inp_tx,
             rx: connset_out_rx,
             stats,
+            ca_conn_stats,
             jh,
         }
     }
@@ -608,7 +620,7 @@ impl CaConnSet {
             return Ok(());
         }
         self.thr_msg_storage_len
-            .trigger_fmt("msg", &[&self.storage_insert_sender.len()]);
+            .trigger("msg", &[&self.storage_insert_sender.len()]);
         debug!("TODO handle_check_health");
 
         // Trigger already the next health check, but use the current data that we have.
@@ -726,6 +738,7 @@ impl CaConnSet {
             addr_v4,
             add.local_epics_hostname,
             self.channel_info_query_tx.clone(),
+            self.ca_conn_stats.clone(),
         );
         let conn_tx = conn.conn_command_tx();
         let conn_stats = conn.stats();
@@ -1136,16 +1149,14 @@ impl Stream for CaConnSet {
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
         use Poll::*;
         self.stats.poll_fn_begin().inc();
-        debug!("CaConnSet  poll");
         loop {
             self.stats.poll_loop_begin().inc();
-            let n1 = self.channel_info_query_queue.len();
-            let p2 = self.channel_info_query_sender.len();
-            let p3 = self.channel_info_res_rx.len();
-            self.thr_msg_poll_1
-                .trigger_fmt("CaConnSet  channel_info_query_queue", &[&n1, &p2, &p3]);
+            self.thr_msg_poll_1.trigger("CaConnSet::poll", &[]);
 
             self.stats.storage_insert_tx_len.set(self.storage_insert_tx.len() as _);
+            self.stats
+                .channel_info_query_queue_len
+                .set(self.channel_info_query_queue.len() as _);
             self.stats
                 .channel_info_query_sender_len
                 .set(self.channel_info_query_sender.len().unwrap_or(0) as _);
@@ -1158,6 +1169,7 @@ impl Stream for CaConnSet {
             self.stats.ca_conn_res_tx_len.set(self.ca_conn_res_tx.len() as _);
 
             let mut have_pending = false;
+            let mut have_progress = false;
 
             self.try_push_ca_conn_cmds();
 
@@ -1190,6 +1202,7 @@ impl Stream for CaConnSet {
                                 error!("CaConn {addr} join error: {e}");
                             }
                         }
+                        have_progress = true;
                     }
                     Pending => {
                         have_pending = true;
@@ -1206,7 +1219,9 @@ impl Stream for CaConnSet {
             }
             if self.storage_insert_sender.is_sending() {
                 match self.storage_insert_sender.poll_unpin(cx) {
-                    Ready(Ok(())) => {}
+                    Ready(Ok(())) => {
+                        have_progress = true;
+                    }
                     Ready(Err(_)) => {
                         let e = Error::with_msg_no_trace("can not send into channel");
                         error!("{e}");
@@ -1225,7 +1240,9 @@ impl Stream for CaConnSet {
             }
             if self.find_ioc_query_sender.is_sending() {
                 match self.find_ioc_query_sender.poll_unpin(cx) {
-                    Ready(Ok(())) => {}
+                    Ready(Ok(())) => {
+                        have_progress = true;
+                    }
                     Ready(Err(_)) => {
                         let e = Error::with_msg_no_trace("can not send into channel");
                         error!("{e}");
@@ -1244,7 +1261,9 @@ impl Stream for CaConnSet {
             }
             if self.channel_info_query_sender.is_sending() {
                 match self.channel_info_query_sender.poll_unpin(cx) {
-                    Ready(Ok(())) => {}
+                    Ready(Ok(())) => {
+                        have_progress = true;
+                    }
                     Ready(Err(_)) => {
                         let e = Error::with_msg_no_trace("can not send into channel");
                         error!("{e}");
@@ -1256,84 +1275,79 @@ impl Stream for CaConnSet {
                 }
             }
 
-            let item = match self.find_ioc_res_rx.poll_next_unpin(cx) {
+            match self.find_ioc_res_rx.poll_next_unpin(cx) {
                 Ready(Some(x)) => match self.handle_ioc_query_result(x) {
-                    Ok(()) => Ready(None),
-                    Err(e) => Ready(Some(CaConnSetItem::Error(e))),
+                    Ok(()) => {
+                        have_progress = true;
+                    }
+                    Err(e) => break Ready(Some(CaConnSetItem::Error(e))),
                 },
-                Ready(None) => Ready(None),
+                Ready(None) => {}
                 Pending => {
                     have_pending = true;
-                    Pending
                 }
-            };
-            match item {
-                Ready(Some(x)) => break Ready(Some(x)),
-                _ => {}
             }
 
-            let item = match self.ca_conn_res_rx.poll_next_unpin(cx) {
+            match self.ca_conn_res_rx.poll_next_unpin(cx) {
                 Ready(Some((addr, ev))) => match self.handle_ca_conn_event(addr, ev) {
-                    Ok(()) => Ready(None),
-                    Err(e) => Ready(Some(CaConnSetItem::Error(e))),
+                    Ok(()) => {
+                        have_progress = true;
+                    }
+                    Err(e) => break Ready(Some(CaConnSetItem::Error(e))),
                 },
-                Ready(None) => Ready(None),
+                Ready(None) => {}
                 Pending => {
                     have_pending = true;
-                    Pending
                 }
-            };
-            match item {
-                Ready(Some(x)) => break Ready(Some(x)),
-                _ => {}
             }
 
-            let item = match self.channel_info_res_rx.poll_next_unpin(cx) {
+            match self.channel_info_res_rx.poll_next_unpin(cx) {
                 Ready(Some(x)) => match self.handle_series_lookup_result(x) {
-                    Ok(()) => Ready(None),
-                    Err(e) => Ready(Some(CaConnSetItem::Error(e))),
+                    Ok(()) => {
+                        have_progress = true;
+                    }
+                    Err(e) => break Ready(Some(CaConnSetItem::Error(e))),
                 },
-                Ready(None) => Ready(None),
+                Ready(None) => {}
                 Pending => {
                     have_pending = true;
-                    Pending
                 }
-            };
-            match item {
-                Ready(Some(x)) => break Ready(Some(x)),
-                _ => {}
             }
 
-            let item = match self.connset_inp_rx.poll_next_unpin(cx) {
+            match self.connset_inp_rx.poll_next_unpin(cx) {
                 Ready(Some(x)) => match self.handle_event(x) {
-                    Ok(()) => Ready(None),
-                    Err(e) => Ready(Some(CaConnSetItem::Error(e))),
+                    Ok(()) => {
+                        have_progress = true;
+                    }
+                    Err(e) => break Ready(Some(CaConnSetItem::Error(e))),
                 },
-                Ready(None) => Ready(None),
+                Ready(None) => {}
                 Pending => {
                     have_pending = true;
-                    Pending
                 }
-            };
-            match item {
-                Ready(Some(x)) => break Ready(Some(x)),
-                _ => {}
             }
 
             break if self.ready_for_end_of_stream() {
-                if have_pending {
-                    self.stats.ready_for_end_of_stream_with_pending().inc();
+                self.stats.ready_for_end_of_stream().inc();
+                if have_progress {
+                    self.stats.ready_for_end_of_stream_with_progress().inc();
+                    continue;
                 } else {
-                    self.stats.ready_for_end_of_stream_no_pending().inc();
+                    Ready(None)
                 }
-                Ready(None)
             } else {
-                if have_pending {
-                    self.stats.poll_pending().inc();
-                    Pending
-                } else {
+                if have_progress {
                     self.stats.poll_reloop().inc();
                     continue;
+                } else {
+                    if have_pending {
+                        self.stats.poll_pending().inc();
+                        Pending
+                    } else {
+                        self.stats.poll_no_progress_no_pending().inc();
+                        let e = Error::with_msg_no_trace("no progress no pending");
+                        Ready(Some(CaConnSetItem::Error(e)))
+                    }
                 }
             };
         }

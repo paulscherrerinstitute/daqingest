@@ -89,7 +89,7 @@ async fn finder_worker_single(
     backend: String,
     db: Database,
 ) -> Result<(), Error> {
-    let pg = make_pg_client(&db)
+    let (pg, jh) = make_pg_client(&db)
         .await
         .map_err(|e| Error::with_msg_no_trace(e.to_string()))?;
     let sql = concat!(

@@ -58,7 +58,7 @@ enum CheckPeriodic {
 pub struct DaemonOpts {
     backend: String,
     local_epics_hostname: String,
-    array_truncate: usize,
+    array_truncate: u64,
     insert_item_queue_cap: usize,
     pgconf: Database,
     scyconf: ScyllaConfig,
@@ -67,6 +67,7 @@ pub struct DaemonOpts {
     test_bsread_addr: Option<String>,
     insert_worker_count: usize,
     insert_scylla_sessions: usize,
+    insert_frac: Arc<AtomicU64>,
 }
 
 impl DaemonOpts {
@@ -90,6 +91,7 @@ pub struct Daemon {
     insert_workers_jh: Vec<JoinHandle<Result<(), Error>>>,
     stats: Arc<DaemonStats>,
     insert_worker_stats: Arc<InsertWorkerStats>,
+    series_by_channel_stats: Arc<SeriesByChannelStats>,
     shutting_down: bool,
     connset_ctrl: CaConnSetCtrl,
     connset_status_last: CheckPeriodic,
@@ -107,7 +109,7 @@ impl Daemon {
 
         // TODO keep join handles and await later
         let (channel_info_query_tx, jhs, jh) =
-            dbpg::seriesbychannel::start_lookup_workers(4, &opts.pgconf, series_by_channel_stats)
+            dbpg::seriesbychannel::start_lookup_workers(4, &opts.pgconf, series_by_channel_stats.clone())
                 .await
                 .map_err(|e| Error::with_msg_no_trace(e.to_string()))?;
 
@@ -152,13 +154,12 @@ impl Daemon {
 
         let use_rate_limit_queue = false;
 
-        // TODO use a new stats type:
-        let store_stats = Arc::new(stats::CaConnStats::new());
         let ttls = opts.ttls.clone();
         let insert_worker_opts = InsertWorkerOpts {
             store_workers_rate: Arc::new(AtomicU64::new(20000000)),
             insert_workers_running: Arc::new(AtomicU64::new(0)),
-            insert_frac: Arc::new(AtomicU64::new(1000)),
+            insert_frac: opts.insert_frac.clone(),
+            array_truncate: Arc::new(AtomicU64::new(opts.array_truncate)),
         };
         let insert_worker_opts = Arc::new(insert_worker_opts);
         let insert_workers_jh = scywr::insertworker::spawn_scylla_insert_workers(
@@ -172,6 +173,8 @@ impl Daemon {
             ttls,
         )
         .await?;
+        let stats = Arc::new(DaemonStats::new());
+        stats.insert_worker_spawned().add(insert_workers_jh.len() as _);
 
         #[cfg(feature = "bsread")]
         if let Some(bsaddr) = &opts.test_bsread_addr {
@@ -219,8 +222,9 @@ impl Daemon {
             count_assigned: 0,
             last_status_print: SystemTime::now(),
             insert_workers_jh,
-            stats: Arc::new(DaemonStats::new()),
+            stats,
             insert_worker_stats,
+            series_by_channel_stats,
             shutting_down: false,
             connset_ctrl: conn_set_ctrl,
             connset_status_last: CheckPeriodic::Waiting(Instant::now()),
@@ -516,18 +520,20 @@ impl Daemon {
                 }
             }
         }
-        warn!("TODO wait for insert workers");
         while let Some(jh) = self.insert_workers_jh.pop() {
             match jh.await.map_err(Error::from_string) {
                 Ok(x) => match x {
                     Ok(()) => {
-                        debug!("joined insert worker");
+                        self.stats.insert_worker_join_ok().inc();
+                        // debug!("joined insert worker");
                     }
                     Err(e) => {
+                        self.stats.insert_worker_join_ok_err().inc();
                         error!("joined insert worker, error  {e}");
                     }
                 },
                 Err(e) => {
+                    self.stats.insert_worker_join_err().inc();
                     error!("insert worker join error {e}");
                 }
             }
@@ -556,11 +562,11 @@ pub async fn run(opts: CaIngestOpts, channels: Vec<String>) -> Result<(), Error>
     ingest_linux::signal::set_signal_handler(libc::SIGINT, handler_sigint).map_err(Error::from_string)?;
     ingest_linux::signal::set_signal_handler(libc::SIGTERM, handler_sigterm).map_err(Error::from_string)?;
 
-    let pg = dbpg::conn::make_pg_client(opts.postgresql_config())
+    let (pg, jh) = dbpg::conn::make_pg_client(opts.postgresql_config())
         .await
         .map_err(Error::from_string)?;
-
     dbpg::schema::schema_check(&pg).await.map_err(Error::from_string)?;
+    drop(pg);
 
     scywr::schema::migrate_scylla_data_schema(opts.scylla_config())
         .await
@@ -578,6 +584,8 @@ pub async fn run(opts: CaIngestOpts, channels: Vec<String>) -> Result<(), Error>
         channels.clear();
     }
 
+    let insert_frac = Arc::new(AtomicU64::new(opts.insert_frac()));
+
     let opts2 = DaemonOpts {
         backend: opts.backend().into(),
         local_epics_hostname: opts.local_epics_hostname().into(),
@@ -594,20 +602,26 @@ pub async fn run(opts: CaIngestOpts, channels: Vec<String>) -> Result<(), Error>
         test_bsread_addr: opts.test_bsread_addr.clone(),
         insert_worker_count: opts.insert_worker_count(),
         insert_scylla_sessions: opts.insert_scylla_sessions(),
+        insert_frac: insert_frac.clone(),
     };
     let daemon = Daemon::new(opts2).await?;
     let tx = daemon.tx.clone();
     let daemon_stats = daemon.stats().clone();
     let connset_cmd_tx = daemon.connset_ctrl.sender().clone();
+    let ca_conn_stats = daemon.connset_ctrl.ca_conn_stats().clone();
 
     let (metrics_shutdown_tx, metrics_shutdown_rx) = async_channel::bounded(8);
 
     let dcom = Arc::new(netfetch::metrics::DaemonComm::new(tx.clone()));
     let metrics_jh = {
+        let conn_set_stats = daemon.connset_ctrl.stats().clone();
         let stats_set = StatsSet::new(
             daemon_stats,
-            daemon.connset_ctrl.stats().clone(),
+            conn_set_stats,
+            ca_conn_stats,
             daemon.insert_worker_stats.clone(),
+            daemon.series_by_channel_stats.clone(),
+            insert_frac,
         );
         let fut =
             netfetch::metrics::metrics_service(opts.api_bind(), dcom, connset_cmd_tx, stats_set, metrics_shutdown_rx);
@@ -625,7 +639,7 @@ pub async fn run(opts: CaIngestOpts, channels: Vec<String>) -> Result<(), Error>
             Ok(()) => {}
             Err(_) => break,
         }
-        thr_msg.trigger_fmt("sent ChannelAdd", &[&i as &_]);
+        thr_msg.trigger("sent ChannelAdd", &[&i as &_]);
         i += 1;
     }
     debug!("{} configured channels applied", channels.len());

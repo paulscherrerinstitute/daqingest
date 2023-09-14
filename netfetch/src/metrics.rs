@@ -21,8 +21,10 @@ use stats::CaConnStatsAgg;
 use stats::CaConnStatsAggDiff;
 use stats::DaemonStats;
 use stats::InsertWorkerStats;
+use stats::SeriesByChannelStats;
 use std::collections::HashMap;
 use std::net::SocketAddrV4;
+use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
@@ -31,19 +33,28 @@ use taskrun::tokio;
 pub struct StatsSet {
     daemon: Arc<DaemonStats>,
     ca_conn_set: Arc<CaConnSetStats>,
+    ca_conn: Arc<CaConnStats>,
     insert_worker_stats: Arc<InsertWorkerStats>,
+    series_by_channel_stats: Arc<SeriesByChannelStats>,
+    insert_frac: Arc<AtomicU64>,
 }
 
 impl StatsSet {
     pub fn new(
         daemon: Arc<DaemonStats>,
         ca_conn_set: Arc<CaConnSetStats>,
+        ca_conn: Arc<CaConnStats>,
         insert_worker_stats: Arc<InsertWorkerStats>,
+        series_by_channel_stats: Arc<SeriesByChannelStats>,
+        insert_frac: Arc<AtomicU64>,
     ) -> Self {
         Self {
             daemon,
             ca_conn_set,
+            ca_conn,
             insert_worker_stats,
+            series_by_channel_stats,
+            insert_frac,
         }
     }
 }
@@ -198,8 +209,12 @@ fn make_routes(dcom: Arc<DaemonComm>, connset_cmd_tx: Sender<CaConnSetEvent>, st
                     let mut s1 = stats_set.daemon.prometheus();
                     let s2 = stats_set.ca_conn_set.prometheus();
                     let s3 = stats_set.insert_worker_stats.prometheus();
+                    let s4 = stats_set.ca_conn.prometheus();
+                    let s5 = stats_set.series_by_channel_stats.prometheus();
                     s1.push_str(&s2);
                     s1.push_str(&s3);
+                    s1.push_str(&s4);
+                    s1.push_str(&s5);
                     s1
                 }
             }),
@@ -241,7 +256,7 @@ fn make_routes(dcom: Arc<DaemonComm>, connset_cmd_tx: Sender<CaConnSetEvent>, st
             }),
         )
         .route(
-            "/store_workers_rate",
+            "/daqingest/store_workers_rate",
             get({
                 let dcom = dcom.clone();
                 || async move { axum::Json(123) }
@@ -252,18 +267,20 @@ fn make_routes(dcom: Arc<DaemonComm>, connset_cmd_tx: Sender<CaConnSetEvent>, st
             }),
         )
         .route(
-            "/insert_frac",
+            "/daqingest/insert_frac",
             get({
-                let dcom = dcom.clone();
-                || async move { axum::Json(123) }
+                let insert_frac = stats_set.insert_frac.clone();
+                || async move { axum::Json(insert_frac.load(Ordering::Acquire)) }
             })
             .put({
-                let dcom = dcom.clone();
-                |v: extract::Json<u64>| async move {}
+                let insert_frac = stats_set.insert_frac.clone();
+                |v: extract::Json<u64>| async move {
+                    insert_frac.store(v.0, Ordering::Release);
+                }
             }),
         )
         .route(
-            "/extra_inserts_conf",
+            "/daqingest/extra_inserts_conf",
             get({
                 let dcom = dcom.clone();
                 || async move { axum::Json(serde_json::to_value(&"TODO").unwrap()) }
@@ -274,7 +291,7 @@ fn make_routes(dcom: Arc<DaemonComm>, connset_cmd_tx: Sender<CaConnSetEvent>, st
             }),
         )
         .route(
-            "/insert_ivl_min",
+            "/daqingest/insert_ivl_min",
             put({
                 let dcom = dcom.clone();
                 |v: extract::Json<u64>| async move {}

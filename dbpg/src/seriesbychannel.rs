@@ -108,7 +108,7 @@ impl Worker {
         batch_rx: Receiver<Vec<ChannelInfoQuery>>,
         stats: Arc<SeriesByChannelStats>,
     ) -> Result<Self, Error> {
-        let pg = crate::conn::make_pg_client(db).await?;
+        let (pg, jh) = crate::conn::make_pg_client(db).await?;
         let sql = concat!(
             "with q1 as (select * from unnest($1::text[], $2::text[], $3::int[], $4::text[], $5::int[])",
             " as inp (backend, channel, scalar_type, shape_dims, rid))",
@@ -290,7 +290,8 @@ impl Worker {
 
     async fn work(&mut self) -> Result<(), Error> {
         while let Some(batch) = self.batch_rx.next().await {
-            trace!("worker recv batch  len {}", batch.len());
+            self.stats.recv_batch().inc();
+            self.stats.recv_items().add(batch.len() as _);
             for x in &batch {
                 trace3!(
                     "search for {}  {}  {:?}  {:?}",

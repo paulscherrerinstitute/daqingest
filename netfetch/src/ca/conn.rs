@@ -509,6 +509,7 @@ impl CaConn {
         remote_addr_dbg: SocketAddrV4,
         local_epics_hostname: String,
         channel_info_query_tx: Sender<ChannelInfoQuery>,
+        stats: Arc<CaConnStats>,
     ) -> Self {
         let (cq_tx, cq_rx) = async_channel::bounded(32);
         Self {
@@ -527,7 +528,7 @@ impl CaConn {
             insert_item_queue: VecDeque::new(),
             remote_addr_dbg,
             local_epics_hostname,
-            stats: Arc::new(CaConnStats::new()),
+            stats,
             insert_ivl_min_mus: 1000 * 6,
             conn_command_tx: cq_tx,
             conn_command_rx: cq_rx,
@@ -893,24 +894,27 @@ impl CaConn {
     fn check_channels_alive(&mut self) -> Result<(), Error> {
         let tsnow = Instant::now();
         trace2!("check_channels_alive  {addr:?}", addr = &self.remote_addr_dbg);
-        if self.ioc_ping_last.elapsed() > Duration::from_millis(20000) {
-            if let Some(started) = self.ioc_ping_start {
-                if started.elapsed() > Duration::from_millis(4000) {
-                    warn!("pong timeout {addr:?}", addr = self.remote_addr_dbg);
-                    let item = CaConnEvent {
-                        ts: Instant::now(),
-                        value: CaConnEventValue::EchoTimeout,
-                    };
-                    self.ca_conn_event_out_queue.push_back(item);
-                    self.trigger_shutdown(ChannelStatusClosedReason::IocTimeout);
-                }
-            } else {
-                self.ioc_ping_start = Some(Instant::now());
+        if let Some(started) = self.ioc_ping_start {
+            if started.elapsed() >= Duration::from_millis(4000) {
+                self.stats.pong_timeout().inc();
+                self.ioc_ping_start = None;
+                warn!("pong timeout {addr:?}", addr = self.remote_addr_dbg);
+                let item = CaConnEvent {
+                    ts: tsnow,
+                    value: CaConnEventValue::EchoTimeout,
+                };
+                self.ca_conn_event_out_queue.push_back(item);
+                self.trigger_shutdown(ChannelStatusClosedReason::IocTimeout);
+            }
+        } else {
+            if self.ioc_ping_last.elapsed() > Duration::from_millis(20000) {
                 if let Some(proto) = &mut self.proto {
-                    trace2!("ping to {}", self.remote_addr_dbg);
+                    self.stats.ping_start().inc();
+                    self.ioc_ping_start = Some(Instant::now());
                     let msg = CaMsg { ty: CaMsgTy::Echo };
                     proto.push_out(msg);
                 } else {
+                    self.stats.ping_no_proto().inc();
                     warn!("can not ping {}  no proto", self.remote_addr_dbg);
                     self.trigger_shutdown(ChannelStatusClosedReason::NoProtocol);
                 }
@@ -1057,6 +1061,7 @@ impl CaConn {
         scalar_type: ScalarType,
         shape: Shape,
         ts: u64,
+        ts_local: u64,
         ev: proto::EventAddRes,
         item_queue: &mut VecDeque<QueryItem>,
         ts_msp_last: u64,
@@ -1090,6 +1095,7 @@ impl CaConn {
             shape,
             val: ev.value.data.into(),
             ts_msp_grid,
+            ts_local,
         };
         item_queue.push_back(QueryItem::Insert(item));
         stats.insert_item_create.inc();
@@ -1102,6 +1108,7 @@ impl CaConn {
         scalar_type: ScalarType,
         shape: Shape,
         ts: u64,
+        ts_local: u64,
         ev: proto::EventAddRes,
         tsnow: Instant,
         item_queue: &mut VecDeque<QueryItem>,
@@ -1136,6 +1143,7 @@ impl CaConn {
                     scalar_type.clone(),
                     shape.clone(),
                     ts - 1 - i as u64,
+                    ts_local - 1 - i as u64,
                     ev.clone(),
                     item_queue,
                     ts_msp_last,
@@ -1150,6 +1158,7 @@ impl CaConn {
             scalar_type,
             shape,
             ts,
+            ts_local,
             ev,
             item_queue,
             ts_msp_last,
@@ -1265,6 +1274,7 @@ impl CaConn {
                         scalar_type,
                         shape,
                         ts,
+                        ts_local,
                         ev,
                         tsnow,
                         item_queue,
@@ -1504,16 +1514,28 @@ impl CaConn {
                             }
                             CaMsgTy::AccessRightsRes(_) => {}
                             CaMsgTy::Echo => {
-                                let addr = &self.remote_addr_dbg;
+                                // let addr = &self.remote_addr_dbg;
                                 if let Some(started) = self.ioc_ping_start {
                                     let dt = started.elapsed().as_secs_f32() * 1e3;
-                                    if dt > 50. {
-                                        info!("Received Echo  {dt:10.0}ms  {addr:?}");
-                                    } else if dt > 500. {
-                                        warn!("Received Echo  {dt:10.0}ms  {addr:?}");
+                                    if dt <= 10. {
+                                        self.stats.pong_recv_010ms().inc();
+                                    } else if dt <= 25. {
+                                        self.stats.pong_recv_025ms().inc();
+                                    } else if dt <= 50. {
+                                        self.stats.pong_recv_050ms().inc();
+                                    } else if dt <= 100. {
+                                        self.stats.pong_recv_100ms().inc();
+                                    } else if dt <= 200. {
+                                        self.stats.pong_recv_200ms().inc();
+                                    } else if dt <= 400. {
+                                        self.stats.pong_recv_400ms().inc();
+                                    } else {
+                                        self.stats.pong_recv_slow().inc();
+                                        // warn!("Received Echo  {dt:10.0}ms  {addr:?}");
                                     }
                                 } else {
-                                    info!("Received Echo even though we didn't asked for it  {addr:?}");
+                                    let addr = &self.remote_addr_dbg;
+                                    warn!("Received Echo even though we didn't asked for it  {addr:?}");
                                 }
                                 self.ioc_ping_last = Instant::now();
                                 self.ioc_ping_start = None;
@@ -1786,8 +1808,8 @@ impl Stream for CaConn {
         let poll_ts1 = Instant::now();
         let ret = loop {
             let qlen = self.insert_item_queue.len();
-            if qlen >= 200 {
-                self.thr_msg_poll.trigger_fmt("CaConn::poll_next", &[&qlen]);
+            if qlen > self.opts.insert_queue_max / 3 {
+                self.stats.insert_item_queue_pressure().inc();
             }
             break if let CaConnState::EndOfStream = self.state {
                 Ready(None)

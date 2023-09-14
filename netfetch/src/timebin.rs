@@ -143,7 +143,7 @@ impl ConnTimeBin {
                         trace2!("TODO  setup_event_acc  {:?}  {:?}", scalar_type, shape);
                     }
                     _ => {
-                        warn!("TODO  setup_event_acc  {:?}  {:?}", scalar_type, shape);
+                        trace2!("TODO  setup_event_acc  {:?}  {:?}", scalar_type, shape);
                     }
                 }
             }
@@ -151,12 +151,12 @@ impl ConnTimeBin {
                 //type Cont<T> = EventsDim1<T>;
                 match scalar_type {
                     _ => {
-                        warn!("TODO  setup_event_acc  {:?}  {:?}", scalar_type, shape);
+                        trace2!("TODO  setup_event_acc  {:?}  {:?}", scalar_type, shape);
                     }
                 }
             }
             _ => {
-                warn!("TODO  setup_event_acc  {:?}  {:?}", scalar_type, shape);
+                trace2!("TODO  setup_event_acc  {:?}  {:?}", scalar_type, shape);
             }
         }
         Ok(())

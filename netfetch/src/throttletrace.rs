@@ -18,16 +18,7 @@ impl ThrottleTrace {
         }
     }
 
-    pub fn trigger(&mut self, msg: &str) {
-        self.count += 1;
-        let tsnow = Instant::now();
-        if self.next <= tsnow {
-            self.next = tsnow + self.ivl;
-            debug!("{} (count {})", msg, self.count);
-        }
-    }
-
-    pub fn trigger_fmt(&mut self, msg: &str, params: &[&dyn fmt::Debug]) {
+    pub fn trigger(&mut self, msg: &str, params: &[&dyn fmt::Debug]) {
         self.count += 1;
         let tsnow = Instant::now();
         if self.next <= tsnow {

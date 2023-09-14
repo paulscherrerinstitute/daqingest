@@ -192,6 +192,7 @@ pub struct InsertItem {
     pub scalar_type: ScalarType,
     pub shape: Shape,
     pub val: DataValue,
+    pub ts_local: u64,
 }
 
 #[derive(Debug)]
@@ -326,6 +327,7 @@ struct InsParCom {
     ts_lsp: u64,
     pulse: u64,
     ttl: u32,
+    do_insert: bool,
 }
 
 async fn insert_scalar_gen<ST>(
@@ -345,18 +347,22 @@ where
         val,
         par.ttl as i32,
     );
-    let y = data_store.scy.execute(qu, params).await;
-    match y {
-        Ok(_) => Ok(()),
-        Err(e) => match e {
-            QueryError::TimeoutError => Err(Error::DbTimeout),
-            // TODO use `msg`
-            QueryError::DbError(e, _msg) => match e {
-                DbError::Overloaded => Err(Error::DbOverload),
+    if par.do_insert {
+        let y = data_store.scy.execute(qu, params).await;
+        match y {
+            Ok(_) => Ok(()),
+            Err(e) => match e {
+                QueryError::TimeoutError => Err(Error::DbTimeout),
+                // TODO use `msg`
+                QueryError::DbError(e, _msg) => match e {
+                    DbError::Overloaded => Err(Error::DbOverload),
+                    _ => Err(e.into()),
+                },
                 _ => Err(e.into()),
             },
-            _ => Err(e.into()),
-        },
+        }
+    } else {
+        Ok(())
     }
 }
 
@@ -369,16 +375,20 @@ async fn insert_array_gen<ST>(
 where
     ST: scylla::frame::value::Value,
 {
-    let params = (
-        par.series as i64,
-        par.ts_msp as i64,
-        par.ts_lsp as i64,
-        par.pulse as i64,
-        val,
-        par.ttl as i32,
-    );
-    data_store.scy.execute(qu, params).await?;
-    Ok(())
+    if par.do_insert {
+        let params = (
+            par.series as i64,
+            par.ts_msp as i64,
+            par.ts_lsp as i64,
+            par.pulse as i64,
+            val,
+            par.ttl as i32,
+        );
+        data_store.scy.execute(qu, params).await?;
+        Ok(())
+    } else {
+        Ok(())
+    }
 }
 
 static warn_last: AtomicU64 = AtomicU64::new(0);
@@ -390,6 +400,7 @@ pub async fn insert_item(
     ttl_1d: Duration,
     data_store: &DataStore,
     stats: &InsertWorkerStats,
+    do_insert: bool,
 ) -> Result<(), Error> {
     if item.msp_bump {
         let params = (item.series.id() as i64, item.ts_msp as i64, ttl_index.as_secs() as i32);
@@ -420,6 +431,7 @@ pub async fn insert_item(
                 ts_lsp: item.ts_lsp,
                 pulse: item.pulse,
                 ttl: ttl_0d.as_secs() as _,
+                do_insert,
             };
             use ScalarValue::*;
             match val {
@@ -456,6 +468,7 @@ pub async fn insert_item(
                 ts_lsp: item.ts_lsp,
                 pulse: item.pulse,
                 ttl: ttl_1d.as_secs() as _,
+                do_insert,
             };
             use ArrayValue::*;
             match val {
