@@ -185,7 +185,6 @@ struct CreatedState {
     info_store_msp_last: u32,
 }
 
-#[allow(unused)]
 #[derive(Clone, Debug)]
 enum ChannelState {
     Init(ChannelStatusSeriesId),
@@ -393,14 +392,30 @@ impl ConnCommand {
 }
 
 #[derive(Debug)]
+pub struct CheckHealthResult {
+    pub channel_statuses: BTreeMap<String, ChannelStateInfo>,
+}
+
+#[derive(Debug)]
 pub enum ConnCommandResultKind {
-    CheckHealth,
+    CheckHealth(CheckHealthResult),
 }
 
 #[derive(Debug)]
 pub struct ConnCommandResult {
     pub id: usize,
     pub kind: ConnCommandResultKind,
+}
+
+impl ConnCommandResult {
+    pub fn id(&self) -> usize {
+        self.id
+    }
+
+    fn make_id() -> usize {
+        static ID: AtomicUsize = AtomicUsize::new(0);
+        ID.fetch_add(1, atomic::Ordering::AcqRel)
+    }
 }
 
 #[derive(Debug)]
@@ -562,12 +577,20 @@ impl CaConn {
             }
         }
         // TODO return the result
+        let mut channel_statuses = BTreeMap::new();
+        for (k, v) in self.channels.iter() {
+            let name = self
+                .name_by_cid(*k)
+                .map_or_else(|| format!("{k:?}"), ToString::to_string);
+            let info = v.to_info(name.clone(), self.remote_addr_dbg);
+            channel_statuses.insert(name, info);
+        }
+        let health = CheckHealthResult { channel_statuses };
         let res = ConnCommandResult {
-            id: 0,
-            kind: ConnCommandResultKind::CheckHealth,
+            id: ConnCommandResult::make_id(),
+            kind: ConnCommandResultKind::CheckHealth(health),
         };
         self.cmd_res_queue.push_back(res);
-        //self.stats.caconn_command_can_not_reply.inc();
     }
 
     fn cmd_find_channel(&self, pattern: &str) {
@@ -869,7 +892,7 @@ impl CaConn {
 
     fn check_channels_alive(&mut self) -> Result<(), Error> {
         let tsnow = Instant::now();
-        trace!("check_channels_alive  {addr:?}", addr = &self.remote_addr_dbg);
+        trace2!("check_channels_alive  {addr:?}", addr = &self.remote_addr_dbg);
         if self.ioc_ping_last.elapsed() > Duration::from_millis(20000) {
             if let Some(started) = self.ioc_ping_start {
                 if started.elapsed() > Duration::from_millis(4000) {
@@ -884,7 +907,7 @@ impl CaConn {
             } else {
                 self.ioc_ping_start = Some(Instant::now());
                 if let Some(proto) = &mut self.proto {
-                    debug!("ping to {}", self.remote_addr_dbg);
+                    trace2!("ping to {}", self.remote_addr_dbg);
                     let msg = CaMsg { ty: CaMsgTy::Echo };
                     proto.push_out(msg);
                 } else {
@@ -1762,7 +1785,10 @@ impl Stream for CaConn {
         self.stats.caconn_poll_count.inc();
         let poll_ts1 = Instant::now();
         let ret = loop {
-            self.thr_msg_poll.trigger("CaConn::poll_next");
+            let qlen = self.insert_item_queue.len();
+            if qlen >= 200 {
+                self.thr_msg_poll.trigger_fmt("CaConn::poll_next", &[&qlen]);
+            }
             break if let CaConnState::EndOfStream = self.state {
                 Ready(None)
             } else if let Err(e) = self.as_mut().handle_own_ticker(cx) {

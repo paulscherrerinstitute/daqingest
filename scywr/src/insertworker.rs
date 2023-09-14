@@ -11,6 +11,7 @@ use netpod::timeunits::MS;
 use netpod::timeunits::SEC;
 use netpod::ScyllaConfig;
 use stats::CaConnStats;
+use stats::InsertWorkerStats;
 use std::sync::atomic;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
@@ -20,26 +21,26 @@ use std::time::Instant;
 use taskrun::tokio;
 use taskrun::tokio::task::JoinHandle;
 
-fn stats_inc_for_err(stats: &stats::CaConnStats, err: &crate::iteminsertqueue::Error) {
+fn stats_inc_for_err(stats: &stats::InsertWorkerStats, err: &crate::iteminsertqueue::Error) {
     use crate::iteminsertqueue::Error;
     match err {
         Error::DbOverload => {
-            stats.store_worker_insert_overload.inc();
+            stats.db_overload().inc();
         }
         Error::DbTimeout => {
-            stats.store_worker_insert_timeout.inc();
+            stats.db_timeout().inc();
         }
         Error::DbUnavailable => {
-            stats.store_worker_insert_unavailable.inc();
+            stats.db_unavailable().inc();
         }
         Error::DbError(e) => {
             if false {
                 warn!("db error {e}");
             }
-            stats.store_worker_insert_error.inc();
+            stats.db_error().inc();
         }
         Error::QueryError(_) => {
-            stats.store_worker_insert_error.inc();
+            stats.query_error().inc();
         }
     }
 }
@@ -75,7 +76,7 @@ async fn rate_limiter_worker(
     rate: Arc<AtomicU64>,
     inp: Receiver<QueryItem>,
     tx: Sender<QueryItem>,
-    stats: Arc<stats::CaConnStats>,
+    stats: Arc<stats::InsertWorkerStats>,
 ) {
     let mut ts_forward_last = Instant::now();
     let mut ivl_ema = stats::Ema64::with_k(0.00001);
@@ -103,7 +104,7 @@ async fn rate_limiter_worker(
         let ivl2 = Duration::from_nanos(ema2.ema() as u64);
         if allowed_to_drop && ivl2 < dt_min {
             //tokio::time::sleep_until(ts_recv_last.checked_add(dt_min).unwrap().into()).await;
-            stats.store_worker_ratelimit_drop.inc();
+            stats.ratelimit_drop().inc();
         } else {
             if tx.send(item).await.is_err() {
                 break;
@@ -113,7 +114,7 @@ async fn rate_limiter_worker(
                 let dt_ns = SEC * dt.as_secs() + dt.subsec_nanos() as u64;
                 ivl_ema.update(dt_ns.min(MS * 100) as f32);
                 ts_forward_last = tsnow;
-                stats.inter_ivl_ema.set(ivl_ema.ema() as u64);
+                // stats.inter_ivl_ema.set(ivl_ema.ema() as u64);
             }
         }
     }
@@ -123,7 +124,7 @@ async fn rate_limiter_worker(
 fn rate_limiter(
     inp: Receiver<QueryItem>,
     opts: Arc<InsertWorkerOpts>,
-    stats: Arc<stats::CaConnStats>,
+    stats: Arc<stats::InsertWorkerStats>,
 ) -> Receiver<QueryItem> {
     let (tx, rx) = async_channel::bounded(inp.capacity().unwrap_or(256));
     tokio::spawn(rate_limiter_worker(opts.store_workers_rate.clone(), inp, tx, stats));
@@ -136,7 +137,7 @@ async fn worker(
     ttls: Ttls,
     insert_worker_opts: Arc<InsertWorkerOpts>,
     data_store: Arc<DataStore>,
-    stats: Arc<CaConnStats>,
+    stats: Arc<InsertWorkerStats>,
 ) -> Result<(), Error> {
     insert_worker_opts
         .insert_workers_running
@@ -146,7 +147,7 @@ async fn worker(
     let mut i1 = 0;
     loop {
         let item = if let Ok(item) = item_inp.recv().await {
-            stats.store_worker_item_recv.inc();
+            stats.item_recv.inc();
             item
         } else {
             break;
@@ -155,7 +156,7 @@ async fn worker(
             QueryItem::ConnectionStatus(item) => {
                 match insert_connection_status(item, ttls.index, &data_store, &stats).await {
                     Ok(_) => {
-                        stats.connection_status_insert_done.inc();
+                        stats.inserted_connection_status().inc();
                         backoff = backoff_0;
                     }
                     Err(e) => {
@@ -167,7 +168,7 @@ async fn worker(
             QueryItem::ChannelStatus(item) => {
                 match insert_channel_status(item, ttls.index, &data_store, &stats).await {
                     Ok(_) => {
-                        stats.channel_status_insert_done.inc();
+                        stats.inserted_channel_status().inc();
                         backoff = backoff_0;
                     }
                     Err(e) => {
@@ -177,22 +178,26 @@ async fn worker(
                 }
             }
             QueryItem::Insert(item) => {
-                let insert_frac = insert_worker_opts.insert_frac.load(Ordering::Acquire);
-                if i1 % 1000 < insert_frac {
-                    match insert_item(item, ttls.index, ttls.d0, ttls.d1, &data_store, &stats).await {
-                        Ok(_) => {
-                            stats.store_worker_insert_done.inc();
-                            backoff = backoff_0;
-                        }
-                        Err(e) => {
-                            stats_inc_for_err(&stats, &e);
-                            back_off_sleep(&mut backoff).await;
-                        }
-                    }
+                if true {
+                    stats.inserted_values().inc();
                 } else {
-                    stats.store_worker_fraction_drop.inc();
+                    let insert_frac = insert_worker_opts.insert_frac.load(Ordering::Acquire);
+                    if i1 % 1000 < insert_frac {
+                        match insert_item(item, ttls.index, ttls.d0, ttls.d1, &data_store, &stats).await {
+                            Ok(_) => {
+                                stats.inserted_values().inc();
+                                backoff = backoff_0;
+                            }
+                            Err(e) => {
+                                stats_inc_for_err(&stats, &e);
+                                back_off_sleep(&mut backoff).await;
+                            }
+                        }
+                    } else {
+                        stats.fraction_drop().inc();
+                    }
+                    i1 += 1;
                 }
-                i1 += 1;
             }
             QueryItem::Mute(item) => {
                 let values = (
@@ -206,7 +211,7 @@ async fn worker(
                 let qres = data_store.scy.execute(&data_store.qu_insert_muted, values).await;
                 match qres {
                     Ok(_) => {
-                        stats.mute_insert_done.inc();
+                        stats.inserted_mute().inc();
                         backoff = backoff_0;
                     }
                     Err(e) => {
@@ -230,7 +235,7 @@ async fn worker(
                     .await;
                 match qres {
                     Ok(_) => {
-                        stats.ivl_insert_done.inc();
+                        stats.inserted_interval().inc();
                         backoff = backoff_0;
                     }
                     Err(e) => {
@@ -252,7 +257,7 @@ async fn worker(
                 let qres = data_store.scy.execute(&data_store.qu_insert_channel_ping, params).await;
                 match qres {
                     Ok(_) => {
-                        stats.channel_info_insert_done.inc();
+                        stats.inserted_channel_info().inc();
                         backoff = backoff_0;
                     }
                     Err(e) => {
@@ -281,7 +286,7 @@ async fn worker(
                     .await;
                 match qres {
                     Ok(_) => {
-                        stats.store_worker_insert_binned_done.inc();
+                        stats.inserted_binned().inc();
                         backoff = backoff_0;
                     }
                     Err(e) => {
@@ -305,7 +310,7 @@ pub async fn spawn_scylla_insert_workers(
     insert_worker_count: usize,
     item_inp: Receiver<QueryItem>,
     insert_worker_opts: Arc<InsertWorkerOpts>,
-    store_stats: Arc<stats::CaConnStats>,
+    store_stats: Arc<stats::InsertWorkerStats>,
     use_rate_limit_queue: bool,
     ttls: Ttls,
 ) -> Result<Vec<JoinHandle<Result<(), Error>>>, Error> {

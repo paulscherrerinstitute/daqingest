@@ -139,6 +139,9 @@ impl ConnTimeBin {
                         self.tick_fn = Box::new(tick::<ST>);
                         self.did_setup = true;
                     }
+                    STRING => {
+                        trace2!("TODO  setup_event_acc  {:?}  {:?}", scalar_type, shape);
+                    }
                     _ => {
                         warn!("TODO  setup_event_acc  {:?}  {:?}", scalar_type, shape);
                     }

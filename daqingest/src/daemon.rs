@@ -27,6 +27,8 @@ use serde::Serialize;
 use series::ChannelStatusSeriesId;
 use series::SeriesId;
 use stats::DaemonStats;
+use stats::InsertWorkerStats;
+use stats::SeriesByChannelStats;
 use std::collections::BTreeMap;
 use std::collections::VecDeque;
 use std::net::SocketAddr;
@@ -87,8 +89,8 @@ pub struct Daemon {
     last_status_print: SystemTime,
     insert_workers_jh: Vec<JoinHandle<Result<(), Error>>>,
     stats: Arc<DaemonStats>,
+    insert_worker_stats: Arc<InsertWorkerStats>,
     shutting_down: bool,
-    insert_rx_weak: WeakReceiver<QueryItem>,
     connset_ctrl: CaConnSetCtrl,
     connset_status_last: CheckPeriodic,
     // TODO should be a stats object?
@@ -100,10 +102,14 @@ impl Daemon {
     pub async fn new(opts: DaemonOpts) -> Result<Self, Error> {
         let (daemon_ev_tx, daemon_ev_rx) = async_channel::bounded(32);
 
+        let series_by_channel_stats = Arc::new(SeriesByChannelStats::new());
+        let insert_worker_stats = Arc::new(InsertWorkerStats::new());
+
         // TODO keep join handles and await later
-        let (channel_info_query_tx, jhs, jh) = dbpg::seriesbychannel::start_lookup_workers(4, &opts.pgconf)
-            .await
-            .map_err(|e| Error::with_msg_no_trace(e.to_string()))?;
+        let (channel_info_query_tx, jhs, jh) =
+            dbpg::seriesbychannel::start_lookup_workers(4, &opts.pgconf, series_by_channel_stats)
+                .await
+                .map_err(|e| Error::with_msg_no_trace(e.to_string()))?;
 
         let (query_item_tx, query_item_rx) = async_channel::bounded(opts.insert_item_queue_cap);
         let query_item_tx_weak = query_item_tx.downgrade();
@@ -159,9 +165,9 @@ impl Daemon {
             opts.scyconf.clone(),
             opts.insert_scylla_sessions,
             opts.insert_worker_count,
-            query_item_rx.clone(),
+            query_item_rx,
             insert_worker_opts,
-            store_stats.clone(),
+            insert_worker_stats.clone(),
             use_rate_limit_queue,
             ttls,
         )
@@ -214,8 +220,8 @@ impl Daemon {
             last_status_print: SystemTime::now(),
             insert_workers_jh,
             stats: Arc::new(DaemonStats::new()),
+            insert_worker_stats,
             shutting_down: false,
-            insert_rx_weak: query_item_rx.downgrade(),
             connset_ctrl: conn_set_ctrl,
             connset_status_last: CheckPeriodic::Waiting(Instant::now()),
             insert_workers_running: AtomicU64::new(0),
@@ -231,7 +237,7 @@ impl Daemon {
     async fn check_caconn_chans(&mut self, ts1: Instant) -> Result<(), Error> {
         match &self.connset_status_last {
             CheckPeriodic::Waiting(since) => {
-                if *since + Duration::from_millis(2000) < ts1 {
+                if *since + Duration::from_millis(5000) < ts1 {
                     debug!("========================================   issue health check CaConn");
                     self.connset_ctrl.check_health().await?;
                     self.connset_status_last = CheckPeriodic::Ongoing(ts1);
@@ -242,7 +248,7 @@ impl Daemon {
             }
             CheckPeriodic::Ongoing(since) => {
                 let dt = ts1.saturating_duration_since(*since);
-                if dt > Duration::from_millis(4000) {
+                if dt > Duration::from_millis(2000) {
                     error!("========================================   CaConnSet has not reported health status  since {:.0}", dt.as_secs_f32() * 1e3);
                 }
             }
@@ -254,7 +260,7 @@ impl Daemon {
         if self.shutting_down {
             let nworkers = self.insert_workers_running.load(atomic::Ordering::Acquire);
             let nitems = self
-                .insert_rx_weak
+                .query_item_tx_weak
                 .upgrade()
                 .map(|x| (x.sender_count(), x.receiver_count(), x.len()));
             info!("qu senders A  nworkers {}  nitems {:?}", nworkers, nitems);
@@ -592,13 +598,19 @@ pub async fn run(opts: CaIngestOpts, channels: Vec<String>) -> Result<(), Error>
     let daemon = Daemon::new(opts2).await?;
     let tx = daemon.tx.clone();
     let daemon_stats = daemon.stats().clone();
+    let connset_cmd_tx = daemon.connset_ctrl.sender().clone();
 
     let (metrics_shutdown_tx, metrics_shutdown_rx) = async_channel::bounded(8);
 
     let dcom = Arc::new(netfetch::metrics::DaemonComm::new(tx.clone()));
     let metrics_jh = {
-        let stats_set = StatsSet::new(daemon_stats);
-        let fut = netfetch::metrics::metrics_service(opts.api_bind(), dcom, stats_set, metrics_shutdown_rx);
+        let stats_set = StatsSet::new(
+            daemon_stats,
+            daemon.connset_ctrl.stats().clone(),
+            daemon.insert_worker_stats.clone(),
+        );
+        let fut =
+            netfetch::metrics::metrics_service(opts.api_bind(), dcom, connset_cmd_tx, stats_set, metrics_shutdown_rx);
         tokio::task::spawn(fut)
     };
 
@@ -615,9 +627,6 @@ pub async fn run(opts: CaIngestOpts, channels: Vec<String>) -> Result<(), Error>
         }
         thr_msg.trigger_fmt("sent ChannelAdd", &[&i as &_]);
         i += 1;
-        // if i % 100 == 0 {
-        //     debug!("sent {} ChannelAdd", i);
-        // }
     }
     debug!("{} configured channels applied", channels.len());
     daemon_jh.await.map_err(|e| Error::with_msg_no_trace(e.to_string()))??;

@@ -33,23 +33,20 @@ impl CaConnState {
     }
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub enum ConnectionStateValue {
     Unconnected,
-    Connected {
-        //#[serde(with = "serde_Instant")]
-        since: SystemTime,
-    },
+    Connected,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ConnectionState {
     //#[serde(with = "serde_Instant")]
     pub updated: SystemTime,
     pub value: ConnectionStateValue,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub enum WithAddressState {
     Unassigned {
         //#[serde(with = "serde_Instant")]
@@ -58,7 +55,7 @@ pub enum WithAddressState {
     Assigned(ConnectionState),
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub enum WithStatusSeriesIdStateInner {
     UnknownAddress {
         since: SystemTime,
@@ -76,12 +73,12 @@ pub enum WithStatusSeriesIdStateInner {
     },
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct WithStatusSeriesIdState {
     pub inner: WithStatusSeriesIdStateInner,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug, Clone, Serialize)]
 pub enum ActiveChannelState {
     Init {
         since: SystemTime,
@@ -95,18 +92,18 @@ pub enum ActiveChannelState {
     },
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Serialize)]
 pub enum ChannelStateValue {
     Active(ActiveChannelState),
     ToRemove { addr: Option<SocketAddrV4> },
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ChannelState {
     pub value: ChannelStateValue,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ChannelStateMap {
     map: BTreeMap<Channel, ChannelState>,
 }

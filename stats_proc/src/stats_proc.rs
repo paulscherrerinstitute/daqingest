@@ -101,14 +101,14 @@ fn stats_struct_impl(st: &StatsStructDef) -> String {
         }
         for x in &st.values {
             let n = x.to_string();
-            let nn = if let Some(pre) = &st.prefix {
-                format!("{pre}_{n}")
+            let pre = if let Some(x) = &st.prefix {
+                format!("_{}", x)
             } else {
-                n.to_string()
+                String::new()
             };
             buf.push_str(&format!(
-                "ret.push_str(&format!(\"daqingest_{} {{}}\\n\", self.{}.load()));\n",
-                nn, n
+                "ret.push_str(&format!(\"daqingest{}_{} {{}}\\n\", self.{}.load()));\n",
+                pre, n, n
             ));
         }
         format!(

@@ -1,3 +1,8 @@
+use crate::ca::conn::ChannelStateInfo;
+use crate::ca::connset::CaConnSetEvent;
+use crate::ca::connset::ChannelStatusesRequest;
+use crate::ca::connset::ChannelStatusesResponse;
+use crate::ca::connset::ConnSetCmd;
 use crate::ca::METRICS;
 use crate::daemon_common::DaemonEvent;
 use async_channel::Receiver;
@@ -10,10 +15,12 @@ use log::*;
 use scywr::iteminsertqueue::QueryItem;
 use serde::Deserialize;
 use serde::Serialize;
+use stats::CaConnSetStats;
 use stats::CaConnStats;
 use stats::CaConnStatsAgg;
 use stats::CaConnStatsAggDiff;
 use stats::DaemonStats;
+use stats::InsertWorkerStats;
 use std::collections::HashMap;
 use std::net::SocketAddrV4;
 use std::sync::atomic::Ordering;
@@ -23,11 +30,21 @@ use taskrun::tokio;
 
 pub struct StatsSet {
     daemon: Arc<DaemonStats>,
+    ca_conn_set: Arc<CaConnSetStats>,
+    insert_worker_stats: Arc<InsertWorkerStats>,
 }
 
 impl StatsSet {
-    pub fn new(daemon: Arc<DaemonStats>) -> Self {
-        Self { daemon }
+    pub fn new(
+        daemon: Arc<DaemonStats>,
+        ca_conn_set: Arc<CaConnSetStats>,
+        insert_worker_stats: Arc<InsertWorkerStats>,
+    ) -> Self {
+        Self {
+            daemon,
+            ca_conn_set,
+            insert_worker_stats,
+        }
     }
 }
 
@@ -102,13 +119,28 @@ async fn channel_state(params: HashMap<String, String>, dcom: Arc<DaemonComm>) -
     axum::Json(false)
 }
 
-async fn channel_states(
-    params: HashMap<String, String>,
-    dcom: Arc<DaemonComm>,
-) -> axum::Json<Vec<crate::ca::conn::ChannelStateInfo>> {
-    let limit = params.get("limit").map(|x| x.parse()).unwrap_or(Ok(40)).unwrap_or(40);
-    error!("TODO channel_state");
-    axum::Json(Vec::new())
+// axum::Json<ChannelStatusesResponse>
+async fn channel_states(params: HashMap<String, String>, tx: Sender<CaConnSetEvent>) -> String {
+    let limit = params
+        .get("limit")
+        .map(|x| x.parse().ok())
+        .unwrap_or(None)
+        .unwrap_or(40);
+    let (tx2, rx2) = async_channel::bounded(1);
+    let req = ChannelStatusesRequest { tx: tx2 };
+    let item = CaConnSetEvent::ConnSetCmd(ConnSetCmd::ChannelStatuses(req));
+    // TODO handle error
+    tx.send(item).await;
+    let res = rx2.recv().await.unwrap();
+    match serde_json::to_string(&res) {
+        Ok(x) => x,
+        Err(e) => {
+            error!("Serialize error {e}");
+            Err::<(), _>(e).unwrap();
+            panic!();
+        }
+    }
+    // axum::Json(res)
 }
 
 async fn extra_inserts_conf_set(v: ExtraInsertsConf, dcom: Arc<DaemonComm>) -> axum::Json<bool> {
@@ -136,7 +168,7 @@ impl DaemonComm {
     }
 }
 
-fn make_routes(dcom: Arc<DaemonComm>, stats_set: StatsSet) -> axum::Router {
+fn make_routes(dcom: Arc<DaemonComm>, connset_cmd_tx: Sender<CaConnSetEvent>, stats_set: StatsSet) -> axum::Router {
     use axum::extract;
     use axum::routing::get;
     use axum::routing::put;
@@ -162,8 +194,12 @@ fn make_routes(dcom: Arc<DaemonComm>, stats_set: StatsSet) -> axum::Router {
             get({
                 //
                 || async move {
-                    info!("metrics");
-                    let s1 = stats_set.daemon.prometheus();
+                    debug!("metrics");
+                    let mut s1 = stats_set.daemon.prometheus();
+                    let s2 = stats_set.ca_conn_set.prometheus();
+                    let s3 = stats_set.insert_worker_stats.prometheus();
+                    s1.push_str(&s2);
+                    s1.push_str(&s3);
                     s1
                 }
             }),
@@ -186,7 +222,8 @@ fn make_routes(dcom: Arc<DaemonComm>, stats_set: StatsSet) -> axum::Router {
             "/daqingest/channel/states",
             get({
                 let dcom = dcom.clone();
-                |Query(params): Query<HashMap<String, String>>| channel_states(params, dcom)
+                let tx = connset_cmd_tx.clone();
+                |Query(params): Query<HashMap<String, String>>| channel_states(params, tx)
             }),
         )
         .route(
@@ -248,11 +285,12 @@ fn make_routes(dcom: Arc<DaemonComm>, stats_set: StatsSet) -> axum::Router {
 pub async fn metrics_service(
     bind_to: String,
     dcom: Arc<DaemonComm>,
+    connset_cmd_tx: Sender<CaConnSetEvent>,
     stats_set: StatsSet,
     shutdown_signal: Receiver<u32>,
 ) {
     let addr = bind_to.parse().unwrap();
-    let router = make_routes(dcom, stats_set).into_make_service();
+    let router = make_routes(dcom, connset_cmd_tx, stats_set).into_make_service();
     axum::Server::bind(&addr)
         .serve(router)
         .with_graceful_shutdown(async move {

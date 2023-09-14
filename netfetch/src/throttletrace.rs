@@ -36,6 +36,11 @@ impl ThrottleTrace {
                 debug!("{}  {:?}  (count {})", msg, params[0], self.count);
             } else if params.len() == 2 {
                 debug!("{}  {:?}  {:?}  (count {})", msg, params[0], params[1], self.count);
+            } else if params.len() == 3 {
+                debug!(
+                    "{}  {:?}  {:?}  {:?}  (count {})",
+                    msg, params[0], params[1], params[2], self.count
+                );
             } else {
                 debug!("{}  (count {})", msg, self.count);
             }

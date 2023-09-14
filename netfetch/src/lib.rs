@@ -2,7 +2,6 @@ pub mod ca;
 pub mod conf;
 pub mod daemon_common;
 pub mod errconv;
-pub mod insertworker;
 pub mod linuxhelper;
 pub mod metrics;
 pub mod netbuf;

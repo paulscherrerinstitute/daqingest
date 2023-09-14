@@ -10,7 +10,9 @@ use md5::Digest;
 use netpod::Database;
 use series::series::Existence;
 use series::SeriesId;
+use stats::SeriesByChannelStats;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
 use taskrun::tokio;
@@ -97,10 +99,15 @@ struct Worker {
     qu_select: PgStatement,
     qu_insert: PgStatement,
     batch_rx: Receiver<Vec<ChannelInfoQuery>>,
+    stats: Arc<SeriesByChannelStats>,
 }
 
 impl Worker {
-    async fn new(db: &Database, batch_rx: Receiver<Vec<ChannelInfoQuery>>) -> Result<Self, Error> {
+    async fn new(
+        db: &Database,
+        batch_rx: Receiver<Vec<ChannelInfoQuery>>,
+        stats: Arc<SeriesByChannelStats>,
+    ) -> Result<Self, Error> {
         let pg = crate::conn::make_pg_client(db).await?;
         let sql = concat!(
             "with q1 as (select * from unnest($1::text[], $2::text[], $3::int[], $4::text[], $5::int[])",
@@ -125,6 +132,7 @@ impl Worker {
             qu_select,
             qu_insert,
             batch_rx,
+            stats,
         };
         Ok(ret)
     }
@@ -319,16 +327,14 @@ impl Worker {
                     channel: r.channel,
                     series: r.series,
                 };
-                trace3!("try to send result for  {:?}", item);
+                // trace3!("try to send result for  {:?}", item);
                 let fut = r.tx.make_send(Ok(item));
-                match tokio::time::timeout(Duration::from_millis(2000), fut).await {
-                    Ok(Ok(())) => {}
-                    Ok(Err(_e)) => {
-                        warn!("can not deliver result");
-                        return Err(Error::ChannelError);
-                    }
-                    Err(_) => {
-                        debug!("timeout can not deliver result");
+                match fut.await {
+                    Ok(()) => {}
+                    Err(_e) => {
+                        //warn!("can not deliver result");
+                        // return Err(Error::ChannelError);
+                        self.stats.res_tx_fail.inc();
                     }
                 }
             }
@@ -341,6 +347,7 @@ impl Worker {
 pub async fn start_lookup_workers(
     worker_count: usize,
     db: &Database,
+    stats: Arc<SeriesByChannelStats>,
 ) -> Result<
     (
         Sender<ChannelInfoQuery>,
@@ -356,7 +363,7 @@ pub async fn start_lookup_workers(
     let (batch_rx, bjh) = batchtools::batcher::batch(inp_cap, timeout, batch_out_cap, query_rx);
     let mut jhs = Vec::new();
     for _ in 0..worker_count {
-        let mut worker = Worker::new(db, batch_rx.clone()).await?;
+        let mut worker = Worker::new(db, batch_rx.clone(), stats.clone()).await?;
         let jh = tokio::task::spawn(async move { worker.work().await });
         jhs.push(jh);
     }

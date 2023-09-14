@@ -13,6 +13,7 @@ use scylla::transport::errors::DbError;
 use scylla::transport::errors::QueryError;
 use series::SeriesId;
 use stats::CaConnStats;
+use stats::InsertWorkerStats;
 use std::net::SocketAddrV4;
 use std::sync::atomic;
 use std::sync::atomic::AtomicU64;
@@ -388,12 +389,12 @@ pub async fn insert_item(
     ttl_0d: Duration,
     ttl_1d: Duration,
     data_store: &DataStore,
-    stats: &CaConnStats,
+    stats: &InsertWorkerStats,
 ) -> Result<(), Error> {
     if item.msp_bump {
         let params = (item.series.id() as i64, item.ts_msp as i64, ttl_index.as_secs() as i32);
         data_store.scy.execute(&data_store.qu_insert_ts_msp, params).await?;
-        stats.inserts_msp.inc();
+        stats.inserts_msp().inc();
     }
     if let Some(ts_msp_grid) = item.ts_msp_grid {
         let params = (
@@ -408,7 +409,7 @@ pub async fn insert_item(
             .scy
             .execute(&data_store.qu_insert_series_by_ts_msp, params)
             .await?;
-        stats.inserts_msp_grid.inc();
+        stats.inserts_msp_grid().inc();
     }
     use DataValue::*;
     match item.val {
@@ -467,7 +468,7 @@ pub async fn insert_item(
             }
         }
     }
-    stats.inserts_val.inc();
+    stats.inserts_value().inc();
     Ok(())
 }
 
@@ -475,7 +476,7 @@ pub async fn insert_connection_status(
     item: ConnectionStatusItem,
     ttl: Duration,
     data_store: &DataStore,
-    _stats: &CaConnStats,
+    _stats: &InsertWorkerStats,
 ) -> Result<(), Error> {
     let tsunix = item.ts.duration_since(std::time::UNIX_EPOCH).unwrap_or(Duration::ZERO);
     let secs = tsunix.as_secs() * netpod::timeunits::SEC;
@@ -497,7 +498,7 @@ pub async fn insert_channel_status(
     item: ChannelStatusItem,
     ttl: Duration,
     data_store: &DataStore,
-    _stats: &CaConnStats,
+    _stats: &InsertWorkerStats,
 ) -> Result<(), Error> {
     let tsunix = item.ts.duration_since(std::time::UNIX_EPOCH).unwrap_or(Duration::ZERO);
     let secs = tsunix.as_secs() * netpod::timeunits::SEC;
