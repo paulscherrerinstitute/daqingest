@@ -15,7 +15,6 @@ use crate::ca::statemap::WithAddressState;
 use crate::daemon_common::Channel;
 use crate::errconv::ErrConv;
 use crate::rt::JoinHandle;
-use crate::rt::TokMx;
 use crate::senderpolling::SenderPolling;
 use crate::throttletrace::ThrottleTrace;
 use async_channel::Receiver;
@@ -152,14 +151,32 @@ pub struct ChannelRemove {
     name: String,
 }
 
+pub struct ChannelStatusRequest {
+    pub tx: Sender<ChannelStatusResponse>,
+}
+
 #[derive(Debug, Clone, Serialize)]
-pub struct ChannelStatusesResponse {
+pub struct ChannelStatusResponse {
     pub channels_ca_conn: BTreeMap<String, ChannelStateInfo>,
     pub channels_ca_conn_set: BTreeMap<String, ChannelState>,
 }
 
+impl fmt::Debug for ChannelStatusRequest {
+    fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+        fmt.debug_struct("ChannelStatusesRequest").finish()
+    }
+}
+
 pub struct ChannelStatusesRequest {
+    pub name: String,
+    pub limit: u64,
     pub tx: Sender<ChannelStatusesResponse>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ChannelStatusesResponse {
+    pub channels_ca_conn: BTreeMap<String, ChannelStateInfo>,
+    pub channels_ca_conn_set: BTreeMap<String, ChannelState>,
 }
 
 impl fmt::Debug for ChannelStatusesRequest {
@@ -418,7 +435,7 @@ impl CaConnSet {
     fn handle_ca_conn_event(&mut self, addr: SocketAddr, ev: CaConnEvent) -> Result<(), Error> {
         match ev.value {
             CaConnEventValue::None => Ok(()),
-            CaConnEventValue::EchoTimeout => todo!(),
+            CaConnEventValue::EchoTimeout => Ok(()),
             CaConnEventValue::ConnCommandResult(x) => self.handle_conn_command_result(addr, x),
             CaConnEventValue::QueryItem(item) => {
                 self.storage_insert_queue.push_back(item);
@@ -645,14 +662,23 @@ impl CaConnSet {
             return Ok(());
         }
         debug!("handle_channel_statuses_req");
+        let reg1 = regex::Regex::new(&req.name)?;
+        let channels_ca_conn = self
+            .ca_conn_channel_states
+            .iter()
+            .filter(|x| reg1.is_match(x.0))
+            .map(|(k, v)| (k.to_string(), v.clone()))
+            .collect();
+        let channels_ca_conn_set = self
+            .channel_states
+            .inner()
+            .iter()
+            .filter(|(k, v)| reg1.is_match(k.id()))
+            .map(|(k, v)| (k.id().to_string(), v.clone()))
+            .collect();
         let item = ChannelStatusesResponse {
-            channels_ca_conn: self.ca_conn_channel_states.clone(),
-            channels_ca_conn_set: self
-                .channel_states
-                .inner()
-                .iter()
-                .map(|(k, v)| (k.id().to_string(), v.clone()))
-                .collect(),
+            channels_ca_conn,
+            channels_ca_conn_set,
         };
         if req.tx.try_send(item).is_err() {
             self.stats.response_tx_fail.inc();
@@ -737,6 +763,7 @@ impl CaConnSet {
             add.backend.clone(),
             addr_v4,
             add.local_epics_hostname,
+            self.storage_insert_tx.clone(),
             self.channel_info_query_tx.clone(),
             self.ca_conn_stats.clone(),
         );
@@ -895,19 +922,6 @@ impl CaConnSet {
             };
         }
         Ok(())
-    }
-
-    async fn conn_remove(
-        ca_conn_ress: &TokMx<BTreeMap<SocketAddrV4, CaConnRes>>,
-        addr: SocketAddrV4,
-    ) -> Result<bool, Error> {
-        // TODO make this lock-free.
-        //warn!("Lock for conn_remove");
-        if let Some(_caconn) = ca_conn_ress.lock().await.remove(&addr) {
-            Ok(true)
-        } else {
-            Ok(false)
-        }
     }
 
     fn check_connection_states(&mut self) -> Result<(), Error> {

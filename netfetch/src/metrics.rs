@@ -3,7 +3,6 @@ use crate::ca::connset::CaConnSetEvent;
 use crate::ca::connset::ChannelStatusesRequest;
 use crate::ca::connset::ChannelStatusesResponse;
 use crate::ca::connset::ConnSetCmd;
-use crate::ca::METRICS;
 use crate::daemon_common::DaemonEvent;
 use async_channel::Receiver;
 use async_channel::Sender;
@@ -124,34 +123,39 @@ async fn channel_remove(params: HashMap<String, String>, dcom: Arc<DaemonComm>) 
     Json(Value::Bool(false))
 }
 
-async fn channel_state(params: HashMap<String, String>, dcom: Arc<DaemonComm>) -> axum::Json<bool> {
-    let name = params.get("name").map_or(String::new(), |x| x.clone()).to_string();
-    error!("TODO channel_state");
-    axum::Json(false)
+async fn channel_state(
+    params: HashMap<String, String>,
+    tx: Sender<CaConnSetEvent>,
+) -> axum::Json<ChannelStatusesResponse> {
+    panic!("TODO");
 }
 
 // axum::Json<ChannelStatusesResponse>
-async fn channel_states(params: HashMap<String, String>, tx: Sender<CaConnSetEvent>) -> String {
+async fn channel_states(
+    params: HashMap<String, String>,
+    tx: Sender<CaConnSetEvent>,
+) -> axum::Json<ChannelStatusesResponse> {
+    let name = params.get("name").map_or(String::new(), |x| x.clone()).to_string();
     let limit = params
         .get("limit")
         .map(|x| x.parse().ok())
         .unwrap_or(None)
         .unwrap_or(40);
     let (tx2, rx2) = async_channel::bounded(1);
-    let req = ChannelStatusesRequest { tx: tx2 };
+    let req = ChannelStatusesRequest { name, limit, tx: tx2 };
     let item = CaConnSetEvent::ConnSetCmd(ConnSetCmd::ChannelStatuses(req));
     // TODO handle error
     tx.send(item).await;
     let res = rx2.recv().await.unwrap();
-    match serde_json::to_string(&res) {
-        Ok(x) => x,
-        Err(e) => {
-            error!("Serialize error {e}");
-            Err::<(), _>(e).unwrap();
-            panic!();
-        }
-    }
-    // axum::Json(res)
+    // match serde_json::to_string(&res) {
+    //     Ok(x) => x,
+    //     Err(e) => {
+    //         error!("Serialize error {e}");
+    //         Err::<(), _>(e).unwrap();
+    //         panic!();
+    //     }
+    // }
+    axum::Json(res)
 }
 
 async fn extra_inserts_conf_set(v: ExtraInsertsConf, dcom: Arc<DaemonComm>) -> axum::Json<bool> {
@@ -229,14 +233,15 @@ fn make_routes(dcom: Arc<DaemonComm>, connset_cmd_tx: Sender<CaConnSetEvent>, st
         .route(
             "/daqingest/channel/state",
             get({
-                let dcom = dcom.clone();
-                |Query(params): Query<HashMap<String, String>>| channel_state(params, dcom)
+                // let dcom = dcom.clone();
+                let tx = connset_cmd_tx.clone();
+                |Query(params): Query<HashMap<String, String>>| channel_state(params, tx)
             }),
         )
         .route(
             "/daqingest/channel/states",
             get({
-                let dcom = dcom.clone();
+                // let dcom = dcom.clone();
                 let tx = connset_cmd_tx.clone();
                 |Query(params): Query<HashMap<String, String>>| channel_states(params, tx)
             }),
@@ -349,11 +354,14 @@ pub async fn metrics_agg_task(
             let nitems = query_item_chn.upgrade().map_or(0, |x| x.len());
             agg.store_worker_recv_queue_len.__set(nitems as u64);
         }
-        let mut m = METRICS.lock().unwrap();
-        *m = Some(agg.clone());
-        if false {
-            let diff = CaConnStatsAggDiff::diff_from(&agg_last, &agg);
-            info!("{}", diff.display());
+        #[cfg(DISABLED)]
+        {
+            let mut m = METRICS.lock().unwrap();
+            *m = Some(agg.clone());
+            if false {
+                let diff = CaConnStatsAggDiff::diff_from(&agg_last, &agg);
+                info!("{}", diff.display());
+            }
         }
         agg_last = agg;
     }

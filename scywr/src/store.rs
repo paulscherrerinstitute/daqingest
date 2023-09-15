@@ -22,12 +22,15 @@ pub struct DataStore {
     pub qu_insert_scalar_i8: Arc<PreparedStatement>,
     pub qu_insert_scalar_i16: Arc<PreparedStatement>,
     pub qu_insert_scalar_i32: Arc<PreparedStatement>,
+    pub qu_insert_scalar_i64: Arc<PreparedStatement>,
     pub qu_insert_scalar_f32: Arc<PreparedStatement>,
     pub qu_insert_scalar_f64: Arc<PreparedStatement>,
+    pub qu_insert_scalar_bool: Arc<PreparedStatement>,
     pub qu_insert_scalar_string: Arc<PreparedStatement>,
     pub qu_insert_array_i8: Arc<PreparedStatement>,
     pub qu_insert_array_i16: Arc<PreparedStatement>,
     pub qu_insert_array_i32: Arc<PreparedStatement>,
+    pub qu_insert_array_i64: Arc<PreparedStatement>,
     pub qu_insert_array_f32: Arc<PreparedStatement>,
     pub qu_insert_array_f64: Arc<PreparedStatement>,
     pub qu_insert_array_bool: Arc<PreparedStatement>,
@@ -81,6 +84,11 @@ impl DataStore {
         let qu_insert_scalar_i32 = Arc::new(q);
 
         let cql =
+            "insert into events_scalar_i64 (series, ts_msp, ts_lsp, pulse, value) values (?, ?, ?, ?, ?) using ttl ?";
+        let q = scy.prepare(cql).await?;
+        let qu_insert_scalar_i64 = Arc::new(q);
+
+        let cql =
             "insert into events_scalar_f32 (series, ts_msp, ts_lsp, pulse, value) values (?, ?, ?, ?, ?) using ttl ?";
         let q = scy.prepare(cql).await?;
         let qu_insert_scalar_f32 = Arc::new(q);
@@ -89,6 +97,11 @@ impl DataStore {
             "insert into events_scalar_f64 (series, ts_msp, ts_lsp, pulse, value) values (?, ?, ?, ?, ?) using ttl ?";
         let q = scy.prepare(cql).await?;
         let qu_insert_scalar_f64 = Arc::new(q);
+
+        let cql =
+            "insert into events_scalar_bool (series, ts_msp, ts_lsp, pulse, value) values (?, ?, ?, ?, ?) using ttl ?";
+        let q = scy.prepare(cql).await?;
+        let qu_insert_scalar_bool = Arc::new(q);
 
         let cql="insert into events_scalar_string (series, ts_msp, ts_lsp, pulse, value) values (?, ?, ?, ?, ?) using ttl ?";
         let q = scy.prepare(cql).await?;
@@ -109,6 +122,11 @@ impl DataStore {
             "insert into events_array_i32 (series, ts_msp, ts_lsp, pulse, value) values (?, ?, ?, ?, ?) using ttl ?";
         let q = scy.prepare(cql).await?;
         let qu_insert_array_i32 = Arc::new(q);
+
+        let cql =
+            "insert into events_array_i64 (series, ts_msp, ts_lsp, pulse, value) values (?, ?, ?, ?, ?) using ttl ?";
+        let q = scy.prepare(cql).await?;
+        let qu_insert_array_i64 = Arc::new(q);
 
         let cql =
             "insert into events_array_f32 (series, ts_msp, ts_lsp, pulse, value) values (?, ?, ?, ?, ?) using ttl ?";
@@ -169,12 +187,15 @@ impl DataStore {
             qu_insert_scalar_i8,
             qu_insert_scalar_i16,
             qu_insert_scalar_i32,
+            qu_insert_scalar_i64,
             qu_insert_scalar_f32,
             qu_insert_scalar_f64,
+            qu_insert_scalar_bool,
             qu_insert_scalar_string,
             qu_insert_array_i8,
             qu_insert_array_i16,
             qu_insert_array_i32,
+            qu_insert_array_i64,
             qu_insert_array_f32,
             qu_insert_array_f64,
             qu_insert_array_bool,

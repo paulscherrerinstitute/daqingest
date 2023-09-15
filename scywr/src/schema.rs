@@ -207,13 +207,40 @@ impl GenTwcsTab {
     }
 }
 
+fn table_param_compaction(compaction_window_size: Duration) -> String {
+    table_param_compaction_twcs(compaction_window_size)
+}
+
+#[allow(unused)]
+fn table_param_compaction_stcs() -> String {
+    format!(concat!(
+        "{{ 'class': 'SizeTieredCompactionStrategy'",
+        // ", 'min_sstable_size': 200",
+        // ", 'max_threshold': 10",
+        " }}"
+    ))
+}
+
+#[allow(unused)]
+fn table_param_compaction_twcs(compaction_window_size: Duration) -> String {
+    format!(
+        concat!(
+            "{{ 'class': 'TimeWindowCompactionStrategy'",
+            ", 'compaction_window_unit': 'HOURS'",
+            ", 'compaction_window_size': {}",
+            " }}"
+        ),
+        compaction_window_size.as_secs() / 60 / 60
+    )
+}
+
 struct EvTabDim0 {
     sty: String,
     cqlsty: String,
     // SCYLLA_TTL_EVENTS_DIM0
-    default_time_to_live: usize,
+    default_time_to_live: Duration,
     // TWCS_WINDOW_0D
-    compaction_window_size: usize,
+    compaction_window_size: Duration,
 }
 
 impl EvTabDim0 {
@@ -223,14 +250,13 @@ impl EvTabDim0 {
 
     fn cql_create(&self) -> String {
         use std::fmt::Write;
+        let ttl = self.default_time_to_live.as_secs();
+        let compaction = table_param_compaction(self.compaction_window_size);
         let mut s = String::new();
         write!(s, "create table {}", self.name()).unwrap();
         write!(s, " (series bigint, ts_msp bigint, ts_lsp bigint, pulse bigint, value {}, primary key ((series, ts_msp), ts_lsp))", self.cqlsty).unwrap();
-        write!(s, " with default_time_to_live = {}", self.default_time_to_live).unwrap();
-        s.write_str(" and compaction = { 'class': 'TimeWindowCompactionStrategy', 'compaction_window_unit': 'HOURS'")
-            .unwrap();
-        write!(s, ", 'compaction_window_size': {}", self.compaction_window_size).unwrap();
-        s.write_str(" }").unwrap();
+        write!(s, " with default_time_to_live = {}", ttl).unwrap();
+        write!(s, " and compaction = {}", compaction).unwrap();
         s
     }
 }
@@ -239,9 +265,9 @@ struct EvTabDim1 {
     sty: String,
     cqlsty: String,
     // SCYLLA_TTL_EVENTS_DIM1
-    default_time_to_live: usize,
+    default_time_to_live: Duration,
     // TWCS_WINDOW_1D
-    compaction_window_size: usize,
+    compaction_window_size: Duration,
 }
 
 impl EvTabDim1 {
@@ -252,13 +278,12 @@ impl EvTabDim1 {
     fn cql(&self) -> String {
         use std::fmt::Write;
         let mut s = String::new();
+        let ttl = self.default_time_to_live.as_secs();
+        let compaction = table_param_compaction(self.compaction_window_size);
         write!(s, "create table {}", self.name()).unwrap();
         write!(s, " (series bigint, ts_msp bigint, ts_lsp bigint, pulse bigint, value {}, primary key ((series, ts_msp), ts_lsp))", self.cqlsty).unwrap();
-        write!(s, " with default_time_to_live = {}", self.default_time_to_live).unwrap();
-        s.write_str(" and compaction = { 'class': 'TimeWindowCompactionStrategy', 'compaction_window_unit': 'HOURS'")
-            .unwrap();
-        write!(s, ", 'compaction_window_size': {}", self.compaction_window_size).unwrap();
-        s.write_str(" }").unwrap();
+        write!(s, " with default_time_to_live = {}", ttl).unwrap();
+        write!(s, " and compaction = {}", compaction).unwrap();
         s
     }
 }
@@ -294,8 +319,8 @@ async fn check_event_tables(scy: &ScySession) -> Result<(), Error> {
             sty: sty.into(),
             cqlsty: cqlsty.into(),
             // ttl is set in actual data inserts
-            default_time_to_live: 60 * 60 * 1,
-            compaction_window_size: 48,
+            default_time_to_live: dhours(1),
+            compaction_window_size: dhours(48),
         };
         if !has_table(&desc.name(), scy).await? {
             scy.query(desc.cql_create(), ()).await?;
@@ -304,8 +329,8 @@ async fn check_event_tables(scy: &ScySession) -> Result<(), Error> {
             sty: sty.into(),
             cqlsty: format!("frozen<list<{}>>", cqlsty),
             // ttl is set in actual data inserts
-            default_time_to_live: 60 * 60 * 1,
-            compaction_window_size: 12,
+            default_time_to_live: dhours(1),
+            compaction_window_size: dhours(12),
         };
         if !check_table_readable(&desc.name(), scy).await? {
             scy.query(desc.cql(), ()).await?;
@@ -319,8 +344,16 @@ pub async fn migrate_scylla_data_schema(scyconf: &ScyllaConfig) -> Result<(), Er
     let scy = &scy2;
 
     if !has_keyspace(&scyconf.keyspace, scy).await? {
-        let rf = 2;
-        let cql = format!("create keyspace {} with replication = {{ 'class': 'SimpleStrategy', 'replication_factor': {} }} and durable_writes = true;", scyconf.keyspace, rf);
+        let replication = 2;
+        let durable = false;
+        let cql = format!(
+            concat!(
+                "create keyspace {}",
+                " with replication = {{ 'class': 'SimpleStrategy', 'replication_factor': {} }}",
+                " and durable_writes = {};"
+            ),
+            scyconf.keyspace, replication, durable
+        );
         scy.query_iter(cql, ()).await?;
         info!("keyspace created");
     }

@@ -2,6 +2,7 @@ use crate::daemon::PRINT_ACTIVE_INTERVAL;
 use async_channel::Receiver;
 use async_channel::Sender;
 use log::*;
+use netpod::ScalarType;
 use netpod::Shape;
 use scywr::iteminsertqueue::QueryItem;
 use std::collections::BTreeMap;
@@ -30,16 +31,18 @@ pub async fn active_channel_insert_hook_worker(rx: Receiver<QueryItem>, tx: Send
                     Shape::Wave(_) => 1,
                     Shape::Image(_, _) => 2,
                 };
-                histo
-                    .entry(item.series.clone())
-                    .and_modify(|(c, msp, lsp, pulse, _shape_kind)| {
-                        *c += 1;
-                        *msp = item.ts_msp;
-                        *lsp = item.ts_lsp;
-                        *pulse = item.pulse;
-                        // TODO should check that shape_kind stays the same.
-                    })
-                    .or_insert((0 as usize, item.ts_msp, item.ts_lsp, item.pulse, shape_kind));
+                if let ScalarType::STRING = item.scalar_type {
+                    histo
+                        .entry(item.series.clone())
+                        .and_modify(|(c, msp, lsp, pulse, _shape_kind)| {
+                            *c += 1;
+                            *msp = item.ts_msp;
+                            *lsp = item.ts_lsp;
+                            *pulse = item.pulse;
+                            // TODO should check that shape_kind stays the same.
+                        })
+                        .or_insert((0 as usize, item.ts_msp, item.ts_lsp, item.pulse, shape_kind));
+                }
             }
             _ => {}
         }
@@ -75,7 +78,7 @@ pub async fn active_channel_insert_hook_worker(rx: Receiver<QueryItem>, tx: Send
 }
 
 pub fn active_channel_insert_hook(inp: Receiver<QueryItem>) -> Receiver<QueryItem> {
-    let (tx, rx) = async_channel::bounded(256);
+    let (tx, rx) = async_channel::bounded(inp.capacity().unwrap_or(256));
     tokio::spawn(active_channel_insert_hook_worker(inp, tx));
     rx
 }

@@ -8,30 +8,17 @@ pub mod search;
 pub mod statemap;
 
 use crate::metrics::ExtraInsertsConf;
-use crate::rt::TokMx;
 use futures_util::Future;
 use futures_util::FutureExt;
 use log::*;
-use netpod::Database;
-use scywr::insertworker::InsertWorkerOpts;
-use scywr::store::DataStore;
-use stats::CaConnStatsAgg;
 use std::pin::Pin;
 use std::sync::atomic::AtomicU32;
-use std::sync::atomic::AtomicU64;
-use std::sync::atomic::Ordering;
-use std::sync::Arc;
-use std::sync::Mutex;
 use std::task::Poll;
 use std::time::Duration;
 use std::time::Instant;
 use taskrun::tokio;
 
 pub static SIGINT: AtomicU32 = AtomicU32::new(0);
-
-lazy_static::lazy_static! {
-    pub static ref METRICS: Mutex<Option<CaConnStatsAgg>> = Mutex::new(None);
-}
 
 pub trait SlowWarnable {
     fn slow_warn(self, ms: u64) -> SlowWarn<Pin<Box<Self>>>
@@ -117,9 +104,4 @@ where
             }
         }
     }
-}
-
-fn handler_sigaction(_a: libc::c_int, _b: *const libc::siginfo_t, _c: *const libc::c_void) {
-    crate::ca::SIGINT.store(1, Ordering::Release);
-    let _ = ingest_linux::signal::unset_signal_handler(libc::SIGINT);
 }

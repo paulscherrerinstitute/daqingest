@@ -453,6 +453,13 @@ pub struct CaConnOpts {
     array_truncate: usize,
 }
 
+impl CaConnOpts {
+    pub fn with_insert_queue_max(mut self, val: usize) -> Self {
+        self.insert_queue_max = val;
+        self
+    }
+}
+
 impl Default for CaConnOpts {
     fn default() -> Self {
         Self {
@@ -488,6 +495,7 @@ pub struct CaConn {
     extra_inserts_conf: ExtraInsertsConf,
     ioc_ping_last: Instant,
     ioc_ping_start: Option<Instant>,
+    storage_insert_sender: SenderPolling<QueryItem>,
     cmd_res_queue: VecDeque<ConnCommandResult>,
     ca_conn_event_out_queue: VecDeque<CaConnEvent>,
     channel_info_query_queue: VecDeque<ChannelInfoQuery>,
@@ -508,6 +516,7 @@ impl CaConn {
         backend: String,
         remote_addr_dbg: SocketAddrV4,
         local_epics_hostname: String,
+        storage_insert_tx: Sender<QueryItem>,
         channel_info_query_tx: Sender<ChannelInfoQuery>,
         stats: Arc<CaConnStats>,
     ) -> Self {
@@ -538,6 +547,7 @@ impl CaConn {
             extra_inserts_conf: ExtraInsertsConf::new(),
             ioc_ping_last: Instant::now(),
             ioc_ping_start: None,
+            storage_insert_sender: SenderPolling::new(storage_insert_tx),
             cmd_res_queue: VecDeque::new(),
             ca_conn_event_out_queue: VecDeque::new(),
             channel_info_query_queue: VecDeque::new(),
@@ -710,47 +720,45 @@ impl CaConn {
         Ok(())
     }
 
-    fn handle_conn_command(&mut self, cx: &mut Context) -> Poll<Option<Result<(), Error>>> {
+    fn handle_conn_command(&mut self, cx: &mut Context) -> Result<Poll<Option<()>>, Error> {
         // TODO if this loops for too long time, yield and make sure we get wake up again.
         use Poll::*;
-        loop {
-            self.stats.caconn_loop3_count.inc();
-            break if self.is_shutdown() {
-                Ready(None)
-            } else {
-                match self.conn_command_rx.poll_next_unpin(cx) {
-                    Ready(Some(a)) => {
-                        trace3!("handle_conn_command received a command  {}", self.remote_addr_dbg);
-                        match a.kind {
-                            ConnCommandKind::ChannelAdd(name, cssid) => {
-                                self.cmd_channel_add(name, cssid);
-                                Ready(Some(Ok(())))
-                            }
-                            ConnCommandKind::ChannelRemove(name) => {
-                                self.cmd_channel_remove(name);
-                                Ready(Some(Ok(())))
-                            }
-                            ConnCommandKind::CheckHealth => {
-                                self.cmd_check_health();
-                                Ready(Some(Ok(())))
-                            }
-                            ConnCommandKind::Shutdown => {
-                                self.cmd_shutdown();
-                                Ready(Some(Ok(())))
-                            }
-                            ConnCommandKind::SeriesLookupResult(x) => match self.handle_series_lookup_result(x) {
-                                Ok(()) => Ready(Some(Ok(()))),
-                                Err(e) => Ready(Some(Err(e))),
-                            },
+        self.stats.caconn_loop3_count.inc();
+        if self.is_shutdown() {
+            Ok(Ready(None))
+        } else {
+            match self.conn_command_rx.poll_next_unpin(cx) {
+                Ready(Some(a)) => {
+                    trace3!("handle_conn_command received a command  {}", self.remote_addr_dbg);
+                    match a.kind {
+                        ConnCommandKind::ChannelAdd(name, cssid) => {
+                            self.cmd_channel_add(name, cssid);
+                            Ok(Ready(Some(())))
                         }
+                        ConnCommandKind::ChannelRemove(name) => {
+                            self.cmd_channel_remove(name);
+                            Ok(Ready(Some(())))
+                        }
+                        ConnCommandKind::CheckHealth => {
+                            self.cmd_check_health();
+                            Ok(Ready(Some(())))
+                        }
+                        ConnCommandKind::Shutdown => {
+                            self.cmd_shutdown();
+                            Ok(Ready(Some(())))
+                        }
+                        ConnCommandKind::SeriesLookupResult(x) => match self.handle_series_lookup_result(x) {
+                            Ok(()) => Ok(Ready(Some(()))),
+                            Err(e) => Err(e),
+                        },
                     }
-                    Ready(None) => {
-                        error!("Command queue closed");
-                        Ready(None)
-                    }
-                    Pending => Pending,
                 }
-            };
+                Ready(None) => {
+                    error!("Command queue closed");
+                    Ok(Ready(None))
+                }
+                Pending => Ok(Pending),
+            }
         }
     }
 
@@ -1708,30 +1716,38 @@ impl CaConn {
 
     fn loop_inner(&mut self, cx: &mut Context) -> Result<Poll<Option<()>>, Error> {
         use Poll::*;
-        loop {
+        let mut have_progress = false;
+        for _ in 0..64 {
             self.stats.caconn_loop2_count.inc();
-            break if self.is_shutdown() {
-                Ok(Ready(None))
+            if self.is_shutdown() {
+                break;
             } else if self.insert_item_queue.len() >= self.opts.insert_queue_max {
-                warn!("=======================================================   queue stall");
-                Ok(Ready(None))
+                break;
             } else {
                 match self.handle_conn_state(cx) {
                     Ok(x) => match x {
-                        Ready(Some(())) => continue,
+                        Ready(Some(())) => {
+                            have_progress = true;
+                            continue;
+                        }
                         Ready(None) => {
                             error!("handle_conn_state yields {x:?}");
-                            Err(Error::with_msg_no_trace("logic error"))
+                            return Err(Error::with_msg_no_trace("logic error"));
                         }
-                        Pending => Ok(Pending),
+                        Pending => return Ok(Pending),
                     },
-                    Err(e) => Err(e),
+                    Err(e) => return Err(e),
                 }
             };
         }
+        if have_progress {
+            Ok(Ready(Some(())))
+        } else {
+            Ok(Ready(None))
+        }
     }
 
-    fn handle_own_ticker(mut self: Pin<&mut Self>, cx: &mut Context) -> Result<(), Error> {
+    fn handle_own_ticker(mut self: Pin<&mut Self>, cx: &mut Context) -> Result<Poll<()>, Error> {
         use Poll::*;
         match self.ticker.poll_unpin(cx) {
             Ready(()) => {
@@ -1742,7 +1758,7 @@ impl CaConn {
                             let _ = self.ticker.poll_unpin(cx);
                             // cx.waker().wake_by_ref();
                         }
-                        Ok(())
+                        Ok(Pending)
                     }
                     Err(e) => {
                         error!("handle_own_ticker {e}");
@@ -1751,7 +1767,7 @@ impl CaConn {
                     }
                 }
             }
-            Pending => Ok(()),
+            Pending => Ok(Pending),
         }
     }
 
@@ -1773,28 +1789,56 @@ impl CaConn {
         true
     }
 
-    fn attempt_flush_channel_info_query(mut self: Pin<&mut Self>, cx: &mut Context) -> Result<(), Error> {
+    fn attempt_flush_storage_queue(mut self: Pin<&mut Self>, cx: &mut Context) -> Result<Poll<Option<()>>, Error> {
         use Poll::*;
-        loop {
-            break if self.is_shutdown() {
-                Ok(())
-            } else {
-                let sd = &mut self.channel_info_query_sending;
-                if sd.is_sending() {
-                    match sd.poll_unpin(cx) {
-                        Ready(Ok(())) => continue,
-                        Ready(Err(_)) => Err(Error::with_msg_no_trace("can not send into channel")),
-                        Pending => Ok(()),
+        let mut have_progress = false;
+        for _ in 0..128 {
+            let sd = &mut self.storage_insert_sender;
+            if sd.is_idle() {
+                if let Some(item) = self.insert_item_queue.pop_front() {
+                    self.storage_insert_sender.send(item);
+                }
+            }
+            if self.storage_insert_sender.is_sending() {
+                match self.storage_insert_sender.poll_unpin(cx) {
+                    Ready(Ok(())) => {
+                        have_progress = true;
                     }
-                } else if let Some(item) = self.channel_info_query_queue.pop_front() {
+                    Ready(Err(_)) => return Err(Error::with_msg_no_trace("can not send into channel")),
+                    Pending => return Ok(Pending),
+                }
+            }
+        }
+        if have_progress {
+            Ok(Ready(Some(())))
+        } else {
+            Ok(Ready(None))
+        }
+    }
+
+    fn attempt_flush_channel_info_query(mut self: Pin<&mut Self>, cx: &mut Context) -> Result<Poll<Option<()>>, Error> {
+        use Poll::*;
+        if self.is_shutdown() {
+            Ok(Ready(None))
+        } else {
+            let sd = &mut self.channel_info_query_sending;
+            if sd.is_idle() {
+                if let Some(item) = self.channel_info_query_queue.pop_front() {
                     trace3!("send series query {item:?}");
                     let sd = &mut self.channel_info_query_sending;
                     sd.send(item);
-                    continue;
-                } else {
-                    Ok(())
                 }
-            };
+            }
+            let sd = &mut self.channel_info_query_sending;
+            if sd.is_sending() {
+                match sd.poll_unpin(cx) {
+                    Ready(Ok(())) => Ok(Ready(Some(()))),
+                    Ready(Err(_)) => Err(Error::with_msg_no_trace("can not send into channel")),
+                    Pending => Ok(Pending),
+                }
+            } else {
+                Ok(Ready(None))
+            }
         }
     }
 }
@@ -1806,62 +1850,129 @@ impl Stream for CaConn {
         use Poll::*;
         self.stats.caconn_poll_count.inc();
         let poll_ts1 = Instant::now();
+        self.stats.ca_conn_poll_fn_begin().inc();
         let ret = loop {
+            self.stats.ca_conn_poll_loop_begin().inc();
             let qlen = self.insert_item_queue.len();
-            if qlen > self.opts.insert_queue_max / 3 {
+            if qlen >= self.opts.insert_queue_max * 2 / 3 {
                 self.stats.insert_item_queue_pressure().inc();
+            } else if qlen >= self.opts.insert_queue_max {
+                self.stats.insert_item_queue_full().inc();
             }
-            break if let CaConnState::EndOfStream = self.state {
-                Ready(None)
-            } else if let Err(e) = self.as_mut().handle_own_ticker(cx) {
-                Ready(Some(Err(e)))
-            } else if let Some(item) = self.cmd_res_queue.pop_front() {
+
+            let mut have_pending = false;
+            let mut have_progress = false;
+
+            if let CaConnState::EndOfStream = self.state {
+                break Ready(None);
+            }
+            if let Some(item) = self.cmd_res_queue.pop_front() {
                 let item = CaConnEvent {
                     ts: Instant::now(),
                     value: CaConnEventValue::ConnCommandResult(item),
                 };
-                Ready(Some(Ok(item)))
-            } else if let Some(item) = self.ca_conn_event_out_queue.pop_front() {
-                Ready(Some(Ok(item)))
-            } else if let Some(item) = self.insert_item_queue.pop_front() {
-                let ev = CaConnEvent {
-                    ts: Instant::now(),
-                    value: CaConnEventValue::QueryItem(item),
-                };
-                Ready(Some(Ok(ev)))
-            } else if let Err(e) = self.as_mut().attempt_flush_channel_info_query(cx) {
-                Ready(Some(Err(e)))
-            } else if let Ready(Some(Err(e))) = self.as_mut().handle_conn_command(cx) {
-                Ready(Some(Err(e)))
-            } else {
-                match self.loop_inner(cx) {
-                    Ok(Ready(Some(()))) => continue,
-                    Ok(Ready(None)) => {
-                        // Ready(_) => self.stats.conn_stream_ready.inc(),
-                        // Pending => self.stats.conn_stream_pending.inc(),
-                        let _item = CaConnEvent {
-                            ts: Instant::now(),
-                            value: CaConnEventValue::None,
-                        };
-                        if self.is_shutdown() {
-                            if self.queues_async_out_flushed() == false {
-                                debug!("shutdown, but async queues not flushed");
-                                continue;
-                            } else {
-                                debug!("end of stream {}", self.remote_addr_dbg);
-                                self.state = CaConnState::EndOfStream;
-                                Ready(None)
-                            }
-                        } else {
-                            continue;
-                        }
-                    }
-                    Ok(Pending) => Pending,
-                    Err(e) => {
-                        error!("{e}");
-                        self.state = CaConnState::EndOfStream;
+                break Ready(Some(Ok(item)));
+            }
+            if let Some(item) = self.ca_conn_event_out_queue.pop_front() {
+                break Ready(Some(Ok(item)));
+            }
+            // if let Some(item) = self.insert_item_queue.pop_front() {
+            //     let ev = CaConnEvent {
+            //         ts: Instant::now(),
+            //         value: CaConnEventValue::QueryItem(item),
+            //     };
+            //     break Ready(Some(Ok(ev)));
+            // }
+
+            match self.as_mut().handle_own_ticker(cx) {
+                Ok(Ready(())) => {
+                    have_progress = true;
+                }
+                Ok(Pending) => {
+                    have_pending = true;
+                }
+                Err(e) => break Ready(Some(Err(e))),
+            }
+
+            match self.as_mut().attempt_flush_storage_queue(cx) {
+                Ok(Ready(Some(()))) => {
+                    have_progress = true;
+                }
+                Ok(Ready(None)) => {}
+                Ok(Pending) => {
+                    have_pending = true;
+                }
+                Err(e) => break Ready(Some(Err(e))),
+            }
+
+            match self.as_mut().attempt_flush_channel_info_query(cx) {
+                Ok(Ready(Some(()))) => {
+                    have_progress = true;
+                }
+                Ok(Ready(None)) => {}
+                Ok(Pending) => {
+                    have_pending = true;
+                }
+                Err(e) => break Ready(Some(Err(e))),
+            }
+
+            match self.as_mut().handle_conn_command(cx) {
+                Ok(Ready(Some(()))) => {
+                    have_progress = true;
+                }
+                Ok(Ready(None)) => {}
+                Ok(Pending) => {
+                    have_pending = true;
+                }
+                Err(e) => break Ready(Some(Err(e))),
+            }
+
+            match self.loop_inner(cx) {
+                Ok(Ready(Some(()))) => {
+                    have_progress = true;
+                }
+                Ok(Ready(None)) => {}
+                Ok(Pending) => {
+                    have_pending = true;
+                }
+                Err(e) => {
+                    error!("{e}");
+                    self.state = CaConnState::EndOfStream;
+                    break Ready(Some(Err(e)));
+                }
+            }
+
+            break if self.is_shutdown() {
+                if self.queues_async_out_flushed() {
+                    debug!("end of stream {}", self.remote_addr_dbg);
+                    self.state = CaConnState::EndOfStream;
+                    Ready(None)
+                } else {
+                    if have_progress {
+                        self.stats.ca_conn_poll_reloop().inc();
+                        continue;
+                    } else if have_pending {
+                        self.stats.ca_conn_poll_pending().inc();
+                        Pending
+                    } else {
+                        // TODO error
+                        error!("logic error");
+                        self.stats.logic_error().inc();
+                        let e = Error::with_msg_no_trace("shutdown, not done, no progress, no pending");
                         Ready(Some(Err(e)))
                     }
+                }
+            } else {
+                if have_progress {
+                    self.stats.ca_conn_poll_reloop().inc();
+                    continue;
+                } else if have_pending {
+                    self.stats.ca_conn_poll_pending().inc();
+                    Pending
+                } else {
+                    self.stats.ca_conn_poll_no_progress_no_pending().inc();
+                    let e = Error::with_msg_no_trace("no progress no pending");
+                    Ready(Some(Err(e)))
                 }
             };
         };

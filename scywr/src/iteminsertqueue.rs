@@ -1,25 +1,17 @@
 pub use netpod::CONNECTION_STATUS_DIV;
 
 use crate::store::DataStore;
-use async_channel::Receiver;
-use async_channel::Sender;
 use err::thiserror;
 use err::ThisError;
-use log::*;
 use netpod::ScalarType;
 use netpod::Shape;
 use scylla::prepared_statement::PreparedStatement;
 use scylla::transport::errors::DbError;
 use scylla::transport::errors::QueryError;
 use series::SeriesId;
-use stats::CaConnStats;
 use stats::InsertWorkerStats;
 use std::net::SocketAddrV4;
-use std::sync::atomic;
-use std::sync::atomic::AtomicU64;
-use std::sync::Mutex;
 use std::time::Duration;
-use std::time::Instant;
 use std::time::SystemTime;
 
 #[derive(Debug, ThisError)]
@@ -244,83 +236,6 @@ pub enum QueryItem {
     TimeBinPatchSimpleF32(TimeBinPatchSimpleF32),
 }
 
-pub struct CommonInsertItemQueueSender {
-    sender: Sender<QueryItem>,
-}
-
-impl CommonInsertItemQueueSender {
-    #[inline(always)]
-    pub fn send(&self, k: QueryItem) -> async_channel::Send<QueryItem> {
-        self.sender.send(k)
-    }
-
-    #[inline(always)]
-    pub fn is_full(&self) -> bool {
-        self.sender.is_full()
-    }
-
-    pub fn inner(&self) -> &Sender<QueryItem> {
-        &self.sender
-    }
-}
-
-pub struct CommonInsertItemQueue {
-    sender: Mutex<Option<Sender<QueryItem>>>,
-    recv: Receiver<QueryItem>,
-}
-
-impl CommonInsertItemQueue {
-    pub fn new(cap: usize) -> Self {
-        let (tx, rx) = async_channel::bounded(cap);
-        Self {
-            sender: Mutex::new(Some(tx)),
-            recv: rx,
-        }
-    }
-
-    pub fn from_tx_rx(tx: Sender<QueryItem>, rx: Receiver<QueryItem>) -> Self {
-        Self {
-            sender: Mutex::new(Some(tx)),
-            recv: rx,
-        }
-    }
-
-    pub fn sender(&self) -> Option<CommonInsertItemQueueSender> {
-        match self.sender.lock().unwrap().as_ref() {
-            Some(sender) => {
-                let ret = CommonInsertItemQueueSender { sender: sender.clone() };
-                Some(ret)
-            }
-            None => None,
-        }
-    }
-
-    pub fn receiver(&self) -> Option<Receiver<QueryItem>> {
-        let ret = self.recv.clone();
-        Some(ret)
-    }
-
-    pub fn sender_count(&self) -> Option<usize> {
-        self.sender.lock().unwrap().as_ref().map(|x| x.sender_count())
-    }
-
-    pub fn sender_count_2(&self) -> usize {
-        self.recv.sender_count()
-    }
-
-    pub fn receiver_count(&self) -> usize {
-        self.recv.receiver_count()
-    }
-
-    pub fn close(&self) {
-        self.sender.lock().unwrap().as_ref().map(|x| x.close());
-    }
-
-    pub fn drop_sender(&self) {
-        self.sender.lock().unwrap().take();
-    }
-}
-
 struct InsParCom {
     series: u64,
     ts_msp: u64,
@@ -384,14 +299,23 @@ where
             val,
             par.ttl as i32,
         );
-        data_store.scy.execute(qu, params).await?;
-        Ok(())
+        let y = data_store.scy.execute(qu, params).await;
+        match y {
+            Ok(_) => Ok(()),
+            Err(e) => match e {
+                QueryError::TimeoutError => Err(Error::DbTimeout),
+                // TODO use `msg`
+                QueryError::DbError(e, _msg) => match e {
+                    DbError::Overloaded => Err(Error::DbOverload),
+                    _ => Err(e.into()),
+                },
+                _ => Err(e.into()),
+            },
+        }
     } else {
         Ok(())
     }
 }
-
-static warn_last: AtomicU64 = AtomicU64::new(0);
 
 pub async fn insert_item(
     item: InsertItem,
@@ -441,24 +365,8 @@ pub async fn insert_item(
                 I32(val) => insert_scalar_gen(par, val, &data_store.qu_insert_scalar_i32, &data_store).await?,
                 F32(val) => insert_scalar_gen(par, val, &data_store.qu_insert_scalar_f32, &data_store).await?,
                 F64(val) => insert_scalar_gen(par, val, &data_store.qu_insert_scalar_f64, &data_store).await?,
-                String(val) => {
-                    let ts = SystemTime::now()
-                        .duration_since(SystemTime::UNIX_EPOCH)
-                        .map_or(0, |x| x.as_secs());
-                    if ts > warn_last.load(atomic::Ordering::Acquire) + 10 {
-                        warn_last.store(ts, atomic::Ordering::Release);
-                        warn!("TODO string insert {val}");
-                    }
-                }
-                Bool(val) => {
-                    let ts = SystemTime::now()
-                        .duration_since(SystemTime::UNIX_EPOCH)
-                        .map_or(0, |x| x.as_secs());
-                    if ts > warn_last.load(atomic::Ordering::Acquire) + 10 {
-                        warn_last.store(ts, atomic::Ordering::Release);
-                        warn!("TODO bool insert {val}");
-                    }
-                }
+                String(val) => insert_scalar_gen(par, val, &data_store.qu_insert_scalar_string, &data_store).await?,
+                Bool(val) => insert_scalar_gen(par, val, &data_store.qu_insert_scalar_bool, &data_store).await?,
             }
         }
         Array(val) => {

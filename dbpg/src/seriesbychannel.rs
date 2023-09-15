@@ -259,7 +259,7 @@ impl Worker {
             let mut all_good = true;
             for h in &mut hashers {
                 let mut good = false;
-                for _ in 0..50 {
+                for _ in 0..400 {
                     h.update(tsbeg.elapsed().subsec_nanos().to_ne_bytes());
                     let f = h.clone().finalize();
                     let series = u64::from_le_bytes(f.as_slice()[0..8].try_into().unwrap());

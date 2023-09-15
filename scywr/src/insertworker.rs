@@ -189,46 +189,64 @@ async fn worker(
                 }
             }
             QueryItem::Insert(item) => {
+                let item_ts_local = item.ts_local.clone();
                 let tsnow = {
                     let ts = SystemTime::now();
                     let epoch = ts.duration_since(std::time::UNIX_EPOCH).unwrap();
                     epoch.as_secs() * SEC + epoch.subsec_nanos() as u64
                 };
-                let dt = (tsnow / 1000) as i64 - (item.ts_local / 1000) as i64;
+                let dt = (tsnow / 1000000) as i64 - (item_ts_local / 1000000) as i64;
                 if dt < 0 {
                     stats.item_latency_neg().inc();
-                } else if dt <= 1000 * 25 {
+                } else if dt <= 25 {
                     stats.item_latency_025ms().inc();
-                } else if dt <= 1000 * 50 {
+                } else if dt <= 50 {
                     stats.item_latency_050ms().inc();
-                } else if dt <= 1000 * 100 {
+                } else if dt <= 100 {
                     stats.item_latency_100ms().inc();
-                } else if dt <= 1000 * 200 {
+                } else if dt <= 200 {
                     stats.item_latency_200ms().inc();
-                } else if dt <= 1000 * 400 {
+                } else if dt <= 400 {
                     stats.item_latency_400ms().inc();
-                } else if dt <= 1000 * 800 {
+                } else if dt <= 800 {
                     stats.item_latency_800ms().inc();
+                } else if dt <= 1600 {
+                    stats.item_latency_1600ms().inc();
+                } else if dt <= 3200 {
+                    stats.item_latency_3200ms().inc();
                 } else {
                     stats.item_latency_large().inc();
                 }
-                if false {
-                    stats.inserted_values().inc();
-                } else {
-                    let insert_frac = insert_worker_opts.insert_frac.load(Ordering::Acquire);
-                    let do_insert = i1 % 1000 < insert_frac;
-                    match insert_item(item, ttls.index, ttls.d0, ttls.d1, &data_store, &stats, do_insert).await {
-                        Ok(_) => {
-                            stats.inserted_values().inc();
-                            backoff = backoff_0;
+                let insert_frac = insert_worker_opts.insert_frac.load(Ordering::Acquire);
+                let do_insert = i1 % 1000 < insert_frac;
+                match insert_item(item, ttls.index, ttls.d0, ttls.d1, &data_store, &stats, do_insert).await {
+                    Ok(_) => {
+                        stats.inserted_values().inc();
+                        let tsnow = {
+                            let ts = SystemTime::now();
+                            let epoch = ts.duration_since(std::time::UNIX_EPOCH).unwrap();
+                            epoch.as_secs() * SEC + epoch.subsec_nanos() as u64
+                        };
+                        let dt = (tsnow / 1000000) as i64 - (item_ts_local / 1000000) as i64;
+                        if dt <= 50 {
+                            stats.item_commit_latency_0050ms().inc();
+                        } else if dt <= 200 {
+                            stats.item_commit_latency_0200ms().inc();
+                        } else if dt <= 800 {
+                            stats.item_commit_latency_0800ms().inc();
+                        } else if dt <= 3200 {
+                            stats.item_commit_latency_3200ms().inc();
+                        } else {
+                            stats.item_commit_latency_large().inc();
                         }
-                        Err(e) => {
-                            stats_inc_for_err(&stats, &e);
-                            back_off_sleep(&mut backoff).await;
-                        }
+                        backoff = backoff_0;
                     }
-                    i1 += 1;
+                    Err(e) => {
+                        stats_inc_for_err(&stats, &e);
+                        back_off_sleep(&mut backoff).await;
+                    }
                 }
+                i1 += 1;
             }
             QueryItem::Mute(item) => {
                 let values = (
