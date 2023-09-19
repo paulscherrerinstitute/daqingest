@@ -1,8 +1,13 @@
 pub use netpod::CONNECTION_STATUS_DIV;
 
+use crate::insertworker::Ttls;
+use crate::session::ScySession;
 use crate::store::DataStore;
 use err::thiserror;
 use err::ThisError;
+use futures_util::Future;
+use futures_util::FutureExt;
+use futures_util::TryFutureExt;
 use netpod::ScalarType;
 use netpod::Shape;
 use scylla::prepared_statement::PreparedStatement;
@@ -11,6 +16,10 @@ use scylla::transport::errors::QueryError;
 use series::SeriesId;
 use stats::InsertWorkerStats;
 use std::net::SocketAddrV4;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::task::Context;
+use std::task::Poll;
 use std::time::Duration;
 use std::time::SystemTime;
 
@@ -245,6 +254,74 @@ struct InsParCom {
     do_insert: bool,
 }
 
+fn insert_scalar_gen_fut<ST>(
+    par: InsParCom,
+    val: ST,
+    qu: &Arc<PreparedStatement>,
+    scy: &Arc<ScySession>,
+) -> Pin<Box<dyn Future<Output = Result<(), Error>> + Send>>
+where
+    ST: scylla::frame::value::Value + Send + 'static,
+{
+    Box::pin(insert_scalar_gen_fut_inner(par, val, qu.clone(), scy.clone()))
+}
+
+async fn insert_scalar_gen_fut_inner<ST>(
+    par: InsParCom,
+    val: ST,
+    qu: Arc<PreparedStatement>,
+    scy: Arc<ScySession>,
+) -> Result<(), Error>
+where
+    ST: scylla::frame::value::Value,
+{
+    let params = (
+        par.series as i64,
+        par.ts_msp as i64,
+        par.ts_lsp as i64,
+        par.pulse as i64,
+        val,
+        par.ttl as i32,
+    );
+    scy.execute(&qu, params)
+        .map(|item| {
+            match item {
+                Ok(_) => Ok(()),
+                Err(e) => match e {
+                    QueryError::TimeoutError => Err(Error::DbTimeout),
+                    // TODO use `msg`
+                    QueryError::DbError(e, _msg) => match e {
+                        DbError::Overloaded => Err(Error::DbOverload),
+                        _ => Err(e.into()),
+                    },
+                    _ => Err(e.into()),
+                },
+            }
+        })
+        .await
+}
+
+#[pin_project::pin_project]
+pub struct InsertFut<F> {
+    scy: Arc<ScySession>,
+    qu: Arc<PreparedStatement>,
+    fut: F,
+}
+
+impl<F> InsertFut<F> {
+    pub fn new(scy: Arc<ScySession>, qu: Arc<PreparedStatement>, fut: F) -> Self {
+        Self { scy, qu, fut }
+    }
+}
+
+impl<F> Future for InsertFut<F> {
+    type Output = Result<(), Error>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
+        todo!()
+    }
+}
+
 async fn insert_scalar_gen<ST>(
     par: InsParCom,
     val: ST,
@@ -319,15 +396,13 @@ where
 
 pub async fn insert_item(
     item: InsertItem,
-    ttl_index: Duration,
-    ttl_0d: Duration,
-    ttl_1d: Duration,
+    ttls: &Ttls,
     data_store: &DataStore,
     stats: &InsertWorkerStats,
     do_insert: bool,
 ) -> Result<(), Error> {
     if item.msp_bump {
-        let params = (item.series.id() as i64, item.ts_msp as i64, ttl_index.as_secs() as i32);
+        let params = (item.series.id() as i64, item.ts_msp as i64, ttls.index.as_secs() as i32);
         data_store.scy.execute(&data_store.qu_insert_ts_msp, params).await?;
         stats.inserts_msp().inc();
     }
@@ -338,7 +413,7 @@ pub async fn insert_item(
             if item.shape.to_scylla_vec().is_empty() { 0 } else { 1 } as i32,
             item.scalar_type.to_scylla_i32(),
             item.series.id() as i64,
-            ttl_index.as_secs() as i32,
+            ttls.index.as_secs() as i32,
         );
         data_store
             .scy
@@ -354,7 +429,7 @@ pub async fn insert_item(
                 ts_msp: item.ts_msp,
                 ts_lsp: item.ts_lsp,
                 pulse: item.pulse,
-                ttl: ttl_0d.as_secs() as _,
+                ttl: ttls.d0.as_secs() as _,
                 do_insert,
             };
             use ScalarValue::*;
@@ -375,7 +450,7 @@ pub async fn insert_item(
                 ts_msp: item.ts_msp,
                 ts_lsp: item.ts_lsp,
                 pulse: item.pulse,
-                ttl: ttl_1d.as_secs() as _,
+                ttl: ttls.d1.as_secs() as _,
                 do_insert,
             };
             use ArrayValue::*;
@@ -391,6 +466,100 @@ pub async fn insert_item(
     }
     stats.inserts_value().inc();
     Ok(())
+}
+
+pub async fn insert_msp_fut(
+    series: SeriesId,
+    ts_msp: u64,
+    ttls: &Ttls,
+    scy: &ScySession,
+    qu: &PreparedStatement,
+) -> Result<(), Error> {
+    let params = (series.id() as i64, ts_msp as i64, ttls.index.as_secs() as i32);
+    scy.execute(qu, params)
+        .map(|item| {
+            match item {
+                Ok(_) => Ok(()),
+                Err(e) => match e {
+                    QueryError::TimeoutError => Err(Error::DbTimeout),
+                    // TODO use `msg`
+                    QueryError::DbError(e, _msg) => match e {
+                        DbError::Overloaded => Err(Error::DbOverload),
+                        _ => Err(e.into()),
+                    },
+                    _ => Err(e.into()),
+                },
+            }
+        })
+        .await
+}
+
+pub fn insert_item_fut(
+    item: InsertItem,
+    ttls: &Ttls,
+    data_store: &DataStore,
+    do_insert: bool,
+) -> Pin<Box<dyn Future<Output = Result<(), Error>> + Send>> {
+    let par = InsParCom {
+        series: item.series.id(),
+        ts_msp: item.ts_msp,
+        ts_lsp: item.ts_lsp,
+        pulse: item.pulse,
+        ttl: ttls.d0.as_secs() as _,
+        do_insert,
+    };
+    let scy = &data_store.scy;
+    use DataValue::*;
+    match item.val {
+        Scalar(val) => {
+            let par = InsParCom {
+                series: item.series.id(),
+                ts_msp: item.ts_msp,
+                ts_lsp: item.ts_lsp,
+                pulse: item.pulse,
+                ttl: ttls.d0.as_secs() as _,
+                do_insert,
+            };
+            use ScalarValue::*;
+            match val {
+                I8(val) => insert_scalar_gen_fut(par, val, &data_store.qu_insert_scalar_i8, scy),
+                I16(val) => insert_scalar_gen_fut(par, val, &data_store.qu_insert_scalar_i16, scy),
+                Enum(val) => insert_scalar_gen_fut(par, val, &data_store.qu_insert_scalar_i16, scy),
+                I32(val) => insert_scalar_gen_fut(par, val, &data_store.qu_insert_scalar_i32, scy),
+                F32(val) => insert_scalar_gen_fut(par, val, &data_store.qu_insert_scalar_f32, scy),
+                F64(val) => insert_scalar_gen_fut(par, val, &data_store.qu_insert_scalar_f64, scy),
+                String(val) => insert_scalar_gen_fut(par, val, &data_store.qu_insert_scalar_string, scy),
+                Bool(val) => insert_scalar_gen_fut(par, val, &data_store.qu_insert_scalar_bool, scy),
+            }
+        }
+        Array(val) => {
+            let par = InsParCom {
+                series: item.series.id(),
+                ts_msp: item.ts_msp,
+                ts_lsp: item.ts_lsp,
+                pulse: item.pulse,
+                ttl: ttls.d1.as_secs() as _,
+                do_insert,
+            };
+            use ArrayValue::*;
+            match val {
+                // I8(val) => insert_array_gen(par, val, &data_store.qu_insert_array_i8, &data_store).await?,
+                // I16(val) => insert_array_gen(par, val, &data_store.qu_insert_array_i16, &data_store).await?,
+                // I32(val) => insert_array_gen(par, val, &data_store.qu_insert_array_i32, &data_store).await?,
+                // F32(val) => insert_array_gen(par, val, &data_store.qu_insert_array_f32, &data_store).await?,
+                // F64(val) => insert_array_gen(par, val, &data_store.qu_insert_array_f64, &data_store).await?,
+                // Bool(val) => insert_array_gen(par, val, &data_store.qu_insert_array_bool, &data_store).await?,
+                _ => Box::pin(futures_util::future::ready(Ok(()))),
+            }
+        }
+    }
+    // let val: i32 = 4242;
+    // insert_scalar_gen_fut(
+    //     par,
+    //     val,
+    //     data_store.qu_insert_scalar_i32.clone(),
+    //     data_store.scy.clone(),
+    // )
 }
 
 pub async fn insert_connection_status(

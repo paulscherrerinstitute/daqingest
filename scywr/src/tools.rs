@@ -1,11 +1,8 @@
+use crate::session::create_session;
 use log::*;
 use netpod::ScyllaConfig;
-use scylla::execution_profile::ExecutionProfileBuilder;
-use scylla::statement::Consistency;
 use scylla::transport::errors::NewSessionError;
 use scylla::transport::errors::QueryError;
-use scylla::Session;
-use scylla::SessionBuilder;
 
 pub struct Error(err::Error);
 
@@ -27,23 +24,10 @@ impl From<QueryError> for Error {
     }
 }
 
-async fn make_scy_session(conf: &ScyllaConfig) -> Result<Session, Error> {
-    let scy = SessionBuilder::new()
-        .known_nodes(&conf.hosts)
-        .use_keyspace(&conf.keyspace, true)
-        .default_execution_profile_handle(
-            ExecutionProfileBuilder::default()
-                .consistency(Consistency::LocalOne)
-                .build()
-                .into_handle(),
-        )
-        .build()
-        .await?;
-    Ok(scy)
-}
-
 pub async fn list_pkey(scylla_conf: &ScyllaConfig) -> Result<(), Error> {
-    let scy = make_scy_session(scylla_conf).await?;
+    let scy = create_session(scylla_conf)
+        .await
+        .map_err(|e| Error(err::Error::with_msg_no_trace(e.to_string())))?;
     let query = scy
         .prepare("select distinct token(pulse_a), pulse_a from pulse where token(pulse_a) >= ? and token(pulse_a) <= ?")
         .await?;
@@ -79,7 +63,9 @@ pub async fn list_pkey(scylla_conf: &ScyllaConfig) -> Result<(), Error> {
 }
 
 pub async fn list_pulses(scylla_conf: &ScyllaConfig) -> Result<(), Error> {
-    let scy = make_scy_session(scylla_conf).await?;
+    let scy = create_session(scylla_conf)
+        .await
+        .map_err(|e| Error(err::Error::with_msg_no_trace(e.to_string())))?;
     let query = scy
         .prepare("select token(tsa) as tsatok, tsa, tsb, pulse from pulse where token(tsa) >= ? and token(tsa) <= ?")
         .await?;
@@ -116,7 +102,9 @@ pub async fn list_pulses(scylla_conf: &ScyllaConfig) -> Result<(), Error> {
 pub async fn fetch_events(backend: &str, channel: &str, scylla_conf: &ScyllaConfig) -> Result<(), Error> {
     // TODO use the keyspace from commandline.
     err::todo();
-    let scy = make_scy_session(scylla_conf).await?;
+    let scy = create_session(scylla_conf)
+        .await
+        .map_err(|e| Error(err::Error::with_msg_no_trace(e.to_string())))?;
     let qu_series = scy
         .prepare(
             "select series, scalar_type, shape_dims from series_by_channel where facility = ? and channel_name = ?",

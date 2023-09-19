@@ -1,16 +1,22 @@
 use crate::iteminsertqueue::insert_channel_status;
 use crate::iteminsertqueue::insert_connection_status;
 use crate::iteminsertqueue::insert_item;
+use crate::iteminsertqueue::insert_item_fut;
+use crate::iteminsertqueue::insert_msp_fut;
+use crate::iteminsertqueue::InsertFut;
 use crate::iteminsertqueue::QueryItem;
 use crate::store::DataStore;
 use async_channel::Receiver;
 use async_channel::Sender;
 use err::Error;
+use futures_util::Future;
+use futures_util::TryFutureExt;
 use log::*;
 use netpod::timeunits::MS;
 use netpod::timeunits::SEC;
 use netpod::ScyllaConfig;
 use stats::InsertWorkerStats;
+use std::pin::Pin;
 use std::sync::atomic;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
@@ -141,6 +147,51 @@ fn rate_limiter(
     rx
 }
 
+pub async fn spawn_scylla_insert_workers(
+    scyconf: ScyllaConfig,
+    insert_scylla_sessions: usize,
+    insert_worker_count: usize,
+    item_inp: Receiver<QueryItem>,
+    insert_worker_opts: Arc<InsertWorkerOpts>,
+    store_stats: Arc<stats::InsertWorkerStats>,
+    use_rate_limit_queue: bool,
+    ttls: Ttls,
+) -> Result<Vec<JoinHandle<Result<(), Error>>>, Error> {
+    let item_inp = if use_rate_limit_queue {
+        rate_limiter(item_inp, insert_worker_opts.clone(), store_stats.clone())
+    } else {
+        item_inp
+    };
+    let mut jhs = Vec::new();
+    let mut data_stores = Vec::new();
+    for _ in 0..insert_scylla_sessions {
+        let data_store = Arc::new(DataStore::new(&scyconf).await.map_err(|e| Error::from(e.to_string()))?);
+        data_stores.push(data_store);
+    }
+    for worker_ix in 0..insert_worker_count {
+        let data_store = data_stores[worker_ix * data_stores.len() / insert_worker_count].clone();
+        let jh = tokio::spawn(worker(
+            worker_ix,
+            item_inp.clone(),
+            ttls.clone(),
+            insert_worker_opts.clone(),
+            data_store,
+            store_stats.clone(),
+        ));
+        // let jh = tokio::spawn(worker_streamed(
+        //     worker_ix,
+        //     insert_worker_count * 3,
+        //     item_inp.clone(),
+        //     ttls.clone(),
+        //     insert_worker_opts.clone(),
+        //     data_store,
+        //     store_stats.clone(),
+        // ));
+        jhs.push(jh);
+    }
+    Ok(jhs)
+}
+
 async fn worker(
     worker_ix: usize,
     item_inp: Receiver<QueryItem>,
@@ -219,7 +270,7 @@ async fn worker(
                 }
                 let insert_frac = insert_worker_opts.insert_frac.load(Ordering::Acquire);
                 let do_insert = i1 % 1000 < insert_frac;
-                match insert_item(item, ttls.index, ttls.d0, ttls.d1, &data_store, &stats, do_insert).await {
+                match insert_item(item, &ttls, &data_store, &stats, do_insert).await {
                     Ok(_) => {
                         stats.inserted_values().inc();
                         let tsnow = {
@@ -354,38 +405,92 @@ async fn worker(
     Ok(())
 }
 
-pub async fn spawn_scylla_insert_workers(
-    scyconf: ScyllaConfig,
-    insert_scylla_sessions: usize,
-    insert_worker_count: usize,
+async fn worker_streamed(
+    worker_ix: usize,
+    concurrency: usize,
     item_inp: Receiver<QueryItem>,
-    insert_worker_opts: Arc<InsertWorkerOpts>,
-    store_stats: Arc<stats::InsertWorkerStats>,
-    use_rate_limit_queue: bool,
     ttls: Ttls,
-) -> Result<Vec<JoinHandle<Result<(), Error>>>, Error> {
-    let item_inp = if use_rate_limit_queue {
-        rate_limiter(item_inp, insert_worker_opts.clone(), store_stats.clone())
-    } else {
-        item_inp
-    };
-    let mut jhs = Vec::new();
-    let mut data_stores = Vec::new();
-    for _ in 0..insert_scylla_sessions {
-        let data_store = Arc::new(DataStore::new(&scyconf).await.map_err(|e| Error::from(e.to_string()))?);
-        data_stores.push(data_store);
+    insert_worker_opts: Arc<InsertWorkerOpts>,
+    data_store: Arc<DataStore>,
+    stats: Arc<InsertWorkerStats>,
+) -> Result<(), Error> {
+    use futures_util::StreamExt;
+    stats.worker_start().inc();
+    insert_worker_opts
+        .insert_workers_running
+        .fetch_add(1, atomic::Ordering::AcqRel);
+    let mut stream = item_inp
+        .map(|item| match item {
+            QueryItem::Insert(item) => {
+                stats.item_recv.inc();
+                // let mut futs: smallvec::SmallVec<
+                //     [Pin<Box<dyn Future<Output = Result<(), crate::iteminsertqueue::Error>> + Send>>; 4],
+                // > = smallvec::smallvec![];
+                let mut futs: Vec<Pin<Box<dyn Future<Output = Result<(), crate::iteminsertqueue::Error>> + Send>>> =
+                    Vec::new();
+                if item.msp_bump {
+                    stats.inserts_msp().inc();
+                    let fut = insert_msp_fut(
+                        item.series.clone(),
+                        item.ts_msp,
+                        &ttls,
+                        &data_store.scy,
+                        &data_store.qu_insert_ts_msp,
+                    );
+                    // futs.push(Box::pin(fut));
+                }
+                #[cfg(DISABLED)]
+                if let Some(ts_msp_grid) = item.ts_msp_grid {
+                    let params = (
+                        (item.series.id() as i32) & 0xff,
+                        ts_msp_grid as i32,
+                        if item.shape.to_scylla_vec().is_empty() { 0 } else { 1 } as i32,
+                        item.scalar_type.to_scylla_i32(),
+                        item.series.id() as i64,
+                        ttls.index.as_secs() as i32,
+                    );
+                    data_store
+                        .scy
+                        .execute(&data_store.qu_insert_series_by_ts_msp, params)
+                        .await?;
+                    stats.inserts_msp_grid().inc();
+                }
+                let do_insert = true;
+                // TODO prepare db future and pass-through.
+                stats.inserts_value().inc();
+                let fut = insert_item_fut(item, &ttls, &data_store, do_insert);
+                // .map_err(|e| Error::with_msg_no_trace(e.to_string()))
+                let fut = tokio::task::unconstrained(fut);
+                // futs.push(Box::pin(fut));
+                futs
+            }
+            _ => {
+                // TODO
+                Vec::new()
+            }
+        })
+        .map(|mut x| async move { x.pop().unwrap().await })
+        // .map(|x| futures_util::stream::iter(x))
+        // .flatten_unordered(None)
+        .buffer_unordered(concurrency)
+        .map(|x| x);
+
+    while let Some(item) = stream.next().await {
+        match item {
+            Ok(()) => {
+                stats.inserted_values().inc();
+                // TODO compute the insert latency bin and count.
+            }
+            Err(e) => {
+                stats_inc_for_err(&stats, &e);
+            }
+        }
     }
-    for worker_ix in 0..insert_worker_count {
-        let data_store = data_stores[worker_ix * data_stores.len() / insert_worker_count].clone();
-        let jh = tokio::spawn(worker(
-            worker_ix,
-            item_inp.clone(),
-            ttls.clone(),
-            insert_worker_opts.clone(),
-            data_store,
-            store_stats.clone(),
-        ));
-        jhs.push(jh);
-    }
-    Ok(jhs)
+
+    stats.worker_finish().inc();
+    insert_worker_opts
+        .insert_workers_running
+        .fetch_sub(1, atomic::Ordering::AcqRel);
+    trace2!("insert worker {worker_ix} done");
+    Ok(())
 }

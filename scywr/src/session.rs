@@ -7,6 +7,7 @@ use err::ThisError;
 use scylla::execution_profile::ExecutionProfileBuilder;
 use scylla::statement::Consistency;
 use scylla::transport::errors::NewSessionError;
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 #[derive(Debug, ThisError)]
@@ -21,14 +22,17 @@ impl From<NewSessionError> for Error {
 }
 
 pub async fn create_session_no_ks(scyconf: &ScyllaConfig) -> Result<Arc<Session>, Error> {
-    let scy = scylla::SessionBuilder::new()
+    let profile = ExecutionProfileBuilder::default()
+        .consistency(Consistency::LocalOne)
+        .build()
+        .into_handle();
+    let scy = scylla::transport::session_builder::GenericSessionBuilder::new()
+        .pool_size(scylla::transport::session::PoolSize::PerShard(
+            NonZeroUsize::new(1).unwrap(),
+        ))
         .known_nodes(&scyconf.hosts)
-        .default_execution_profile_handle(
-            ExecutionProfileBuilder::default()
-                .consistency(Consistency::LocalOne)
-                .build()
-                .into_handle(),
-        )
+        .default_execution_profile_handle(profile)
+        .write_coalescing(true)
         .build()
         .await?;
     let scy = Arc::new(scy);

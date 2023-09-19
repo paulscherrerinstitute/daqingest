@@ -1,9 +1,8 @@
+use crate::session::create_session;
 use err::thiserror;
 use err::ThisError;
 use netpod::ScyllaConfig;
-use scylla::execution_profile::ExecutionProfileBuilder;
 use scylla::prepared_statement::PreparedStatement;
-use scylla::statement::Consistency;
 use scylla::transport::errors::NewSessionError;
 use scylla::transport::errors::QueryError;
 use scylla::Session as ScySession;
@@ -13,6 +12,7 @@ use std::sync::Arc;
 pub enum Error {
     NewSessionError(#[from] NewSessionError),
     QueryError(#[from] QueryError),
+    NewSession,
 }
 
 pub struct DataStore {
@@ -45,18 +45,7 @@ pub struct DataStore {
 
 impl DataStore {
     pub async fn new(scyconf: &ScyllaConfig) -> Result<Self, Error> {
-        let scy = scylla::SessionBuilder::new()
-            .known_nodes(&scyconf.hosts)
-            .use_keyspace(&scyconf.keyspace, true)
-            .default_execution_profile_handle(
-                ExecutionProfileBuilder::default()
-                    .consistency(Consistency::LocalOne)
-                    .build()
-                    .into_handle(),
-            )
-            .build()
-            .await?;
-        let scy = Arc::new(scy);
+        let scy = create_session(scyconf).await.map_err(|_| Error::NewSession)?;
 
         let q = scy
             .prepare("insert into ts_msp (series, ts_msp) values (?, ?) using ttl ?")
