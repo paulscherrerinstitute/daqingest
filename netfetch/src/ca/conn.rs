@@ -40,6 +40,7 @@ use serde::Serialize;
 use series::ChannelStatusSeriesId;
 use series::SeriesId;
 use stats::CaConnStats;
+use stats::CaProtoStats;
 use stats::IntervalEma;
 use std::collections::BTreeMap;
 use std::collections::VecDeque;
@@ -502,8 +503,10 @@ pub struct CaConn {
     channel_info_query_sending: SenderPolling<ChannelInfoQuery>,
     time_binners: BTreeMap<Cid, ConnTimeBin>,
     thr_msg_poll: ThrottleTrace,
+    ca_proto_stats: Arc<CaProtoStats>,
 }
 
+#[cfg(DISABLED)]
 impl Drop for CaConn {
     fn drop(&mut self) {
         debug!("~~~~~~~~~~~~~~~   Drop CaConn {}", self.remote_addr_dbg);
@@ -519,6 +522,7 @@ impl CaConn {
         storage_insert_tx: Sender<QueryItem>,
         channel_info_query_tx: Sender<ChannelInfoQuery>,
         stats: Arc<CaConnStats>,
+        ca_proto_stats: Arc<CaProtoStats>,
     ) -> Self {
         let (cq_tx, cq_rx) = async_channel::bounded(32);
         Self {
@@ -554,6 +558,7 @@ impl CaConn {
             channel_info_query_sending: SenderPolling::new(channel_info_query_tx),
             time_binners: BTreeMap::new(),
             thr_msg_poll: ThrottleTrace::new(Duration::from_millis(10000)),
+            ca_proto_stats,
         }
     }
 
@@ -1614,7 +1619,12 @@ impl CaConn {
                                         status: ConnectionStatus::Established,
                                     }));
                                 self.backoff_reset();
-                                let proto = CaProto::new(tcp, self.remote_addr_dbg.clone(), self.opts.array_truncate);
+                                let proto = CaProto::new(
+                                    tcp,
+                                    self.remote_addr_dbg.clone(),
+                                    self.opts.array_truncate,
+                                    self.ca_proto_stats.clone(),
+                                );
                                 self.state = CaConnState::Init;
                                 self.proto = Some(proto);
                                 Ok(Ready(Some(())))

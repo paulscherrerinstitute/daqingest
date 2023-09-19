@@ -18,6 +18,7 @@ use stats::CaConnSetStats;
 use stats::CaConnStats;
 use stats::CaConnStatsAgg;
 use stats::CaConnStatsAggDiff;
+use stats::CaProtoStats;
 use stats::DaemonStats;
 use stats::InsertWorkerStats;
 use stats::SeriesByChannelStats;
@@ -33,6 +34,7 @@ pub struct StatsSet {
     daemon: Arc<DaemonStats>,
     ca_conn_set: Arc<CaConnSetStats>,
     ca_conn: Arc<CaConnStats>,
+    ca_proto: Arc<CaProtoStats>,
     insert_worker_stats: Arc<InsertWorkerStats>,
     series_by_channel_stats: Arc<SeriesByChannelStats>,
     insert_frac: Arc<AtomicU64>,
@@ -43,6 +45,7 @@ impl StatsSet {
         daemon: Arc<DaemonStats>,
         ca_conn_set: Arc<CaConnSetStats>,
         ca_conn: Arc<CaConnStats>,
+        ca_proto: Arc<CaProtoStats>,
         insert_worker_stats: Arc<InsertWorkerStats>,
         series_by_channel_stats: Arc<SeriesByChannelStats>,
         insert_frac: Arc<AtomicU64>,
@@ -51,6 +54,7 @@ impl StatsSet {
             daemon,
             ca_conn_set,
             ca_conn,
+            ca_proto,
             insert_worker_stats,
             series_by_channel_stats,
             insert_frac,
@@ -215,11 +219,8 @@ fn make_routes(dcom: Arc<DaemonComm>, connset_cmd_tx: Sender<CaConnSetEvent>, st
                     let s3 = stats_set.insert_worker_stats.prometheus();
                     let s4 = stats_set.ca_conn.prometheus();
                     let s5 = stats_set.series_by_channel_stats.prometheus();
-                    s1.push_str(&s2);
-                    s1.push_str(&s3);
-                    s1.push_str(&s4);
-                    s1.push_str(&s5);
-                    s1
+                    let s6 = stats_set.ca_proto.prometheus();
+                    [s1, s2, s3, s4, s5, s6].join("")
                 }
             }),
         )

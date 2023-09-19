@@ -47,6 +47,7 @@ use statemap::WithStatusSeriesIdStateInner;
 use statemap::CHANNEL_STATUS_DUMMY_SCALAR_TYPE;
 use stats::CaConnSetStats;
 use stats::CaConnStats;
+use stats::CaProtoStats;
 use std::collections::BTreeMap;
 use std::collections::VecDeque;
 use std::net::SocketAddr;
@@ -214,6 +215,7 @@ pub struct CaConnSetCtrl {
     rx: Receiver<CaConnSetItem>,
     stats: Arc<CaConnSetStats>,
     ca_conn_stats: Arc<CaConnStats>,
+    ca_proto_stats: Arc<CaProtoStats>,
     jh: JoinHandle<Result<(), Error>>,
 }
 
@@ -267,6 +269,10 @@ impl CaConnSetCtrl {
 
     pub fn ca_conn_stats(&self) -> &Arc<CaConnStats> {
         &self.ca_conn_stats
+    }
+
+    pub fn ca_proto_stats(&self) -> &Arc<CaProtoStats> {
+        &self.ca_proto_stats
     }
 }
 
@@ -323,6 +329,7 @@ pub struct CaConnSet {
     thr_msg_poll_1: ThrottleTrace,
     thr_msg_storage_len: ThrottleTrace,
     did_connset_out_queue: bool,
+    ca_proto_stats: Arc<CaProtoStats>,
 }
 
 impl CaConnSet {
@@ -341,10 +348,8 @@ impl CaConnSet {
             super::finder::start_finder(find_ioc_res_tx.clone(), backend.clone(), pgconf);
         let (channel_info_res_tx, channel_info_res_rx) = async_channel::bounded(400);
         let stats = Arc::new(CaConnSetStats::new());
+        let ca_proto_stats = Arc::new(CaProtoStats::new());
         let ca_conn_stats = Arc::new(CaConnStats::new());
-        stats.test_1().inc();
-        stats.test_1().inc();
-        stats.test_1().inc();
         let connset = Self {
             backend,
             local_epics_hostname,
@@ -378,6 +383,7 @@ impl CaConnSet {
             thr_msg_poll_1: ThrottleTrace::new(Duration::from_millis(2000)),
             thr_msg_storage_len: ThrottleTrace::new(Duration::from_millis(1000)),
             did_connset_out_queue: false,
+            ca_proto_stats: ca_proto_stats.clone(),
         };
         // TODO await on jh
         let jh = tokio::spawn(CaConnSet::run(connset));
@@ -386,6 +392,7 @@ impl CaConnSet {
             rx: connset_out_rx,
             stats,
             ca_conn_stats,
+            ca_proto_stats,
             jh,
         }
     }
@@ -766,6 +773,7 @@ impl CaConnSet {
             self.storage_insert_tx.clone(),
             self.channel_info_query_tx.clone(),
             self.ca_conn_stats.clone(),
+            self.ca_proto_stats.clone(),
         );
         let conn_tx = conn.conn_command_tx();
         let conn_stats = conn.stats();
@@ -817,6 +825,7 @@ impl CaConnSet {
                 Err(e) => {
                     error!("CaConn gives error: {e:?}");
                     ret = Err(e);
+                    break;
                 }
             }
         }

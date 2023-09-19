@@ -7,21 +7,26 @@ use err::thiserror;
 use err::ThisError;
 use futures_util::Future;
 use futures_util::FutureExt;
-use futures_util::TryFutureExt;
+use netpod::timeunits::SEC;
 use netpod::ScalarType;
 use netpod::Shape;
 use scylla::prepared_statement::PreparedStatement;
 use scylla::transport::errors::DbError;
 use scylla::transport::errors::QueryError;
+use scylla::QueryResult;
 use series::SeriesId;
+use smallvec::smallvec;
+use smallvec::SmallVec;
 use stats::InsertWorkerStats;
 use std::net::SocketAddrV4;
 use std::pin::Pin;
+use std::ptr::NonNull;
 use std::sync::Arc;
 use std::task::Context;
 use std::task::Poll;
 use std::time::Duration;
 use std::time::SystemTime;
+use std::time::UNIX_EPOCH;
 
 #[derive(Debug, ThisError)]
 pub enum Error {
@@ -254,26 +259,9 @@ struct InsParCom {
     do_insert: bool,
 }
 
-fn insert_scalar_gen_fut<ST>(
-    par: InsParCom,
-    val: ST,
-    qu: &Arc<PreparedStatement>,
-    scy: &Arc<ScySession>,
-) -> Pin<Box<dyn Future<Output = Result<(), Error>> + Send>>
+fn insert_scalar_gen_fut<ST>(par: InsParCom, val: ST, qu: Arc<PreparedStatement>, scy: Arc<ScySession>) -> InsertFut
 where
     ST: scylla::frame::value::Value + Send + 'static,
-{
-    Box::pin(insert_scalar_gen_fut_inner(par, val, qu.clone(), scy.clone()))
-}
-
-async fn insert_scalar_gen_fut_inner<ST>(
-    par: InsParCom,
-    val: ST,
-    qu: Arc<PreparedStatement>,
-    scy: Arc<ScySession>,
-) -> Result<(), Error>
-where
-    ST: scylla::frame::value::Value,
 {
     let params = (
         par.series as i64,
@@ -283,42 +271,52 @@ where
         val,
         par.ttl as i32,
     );
-    scy.execute(&qu, params)
-        .map(|item| {
-            match item {
-                Ok(_) => Ok(()),
-                Err(e) => match e {
-                    QueryError::TimeoutError => Err(Error::DbTimeout),
-                    // TODO use `msg`
-                    QueryError::DbError(e, _msg) => match e {
-                        DbError::Overloaded => Err(Error::DbOverload),
-                        _ => Err(e.into()),
-                    },
-                    _ => Err(e.into()),
-                },
-            }
-        })
-        .await
+    InsertFut::new(scy, qu, params)
 }
 
-#[pin_project::pin_project]
-pub struct InsertFut<F> {
+fn insert_array_gen_fut<ST>(par: InsParCom, val: ST, qu: Arc<PreparedStatement>, scy: Arc<ScySession>) -> InsertFut
+where
+    ST: scylla::frame::value::Value + Send + 'static,
+{
+    let params = (
+        par.series as i64,
+        par.ts_msp as i64,
+        par.ts_lsp as i64,
+        par.pulse as i64,
+        val,
+        par.ttl as i32,
+    );
+    InsertFut::new(scy, qu, params)
+}
+
+pub struct InsertFut {
+    #[allow(unused)]
     scy: Arc<ScySession>,
+    #[allow(unused)]
     qu: Arc<PreparedStatement>,
-    fut: F,
+    fut: Pin<Box<dyn Future<Output = Result<QueryResult, QueryError>> + Send>>,
 }
 
-impl<F> InsertFut<F> {
-    pub fn new(scy: Arc<ScySession>, qu: Arc<PreparedStatement>, fut: F) -> Self {
+impl InsertFut {
+    pub fn new<V: scylla::frame::value::ValueList + Send + 'static>(
+        scy: Arc<ScySession>,
+        qu: Arc<PreparedStatement>,
+        params: V,
+    ) -> Self {
+        let scy_ref = unsafe { NonNull::from(scy.as_ref()).as_ref() };
+        let qu_ref = unsafe { NonNull::from(qu.as_ref()).as_ref() };
+        let fut = scy_ref.execute_paged(qu_ref, params, None);
+        let fut = taskrun::tokio::task::unconstrained(fut);
+        let fut = Box::pin(fut);
         Self { scy, qu, fut }
     }
 }
 
-impl<F> Future for InsertFut<F> {
-    type Output = Result<(), Error>;
+impl Future for InsertFut {
+    type Output = Result<QueryResult, QueryError>;
 
-    fn poll(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
-        todo!()
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
+        self.fut.poll_unpin(cx)
     }
 }
 
@@ -468,47 +466,19 @@ pub async fn insert_item(
     Ok(())
 }
 
-pub async fn insert_msp_fut(
+pub fn insert_msp_fut(
     series: SeriesId,
     ts_msp: u64,
     ttls: &Ttls,
-    scy: &ScySession,
-    qu: &PreparedStatement,
-) -> Result<(), Error> {
+    scy: Arc<ScySession>,
+    qu: Arc<PreparedStatement>,
+) -> InsertFut {
     let params = (series.id() as i64, ts_msp as i64, ttls.index.as_secs() as i32);
-    scy.execute(qu, params)
-        .map(|item| {
-            match item {
-                Ok(_) => Ok(()),
-                Err(e) => match e {
-                    QueryError::TimeoutError => Err(Error::DbTimeout),
-                    // TODO use `msg`
-                    QueryError::DbError(e, _msg) => match e {
-                        DbError::Overloaded => Err(Error::DbOverload),
-                        _ => Err(e.into()),
-                    },
-                    _ => Err(e.into()),
-                },
-            }
-        })
-        .await
+    InsertFut::new(scy, qu, params)
 }
 
-pub fn insert_item_fut(
-    item: InsertItem,
-    ttls: &Ttls,
-    data_store: &DataStore,
-    do_insert: bool,
-) -> Pin<Box<dyn Future<Output = Result<(), Error>> + Send>> {
-    let par = InsParCom {
-        series: item.series.id(),
-        ts_msp: item.ts_msp,
-        ts_lsp: item.ts_lsp,
-        pulse: item.pulse,
-        ttl: ttls.d0.as_secs() as _,
-        do_insert,
-    };
-    let scy = &data_store.scy;
+pub fn insert_item_fut(item: InsertItem, ttls: &Ttls, data_store: &DataStore, do_insert: bool) -> InsertFut {
+    let scy = data_store.scy.clone();
     use DataValue::*;
     match item.val {
         Scalar(val) => {
@@ -522,14 +492,14 @@ pub fn insert_item_fut(
             };
             use ScalarValue::*;
             match val {
-                I8(val) => insert_scalar_gen_fut(par, val, &data_store.qu_insert_scalar_i8, scy),
-                I16(val) => insert_scalar_gen_fut(par, val, &data_store.qu_insert_scalar_i16, scy),
-                Enum(val) => insert_scalar_gen_fut(par, val, &data_store.qu_insert_scalar_i16, scy),
-                I32(val) => insert_scalar_gen_fut(par, val, &data_store.qu_insert_scalar_i32, scy),
-                F32(val) => insert_scalar_gen_fut(par, val, &data_store.qu_insert_scalar_f32, scy),
-                F64(val) => insert_scalar_gen_fut(par, val, &data_store.qu_insert_scalar_f64, scy),
-                String(val) => insert_scalar_gen_fut(par, val, &data_store.qu_insert_scalar_string, scy),
-                Bool(val) => insert_scalar_gen_fut(par, val, &data_store.qu_insert_scalar_bool, scy),
+                I8(val) => insert_scalar_gen_fut(par, val, data_store.qu_insert_scalar_i8.clone(), scy),
+                I16(val) => insert_scalar_gen_fut(par, val, data_store.qu_insert_scalar_i16.clone(), scy),
+                Enum(val) => insert_scalar_gen_fut(par, val, data_store.qu_insert_scalar_i16.clone(), scy),
+                I32(val) => insert_scalar_gen_fut(par, val, data_store.qu_insert_scalar_i32.clone(), scy),
+                F32(val) => insert_scalar_gen_fut(par, val, data_store.qu_insert_scalar_f32.clone(), scy),
+                F64(val) => insert_scalar_gen_fut(par, val, data_store.qu_insert_scalar_f64.clone(), scy),
+                String(val) => insert_scalar_gen_fut(par, val, data_store.qu_insert_scalar_string.clone(), scy),
+                Bool(val) => insert_scalar_gen_fut(par, val, data_store.qu_insert_scalar_bool.clone(), scy),
             }
         }
         Array(val) => {
@@ -543,33 +513,87 @@ pub fn insert_item_fut(
             };
             use ArrayValue::*;
             match val {
-                // I8(val) => insert_array_gen(par, val, &data_store.qu_insert_array_i8, &data_store).await?,
-                // I16(val) => insert_array_gen(par, val, &data_store.qu_insert_array_i16, &data_store).await?,
-                // I32(val) => insert_array_gen(par, val, &data_store.qu_insert_array_i32, &data_store).await?,
-                // F32(val) => insert_array_gen(par, val, &data_store.qu_insert_array_f32, &data_store).await?,
-                // F64(val) => insert_array_gen(par, val, &data_store.qu_insert_array_f64, &data_store).await?,
-                // Bool(val) => insert_array_gen(par, val, &data_store.qu_insert_array_bool, &data_store).await?,
-                _ => Box::pin(futures_util::future::ready(Ok(()))),
+                I8(val) => insert_array_gen_fut(par, val, data_store.qu_insert_array_i8.clone(), scy),
+                I16(val) => insert_array_gen_fut(par, val, data_store.qu_insert_array_i16.clone(), scy),
+                I32(val) => insert_array_gen_fut(par, val, data_store.qu_insert_array_i32.clone(), scy),
+                F32(val) => insert_array_gen_fut(par, val, data_store.qu_insert_array_f32.clone(), scy),
+                F64(val) => insert_array_gen_fut(par, val, data_store.qu_insert_array_f64.clone(), scy),
+                Bool(val) => insert_array_gen_fut(par, val, data_store.qu_insert_array_bool.clone(), scy),
             }
         }
     }
-    // let val: i32 = 4242;
-    // insert_scalar_gen_fut(
-    //     par,
-    //     val,
-    //     data_store.qu_insert_scalar_i32.clone(),
-    //     data_store.scy.clone(),
-    // )
+}
+
+pub fn insert_connection_status_fut(item: ConnectionStatusItem, ttls: &Ttls, data_store: &DataStore) -> InsertFut {
+    let tsunix = item.ts.duration_since(UNIX_EPOCH).unwrap_or(Duration::ZERO);
+    let secs = tsunix.as_secs() * SEC;
+    let nanos = tsunix.subsec_nanos() as u64;
+    let ts = secs + nanos;
+    let ts_msp = ts / CONNECTION_STATUS_DIV * CONNECTION_STATUS_DIV;
+    let ts_lsp = ts - ts_msp;
+    let kind = item.status.to_kind();
+    let addr = format!("{}", item.addr);
+    let params = (
+        ts_msp as i64,
+        ts_lsp as i64,
+        kind as i32,
+        addr,
+        ttls.index.as_secs() as i32,
+    );
+    InsertFut::new(
+        data_store.scy.clone(),
+        data_store.qu_insert_connection_status.clone(),
+        params,
+    )
+}
+
+pub fn insert_channel_status_fut(
+    item: ChannelStatusItem,
+    ttls: &Ttls,
+    data_store: &DataStore,
+) -> SmallVec<[InsertFut; 4]> {
+    let tsunix = item.ts.duration_since(UNIX_EPOCH).unwrap_or(Duration::ZERO);
+    let secs = tsunix.as_secs() * SEC;
+    let nanos = tsunix.subsec_nanos() as u64;
+    let ts = secs + nanos;
+    let ts_msp = ts / CONNECTION_STATUS_DIV * CONNECTION_STATUS_DIV;
+    let ts_lsp = ts - ts_msp;
+    let kind = item.status.to_kind();
+    let series = item.series.id();
+    let params = (
+        series as i64,
+        ts_msp as i64,
+        ts_lsp as i64,
+        kind as i32,
+        ttls.index.as_secs() as i32,
+    );
+    let fut1 = InsertFut::new(
+        data_store.scy.clone(),
+        data_store.qu_insert_channel_status.clone(),
+        params,
+    );
+    let params = (
+        ts_msp as i64,
+        ts_lsp as i64,
+        series as i64,
+        kind as i32,
+        ttls.index.as_secs() as i32,
+    );
+    let fut2 = InsertFut::new(
+        data_store.scy.clone(),
+        data_store.qu_insert_channel_status_by_ts_msp.clone(),
+        params,
+    );
+    smallvec![fut1, fut2]
 }
 
 pub async fn insert_connection_status(
     item: ConnectionStatusItem,
     ttl: Duration,
     data_store: &DataStore,
-    _stats: &InsertWorkerStats,
 ) -> Result<(), Error> {
-    let tsunix = item.ts.duration_since(std::time::UNIX_EPOCH).unwrap_or(Duration::ZERO);
-    let secs = tsunix.as_secs() * netpod::timeunits::SEC;
+    let tsunix = item.ts.duration_since(UNIX_EPOCH).unwrap_or(Duration::ZERO);
+    let secs = tsunix.as_secs() * SEC;
     let nanos = tsunix.subsec_nanos() as u64;
     let ts = secs + nanos;
     let ts_msp = ts / CONNECTION_STATUS_DIV * CONNECTION_STATUS_DIV;
@@ -588,10 +612,9 @@ pub async fn insert_channel_status(
     item: ChannelStatusItem,
     ttl: Duration,
     data_store: &DataStore,
-    _stats: &InsertWorkerStats,
 ) -> Result<(), Error> {
-    let tsunix = item.ts.duration_since(std::time::UNIX_EPOCH).unwrap_or(Duration::ZERO);
-    let secs = tsunix.as_secs() * netpod::timeunits::SEC;
+    let tsunix = item.ts.duration_since(UNIX_EPOCH).unwrap_or(Duration::ZERO);
+    let secs = tsunix.as_secs() * SEC;
     let nanos = tsunix.subsec_nanos() as u64;
     let ts = secs + nanos;
     let ts_msp = ts / CONNECTION_STATUS_DIV * CONNECTION_STATUS_DIV;

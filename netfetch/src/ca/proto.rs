@@ -6,6 +6,7 @@ use futures_util::Stream;
 use log::*;
 use netpod::timeunits::*;
 use slidebuf::SlideBuf;
+use stats::CaProtoStats;
 use std::collections::BTreeMap;
 use std::collections::VecDeque;
 use std::io;
@@ -13,6 +14,7 @@ use std::net::SocketAddrV4;
 use std::num::NonZeroU16;
 use std::num::NonZeroU64;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::Context;
 use std::task::Poll;
 use taskrun::tokio;
@@ -948,19 +950,21 @@ pub struct CaProto {
     out: VecDeque<CaMsg>,
     array_truncate: usize,
     logged_proto_error_for_cid: BTreeMap<u32, bool>,
+    stats: Arc<CaProtoStats>,
 }
 
 impl CaProto {
-    pub fn new(tcp: TcpStream, remote_addr_dbg: SocketAddrV4, array_truncate: usize) -> Self {
+    pub fn new(tcp: TcpStream, remote_addr_dbg: SocketAddrV4, array_truncate: usize, stats: Arc<CaProtoStats>) -> Self {
         Self {
             tcp,
             remote_addr_dbg,
             state: CaState::StdHead,
-            buf: SlideBuf::new(1024 * 128),
+            buf: SlideBuf::new(1024 * 512),
             outbuf: SlideBuf::new(1024 * 128),
             out: VecDeque::new(),
             array_truncate,
             logged_proto_error_for_cid: BTreeMap::new(),
+            stats,
         }
     }
 
@@ -1083,7 +1087,11 @@ impl CaProto {
                                     info!("received data  {:?}", &rbuf.filled()[0..t]);
                                 }
                                 match self.buf.wadv(nf) {
-                                    Ok(()) => Ok(Some(Ready(CaItem::empty()))),
+                                    Ok(()) => {
+                                        self.stats.tcp_recv_bytes().add(nf as _);
+                                        self.stats.tcp_recv_count().inc();
+                                        Ok(Some(Ready(CaItem::empty())))
+                                    }
                                     Err(e) => {
                                         error!("netbuf wadv fail  nf {nf}");
                                         Err(e.into())

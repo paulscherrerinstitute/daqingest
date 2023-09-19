@@ -8,6 +8,7 @@ pub mod futinsert;
 pub mod futinsertloop;
 pub mod insertworker;
 pub mod iteminsertqueue;
+pub mod ratelimit;
 pub mod schema;
 pub mod session;
 pub mod store;

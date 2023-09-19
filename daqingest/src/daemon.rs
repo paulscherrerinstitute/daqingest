@@ -619,6 +619,7 @@ pub async fn run(opts: CaIngestOpts, channels: Vec<String>) -> Result<(), Error>
             daemon_stats,
             conn_set_stats,
             ca_conn_stats,
+            daemon.connset_ctrl.ca_proto_stats().clone(),
             daemon.insert_worker_stats.clone(),
             daemon.series_by_channel_stats.clone(),
             insert_frac,

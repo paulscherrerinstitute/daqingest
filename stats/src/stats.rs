@@ -210,6 +210,11 @@ impl IntervalEma {
 // #[cfg(DISABLED)]
 stats_proc::stats_struct!((
     stats_struct(
+        name(CaProtoStats),
+        prefix(ca_proto),
+        counters(tcp_recv_count, tcp_recv_bytes,),
+    ),
+    stats_struct(
         name(CaConnSetStats),
         counters(
             channel_unknown_address,

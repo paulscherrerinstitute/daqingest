@@ -1,9 +1,13 @@
 use crate::iteminsertqueue::insert_channel_status;
+use crate::iteminsertqueue::insert_channel_status_fut;
 use crate::iteminsertqueue::insert_connection_status;
+use crate::iteminsertqueue::insert_connection_status_fut;
 use crate::iteminsertqueue::insert_item;
 use crate::iteminsertqueue::insert_item_fut;
 use crate::iteminsertqueue::insert_msp_fut;
+use crate::iteminsertqueue::ConnectionStatusItem;
 use crate::iteminsertqueue::InsertFut;
+use crate::iteminsertqueue::InsertItem;
 use crate::iteminsertqueue::QueryItem;
 use crate::store::DataStore;
 use async_channel::Receiver;
@@ -15,6 +19,8 @@ use log::*;
 use netpod::timeunits::MS;
 use netpod::timeunits::SEC;
 use netpod::ScyllaConfig;
+use smallvec::smallvec;
+use smallvec::SmallVec;
 use stats::InsertWorkerStats;
 use std::pin::Pin;
 use std::sync::atomic;
@@ -88,65 +94,6 @@ pub struct InsertWorkerOpts {
     pub array_truncate: Arc<AtomicU64>,
 }
 
-async fn rate_limiter_worker(
-    rate: Arc<AtomicU64>,
-    inp: Receiver<QueryItem>,
-    tx: Sender<QueryItem>,
-    stats: Arc<stats::InsertWorkerStats>,
-) {
-    let mut ts_forward_last = Instant::now();
-    let mut ivl_ema = stats::Ema64::with_k(0.00001);
-    loop {
-        let item = if let Ok(x) = inp.recv().await {
-            x
-        } else {
-            break;
-        };
-        let ts_received = Instant::now();
-        let allowed_to_drop = match &item {
-            QueryItem::Insert(_) => true,
-            _ => false,
-        };
-        let dt_min = {
-            let rate2 = rate.load(Ordering::Acquire);
-            Duration::from_nanos(SEC / rate2)
-        };
-        let mut ema2 = ivl_ema.clone();
-        {
-            let dt = ts_received.duration_since(ts_forward_last);
-            let dt_ns = SEC * dt.as_secs() + dt.subsec_nanos() as u64;
-            ema2.update(dt_ns.min(MS * 100) as f32);
-        }
-        let ivl2 = Duration::from_nanos(ema2.ema() as u64);
-        if allowed_to_drop && ivl2 < dt_min {
-            //tokio::time::sleep_until(ts_recv_last.checked_add(dt_min).unwrap().into()).await;
-            stats.ratelimit_drop().inc();
-        } else {
-            if tx.send(item).await.is_err() {
-                break;
-            } else {
-                let tsnow = Instant::now();
-                let dt = tsnow.duration_since(ts_forward_last);
-                let dt_ns = SEC * dt.as_secs() + dt.subsec_nanos() as u64;
-                ivl_ema.update(dt_ns.min(MS * 100) as f32);
-                ts_forward_last = tsnow;
-                // stats.inter_ivl_ema.set(ivl_ema.ema() as u64);
-            }
-        }
-    }
-    info!("rate limiter done");
-}
-
-fn rate_limiter(
-    inp: Receiver<QueryItem>,
-    opts: Arc<InsertWorkerOpts>,
-    stats: Arc<stats::InsertWorkerStats>,
-) -> Receiver<QueryItem> {
-    let (tx, rx) = async_channel::bounded(inp.capacity().unwrap_or(256));
-    tokio::spawn(rate_limiter_worker(opts.store_workers_rate.clone(), inp, tx, stats));
-    rx
-}
-
 pub async fn spawn_scylla_insert_workers(
     scyconf: ScyllaConfig,
     insert_scylla_sessions: usize,
@@ -158,7 +105,7 @@ pub async fn spawn_scylla_insert_workers(
     ttls: Ttls,
 ) -> Result<Vec<JoinHandle<Result<(), Error>>>, Error> {
     let item_inp = if use_rate_limit_queue {
-        rate_limiter(item_inp, insert_worker_opts.clone(), store_stats.clone())
+        crate::ratelimit::rate_limiter(insert_worker_opts.store_workers_rate.clone(), item_inp)
     } else {
         item_inp
     };
@@ -170,6 +117,7 @@ pub async fn spawn_scylla_insert_workers(
     }
     for worker_ix in 0..insert_worker_count {
         let data_store = data_stores[worker_ix * data_stores.len() / insert_worker_count].clone();
+        #[cfg(DISABLED)]
         let jh = tokio::spawn(worker(
             worker_ix,
             item_inp.clone(),
@@ -178,20 +126,21 @@ pub async fn spawn_scylla_insert_workers(
             data_store,
             store_stats.clone(),
         ));
-        // let jh = tokio::spawn(worker_streamed(
-        //     worker_ix,
-        //     insert_worker_count * 3,
-        //     item_inp.clone(),
-        //     ttls.clone(),
-        //     insert_worker_opts.clone(),
-        //     data_store,
-        //     store_stats.clone(),
-        // ));
+        let jh = tokio::spawn(worker_streamed(
+            worker_ix,
+            insert_worker_count * 3,
+            item_inp.clone(),
+            ttls.clone(),
+            insert_worker_opts.clone(),
+            data_store,
+            store_stats.clone(),
+        ));
         jhs.push(jh);
     }
     Ok(jhs)
 }
 
+#[allow(unused)]
 async fn worker(
     worker_ix: usize,
     item_inp: Receiver<QueryItem>,
@@ -215,30 +164,26 @@ async fn worker(
             break;
         };
         match item {
-            QueryItem::ConnectionStatus(item) => {
-                match insert_connection_status(item, ttls.index, &data_store, &stats).await {
-                    Ok(_) => {
-                        stats.inserted_connection_status().inc();
-                        backoff = backoff_0;
-                    }
-                    Err(e) => {
-                        stats_inc_for_err(&stats, &e);
-                        back_off_sleep(&mut backoff).await;
-                    }
+            QueryItem::ConnectionStatus(item) => match insert_connection_status(item, ttls.index, &data_store).await {
+                Ok(_) => {
+                    stats.inserted_connection_status().inc();
+                    backoff = backoff_0;
                 }
-            }
-            QueryItem::ChannelStatus(item) => {
-                match insert_channel_status(item, ttls.index, &data_store, &stats).await {
-                    Ok(_) => {
-                        stats.inserted_channel_status().inc();
-                        backoff = backoff_0;
-                    }
-                    Err(e) => {
-                        stats_inc_for_err(&stats, &e);
-                        back_off_sleep(&mut backoff).await;
-                    }
+                Err(e) => {
+                    stats_inc_for_err(&stats, &e);
+                    back_off_sleep(&mut backoff).await;
                 }
-            }
+            },
+            QueryItem::ChannelStatus(item) => match insert_channel_status(item, ttls.index, &data_store).await {
+                Ok(_) => {
+                    stats.inserted_channel_status().inc();
+                    backoff = backoff_0;
+                }
+                Err(e) => {
+                    stats_inc_for_err(&stats, &e);
+                    back_off_sleep(&mut backoff).await;
+                }
+            },
             QueryItem::Insert(item) => {
                 let item_ts_local = item.ts_local.clone();
                 let tsnow = {
@@ -420,77 +365,96 @@ async fn worker_streamed(
         .insert_workers_running
         .fetch_add(1, atomic::Ordering::AcqRel);
     let mut stream = item_inp
-        .map(|item| match item {
-            QueryItem::Insert(item) => {
-                stats.item_recv.inc();
-                // let mut futs: smallvec::SmallVec<
-                //     [Pin<Box<dyn Future<Output = Result<(), crate::iteminsertqueue::Error>> + Send>>; 4],
-                // > = smallvec::smallvec![];
-                let mut futs: Vec<Pin<Box<dyn Future<Output = Result<(), crate::iteminsertqueue::Error>> + Send>>> =
-                    Vec::new();
-                if item.msp_bump {
-                    stats.inserts_msp().inc();
-                    let fut = insert_msp_fut(
-                        item.series.clone(),
-                        item.ts_msp,
-                        &ttls,
-                        &data_store.scy,
-                        &data_store.qu_insert_ts_msp,
-                    );
-                    // futs.push(Box::pin(fut));
+        .map(|item| {
+            stats.item_recv.inc();
+            match item {
+                QueryItem::Insert(item) => prepare_query_insert_futs(item, &ttls, &data_store, &stats),
+                QueryItem::ConnectionStatus(item) => {
+                    stats.inserted_connection_status().inc();
+                    let fut = insert_connection_status_fut(item, &ttls, &data_store);
+                    smallvec![fut]
                 }
-                #[cfg(DISABLED)]
-                if let Some(ts_msp_grid) = item.ts_msp_grid {
-                    let params = (
-                        (item.series.id() as i32) & 0xff,
-                        ts_msp_grid as i32,
-                        if item.shape.to_scylla_vec().is_empty() { 0 } else { 1 } as i32,
-                        item.scalar_type.to_scylla_i32(),
-                        item.series.id() as i64,
-                        ttls.index.as_secs() as i32,
-                    );
-                    data_store
-                        .scy
-                        .execute(&data_store.qu_insert_series_by_ts_msp, params)
-                        .await?;
-                    stats.inserts_msp_grid().inc();
+                QueryItem::ChannelStatus(item) => {
+                    stats.inserted_channel_status().inc();
+                    insert_channel_status_fut(item, &ttls, &data_store)
                 }
-                let do_insert = true;
-                // TODO prepare db future and pass-through.
-                stats.inserts_value().inc();
-                let fut = insert_item_fut(item, &ttls, &data_store, do_insert);
-                // .map_err(|e| Error::with_msg_no_trace(e.to_string()))
-                let fut = tokio::task::unconstrained(fut);
-                // futs.push(Box::pin(fut));
-                futs
-            }
-            _ => {
-                // TODO
-                Vec::new()
+                _ => {
+                    // TODO
+                    SmallVec::new()
+                }
             }
         })
-        .map(|mut x| async move { x.pop().unwrap().await })
-        // .map(|x| futures_util::stream::iter(x))
-        // .flatten_unordered(None)
-        .buffer_unordered(concurrency)
-        .map(|x| x);
-
+        .map(|x| futures_util::stream::iter(x))
+        .flatten_unordered(Some(1))
+        .buffer_unordered(concurrency);
     while let Some(item) = stream.next().await {
         match item {
-            Ok(()) => {
+            Ok(_) => {
                 stats.inserted_values().inc();
                 // TODO compute the insert latency bin and count.
             }
             Err(e) => {
+                use scylla::transport::errors::QueryError;
+                let e = match e {
+                    QueryError::TimeoutError => crate::iteminsertqueue::Error::DbTimeout,
+                    // TODO use `msg`
+                    QueryError::DbError(e, _msg) => match e {
+                        scylla::transport::errors::DbError::Overloaded => crate::iteminsertqueue::Error::DbOverload,
+                        _ => e.into(),
+                    },
+                    _ => e.into(),
+                };
                 stats_inc_for_err(&stats, &e);
             }
         }
     }
-
     stats.worker_finish().inc();
     insert_worker_opts
         .insert_workers_running
         .fetch_sub(1, atomic::Ordering::AcqRel);
     trace2!("insert worker {worker_ix} done");
     Ok(())
+}
+
+fn prepare_query_insert_futs(
+    item: InsertItem,
+    ttls: &Ttls,
+    data_store: &Arc<DataStore>,
+    stats: &InsertWorkerStats,
+) -> SmallVec<[InsertFut; 4]> {
+    stats.inserts_value().inc();
+    let msp_bump = item.msp_bump;
+    let series = item.series.clone();
+    let ts_msp = item.ts_msp;
+    let do_insert = true;
+    let fut = insert_item_fut(item, &ttls, &data_store, do_insert);
+    let mut futs = smallvec![fut];
+    if msp_bump {
+        stats.inserts_msp().inc();
+        let fut = insert_msp_fut(
+            series,
+            ts_msp,
+            ttls,
+            data_store.scy.clone(),
+            data_store.qu_insert_ts_msp.clone(),
+        );
+        futs.push(fut);
+    }
+    #[cfg(DISABLED)]
+    if let Some(ts_msp_grid) = item.ts_msp_grid {
+        let params = (
+            (item.series.id() as i32) & 0xff,
+            ts_msp_grid as i32,
+            if item.shape.to_scylla_vec().is_empty() { 0 } else { 1 } as i32,
+            item.scalar_type.to_scylla_i32(),
+            item.series.id() as i64,
+            ttls.index.as_secs() as i32,
+        );
+        data_store
+            .scy
+            .execute(&data_store.qu_insert_series_by_ts_msp, params)
+            .await?;
+        stats.inserts_msp_grid().inc();
+    }
+    futs
 }
