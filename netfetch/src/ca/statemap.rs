@@ -1,9 +1,7 @@
+use crate::ca::conn::ChannelStateInfo;
 use crate::daemon_common::Channel;
-use async_channel::Receiver;
 use serde::Serialize;
-use series::series::Existence;
 use series::ChannelStatusSeriesId;
-use series::SeriesId;
 use std::collections::BTreeMap;
 use std::net::SocketAddrV4;
 use std::time::Instant;
@@ -35,13 +33,13 @@ impl CaConnState {
 
 #[derive(Debug, Clone, Serialize)]
 pub enum ConnectionStateValue {
-    Unconnected,
-    Connected,
+    Unknown,
+    ChannelStateInfo(ChannelStateInfo),
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ConnectionState {
-    //#[serde(with = "serde_Instant")]
+    #[serde(with = "humantime_serde")]
     pub updated: SystemTime,
     pub value: ConnectionStateValue,
 }
@@ -50,6 +48,7 @@ pub struct ConnectionState {
 pub enum WithAddressState {
     Unassigned {
         //#[serde(with = "serde_Instant")]
+        #[serde(with = "humantime_serde")]
         since: SystemTime,
     },
     Assigned(ConnectionState),
@@ -58,10 +57,11 @@ pub enum WithAddressState {
 #[derive(Debug, Clone, Serialize)]
 pub enum WithStatusSeriesIdStateInner {
     UnknownAddress {
+        #[serde(with = "humantime_serde")]
         since: SystemTime,
     },
     SearchPending {
-        //#[serde(with = "serde_Instant")]
+        #[serde(with = "humantime_serde")]
         since: SystemTime,
     },
     WithAddress {
@@ -69,6 +69,7 @@ pub enum WithStatusSeriesIdStateInner {
         state: WithAddressState,
     },
     NoAddress {
+        #[serde(with = "humantime_serde")]
         since: SystemTime,
     },
 }
@@ -81,9 +82,11 @@ pub struct WithStatusSeriesIdState {
 #[derive(Debug, Clone, Serialize)]
 pub enum ActiveChannelState {
     Init {
+        #[serde(with = "humantime_serde")]
         since: SystemTime,
     },
     WaitForStatusSeriesId {
+        #[serde(with = "humantime_serde")]
         since: SystemTime,
     },
     WithStatusSeriesId {

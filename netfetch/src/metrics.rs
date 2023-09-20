@@ -3,6 +3,7 @@ use crate::ca::connset::CaConnSetEvent;
 use crate::ca::connset::ChannelStatusesRequest;
 use crate::ca::connset::ChannelStatusesResponse;
 use crate::ca::connset::ConnSetCmd;
+use crate::ca::statemap::ChannelState;
 use crate::daemon_common::DaemonEvent;
 use async_channel::Receiver;
 use async_channel::Sender;
@@ -22,6 +23,7 @@ use stats::CaProtoStats;
 use stats::DaemonStats;
 use stats::InsertWorkerStats;
 use stats::SeriesByChannelStats;
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::net::SocketAddrV4;
 use std::sync::atomic::AtomicU64;
@@ -134,11 +136,12 @@ async fn channel_state(
     panic!("TODO");
 }
 
-// axum::Json<ChannelStatusesResponse>
+// ChannelStatusesResponse
+// BTreeMap<String, ChannelState>
 async fn channel_states(
     params: HashMap<String, String>,
     tx: Sender<CaConnSetEvent>,
-) -> axum::Json<ChannelStatusesResponse> {
+) -> axum::Json<BTreeMap<String, ChannelState>> {
     let name = params.get("name").map_or(String::new(), |x| x.clone()).to_string();
     let limit = params
         .get("limit")
@@ -149,17 +152,9 @@ async fn channel_states(
     let req = ChannelStatusesRequest { name, limit, tx: tx2 };
     let item = CaConnSetEvent::ConnSetCmd(ConnSetCmd::ChannelStatuses(req));
     // TODO handle error
-    tx.send(item).await;
+    tx.send(item).await.unwrap();
     let res = rx2.recv().await.unwrap();
-    // match serde_json::to_string(&res) {
-    //     Ok(x) => x,
-    //     Err(e) => {
-    //         error!("Serialize error {e}");
-    //         Err::<(), _>(e).unwrap();
-    //         panic!();
-    //     }
-    // }
-    axum::Json(res)
+    axum::Json(res.channels_ca_conn_set)
 }
 
 async fn extra_inserts_conf_set(v: ExtraInsertsConf, dcom: Arc<DaemonComm>) -> axum::Json<bool> {

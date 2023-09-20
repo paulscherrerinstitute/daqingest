@@ -17,6 +17,7 @@ use scylla::QueryResult;
 use series::SeriesId;
 use smallvec::smallvec;
 use smallvec::SmallVec;
+use stackfuture::StackFuture;
 use stats::InsertWorkerStats;
 use std::net::SocketAddrV4;
 use std::pin::Pin;
@@ -289,12 +290,15 @@ where
     InsertFut::new(scy, qu, params)
 }
 
+#[pin_project::pin_project]
 pub struct InsertFut {
     #[allow(unused)]
     scy: Arc<ScySession>,
     #[allow(unused)]
     qu: Arc<PreparedStatement>,
     fut: Pin<Box<dyn Future<Output = Result<QueryResult, QueryError>> + Send>>,
+    // #[pin]
+    // fut: StackFuture<'static, Result<QueryResult, QueryError>, { 1024 * 3 }>,
 }
 
 impl InsertFut {
@@ -308,6 +312,7 @@ impl InsertFut {
         let fut = scy_ref.execute_paged(qu_ref, params, None);
         let fut = taskrun::tokio::task::unconstrained(fut);
         let fut = Box::pin(fut);
+        // let fut = StackFuture::from(fut);
         Self { scy, qu, fut }
     }
 }
@@ -315,8 +320,9 @@ impl InsertFut {
 impl Future for InsertFut {
     type Output = Result<QueryResult, QueryError>;
 
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
-        self.fut.poll_unpin(cx)
+    fn poll(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
+        let this = self.project();
+        this.fut.poll_unpin(cx)
     }
 }
 

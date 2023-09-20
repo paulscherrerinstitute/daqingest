@@ -1598,15 +1598,16 @@ impl CaConn {
         use Poll::*;
         match &mut self.state {
             CaConnState::Unconnected => {
-                trace4!("Unconnected");
                 let addr = self.remote_addr_dbg.clone();
+
+                // TODO issue a TCP-connect event (and later a "connected")
                 trace!("create tcp connection to {:?}", (addr.ip(), addr.port()));
+
                 let fut = tokio::time::timeout(Duration::from_millis(1000), TcpStream::connect(addr));
                 self.state = CaConnState::Connecting(addr, Box::pin(fut));
                 Ok(Ready(Some(())))
             }
             CaConnState::Connecting(ref addr, ref mut fut) => {
-                trace4!("Connecting");
                 match fut.poll_unpin(cx) {
                     Ready(connect_result) => {
                         match connect_result {
