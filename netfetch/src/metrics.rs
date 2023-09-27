@@ -22,6 +22,7 @@ use stats::CaConnStatsAggDiff;
 use stats::CaProtoStats;
 use stats::DaemonStats;
 use stats::InsertWorkerStats;
+use stats::IocFinderStats;
 use stats::SeriesByChannelStats;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
@@ -39,6 +40,7 @@ pub struct StatsSet {
     ca_proto: Arc<CaProtoStats>,
     insert_worker_stats: Arc<InsertWorkerStats>,
     series_by_channel_stats: Arc<SeriesByChannelStats>,
+    ioc_finder_stats: Arc<IocFinderStats>,
     insert_frac: Arc<AtomicU64>,
 }
 
@@ -50,6 +52,7 @@ impl StatsSet {
         ca_proto: Arc<CaProtoStats>,
         insert_worker_stats: Arc<InsertWorkerStats>,
         series_by_channel_stats: Arc<SeriesByChannelStats>,
+        ioc_finder_stats: Arc<IocFinderStats>,
         insert_frac: Arc<AtomicU64>,
     ) -> Self {
         Self {
@@ -59,6 +62,7 @@ impl StatsSet {
             ca_proto,
             insert_worker_stats,
             series_by_channel_stats,
+            ioc_finder_stats,
             insert_frac,
         }
     }
@@ -208,14 +212,14 @@ fn make_routes(dcom: Arc<DaemonComm>, connset_cmd_tx: Sender<CaConnSetEvent>, st
             get({
                 //
                 || async move {
-                    debug!("metrics");
-                    let mut s1 = stats_set.daemon.prometheus();
+                    let s1 = stats_set.daemon.prometheus();
                     let s2 = stats_set.ca_conn_set.prometheus();
                     let s3 = stats_set.insert_worker_stats.prometheus();
                     let s4 = stats_set.ca_conn.prometheus();
                     let s5 = stats_set.series_by_channel_stats.prometheus();
                     let s6 = stats_set.ca_proto.prometheus();
-                    [s1, s2, s3, s4, s5, s6].join("")
+                    let s7 = stats_set.ioc_finder_stats.prometheus();
+                    [s1, s2, s3, s4, s5, s6, s7].join("")
                 }
             }),
         )

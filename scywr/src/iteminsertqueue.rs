@@ -14,6 +14,7 @@ use scylla::prepared_statement::PreparedStatement;
 use scylla::transport::errors::DbError;
 use scylla::transport::errors::QueryError;
 use scylla::QueryResult;
+use series::ChannelStatusSeriesId;
 use series::SeriesId;
 use smallvec::smallvec;
 use smallvec::SmallVec;
@@ -126,6 +127,7 @@ pub enum ChannelStatusClosedReason {
     IocTimeout,
     NoProtocol,
     ProtocolDone,
+    ConnectFail,
 }
 
 #[derive(Debug)]
@@ -152,6 +154,7 @@ impl ChannelStatus {
                 IocTimeout => 8,
                 NoProtocol => 9,
                 ProtocolDone => 10,
+                ConnectFail => 11,
             },
         }
     }
@@ -170,6 +173,7 @@ impl ChannelStatus {
             8 => Closed(IocTimeout),
             9 => Closed(NoProtocol),
             10 => Closed(ProtocolDone),
+            11 => Closed(ConnectFail),
             24 => AssignedToAddress,
             _ => {
                 return Err(err::Error::with_msg_no_trace(format!(
@@ -184,8 +188,18 @@ impl ChannelStatus {
 #[derive(Debug)]
 pub struct ChannelStatusItem {
     pub ts: SystemTime,
-    pub series: SeriesId,
+    pub cssid: ChannelStatusSeriesId,
     pub status: ChannelStatus,
+}
+
+impl ChannelStatusItem {
+    pub fn new_closed_conn_timeout(ts: SystemTime, cssid: ChannelStatusSeriesId) -> Self {
+        Self {
+            ts,
+            cssid,
+            status: ChannelStatus::Closed(ChannelStatusClosedReason::IocTimeout),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -565,9 +579,9 @@ pub fn insert_channel_status_fut(
     let ts_msp = ts / CONNECTION_STATUS_DIV * CONNECTION_STATUS_DIV;
     let ts_lsp = ts - ts_msp;
     let kind = item.status.to_kind();
-    let series = item.series.id();
+    let cssid = item.cssid.id();
     let params = (
-        series as i64,
+        cssid as i64,
         ts_msp as i64,
         ts_lsp as i64,
         kind as i32,
@@ -581,7 +595,7 @@ pub fn insert_channel_status_fut(
     let params = (
         ts_msp as i64,
         ts_lsp as i64,
-        series as i64,
+        cssid as i64,
         kind as i32,
         ttls.index.as_secs() as i32,
     );
@@ -626,9 +640,9 @@ pub async fn insert_channel_status(
     let ts_msp = ts / CONNECTION_STATUS_DIV * CONNECTION_STATUS_DIV;
     let ts_lsp = ts - ts_msp;
     let kind = item.status.to_kind();
-    let series = item.series.id();
+    let cssid = item.cssid.id();
     let params = (
-        series as i64,
+        cssid as i64,
         ts_msp as i64,
         ts_lsp as i64,
         kind as i32,
@@ -641,7 +655,7 @@ pub async fn insert_channel_status(
     let params = (
         ts_msp as i64,
         ts_lsp as i64,
-        series as i64,
+        cssid as i64,
         kind as i32,
         ttl.as_secs() as i32,
     );

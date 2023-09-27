@@ -42,6 +42,7 @@ where
                     }
                 },
                 Err(e) => {
+                    debug!("batcher timeout  rx len {}", rx.len());
                     let _e: tokio::time::error::Elapsed = e;
                     if all.len() > 0 {
                         do_emit = true;

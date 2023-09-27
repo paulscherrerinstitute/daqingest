@@ -7,7 +7,7 @@ use std::net::SocketAddrV4;
 use std::time::Instant;
 use std::time::SystemTime;
 
-pub const CHANNEL_STATUS_DUMMY_SCALAR_TYPE: i32 = i32::MIN + 1;
+pub const CHANNEL_STATUS_DUMMY_SCALAR_TYPE: i32 = 14;
 
 #[derive(Debug)]
 pub enum CaConnStateValue {
@@ -60,7 +60,7 @@ pub enum WithStatusSeriesIdStateInner {
         #[serde(with = "humantime_serde")]
         since: SystemTime,
     },
-    SearchPending {
+    AddrSearchPending {
         #[serde(with = "humantime_serde")]
         since: SystemTime,
     },
@@ -69,6 +69,10 @@ pub enum WithStatusSeriesIdStateInner {
         state: WithAddressState,
     },
     NoAddress {
+        #[serde(with = "humantime_serde")]
+        since: SystemTime,
+    },
+    MaybeWrongAddress {
         #[serde(with = "humantime_serde")]
         since: SystemTime,
     },
@@ -104,6 +108,7 @@ pub enum ChannelStateValue {
 #[derive(Debug, Clone, Serialize)]
 pub struct ChannelState {
     pub value: ChannelStateValue,
+    pub running_cmd_id: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize)]

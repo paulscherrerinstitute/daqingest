@@ -275,7 +275,7 @@ impl EvTabDim1 {
         format!("events_array_{}", self.sty)
     }
 
-    fn cql(&self) -> String {
+    fn cql_create(&self) -> String {
         use std::fmt::Write;
         let mut s = String::new();
         let ttl = self.default_time_to_live.as_secs();
@@ -332,8 +332,8 @@ async fn check_event_tables(scy: &ScySession) -> Result<(), Error> {
             default_time_to_live: dhours(1),
             compaction_window_size: dhours(12),
         };
-        if !check_table_readable(&desc.name(), scy).await? {
-            scy.query(desc.cql(), ()).await?;
+        if !has_table(&desc.name(), scy).await? {
+            scy.query(desc.cql_create(), ()).await?;
         }
     }
     Ok(())

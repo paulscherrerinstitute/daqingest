@@ -31,18 +31,17 @@ pub async fn active_channel_insert_hook_worker(rx: Receiver<QueryItem>, tx: Send
                     Shape::Wave(_) => 1,
                     Shape::Image(_, _) => 2,
                 };
-                if let ScalarType::STRING = item.scalar_type {
-                    histo
-                        .entry(item.series.clone())
-                        .and_modify(|(c, msp, lsp, pulse, _shape_kind)| {
-                            *c += 1;
-                            *msp = item.ts_msp;
-                            *lsp = item.ts_lsp;
-                            *pulse = item.pulse;
-                            // TODO should check that shape_kind stays the same.
-                        })
-                        .or_insert((0 as usize, item.ts_msp, item.ts_lsp, item.pulse, shape_kind));
-                }
+                if let ScalarType::STRING = item.scalar_type {}
+                histo
+                    .entry(item.series.clone())
+                    .and_modify(|(c, msp, lsp, pulse, _shape_kind)| {
+                        *c += 1;
+                        *msp = item.ts_msp;
+                        *lsp = item.ts_lsp;
+                        *pulse = item.pulse;
+                        // TODO should check that shape_kind stays the same.
+                    })
+                    .or_insert((0 as usize, item.ts_msp, item.ts_lsp, item.pulse, shape_kind));
             }
             _ => {}
         }

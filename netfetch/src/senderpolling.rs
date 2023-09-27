@@ -72,8 +72,8 @@ impl<T> SenderPolling<T> {
     }
 
     pub fn drop(&mut self) {
-        self.sender = None;
         self.fut = None;
+        self.sender = None;
     }
 
     pub fn len(&self) -> Option<usize> {

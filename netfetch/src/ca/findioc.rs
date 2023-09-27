@@ -1,12 +1,16 @@
 use crate::ca::proto::CaMsg;
 use crate::ca::proto::CaMsgTy;
 use crate::ca::proto::HeadInfo;
+use crate::throttletrace::ThrottleTrace;
+use async_channel::Receiver;
 use err::Error;
 use futures_util::Future;
 use futures_util::FutureExt;
 use futures_util::Stream;
+use futures_util::StreamExt;
 use libc::c_int;
 use log::*;
+use stats::IocFinderStats;
 use std::collections::BTreeMap;
 use std::collections::VecDeque;
 use std::net::Ipv4Addr;
@@ -14,12 +18,22 @@ use std::net::SocketAddrV4;
 use std::pin::Pin;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use std::task::Context;
 use std::task::Poll;
 use std::time::Duration;
 use std::time::Instant;
 use taskrun::tokio;
 use tokio::io::unix::AsyncFd;
+
+#[allow(unused)]
+macro_rules! trace2 {
+    ($($arg:tt)*) => {
+        if true {
+            trace!($($arg)*);
+        }
+    };
+}
 
 struct SockBox(c_int);
 
@@ -36,13 +50,25 @@ impl Drop for SockBox {
 
 // TODO should be able to get away with non-atomic counters.
 static BATCH_ID: AtomicUsize = AtomicUsize::new(0);
-static SEARCH_ID2: AtomicUsize = AtomicUsize::new(0);
+static SEARCH_ID: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
 struct BatchId(u32);
 
+impl BatchId {
+    fn next() -> Self {
+        Self(BATCH_ID.fetch_add(1, Ordering::AcqRel) as u32)
+    }
+}
+
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
 struct SearchId(u32);
+
+impl SearchId {
+    fn next() -> Self {
+        Self(SEARCH_ID.fetch_add(1, Ordering::AcqRel) as u32)
+    }
+}
 
 struct SearchBatch {
     ts_beg: Instant,
@@ -62,7 +88,7 @@ pub struct FindIocRes {
 
 pub struct FindIocStream {
     tgts: Vec<SocketAddrV4>,
-    channels_input: VecDeque<String>,
+    channels_input: Receiver<String>,
     in_flight: BTreeMap<BatchId, SearchBatch>,
     in_flight_max: usize,
     bid_by_sid: BTreeMap<SearchId, BatchId>,
@@ -80,16 +106,30 @@ pub struct FindIocStream {
     sids_done: BTreeMap<SearchId, ()>,
     result_for_done_sid_count: u64,
     sleeper: Pin<Box<dyn Future<Output = ()> + Send>>,
-    stop_on_empty_queue: bool,
+    #[allow(unused)]
+    thr_msg_0: ThrottleTrace,
+    #[allow(unused)]
+    thr_msg_1: ThrottleTrace,
+    #[allow(unused)]
+    thr_msg_2: ThrottleTrace,
+    stats: Arc<IocFinderStats>,
 }
 
 impl FindIocStream {
-    pub fn new(tgts: Vec<SocketAddrV4>, batch_run_max: Duration, in_flight_max: usize, batch_size: usize) -> Self {
+    pub fn new(
+        channels_input: Receiver<String>,
+        tgts: Vec<SocketAddrV4>,
+        #[allow(unused)] blacklist: Vec<SocketAddrV4>,
+        batch_run_max: Duration,
+        in_flight_max: usize,
+        batch_size: usize,
+        stats: Arc<IocFinderStats>,
+    ) -> Self {
         let sock = unsafe { Self::create_socket() }.unwrap();
         let afd = AsyncFd::new(sock.0).unwrap();
         Self {
             tgts,
-            channels_input: VecDeque::new(),
+            channels_input,
             in_flight: BTreeMap::new(),
             bid_by_sid: BTreeMap::new(),
             batch_send_queue: VecDeque::new(),
@@ -107,12 +147,11 @@ impl FindIocStream {
             channels_per_batch: batch_size,
             batch_run_max,
             sleeper: Box::pin(tokio::time::sleep(Duration::from_millis(500))),
-            stop_on_empty_queue: false,
+            thr_msg_0: ThrottleTrace::new(Duration::from_millis(1000)),
+            thr_msg_1: ThrottleTrace::new(Duration::from_millis(1000)),
+            thr_msg_2: ThrottleTrace::new(Duration::from_millis(1000)),
+            stats,
         }
-    }
-
-    pub fn set_stop_on_empty_queue(&mut self) {
-        self.stop_on_empty_queue = true;
     }
 
     pub fn quick_state(&self) -> String {
@@ -129,10 +168,6 @@ impl FindIocStream {
 
     pub fn job_queue_len(&self) -> usize {
         self.channels_input.len()
-    }
-
-    pub fn push(&mut self, x: String) {
-        self.channels_input.push_back(x);
     }
 
     fn buf_and_batch(&mut self, bid: &BatchId) -> Option<(&mut Vec<u8>, &mut SearchBatch)> {
@@ -235,7 +270,10 @@ impl FindIocStream {
         Poll::Ready(Ok(()))
     }
 
-    unsafe fn try_read(sock: i32) -> Poll<Result<(SocketAddrV4, Vec<(SearchId, SocketAddrV4)>), Error>> {
+    unsafe fn try_read(
+        sock: i32,
+        stats: &IocFinderStats,
+    ) -> Poll<Result<(SocketAddrV4, Vec<(SearchId, SocketAddrV4)>), Error>> {
         let mut saddr_mem = [0u8; std::mem::size_of::<libc::sockaddr>()];
         let mut saddr_len: libc::socklen_t = saddr_mem.len() as _;
         let mut buf = vec![0u8; 1024];
@@ -255,11 +293,14 @@ impl FindIocStream {
                 return Poll::Ready(Err("FindIocStream can not read".into()));
             }
         } else if ec < 0 {
+            stats.ca_udp_io_error().inc();
             error!("unexpected received {ec}");
             Poll::Ready(Err(Error::with_msg_no_trace(format!("try_read  ec {ec}"))))
         } else if ec == 0 {
+            stats.ca_udp_io_empty().inc();
             Poll::Ready(Err(Error::with_msg_no_trace(format!("try_read  ec {ec}"))))
         } else {
+            stats.ca_udp_io_recv().inc();
             let saddr2: libc::sockaddr_in = std::mem::transmute_copy(&saddr_mem);
             let src_addr = Ipv4Addr::from(saddr2.sin_addr.s_addr.to_ne_bytes());
             let src_port = u16::from_be(saddr2.sin_port);
@@ -308,13 +349,16 @@ impl FindIocStream {
                 accounted += 16 + hi.payload();
             }
             if accounted != ec as usize {
-                info!("unaccounted data  ec {}  accounted {}", ec, accounted);
+                stats.ca_udp_unaccounted_data().inc();
+                debug!("unaccounted data  ec {}  accounted {}", ec, accounted);
             }
             if msgs.len() < 1 {
-                warn!("received answer without messages");
+                stats.ca_udp_warn().inc();
+                debug!("received answer without messages");
             }
             if msgs.len() == 1 {
-                warn!("received answer with single message: {msgs:?}");
+                stats.ca_udp_warn().inc();
+                debug!("received answer with single message: {msgs:?}");
             }
             let mut good = true;
             if let CaMsgTy::VersionRes(v) = msgs[0].ty {
@@ -323,7 +367,8 @@ impl FindIocStream {
                     good = false;
                 }
             } else {
-                debug!("first message is not a version: {:?}", msgs[0].ty);
+                stats.ca_udp_first_msg_not_version().inc();
+                // debug!("first message is not a version: {:?}", msgs[0].ty);
                 // Seems like a bug in many IOCs
                 //good = false;
             }
@@ -337,6 +382,7 @@ impl FindIocStream {
                         }
                         //CaMsgTy::VersionRes(13) => {}
                         _ => {
+                            stats.ca_udp_error().inc();
                             warn!("try_read: unknown message received  {:?}", msg.ty);
                         }
                     }
@@ -365,15 +411,15 @@ impl FindIocStream {
         }
     }
 
-    fn create_in_flight(&mut self) {
-        let bid = BatchId(BATCH_ID.fetch_add(1, Ordering::AcqRel) as u32);
+    fn create_in_flight(&mut self, chns: Vec<String>) {
+        let bid = BatchId::next();
         let mut sids = Vec::new();
         let mut chs = Vec::new();
-        while chs.len() < self.channels_per_batch && self.channels_input.len() > 0 {
-            let sid = SearchId(SEARCH_ID2.fetch_add(1, Ordering::AcqRel) as u32);
+        for ch in chns {
+            let sid = SearchId::next();
             self.bid_by_sid.insert(sid.clone(), bid.clone());
             sids.push(sid);
-            chs.push(self.channels_input.pop_front().unwrap());
+            chs.push(ch);
         }
         let n = chs.len();
         let batch = SearchBatch {
@@ -385,6 +431,7 @@ impl FindIocStream {
         };
         self.in_flight.insert(bid.clone(), batch);
         self.batch_send_queue.push_back(bid);
+        self.stats.ca_udp_batch_created().inc();
     }
 
     fn handle_result(&mut self, src: SocketAddrV4, res: Vec<(SearchId, SocketAddrV4)>) {
@@ -411,6 +458,7 @@ impl FindIocStream {
                                                 addr: Some(addr),
                                                 dt,
                                             };
+                                            trace!("udp search response {res:?}");
                                             self.out_queue.push_back(res);
                                         }
                                         None => {
@@ -488,6 +536,28 @@ impl FindIocStream {
             self.in_flight.remove(&bid);
         }
     }
+
+    fn get_input_up_to_batch_max(&mut self, cx: &mut Context) -> Vec<String> {
+        use Poll::*;
+        let mut ret = Vec::new();
+        loop {
+            break match self.channels_input.poll_next_unpin(cx) {
+                Ready(Some(item)) => {
+                    ret.push(item);
+                    if ret.len() < self.channels_per_batch {
+                        continue;
+                    }
+                }
+                Ready(None) => {}
+                Pending => {}
+            };
+        }
+        ret
+    }
+
+    fn ready_for_end_of_stream(&self) -> bool {
+        self.channels_input.is_closed() && self.in_flight.is_empty() && self.out_queue.is_empty()
+    }
 }
 
 impl Stream for FindIocStream {
@@ -495,16 +565,17 @@ impl Stream for FindIocStream {
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
         use Poll::*;
+        // self.thr_msg_0.trigger("FindIocStream::poll_next", &[]);
         match self.ping.poll_unpin(cx) {
             Ready(_) => {
                 self.ping = Box::pin(tokio::time::sleep(Duration::from_millis(200)));
-                cx.waker().wake_by_ref();
+                let _ = self.ping.poll_unpin(cx);
             }
             Pending => {}
         }
         self.clear_timed_out();
         loop {
-            let mut loop_again = false;
+            let mut have_progress = false;
             if self.out_queue.is_empty() == false {
                 let ret = std::mem::replace(&mut self.out_queue, VecDeque::new());
                 break Ready(Some(Ok(ret)));
@@ -514,7 +585,7 @@ impl Stream for FindIocStream {
                     Ready(Ok(mut g)) => match unsafe { Self::try_send(self.sock.0, &self.send_addr, &self.buf1) } {
                         Ready(Ok(())) => {
                             self.buf1.clear();
-                            loop_again = true;
+                            have_progress = true;
                         }
                         Ready(Err(e)) => {
                             error!("{e:?}");
@@ -522,7 +593,7 @@ impl Stream for FindIocStream {
                         Pending => {
                             g.clear_ready();
                             warn!("socket seemed ready for write, but is not");
-                            loop_again = true;
+                            have_progress = true;
                         }
                     },
                     Ready(Err(e)) => {
@@ -546,19 +617,19 @@ impl Stream for FindIocStream {
                                                 //info!("Serialize and queue {bid:?}");
                                                 self.send_addr = tgt.clone();
                                                 self.batch_send_queue.push_back(bid);
-                                                loop_again = true;
+                                                have_progress = true;
                                             }
                                             None => {
                                                 self.buf1.clear();
                                                 self.batch_send_queue.push_back(bid);
-                                                loop_again = true;
+                                                have_progress = true;
                                                 error!("tgtix does not exist");
                                             }
                                         }
                                     }
                                     None => {
                                         //info!("Batch exhausted");
-                                        loop_again = true;
+                                        have_progress = true;
                                     }
                                 }
                             }
@@ -569,19 +640,37 @@ impl Stream for FindIocStream {
                                 } else {
                                     warn!("bid {bid:?} from batch send queue not in flight  NOT done");
                                 }
-                                loop_again = true;
+                                have_progress = true;
                             }
                         }
                     }
                     None => break,
                 }
             }
-            while !self.channels_input.is_empty() && self.in_flight.len() < self.in_flight_max {
-                self.create_in_flight();
-                loop_again = true;
+            if !self.channels_input.is_closed() {
+                while self.in_flight.len() < self.in_flight_max {
+                    #[cfg(DISABLED)]
+                    {
+                        let n1 = self.in_flight.len();
+                        self.thr_msg_1.trigger("FindIocStream while A  {}", &[&n1]);
+                    }
+                    let chns = self.get_input_up_to_batch_max(cx);
+                    if chns.len() == 0 {
+                        break;
+                    } else {
+                        #[cfg(DISABLED)]
+                        {
+                            let n1 = self.in_flight.len();
+                            let n2 = chns.len();
+                            self.thr_msg_2.trigger("FindIocStream while B  {}  {}", &[&n1, &n2]);
+                        }
+                        self.create_in_flight(chns);
+                        have_progress = true;
+                    }
+                }
             }
             break match self.afd.poll_read_ready(cx) {
-                Ready(Ok(mut g)) => match unsafe { Self::try_read(self.sock.0) } {
+                Ready(Ok(mut g)) => match unsafe { Self::try_read(self.sock.0, &self.stats) } {
                     Ready(Ok((src, res))) => {
                         self.handle_result(src, res);
                         continue;
@@ -601,20 +690,16 @@ impl Stream for FindIocStream {
                     Ready(Some(Err(e)))
                 }
                 Pending => {
-                    if loop_again {
+                    if have_progress {
                         continue;
                     } else {
-                        if self.channels_input.is_empty() && self.in_flight.is_empty() && self.out_queue.is_empty() {
-                            if self.stop_on_empty_queue {
-                                Ready(None)
-                            } else {
-                                match self.sleeper.poll_unpin(cx) {
-                                    Ready(_) => {
-                                        self.sleeper = Box::pin(tokio::time::sleep(Duration::from_millis(500)));
-                                        continue;
-                                    }
-                                    Pending => Pending,
+                        if self.ready_for_end_of_stream() {
+                            match self.sleeper.poll_unpin(cx) {
+                                Ready(_) => {
+                                    self.sleeper = Box::pin(tokio::time::sleep(Duration::from_millis(500)));
+                                    continue;
                                 }
+                                Pending => Pending,
                             }
                         } else {
                             Pending

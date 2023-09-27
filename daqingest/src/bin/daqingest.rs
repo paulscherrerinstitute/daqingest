@@ -32,6 +32,7 @@ pub fn main() -> Result<(), Error> {
                 scywr::tools::fetch_events(&k.backend, &k.channel, &scylla_conf).await?
             }
             SubCmd::ChannelAccess(k) => match k {
+                #[cfg(DISABLED)]
                 ChannelAccess::CaSearch(k) => {
                     info!("daqingest version {}", clap::crate_version!());
                     let (conf, channels) = parse_config(k.config.into()).await?;

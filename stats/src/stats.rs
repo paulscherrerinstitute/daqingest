@@ -223,6 +223,10 @@ stats_proc::stats_struct!((
             channel_health_timeout,
             ioc_search_start,
             ioc_addr_found,
+            ioc_addr_not_found,
+            ioc_addr_result_for_unknown_channel,
+            ca_conn_task_begin,
+            ca_conn_task_done,
             ca_conn_task_join_done_ok,
             ca_conn_task_join_done_err,
             ca_conn_task_join_err,
@@ -241,6 +245,7 @@ stats_proc::stats_struct!((
             poll_no_progress_no_pending,
         ),
         values(
+            storage_insert_queue_len,
             storage_insert_tx_len,
             channel_info_query_queue_len,
             channel_info_query_sender_len,
@@ -253,6 +258,7 @@ stats_proc::stats_struct!((
             channel_unassigned,
             channel_assigned,
             channel_connected,
+            channel_maybe_wrong_address,
             channel_rogue,
         ),
     ),
@@ -303,6 +309,27 @@ stats_proc::stats_struct!((
             worker_start,
             worker_finish,
         )
+    ),
+    stats_struct(
+        name(IocFinderStats),
+        prefix(ioc_finder),
+        counters(
+            dbsearcher_batch_recv,
+            dbsearcher_item_recv,
+            dbsearcher_select_res_0,
+            dbsearcher_select_error_len_mismatch,
+            dbsearcher_batch_send,
+            dbsearcher_item_send,
+            ca_udp_error,
+            ca_udp_warn,
+            ca_udp_unaccounted_data,
+            ca_udp_batch_created,
+            ca_udp_io_error,
+            ca_udp_io_empty,
+            ca_udp_io_recv,
+            ca_udp_first_msg_not_version,
+        ),
+        values(db_lookup_workers,)
     ),
 ));
 
@@ -417,7 +444,8 @@ stats_proc::stats_struct!((
             channel_unknown_address,
             channel_search_pending,
             channel_with_address,
-            channel_no_address
+            channel_no_address,
+            connset_health_lat_ema,
         ),
     ),
     agg(name(DaemonStatsAgg), parent(DaemonStats)),

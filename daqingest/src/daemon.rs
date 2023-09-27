@@ -3,7 +3,6 @@ pub mod inserthook;
 
 use async_channel::Receiver;
 use async_channel::Sender;
-use async_channel::WeakReceiver;
 use async_channel::WeakSender;
 use err::Error;
 use log::*;
@@ -13,7 +12,6 @@ use netfetch::ca::connset::CaConnSetItem;
 use netfetch::conf::CaIngestOpts;
 use netfetch::daemon_common::Channel;
 use netfetch::daemon_common::DaemonEvent;
-use netfetch::metrics::ExtraInsertsConf;
 use netfetch::metrics::StatsSet;
 use netfetch::throttletrace::ThrottleTrace;
 use netpod::Database;
@@ -21,18 +19,10 @@ use netpod::ScyllaConfig;
 use scywr::insertworker::InsertWorkerOpts;
 use scywr::insertworker::Ttls;
 use scywr::iteminsertqueue as scywriiq;
-use scywr::store::DataStore;
 use scywriiq::QueryItem;
-use serde::Serialize;
-use series::ChannelStatusSeriesId;
-use series::SeriesId;
 use stats::DaemonStats;
 use stats::InsertWorkerStats;
 use stats::SeriesByChannelStats;
-use std::collections::BTreeMap;
-use std::collections::VecDeque;
-use std::net::SocketAddr;
-use std::net::SocketAddrV4;
 use std::sync::atomic;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::AtomicUsize;
@@ -43,9 +33,6 @@ use std::time::SystemTime;
 use taskrun::tokio;
 use tokio::task::JoinHandle;
 
-const CA_CONN_INSERT_QUEUE_MAX: usize = 256;
-
-const CHANNEL_CHECK_INTERVAL: Duration = Duration::from_millis(5000);
 const PRINT_ACTIVE_INTERVAL: Duration = Duration::from_millis(60000);
 const PRINT_STATUS_INTERVAL: Duration = Duration::from_millis(20000);
 
@@ -98,10 +85,11 @@ pub struct Daemon {
     // TODO should be a stats object?
     insert_workers_running: AtomicU64,
     query_item_tx_weak: WeakSender<QueryItem>,
+    connset_health_lat_ema: f32,
 }
 
 impl Daemon {
-    pub async fn new(opts: DaemonOpts) -> Result<Self, Error> {
+    pub async fn new(opts: DaemonOpts, ingest_opts: CaIngestOpts) -> Result<Self, Error> {
         let (daemon_ev_tx, daemon_ev_rx) = async_channel::bounded(32);
 
         let series_by_channel_stats = Arc::new(SeriesByChannelStats::new());
@@ -126,7 +114,7 @@ impl Daemon {
             opts.local_epics_hostname.clone(),
             query_item_tx,
             channel_info_query_tx,
-            opts.pgconf.clone(),
+            ingest_opts,
         );
 
         // TODO remove
@@ -230,6 +218,7 @@ impl Daemon {
             connset_status_last: CheckPeriodic::Waiting(Instant::now()),
             insert_workers_running: AtomicU64::new(0),
             query_item_tx_weak,
+            connset_health_lat_ema: 0.,
         };
         Ok(ret)
     }
@@ -242,18 +231,17 @@ impl Daemon {
         match &self.connset_status_last {
             CheckPeriodic::Waiting(since) => {
                 if *since + Duration::from_millis(5000) < ts1 {
-                    debug!("========================================   issue health check CaConn");
                     self.connset_ctrl.check_health().await?;
                     self.connset_status_last = CheckPeriodic::Ongoing(ts1);
-                    if let Some(tx) = self.query_item_tx_weak.upgrade() {
-                        info!("query_item_tx  len {}", tx.len());
-                    }
                 }
             }
             CheckPeriodic::Ongoing(since) => {
                 let dt = ts1.saturating_duration_since(*since);
                 if dt > Duration::from_millis(2000) {
-                    error!("========================================   CaConnSet has not reported health status  since {:.0}", dt.as_secs_f32() * 1e3);
+                    error!(
+                        "CaConnSet has not reported health status  since {:.0}",
+                        dt.as_secs_f32() * 1e3
+                    );
                 }
             }
         }
@@ -289,7 +277,7 @@ impl Daemon {
         if dt > Duration::from_millis(500) {
             info!("slow check_chans  {}ms", dt.as_secs_f32() * 1e3);
         }
-        if tsnow.duration_since(self.last_status_print).unwrap_or(Duration::ZERO) >= PRINT_STATUS_INTERVAL {
+        if false && tsnow.duration_since(self.last_status_print).unwrap_or(Duration::ZERO) >= PRINT_STATUS_INTERVAL {
             self.last_status_print = tsnow;
             info!(
                 "{:8}  {:8} {:8} : {:8} : {:8} {:8} : {:10}",
@@ -382,11 +370,17 @@ impl Daemon {
                 let dt2 = ts3.duration_since(ts2).as_secs_f32() * 1e3;
                 match &self.connset_status_last {
                     CheckPeriodic::Waiting(_since) => {
-                        error!("========================================   received CaConnSet health report without having asked  {dt1:.0} ms  {dt2:.0} ms");
+                        error!("received CaConnSet health report without having asked  {dt1:.0} ms  {dt2:.0} ms");
                     }
                     CheckPeriodic::Ongoing(since) => {
-                        let dtsince = ts3.duration_since(*since).as_secs_f32() * 1e3;
-                        debug!("========================================   received CaConnSet healthy  dtsince {dtsince:.0} ms  {dt1:.0} ms  {dt2:.0} ms");
+                        // TODO insert response time as series to scylla.
+                        let dtsince = ts3.duration_since(*since).as_secs_f32() * 1e6;
+                        {
+                            let v = &mut self.connset_health_lat_ema;
+                            *v += (dtsince - *v) * 0.2;
+                            self.stats.connset_health_lat_ema().set(*v as _);
+                        }
+                        // debug!("========================================   received CaConnSet healthy  dtsince {dtsince:.0} ms  {dt1:.0} ms  {dt2:.0} ms");
                         self.connset_status_last = CheckPeriodic::Waiting(ts3);
                     }
                 }
@@ -604,7 +598,7 @@ pub async fn run(opts: CaIngestOpts, channels: Vec<String>) -> Result<(), Error>
         insert_scylla_sessions: opts.insert_scylla_sessions(),
         insert_frac: insert_frac.clone(),
     };
-    let daemon = Daemon::new(opts2).await?;
+    let daemon = Daemon::new(opts2, opts.clone()).await?;
     let tx = daemon.tx.clone();
     let daemon_stats = daemon.stats().clone();
     let connset_cmd_tx = daemon.connset_ctrl.sender().clone();
@@ -622,6 +616,7 @@ pub async fn run(opts: CaIngestOpts, channels: Vec<String>) -> Result<(), Error>
             daemon.connset_ctrl.ca_proto_stats().clone(),
             daemon.insert_worker_stats.clone(),
             daemon.series_by_channel_stats.clone(),
+            daemon.connset_ctrl.ioc_finder_stats().clone(),
             insert_frac,
         );
         let fut =
@@ -640,7 +635,7 @@ pub async fn run(opts: CaIngestOpts, channels: Vec<String>) -> Result<(), Error>
             Ok(()) => {}
             Err(_) => break,
         }
-        thr_msg.trigger("sent ChannelAdd", &[&i as &_]);
+        thr_msg.trigger("daemon sent ChannelAdd", &[&i as &_]);
         i += 1;
     }
     debug!("{} configured channels applied", channels.len());

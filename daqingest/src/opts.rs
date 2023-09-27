@@ -79,6 +79,7 @@ pub struct BsreadDump {
 #[derive(Debug, Parser)]
 pub enum ChannelAccess {
     CaIngest(CaConfig),
+    #[cfg(DISABLED)]
     CaSearch(CaSearch),
 }
 

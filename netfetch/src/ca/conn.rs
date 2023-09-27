@@ -58,6 +58,8 @@ use std::time::SystemTime;
 use taskrun::tokio;
 use tokio::net::TcpStream;
 
+const CONNECTING_TIMEOUT: Duration = Duration::from_millis(6000);
+
 #[allow(unused)]
 macro_rules! trace2 {
     ($($arg:tt)*) => {
@@ -144,8 +146,7 @@ struct Cid(pub u32);
 
 #[derive(Clone, Debug)]
 enum ChannelError {
-    #[allow(unused)]
-    NoSuccess,
+    CreateChanFail,
 }
 
 #[derive(Clone, Debug)]
@@ -261,8 +262,9 @@ impl ChannelState {
 }
 
 enum CaConnState {
-    Unconnected,
+    Unconnected(Instant),
     Connecting(
+        Instant,
         SocketAddrV4,
         Pin<Box<dyn Future<Output = Result<Result<TcpStream, std::io::Error>, tokio::time::error::Elapsed>> + Send>>,
     ),
@@ -277,8 +279,8 @@ enum CaConnState {
 impl fmt::Debug for CaConnState {
     fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            Self::Unconnected => write!(fmt, "Unconnected"),
-            Self::Connecting(arg0, _) => fmt.debug_tuple("Connecting").field(arg0).finish(),
+            Self::Unconnected(since) => fmt.debug_tuple("Unconnected").field(since).finish(),
+            Self::Connecting(since, addr, _) => fmt.debug_tuple("Connecting").field(since).field(addr).finish(),
             Self::Init => write!(fmt, "Init"),
             Self::Listen => write!(fmt, "Listen"),
             Self::PeerReady => write!(fmt, "PeerReady"),
@@ -425,7 +427,9 @@ pub enum CaConnEventValue {
     EchoTimeout,
     ConnCommandResult(ConnCommandResult),
     QueryItem(QueryItem),
+    ChannelCreateFail(String),
     EndOfStream,
+    ConnectFail,
 }
 
 #[derive(Debug)]
@@ -497,7 +501,6 @@ pub struct CaConn {
     ioc_ping_last: Instant,
     ioc_ping_start: Option<Instant>,
     storage_insert_sender: SenderPolling<QueryItem>,
-    cmd_res_queue: VecDeque<ConnCommandResult>,
     ca_conn_event_out_queue: VecDeque<CaConnEvent>,
     channel_info_query_queue: VecDeque<ChannelInfoQuery>,
     channel_info_query_sending: SenderPolling<ChannelInfoQuery>,
@@ -528,7 +531,7 @@ impl CaConn {
         Self {
             opts,
             backend,
-            state: CaConnState::Unconnected,
+            state: CaConnState::Unconnected(Instant::now()),
             ticker: Self::new_self_ticker(),
             proto: None,
             cid_store: CidStore::new(),
@@ -552,7 +555,6 @@ impl CaConn {
             ioc_ping_last: Instant::now(),
             ioc_ping_start: None,
             storage_insert_sender: SenderPolling::new(storage_insert_tx),
-            cmd_res_queue: VecDeque::new(),
             ca_conn_event_out_queue: VecDeque::new(),
             channel_info_query_queue: VecDeque::new(),
             channel_info_query_sending: SenderPolling::new(channel_info_query_tx),
@@ -581,7 +583,34 @@ impl CaConn {
     fn trigger_shutdown(&mut self, channel_reason: ChannelStatusClosedReason) {
         self.state = CaConnState::Shutdown;
         self.proto = None;
+        match &channel_reason {
+            ChannelStatusClosedReason::ShutdownCommand => {}
+            ChannelStatusClosedReason::ChannelRemove => {}
+            ChannelStatusClosedReason::ProtocolError => {}
+            ChannelStatusClosedReason::FrequencyQuota => {}
+            ChannelStatusClosedReason::BandwidthQuota => {}
+            ChannelStatusClosedReason::InternalError => {}
+            ChannelStatusClosedReason::IocTimeout => {}
+            ChannelStatusClosedReason::NoProtocol => {}
+            ChannelStatusClosedReason::ProtocolDone => {}
+            ChannelStatusClosedReason::ConnectFail => {
+                debug!("emit status ConnectFail");
+                let item = CaConnEvent {
+                    ts: Instant::now(),
+                    value: CaConnEventValue::ConnectFail,
+                };
+                self.ca_conn_event_out_queue.push_back(item);
+            }
+        }
         self.channel_state_on_shutdown(channel_reason);
+        let addr = self.remote_addr_dbg.clone();
+        self.insert_item_queue
+            .push_back(QueryItem::ConnectionStatus(ConnectionStatusItem {
+                ts: SystemTime::now(),
+                addr,
+                // TODO map to appropriate status
+                status: ConnectionStatus::Closing,
+            }));
     }
 
     fn cmd_check_health(&mut self) {
@@ -606,7 +635,11 @@ impl CaConn {
             id: ConnCommandResult::make_id(),
             kind: ConnCommandResultKind::CheckHealth(health),
         };
-        self.cmd_res_queue.push_back(res);
+        let item = CaConnEvent {
+            ts: Instant::now(),
+            value: CaConnEventValue::ConnCommandResult(res),
+        };
+        self.ca_conn_event_out_queue.push_back(item);
     }
 
     fn cmd_find_channel(&self, pattern: &str) {
@@ -688,16 +721,17 @@ impl CaConn {
         trace2!("handle_series_lookup_result {res:?}");
         match res {
             Ok(res) => {
-                let series = res.series.into_inner();
-                let item = QueryItem::ChannelStatus(ChannelStatusItem {
-                    ts: SystemTime::now(),
-                    series: series.clone(),
-                    status: ChannelStatus::Opened,
-                });
-                self.insert_item_queue.push_back(item);
                 if let Some(cid) = self.cid_by_name.get(&res.channel) {
                     if let Some(chst) = self.channels.get(cid) {
                         if let ChannelState::FetchingSeriesId(st2) = chst {
+                            let cssid = st2.cssid.clone();
+                            let series = res.series.into_inner();
+                            let item = QueryItem::ChannelStatus(ChannelStatusItem {
+                                ts: SystemTime::now(),
+                                cssid,
+                                status: ChannelStatus::Opened,
+                            });
+                            self.insert_item_queue.push_back(item);
                             let cid = st2.cid.clone();
                             let sid = st2.sid;
                             let data_type = st2.data_type;
@@ -805,17 +839,35 @@ impl CaConn {
         )
     }
 
+    pub fn channel_remove(&mut self, channel: String) {
+        Self::channel_remove_expl(
+            channel,
+            &mut self.channels,
+            &mut self.cid_by_name,
+            &mut self.name_by_cid,
+            &mut self.cid_store,
+            &mut self.time_binners,
+        )
+    }
+
+    fn channel_remove_by_cid(&mut self, cid: Cid) {
+        self.channels.remove(&cid);
+        self.name_by_cid.remove(&cid);
+        self.time_binners.remove(&cid);
+        self.cid_by_name.retain(|_, v| v == &cid);
+    }
+
     fn channel_remove_expl(
-        channel: String,
+        name: String,
         channels: &mut BTreeMap<Cid, ChannelState>,
         cid_by_name: &mut BTreeMap<String, Cid>,
         name_by_cid: &mut BTreeMap<Cid, String>,
         cid_store: &mut CidStore,
         time_binners: &mut BTreeMap<Cid, ConnTimeBin>,
     ) {
-        let cid = Self::cid_by_name_expl(&channel, cid_by_name, name_by_cid, cid_store);
+        let cid = Self::cid_by_name_expl(&name, cid_by_name, name_by_cid, cid_store);
         if channels.contains_key(&cid) {
-            warn!("TODO actually cause the channel to get closed and removed  {}", channel);
+            warn!("TODO actually cause the channel to get closed and removed  {}", name);
         }
         {
             let a: Vec<_> = cid_by_name
@@ -831,17 +883,6 @@ impl CaConn {
         name_by_cid.remove(&cid);
         // TODO emit in-progress before drop?
         time_binners.remove(&cid);
-    }
-
-    pub fn channel_remove(&mut self, channel: String) {
-        Self::channel_remove_expl(
-            channel,
-            &mut self.channels,
-            &mut self.cid_by_name,
-            &mut self.name_by_cid,
-            &mut self.cid_store,
-            &mut self.time_binners,
-        )
     }
 
     fn cid_by_name_expl(
@@ -887,10 +928,10 @@ impl CaConn {
                 ChannelState::FetchingSeriesId(..) => {
                     *chst = ChannelState::Ended;
                 }
-                ChannelState::Created(series, ..) => {
+                ChannelState::Created(series, st2) => {
                     let item = QueryItem::ChannelStatus(ChannelStatusItem {
                         ts: SystemTime::now(),
-                        series: series.clone(),
+                        cssid: st2.cssid.clone(),
                         status: ChannelStatus::Closed(channel_reason.clone()),
                     });
                     self.insert_item_queue.push_back(item);
@@ -920,7 +961,8 @@ impl CaConn {
                 self.trigger_shutdown(ChannelStatusClosedReason::IocTimeout);
             }
         } else {
-            if self.ioc_ping_last.elapsed() > Duration::from_millis(20000) {
+            // TODO randomize delay a bit
+            if self.ioc_ping_last.elapsed() > Duration::from_millis(120000) {
                 if let Some(proto) = &mut self.proto {
                     self.stats.ping_start().inc();
                     self.ioc_ping_start = Some(Instant::now());
@@ -1470,6 +1512,8 @@ impl CaConn {
                                 let cssid = match ch_s {
                                     ChannelState::Creating { cssid, .. } => cssid.clone(),
                                     _ => {
+                                        // TODO handle in better way:
+                                        // Remove channel and emit notice that channel is removed with reason.
                                         let e = Error::with_msg_no_trace("handle_peer_ready  bad state");
                                         return Ready(Some(Err(e)));
                                     }
@@ -1522,10 +1566,6 @@ impl CaConn {
                                 let _ = ts1;
                                 res?
                             }
-                            CaMsgTy::Error(e) => {
-                                warn!("channel access error message {e:?}");
-                            }
-                            CaMsgTy::AccessRightsRes(_) => {}
                             CaMsgTy::Echo => {
                                 // let addr = &self.remote_addr_dbg;
                                 if let Some(started) = self.ioc_ping_start {
@@ -1553,8 +1593,30 @@ impl CaConn {
                                 self.ioc_ping_last = Instant::now();
                                 self.ioc_ping_start = None;
                             }
-                            CaMsgTy::CreateChanFail(_) => {
-                                // TODO handle CreateChanFail
+                            CaMsgTy::CreateChanFail(msg) => {
+                                // TODO
+                                // Here, must indicate that the address could be wrong!
+                                // The channel status must be "Fail" so that ConnSet can decide to re-search.
+                                // TODO how to transition the channel state? Any invariants or simply write to the map?
+                                let cid = Cid(msg.cid);
+                                if let Some(name) = self.name_by_cid.get(&cid) {
+                                    debug!("queue event to notive channel create fail {name}");
+                                    let item = CaConnEvent {
+                                        ts: tsnow,
+                                        value: CaConnEventValue::ChannelCreateFail(name.into()),
+                                    };
+                                    self.ca_conn_event_out_queue.push_back(item);
+                                }
+                                self.channel_remove_by_cid(cid);
+                                warn!("CaConn sees: {msg:?}");
+                            }
+                            CaMsgTy::Error(msg) => {
+                                warn!("CaConn sees: {msg:?}");
+                            }
+                            CaMsgTy::AccessRightsRes(msg) => {
+                                if false {
+                                    warn!("CaConn sees: {msg:?}");
+                                }
                             }
                             _ => {
                                 warn!("Received unexpected protocol message {:?}", k);
@@ -1597,17 +1659,17 @@ impl CaConn {
     fn handle_conn_state(&mut self, cx: &mut Context) -> Result<Poll<Option<()>>, Error> {
         use Poll::*;
         match &mut self.state {
-            CaConnState::Unconnected => {
+            CaConnState::Unconnected(_since) => {
                 let addr = self.remote_addr_dbg.clone();
 
                 // TODO issue a TCP-connect event (and later a "connected")
                 trace!("create tcp connection to {:?}", (addr.ip(), addr.port()));
 
                 let fut = tokio::time::timeout(Duration::from_millis(1000), TcpStream::connect(addr));
-                self.state = CaConnState::Connecting(addr, Box::pin(fut));
+                self.state = CaConnState::Connecting(Instant::now(), addr, Box::pin(fut));
                 Ok(Ready(Some(())))
             }
-            CaConnState::Connecting(ref addr, ref mut fut) => {
+            CaConnState::Connecting(_since, addr, fut) => {
                 match fut.poll_unpin(cx) {
                     Ready(connect_result) => {
                         match connect_result {
@@ -1630,33 +1692,44 @@ impl CaConn {
                                 self.proto = Some(proto);
                                 Ok(Ready(Some(())))
                             }
-                            Ok(Err(_e)) => {
-                                // TODO log with exponential backoff
-                                let addr = addr.clone();
-                                self.insert_item_queue
-                                    .push_back(QueryItem::ConnectionStatus(ConnectionStatusItem {
-                                        ts: SystemTime::now(),
-                                        addr,
-                                        status: ConnectionStatus::ConnectError,
-                                    }));
-                                let dt = self.backoff_next();
-                                self.state = CaConnState::Wait(wait_fut(dt));
-                                self.proto = None;
+                            Ok(Err(e)) => {
+                                trace!("error connect to {addr} {e}");
+                                if true {
+                                    let addr = addr.clone();
+                                    self.insert_item_queue.push_back(QueryItem::ConnectionStatus(
+                                        ConnectionStatusItem {
+                                            ts: SystemTime::now(),
+                                            addr,
+                                            status: ConnectionStatus::ConnectError,
+                                        },
+                                    ));
+                                    self.trigger_shutdown(ChannelStatusClosedReason::ConnectFail);
+                                } else {
+                                    // TODO log with exponential backoff
+                                    let dt = self.backoff_next();
+                                    self.state = CaConnState::Wait(wait_fut(dt));
+                                    self.proto = None;
+                                }
                                 Ok(Ready(Some(())))
                             }
                             Err(e) => {
                                 // TODO log with exponential backoff
-                                trace!("timeout during connect to {addr:?} {e:?}");
-                                let addr = addr.clone();
-                                self.insert_item_queue
-                                    .push_back(QueryItem::ConnectionStatus(ConnectionStatusItem {
-                                        ts: SystemTime::now(),
-                                        addr,
-                                        status: ConnectionStatus::ConnectTimeout,
-                                    }));
-                                let dt = self.backoff_next();
-                                self.state = CaConnState::Wait(wait_fut(dt));
-                                self.proto = None;
+                                trace!("timeout connect to {addr} {e}");
+                                if true {
+                                    let addr = addr.clone();
+                                    self.insert_item_queue.push_back(QueryItem::ConnectionStatus(
+                                        ConnectionStatusItem {
+                                            ts: SystemTime::now(),
+                                            addr,
+                                            status: ConnectionStatus::ConnectTimeout,
+                                        },
+                                    ));
+                                    self.trigger_shutdown(ChannelStatusClosedReason::ConnectFail);
+                                } else {
+                                    let dt = self.backoff_next();
+                                    self.state = CaConnState::Wait(wait_fut(dt));
+                                    self.proto = None;
+                                }
                                 Ok(Ready(Some(())))
                             }
                         }
@@ -1707,7 +1780,7 @@ impl CaConn {
                 trace4!("Wait");
                 match inst.poll_unpin(cx) {
                     Ready(_) => {
-                        self.state = CaConnState::Unconnected;
+                        self.state = CaConnState::Unconnected(Instant::now());
                         self.proto = None;
                         Ok(Ready(Some(())))
                     }
@@ -1784,7 +1857,22 @@ impl CaConn {
 
     fn handle_own_ticker_tick(self: Pin<&mut Self>, _cx: &mut Context) -> Result<(), Error> {
         // debug!("tick  CaConn  {}", self.remote_addr_dbg);
+        let tsnow = Instant::now();
         let this = self.get_mut();
+        match &this.state {
+            CaConnState::Unconnected(since) => {}
+            CaConnState::Connecting(since, _addr, _) => {
+                if *since + CONNECTING_TIMEOUT < tsnow {
+                    debug!("CONNECTION TIMEOUT");
+                }
+            }
+            CaConnState::Init => {}
+            CaConnState::Listen => {}
+            CaConnState::PeerReady => {}
+            CaConnState::Wait(_) => {}
+            CaConnState::Shutdown => {}
+            CaConnState::EndOfStream => {}
+        }
         if false {
             for (_, tb) in this.time_binners.iter_mut() {
                 let iiq = &mut this.insert_item_queue;
@@ -1794,10 +1882,18 @@ impl CaConn {
         Ok(())
     }
 
+    fn check_ticker_connecting_timeout(&mut self, since: Instant) -> Result<(), Error> {
+        Ok(())
+    }
+
+    fn queues_out_flushed(&self) -> bool {
+        self.queues_async_out_flushed() && self.ca_conn_event_out_queue.is_empty()
+    }
+
     fn queues_async_out_flushed(&self) -> bool {
         // self.channel_info_query_queue.is_empty() && self.channel_info_query_sending.is_idle()
         // TODO re-enable later
-        true
+        self.insert_item_queue.is_empty() && self.storage_insert_sender.is_idle()
     }
 
     fn attempt_flush_storage_queue(mut self: Pin<&mut Self>, cx: &mut Context) -> Result<Poll<Option<()>>, Error> {
@@ -1877,23 +1973,9 @@ impl Stream for CaConn {
             if let CaConnState::EndOfStream = self.state {
                 break Ready(None);
             }
-            if let Some(item) = self.cmd_res_queue.pop_front() {
-                let item = CaConnEvent {
-                    ts: Instant::now(),
-                    value: CaConnEventValue::ConnCommandResult(item),
-                };
-                break Ready(Some(Ok(item)));
-            }
             if let Some(item) = self.ca_conn_event_out_queue.pop_front() {
                 break Ready(Some(Ok(item)));
             }
-            // if let Some(item) = self.insert_item_queue.pop_front() {
-            //     let ev = CaConnEvent {
-            //         ts: Instant::now(),
-            //         value: CaConnEventValue::QueryItem(item),
-            //     };
-            //     break Ready(Some(Ok(ev)));
-            // }
 
             match self.as_mut().handle_own_ticker(cx) {
                 Ok(Ready(())) => {
@@ -1954,11 +2036,12 @@ impl Stream for CaConn {
             }
 
             break if self.is_shutdown() {
-                if self.queues_async_out_flushed() {
+                if self.queues_out_flushed() {
                     debug!("end of stream {}", self.remote_addr_dbg);
                     self.state = CaConnState::EndOfStream;
                     Ready(None)
                 } else {
+                    debug!("queues_out_flushed false");
                     if have_progress {
                         self.stats.ca_conn_poll_reloop().inc();
                         continue;

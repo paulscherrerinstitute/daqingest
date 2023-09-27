@@ -1,3 +1,4 @@
+use super::findioc::FindIocRes;
 use crate::ca::findioc::FindIocStream;
 use crate::conf::CaIngestOpts;
 use async_channel::Receiver;
@@ -8,14 +9,15 @@ use dbpg::iocindex::IocSearchIndexWorker;
 use err::Error;
 use futures_util::StreamExt;
 use log::*;
+use stats::IocFinderStats;
+use std::collections::VecDeque;
 use std::net::IpAddr;
 use std::net::SocketAddr;
+use std::net::SocketAddrV4;
+use std::sync::Arc;
 use std::time::Duration;
-use std::time::Instant;
 use taskrun::tokio;
 use tokio::task::JoinHandle;
-
-const DB_WORKER_COUNT: usize = 4;
 
 async fn resolve_address(addr_str: &str) -> Result<SocketAddr, Error> {
     const PORT_DEFAULT: u16 = 5064;
@@ -68,6 +70,7 @@ impl DbUpdateWorker {
     }
 }
 
+#[cfg(DISABLED)]
 pub async fn ca_search(opts: CaIngestOpts, channels: &Vec<String>) -> Result<(), Error> {
     info!("ca_search begin");
     let (pg, jh) = dbpg::conn::make_pg_client(opts.postgresql_config())
@@ -76,51 +79,17 @@ pub async fn ca_search(opts: CaIngestOpts, channels: &Vec<String>) -> Result<(),
     dbpg::schema::schema_check(&pg)
         .await
         .map_err(|e| Error::with_msg_no_trace(e.to_string()))?;
-    let mut addrs = Vec::new();
-    for s in opts.search() {
-        match resolve_address(s).await {
-            Ok(addr) => {
-                trace!("resolved {s} as {addr}");
-                addrs.push(addr);
-            }
-            Err(e) => {
-                error!("can not resolve {s} {e}");
-            }
-        }
-    }
-    let gw_addrs = {
-        let mut gw_addrs = Vec::new();
-        for s in opts.search_blacklist() {
-            match resolve_address(s).await {
-                Ok(addr) => {
-                    trace!("resolved {s} as {addr}");
-                    gw_addrs.push(addr);
-                }
-                Err(e) => {
-                    warn!("can not resolve {s} {e}");
-                }
-            }
-        }
-        gw_addrs
-    };
-    let addrs = addrs
-        .into_iter()
-        .filter_map(|x| match x {
-            SocketAddr::V4(x) => Some(x),
-            SocketAddr::V6(_) => {
-                error!("TODO check ipv6 support for IOCs");
-                None
-            }
-        })
-        .collect();
-    let mut finder = FindIocStream::new(addrs, Duration::from_millis(800), 20, 4);
-    finder.set_stop_on_empty_queue();
-    for ch in channels.iter() {
-        finder.push(ch.into());
-    }
 
+    let (search_tgts, blacklist) = search_tgts_from_opts(&opts).await?;
+
+    // let mut finder = FindIocStream::new(search_tgts, Duration::from_millis(800), 20, 16);
+    // finder.set_stop_on_empty_queue();
+    // for ch in channels.iter() {
+    //     finder.push(ch.into());
+    // }
+
+    const DB_WORKER_COUNT: usize = 1;
     let (dbtx, dbrx) = async_channel::bounded(64);
-
     let mut dbworkers = Vec::new();
     for _ in 0..DB_WORKER_COUNT {
         let (pg, jh) = dbpg::conn::make_pg_client(opts.postgresql_config())
@@ -199,5 +168,82 @@ pub async fn ca_search(opts: CaIngestOpts, channels: &Vec<String>) -> Result<(),
         }
     }
     info!("all done");
+    Ok(())
+}
+
+pub async fn ca_search_workers_start(
+    opts: &CaIngestOpts,
+    stats: Arc<IocFinderStats>,
+) -> Result<
+    (
+        Sender<String>,
+        Receiver<Result<VecDeque<FindIocRes>, Error>>,
+        JoinHandle<Result<(), Error>>,
+        Vec<JoinHandle<Result<(), Error>>>,
+    ),
+    Error,
+> {
+    let (search_tgts, blacklist) = search_tgts_from_opts(&opts).await?;
+    let batch_run_max = Duration::from_millis(800);
+    let (inp_tx, inp_rx) = async_channel::bounded(256);
+    let (out_tx, out_rx) = async_channel::bounded(256);
+    let finder = FindIocStream::new(inp_rx, search_tgts, blacklist, batch_run_max, 20, 16, stats);
+    let jh = taskrun::spawn(finder_run(finder, out_tx));
+    let jhs = Vec::new();
+    Ok((inp_tx, out_rx, jh, jhs))
+}
+
+async fn search_tgts_from_opts(opts: &CaIngestOpts) -> Result<(Vec<SocketAddrV4>, Vec<SocketAddrV4>), Error> {
+    let mut addrs = Vec::new();
+    for s in opts.search() {
+        match resolve_address(s).await {
+            Ok(addr) => {
+                trace!("resolved {s} as {addr}");
+                match addr {
+                    SocketAddr::V4(addr) => {
+                        addrs.push(addr);
+                    }
+                    SocketAddr::V6(_) => {
+                        error!("no ipv6 for epics");
+                    }
+                }
+            }
+            Err(e) => {
+                error!("can not resolve {s} {e}");
+            }
+        }
+    }
+    let blacklist = {
+        let mut addrs = Vec::new();
+        for s in opts.search_blacklist() {
+            match resolve_address(s).await {
+                Ok(addr) => {
+                    trace!("resolved {s} as {addr}");
+                    match addr {
+                        SocketAddr::V4(addr) => {
+                            addrs.push(addr);
+                        }
+                        SocketAddr::V6(_) => {
+                            error!("no ipv6 for epics");
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!("can not resolve {s} {e}");
+                }
+            }
+        }
+        addrs
+    };
+    Ok((addrs, blacklist))
+}
+
+async fn finder_run(mut finder: FindIocStream, tx: Sender<Result<VecDeque<FindIocRes>, Error>>) -> Result<(), Error> {
+    while let Some(item) = finder.next().await {
+        if let Err(_) = tx.send(item).await {
+            break;
+        }
+    }
+    debug!("finder_run done");
     Ok(())
 }
