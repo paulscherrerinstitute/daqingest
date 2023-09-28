@@ -212,7 +212,13 @@ stats_proc::stats_struct!((
     stats_struct(
         name(CaProtoStats),
         prefix(ca_proto),
-        counters(tcp_recv_count, tcp_recv_bytes,),
+        counters(
+            tcp_recv_count,
+            tcp_recv_bytes,
+            protocol_issue,
+            payload_very_large,
+            payload_ext_but_small,
+        ),
     ),
     stats_struct(
         name(CaConnSetStats),
@@ -236,6 +242,7 @@ stats_proc::stats_struct!((
             try_push_ca_conn_cmds_full,
             try_push_ca_conn_cmds_closed,
             logic_error,
+            logic_issue,
             ready_for_end_of_stream,
             ready_for_end_of_stream_with_progress,
             poll_fn_begin,
@@ -243,6 +250,8 @@ stats_proc::stats_struct!((
             poll_pending,
             poll_reloop,
             poll_no_progress_no_pending,
+            handle_add_channel_with_addr,
+            create_ca_conn,
         ),
         values(
             storage_insert_queue_len,
@@ -259,6 +268,7 @@ stats_proc::stats_struct!((
             channel_assigned,
             channel_connected,
             channel_maybe_wrong_address,
+            channel_assigned_without_health_update,
             channel_rogue,
         ),
     ),
@@ -328,6 +338,9 @@ stats_proc::stats_struct!((
             ca_udp_io_empty,
             ca_udp_io_recv,
             ca_udp_first_msg_not_version,
+            ca_udp_recv_result,
+            ca_udp_recv_timeout,
+            ca_udp_logic_error,
         ),
         values(db_lookup_workers,)
     ),
@@ -439,6 +452,7 @@ stats_proc::stats_struct!((
             insert_worker_join_ok,
             insert_worker_join_ok_err,
             insert_worker_join_err,
+            caconnset_health_response,
         ),
         values(
             channel_unknown_address,

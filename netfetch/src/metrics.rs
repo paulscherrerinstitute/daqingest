@@ -133,13 +133,6 @@ async fn channel_remove(params: HashMap<String, String>, dcom: Arc<DaemonComm>) 
     Json(Value::Bool(false))
 }
 
-async fn channel_state(
-    params: HashMap<String, String>,
-    tx: Sender<CaConnSetEvent>,
-) -> axum::Json<ChannelStatusesResponse> {
-    panic!("TODO");
-}
-
 // ChannelStatusesResponse
 // BTreeMap<String, ChannelState>
 async fn channel_states(
@@ -231,17 +224,8 @@ fn make_routes(dcom: Arc<DaemonComm>, connset_cmd_tx: Sender<CaConnSetEvent>, st
             }),
         )
         .route(
-            "/daqingest/channel/state",
-            get({
-                // let dcom = dcom.clone();
-                let tx = connset_cmd_tx.clone();
-                |Query(params): Query<HashMap<String, String>>| channel_state(params, tx)
-            }),
-        )
-        .route(
             "/daqingest/channel/states",
             get({
-                // let dcom = dcom.clone();
                 let tx = connset_cmd_tx.clone();
                 |Query(params): Query<HashMap<String, String>>| channel_states(params, tx)
             }),

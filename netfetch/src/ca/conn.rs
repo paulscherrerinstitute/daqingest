@@ -105,11 +105,13 @@ pub struct ChannelStateInfo {
     pub scalar_type: Option<ScalarType>,
     pub shape: Option<Shape>,
     // NOTE: this solution can yield to the same Instant serialize to different string representations.
-    #[serde(skip_serializing_if = "Option::is_none", serialize_with = "ser_instant")]
+    // #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(serialize_with = "ser_instant")]
     pub ts_created: Option<Instant>,
-    #[serde(skip_serializing_if = "Option::is_none", serialize_with = "ser_instant")]
+    // #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(serialize_with = "ser_instant")]
     pub ts_event_last: Option<Instant>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    // #[serde(skip_serializing_if = "Option::is_none")]
     pub item_recv_ivl_ema: Option<f32>,
     pub interest_score: f32,
 }
@@ -507,6 +509,7 @@ pub struct CaConn {
     time_binners: BTreeMap<Cid, ConnTimeBin>,
     thr_msg_poll: ThrottleTrace,
     ca_proto_stats: Arc<CaProtoStats>,
+    weird_count: usize,
 }
 
 #[cfg(DISABLED)]
@@ -561,6 +564,7 @@ impl CaConn {
             time_binners: BTreeMap::new(),
             thr_msg_poll: ThrottleTrace::new(Duration::from_millis(10000)),
             ca_proto_stats,
+            weird_count: 0,
         }
     }
 
@@ -1487,8 +1491,8 @@ impl CaConn {
         let res = match self.proto.as_mut().unwrap().poll_next_unpin(cx) {
             Ready(Some(Ok(k))) => {
                 match k {
-                    CaItem::Msg(k) => {
-                        match k.ty {
+                    CaItem::Msg(camsg) => {
+                        match camsg.ty {
                             CaMsgTy::SearchRes(k) => {
                                 let a = k.addr.to_be_bytes();
                                 let addr = format!("{}.{}.{}.{}:{}", a[0], a[1], a[2], a[3], k.tcp_port);
@@ -1618,8 +1622,24 @@ impl CaConn {
                                     warn!("CaConn sees: {msg:?}");
                                 }
                             }
+                            CaMsgTy::IssueDataCount(hi, stat, sev, secs, nanos) => {
+                                let cid = *self.cid_by_subid.get(&hi.param2()).unwrap();
+                                let name = self.name_by_cid.get(&cid).unwrap();
+                                debug!("ca large count for  {name}  {hi:?}  {stat}  {sev}  {secs}  {nanos}");
+                                self.weird_count += 1;
+                                if self.weird_count > 200 {
+                                    std::process::exit(13);
+                                }
+                            }
+                            CaMsgTy::VersionRes(x) => {
+                                debug!("VersionRes({x})");
+                                self.weird_count += 1;
+                                if self.weird_count > 200 {
+                                    std::process::exit(13);
+                                }
+                            }
                             _ => {
-                                warn!("Received unexpected protocol message {:?}", k);
+                                warn!("Received unexpected protocol message {:?}", camsg);
                             }
                         }
                     }
@@ -2037,11 +2057,11 @@ impl Stream for CaConn {
 
             break if self.is_shutdown() {
                 if self.queues_out_flushed() {
-                    debug!("end of stream {}", self.remote_addr_dbg);
+                    // debug!("end of stream {}", self.remote_addr_dbg);
                     self.state = CaConnState::EndOfStream;
                     Ready(None)
                 } else {
-                    debug!("queues_out_flushed false");
+                    // debug!("queues_out_flushed false");
                     if have_progress {
                         self.stats.ca_conn_poll_reloop().inc();
                         continue;

@@ -59,6 +59,13 @@ async fn migrate_00(pgc: &PgClient) -> Result<(), Error> {
         )
         .await?;
     }
+    if !has_column("ioc_by_channel_log", "modcount", pgc).await? {
+        pgc.execute(
+            "alter table ioc_by_channel_log add modcount int not null default 0",
+            &[],
+        )
+        .await?;
+    }
     {
         match pgc.execute("alter table series_by_channel add constraint series_by_channel_nondup unique (facility, channel, scalar_type, shape_dims, agg_kind)", &[]).await {
             Ok(_) => {

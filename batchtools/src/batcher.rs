@@ -1,4 +1,5 @@
 use async_channel::Receiver;
+use async_channel::Sender;
 use log::*;
 use std::time::Duration;
 use taskrun::tokio;
@@ -13,44 +14,49 @@ where
     T: Send + 'static,
 {
     let (batch_tx, batch_rx) = async_channel::bounded(outcap);
-    let fut2 = async move {
-        let mut all = Vec::new();
-        let mut do_emit = false;
-        loop {
-            if do_emit {
-                do_emit = false;
-                let batch = std::mem::replace(&mut all, Vec::new());
-                match batch_tx.send(batch).await {
-                    Ok(_) => {}
-                    Err(e) => {
-                        error!("can not send batch");
-                        all = e.0;
-                    }
+    (batch_rx, tokio::spawn(run_batcher(rx, batch_tx, batch_limit, timeout)))
+}
+
+async fn run_batcher<T>(rx: Receiver<T>, batch_tx: Sender<Vec<T>>, batch_limit: usize, timeout: Duration) {
+    let mut all = Vec::new();
+    let mut do_emit = false;
+    loop {
+        use tokio::time::error::Elapsed;
+        if do_emit {
+            do_emit = false;
+            let batch = std::mem::replace(&mut all, Vec::new());
+            match tokio::time::timeout(Duration::from_millis(1000), batch_tx.send(batch)).await {
+                Ok(Ok(_)) => {}
+                Ok(Err(e)) => {
+                    error!("can not send batch");
+                    all = e.0;
                 }
-            }
-            match tokio::time::timeout(timeout, rx.recv()).await {
-                Ok(k) => match k {
-                    Ok(item) => {
-                        all.push(item);
-                        if all.len() >= batch_limit {
-                            do_emit = true;
-                        }
-                    }
-                    Err(e) => {
-                        error!("error in batcher, no more input {e}");
-                        break;
-                    }
-                },
-                Err(e) => {
-                    debug!("batcher timeout  rx len {}", rx.len());
-                    let _e: tokio::time::error::Elapsed = e;
-                    if all.len() > 0 {
-                        do_emit = true;
-                    }
+                Err(_) => {
+                    trace!("--------------------------   send timeout")
                 }
             }
         }
-        warn!("--------   batcher is done   --------------");
-    };
-    (batch_rx, tokio::spawn(fut2))
+        match tokio::time::timeout(timeout, rx.recv()).await {
+            Ok(k) => match k {
+                Ok(item) => {
+                    all.push(item);
+                    if all.len() >= batch_limit {
+                        do_emit = true;
+                    }
+                }
+                Err(e) => {
+                    error!("------------------------------------------   error in batcher, no more input {e}");
+                    break;
+                }
+            },
+            Err(e) => {
+                let _: Elapsed = e;
+                trace!("--------------------------    batcher timeout  rx len {}", rx.len());
+                if all.len() > 0 {
+                    do_emit = true;
+                }
+            }
+        }
+    }
+    warn!("--------   batcher is done   --------------");
 }

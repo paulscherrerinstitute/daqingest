@@ -41,6 +41,7 @@ pub enum ConnectionStateValue {
 pub struct ConnectionState {
     #[serde(with = "humantime_serde")]
     pub updated: SystemTime,
+    pub health_update_count: usize,
     pub value: ConnectionStateValue,
 }
 
@@ -80,6 +81,7 @@ pub enum WithStatusSeriesIdStateInner {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct WithStatusSeriesIdState {
+    pub addr_find_backoff: u32,
     pub inner: WithStatusSeriesIdStateInner,
 }
 
@@ -109,6 +111,7 @@ pub enum ChannelStateValue {
 pub struct ChannelState {
     pub value: ChannelStateValue,
     pub running_cmd_id: Option<usize>,
+    pub health_timeout_count: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]

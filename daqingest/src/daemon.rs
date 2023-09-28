@@ -1,4 +1,3 @@
-pub mod finder;
 pub mod inserthook;
 
 use async_channel::Receiver;
@@ -230,7 +229,7 @@ impl Daemon {
     async fn check_caconn_chans(&mut self, ts1: Instant) -> Result<(), Error> {
         match &self.connset_status_last {
             CheckPeriodic::Waiting(since) => {
-                if *since + Duration::from_millis(5000) < ts1 {
+                if *since + Duration::from_millis(500) < ts1 {
                     self.connset_ctrl.check_health().await?;
                     self.connset_status_last = CheckPeriodic::Ongoing(ts1);
                 }
@@ -382,6 +381,7 @@ impl Daemon {
                         }
                         // debug!("========================================   received CaConnSet healthy  dtsince {dtsince:.0} ms  {dt1:.0} ms  {dt2:.0} ms");
                         self.connset_status_last = CheckPeriodic::Waiting(ts3);
+                        self.stats.caconnset_health_response().inc();
                     }
                 }
             }

@@ -334,19 +334,19 @@ impl FindIocStream {
                     break;
                 }
                 let hi = HeadInfo::from_netbuf(&mut nb).map_err(|e| e.to_string())?;
-                if hi.cmdid() == 0 && hi.payload() == 0 {
-                } else if hi.cmdid() == 6 && hi.payload() == 8 {
+                if hi.cmdid() == 0 && hi.payload_len() == 0 {
+                } else if hi.cmdid() == 6 && hi.payload_len() == 8 {
                 } else {
-                    info!("cmdid {}  payload {}", hi.cmdid(), hi.payload());
+                    info!("cmdid {}  payload {}", hi.cmdid(), hi.payload_len());
                 }
-                if nb.data().len() < hi.payload() {
+                if nb.data().len() < hi.payload_len() {
                     error!("incomplete message, missing payload");
                     break;
                 }
                 let msg = CaMsg::from_proto_infos(&hi, nb.data(), 32).map_err(|e| e.to_string())?;
-                nb.adv(hi.payload()).map_err(|e| e.to_string())?;
+                nb.adv(hi.payload_len()).map_err(|e| e.to_string())?;
                 msgs.push(msg);
-                accounted += 16 + hi.payload();
+                accounted += 16 + hi.payload_len();
             }
             if accounted != ec as usize {
                 stats.ca_udp_unaccounted_data().inc();
@@ -458,10 +458,15 @@ impl FindIocStream {
                                                 addr: Some(addr),
                                                 dt,
                                             };
-                                            trace!("udp search response {res:?}");
+                                            if super::connset::trigger.contains(&res.channel.as_str()) {
+                                                debug!("Found via UDP {res:?}");
+                                            }
+                                            // trace!("udp search response {res:?}");
+                                            self.stats.ca_udp_recv_result().inc();
                                             self.out_queue.push_back(res);
                                         }
                                         None => {
+                                            self.stats.ca_udp_logic_error().inc();
                                             error!(
                                                 "logic error  batch sids / channels lens:  {} vs {}",
                                                 batch.sids.len(),
@@ -513,10 +518,11 @@ impl FindIocStream {
                 self.bids_timed_out.insert(bid.clone(), ());
                 for (i2, sid) in batch.sids.iter().enumerate() {
                     if batch.done[i2] == false {
-                        debug!("Timeout: {bid:?} {}", batch.channels[i2]);
+                        // debug!("Timeout: {bid:?} {}", batch.channels[i2]);
                         sids.push(sid.clone());
                         chns.push(batch.channels[i2].clone());
                         dts.push(dt);
+                        self.stats.ca_udp_recv_timeout().inc();
                     }
                 }
                 bids.push(bid.clone());

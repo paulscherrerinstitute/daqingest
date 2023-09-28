@@ -43,6 +43,7 @@ pub enum Error {
     BadCaCount,
     CaCommandNotSupported(u16),
     ParseAttemptInDoneState,
+    UnexpectedHeader,
 }
 
 const CA_PROTO_VERSION: u16 = 13;
@@ -366,6 +367,7 @@ pub enum CaMsgTy {
     ReadNotify(ReadNotify),
     ReadNotifyRes(ReadNotifyRes),
     Echo,
+    IssueDataCount(HeadInfo, u16, u16, u32, u32),
 }
 
 impl CaMsgTy {
@@ -389,6 +391,7 @@ impl CaMsgTy {
             ReadNotify(_) => 0x0f,
             ReadNotifyRes(_) => 0x0f,
             Echo => 0x17,
+            IssueDataCount(..) => panic!(),
         }
     }
 
@@ -422,6 +425,7 @@ impl CaMsgTy {
                 panic!();
             }
             Echo => 0,
+            IssueDataCount(..) => panic!(),
         }
     }
 
@@ -448,6 +452,7 @@ impl CaMsgTy {
             ReadNotify(x) => x.data_type,
             ReadNotifyRes(x) => x.data_type,
             Echo => 0,
+            IssueDataCount(..) => panic!(),
         }
     }
 
@@ -471,6 +476,7 @@ impl CaMsgTy {
             ReadNotify(x) => x.data_count,
             ReadNotifyRes(x) => x.data_count,
             Echo => 0,
+            IssueDataCount(..) => panic!(),
         }
     }
 
@@ -494,6 +500,7 @@ impl CaMsgTy {
             ReadNotify(x) => x.sid,
             ReadNotifyRes(x) => x.sid,
             Echo => 0,
+            IssueDataCount(..) => panic!(),
         }
     }
 
@@ -517,6 +524,7 @@ impl CaMsgTy {
             ReadNotify(x) => x.ioid,
             ReadNotifyRes(x) => x.ioid,
             Echo => 0,
+            IssueDataCount(..) => panic!(),
         }
     }
 
@@ -581,6 +589,7 @@ impl CaMsgTy {
             ReadNotify(_) => {}
             ReadNotifyRes(_) => {}
             Echo => {}
+            IssueDataCount(..) => {}
         }
     }
 }
@@ -729,10 +738,10 @@ impl CaMsg {
                 ty: CaMsgTy::HostName("TODOx5288".into()),
             },
             6 => {
-                if hi.payload_size != 8 {
+                if hi.payload_len() != 8 {
                     warn!("protocol error: search result is expected with fixed payload size 8");
                 }
-                if hi.data_count != 0 {
+                if hi.data_count() != 0 {
                     warn!("protocol error: search result is expected with data count 0");
                 }
                 if payload.len() < 2 {
@@ -788,7 +797,16 @@ impl CaMsg {
                 let ca_severity = u16::from_be_bytes(payload[2..4].try_into().map_err(|_| Error::BadSlice)?);
                 let ca_secs = u32::from_be_bytes(payload[4..8].try_into().map_err(|_| Error::BadSlice)?);
                 let ca_nanos = u32::from_be_bytes(payload[8..12].try_into().map_err(|_| Error::BadSlice)?);
-                let ca_sh = Shape::from_ca_count(hi.data_count).map_err(|_| Error::BadCaCount)?;
+                if hi.data_count == 0 || hi.data_count > 1024 * 32 {
+                    let msg = CaMsg {
+                        ty: CaMsgTy::IssueDataCount(hi.clone(), ca_status, ca_severity, ca_secs, ca_nanos),
+                    };
+                    return Ok(msg);
+                }
+                let ca_sh = Shape::from_ca_count(hi.data_count).map_err(|_| {
+                    error!("BadCaCount  hi.data_count {}", hi.data_count);
+                    Error::BadCaCount
+                })?;
                 let meta_padding = match ca_dbr_ty.meta {
                     CaDbrMetaType::Plain => 0,
                     CaDbrMetaType::Status => match ca_dbr_ty.scalar_type {
@@ -891,6 +909,8 @@ pub struct HeadInfo {
     data_count: u16,
     param1: u32,
     param2: u32,
+    ext_payload_size: u32,
+    ext_data_count: u32,
 }
 
 impl HeadInfo {
@@ -908,16 +928,41 @@ impl HeadInfo {
             data_count,
             param1,
             param2,
+            ext_payload_size: 0,
+            ext_data_count: 0,
         };
         Ok(hi)
+    }
+
+    fn with_ext(mut self, payload: u32, datacount: u32) -> Self {
+        self.ext_payload_size = payload;
+        self.ext_data_count = datacount;
+        self
     }
 
     pub fn cmdid(&self) -> u16 {
         self.cmdid
     }
 
-    pub fn payload(&self) -> usize {
-        self.payload_size as _
+    pub fn payload_len(&self) -> usize {
+        if self.payload_size == 0xffff {
+            self.ext_payload_size as _
+        } else {
+            self.payload_size as _
+        }
+    }
+
+    pub fn data_count(&self) -> usize {
+        if self.payload_size == 0xffff {
+            self.ext_data_count as _
+        } else {
+            self.data_count as _
+        }
+    }
+
+    // only for debug purpose
+    pub fn param2(&self) -> u32 {
+        self.param2
     }
 }
 
@@ -935,7 +980,7 @@ impl CaState {
         match self {
             StdHead => 16,
             ExtHead(_) => 8,
-            Payload(k) => k.payload_size as _,
+            Payload(k) => k.payload_len(),
             Done => 123,
         }
     }
@@ -1130,22 +1175,27 @@ impl CaProto {
                     let hi = HeadInfo::from_netbuf(&mut self.buf)?;
                     if hi.cmdid == 1 || hi.cmdid == 15 {
                         let sid = hi.param1;
-                        if hi.payload_size == 0xffff && hi.data_count == 0 {
+                        if hi.payload_size == 0xffff {
+                            if hi.data_count != 0 {
+                                warn!("protocol error: {hi:?}");
+                                return Err(Error::UnexpectedHeader);
+                            }
+                        }
+                        if hi.payload_size == 0xffff {
                         } else if hi.payload_size > 16368 {
                             if self.logged_proto_error_for_cid.contains_key(&sid) {
                                 // TODO emit this as Item so that downstream can translate SID to name.
-                                warn!(
-                                    "Protocol error  payload_size 0x{:04x}  data_count 0x{:04x}  hi {:?}",
-                                    hi.payload_size, hi.data_count, hi
-                                );
                                 self.logged_proto_error_for_cid.insert(sid, true);
                             }
+                            warn!("protocol error: {hi:?}");
+                            return Err(Error::UnexpectedHeader);
                         }
                     }
                     if hi.cmdid > 26 {
-                        warn!("Enexpected cmdid  {hi:?}");
+                        // TODO count as logic error
+                        self.stats.protocol_issue().inc();
                     }
-                    if hi.payload_size == 0xffff && hi.data_count == 0 {
+                    if hi.payload_size == 0xffff {
                         self.state = CaState::ExtHead(hi);
                         Ok(None)
                     } else {
@@ -1162,27 +1212,31 @@ impl CaProto {
                 CaState::ExtHead(hi) => {
                     let payload_size = self.buf.read_u32_be()?;
                     let data_count = self.buf.read_u32_be()?;
-                    if payload_size > 1024 * 256 {
-                        warn!(
-                            "ExtHead  data_type {}  payload_size {payload_size}  data_count {data_count}",
-                            hi.data_type
-                        );
+                    if payload_size > 1024 * 1024 * 32 {
+                        self.stats.payload_very_large().inc();
+                        if false {
+                            warn!(
+                                "ExtHead  data_type {}  payload_size {payload_size}  data_count {data_count}",
+                                hi.data_type
+                            );
+                        }
                     }
                     if payload_size <= 16368 {
+                        self.stats.payload_ext_but_small().inc();
                         warn!(
                             "ExtHead  data_type {}  payload_size {payload_size}  data_count {data_count}",
                             hi.data_type
                         );
-                        let msg = CaMsg::from_proto_infos(hi, &[], self.array_truncate)?;
-                        self.state = CaState::StdHead;
-                        Ok(Some(CaItem::Msg(msg)))
-                    } else {
-                        self.state = CaState::Payload(hi.clone());
-                        Ok(None)
+                        // let msg = CaMsg::from_proto_infos(hi, &[], self.array_truncate)?;
+                        // self.state = CaState::StdHead;
+                        // Ok(Some(CaItem::Msg(msg)))
                     }
+                    let hi = hi.clone().with_ext(payload_size, data_count);
+                    self.state = CaState::Payload(hi);
+                    Ok(None)
                 }
                 CaState::Payload(hi) => {
-                    let g = self.buf.read_bytes(hi.payload_size as _)?;
+                    let g = self.buf.read_bytes(hi.payload_len())?;
                     let msg = CaMsg::from_proto_infos(hi, g, self.array_truncate)?;
                     self.state = CaState::StdHead;
                     Ok(Some(CaItem::Msg(msg)))

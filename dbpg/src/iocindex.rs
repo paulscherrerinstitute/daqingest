@@ -52,7 +52,7 @@ impl IocSearchIndexWorker {
             pg.prepare(sql).await.unwrap()
         };
         let qu_update_tsmod = {
-            let sql = "update ioc_by_channel_log set tsmod = now(), responseaddr = $4 where facility = $1 and channel = $2 and addr is not distinct from $3 and archived = 0";
+            let sql = "update ioc_by_channel_log set modcount = 1 + modcount, tsmod = now(), responseaddr = $4 where facility = $1 and channel = $2 and addr is not distinct from $3 and archived = 0";
             pg.prepare(sql).await.unwrap()
         };
         let qu_update_archived = {
@@ -81,6 +81,7 @@ impl IocSearchIndexWorker {
         let rx = &self.rx;
         let pg = &self.pg;
         while let Ok(item) = rx.recv().await {
+            // TODO should better do atomic read-update
             let responseaddr = item.response_addr.map(|x| x.to_string());
             let addr = item.addr.map(|x| x.to_string());
             let res = pg

@@ -10,7 +10,8 @@ pub enum Error {
     IocAddrNotFound,
 }
 
-pub async fn find_channel_addr(backend: &str, name: String, pg: &PgClient) -> Result<Option<SocketAddrV4>, Error> {
+#[allow(unused)]
+async fn __find_channel_addr(backend: &str, name: String, pg: &PgClient) -> Result<Option<SocketAddrV4>, Error> {
     let qu_find_addr = pg
         .prepare(
             "select t1.facility, t1.channel, t1.addr from ioc_by_channel_log t1 where t1.facility = $1 and t1.channel = $2 and addr is not null order by tsmod desc limit 1",
@@ -40,7 +41,7 @@ pub async fn find_channel_addr(backend: &str, name: String, pg: &PgClient) -> Re
 }
 
 #[allow(unused)]
-async fn query_addr_multiple(backend: &str, pg_client: &PgClient) -> Result<(), Error> {
+async fn __query_addr_multiple(backend: &str, pg_client: &PgClient) -> Result<(), Error> {
     // TODO factor the find loop into a separate Stream.
     let sql = concat!(
         "with q1 as (select t1.facility, t1.channel, t1.addr from ioc_by_channel_log t1",

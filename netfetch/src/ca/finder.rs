@@ -91,6 +91,27 @@ pub fn start_finder(
     Ok((qtx, jh))
 }
 
+async fn finder_full(
+    qrx: Receiver<IocAddrQuery>,
+    tx: Sender<VecDeque<FindIocRes>>,
+    backend: String,
+    opts: CaIngestOpts,
+    stats: Arc<IocFinderStats>,
+) -> Result<(), Error> {
+    let (tx1, rx1) = async_channel::bounded(20);
+    let jh1 = taskrun::spawn(finder_worker(
+        qrx,
+        tx1,
+        backend,
+        opts.postgresql_config().clone(),
+        stats.clone(),
+    ));
+    let jh2 = taskrun::spawn(finder_network_if_not_found(rx1, tx, opts.clone(), stats));
+    jh1.await??;
+    jh2.await??;
+    Ok(())
+}
+
 async fn finder_worker(
     qrx: Receiver<IocAddrQuery>,
     tx: Sender<VecDeque<FindIocRes>>,
@@ -194,6 +215,12 @@ async fn finder_worker_single(
                         }
                         let mut items = items;
                         items.extend(to_add.into_iter());
+                        let items = items;
+                        for e in &items {
+                            if crate::ca::connset::trigger.contains(&e.channel.as_str()) {
+                                debug!("found in database: {e:?}");
+                            }
+                        }
                         let items_len = items.len();
                         if items_len != nbatch {
                             stats.dbsearcher_select_error_len_mismatch().inc();
@@ -220,27 +247,6 @@ async fn finder_worker_single(
     }
     debug!("finder_worker_single done");
     jh.await?.map_err(|e| Error::from_string(e))?;
-    Ok(())
-}
-
-async fn finder_full(
-    qrx: Receiver<IocAddrQuery>,
-    tx: Sender<VecDeque<FindIocRes>>,
-    backend: String,
-    opts: CaIngestOpts,
-    stats: Arc<IocFinderStats>,
-) -> Result<(), Error> {
-    let (tx1, rx1) = async_channel::bounded(20);
-    let jh1 = taskrun::spawn(finder_worker(
-        qrx,
-        tx1,
-        backend,
-        opts.postgresql_config().clone(),
-        stats.clone(),
-    ));
-    let jh2 = taskrun::spawn(finder_network_if_not_found(rx1, tx, opts.clone(), stats));
-    jh1.await??;
-    jh2.await??;
     Ok(())
 }
 
