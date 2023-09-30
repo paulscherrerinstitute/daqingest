@@ -17,6 +17,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::Context;
 use std::task::Poll;
+use std::time::Instant;
 use taskrun::tokio;
 use tokio::io::AsyncRead;
 use tokio::io::AsyncWrite;
@@ -44,6 +45,7 @@ pub enum Error {
     CaCommandNotSupported(u16),
     ParseAttemptInDoneState,
     UnexpectedHeader,
+    ExtendedHeaderBadCount,
 }
 
 const CA_PROTO_VERSION: u16 = 13;
@@ -84,7 +86,7 @@ pub struct CreateChan {
 #[derive(Debug)]
 pub struct CreateChanRes {
     pub data_type: u16,
-    pub data_count: u16,
+    pub data_count: u32,
     pub cid: u32,
     pub sid: u32,
 }
@@ -112,7 +114,7 @@ pub struct EventAdd {
 #[derive(Debug, Clone)]
 pub struct EventAddRes {
     pub data_type: u16,
-    pub data_count: u16,
+    pub data_count: u32,
     pub status: u32,
     pub subid: u32,
     pub value: CaEventValue,
@@ -129,7 +131,7 @@ pub struct ReadNotify {
 #[derive(Debug)]
 pub struct ReadNotifyRes {
     pub data_type: u16,
-    pub data_count: u16,
+    pub data_count: u32,
     pub sid: u32,
     pub ioid: u32,
 }
@@ -342,9 +344,9 @@ impl From<CaDataValue> for scywr::iteminsertqueue::DataValue {
 
 #[derive(Clone, Debug)]
 pub struct CaEventValue {
-    pub ts: Option<NonZeroU64>,
-    pub status: Option<NonZeroU16>,
-    pub severity: Option<NonZeroU16>,
+    pub ts: u64,
+    pub status: u16,
+    pub severity: u16,
     pub data: CaDataValue,
 }
 
@@ -367,7 +369,6 @@ pub enum CaMsgTy {
     ReadNotify(ReadNotify),
     ReadNotifyRes(ReadNotifyRes),
     Echo,
-    IssueDataCount(HeadInfo, u16, u16, u32, u32),
 }
 
 impl CaMsgTy {
@@ -391,7 +392,6 @@ impl CaMsgTy {
             ReadNotify(_) => 0x0f,
             ReadNotifyRes(_) => 0x0f,
             Echo => 0x17,
-            IssueDataCount(..) => panic!(),
         }
     }
 
@@ -425,7 +425,6 @@ impl CaMsgTy {
                 panic!();
             }
             Echo => 0,
-            IssueDataCount(..) => panic!(),
         }
     }
 
@@ -452,7 +451,6 @@ impl CaMsgTy {
             ReadNotify(x) => x.data_type,
             ReadNotifyRes(x) => x.data_type,
             Echo => 0,
-            IssueDataCount(..) => panic!(),
         }
     }
 
@@ -468,15 +466,23 @@ impl CaMsgTy {
             Search(_) => CA_PROTO_VERSION,
             SearchRes(_) => 0,
             CreateChan(_) => 0,
-            CreateChanRes(x) => x.data_count,
+            CreateChanRes(x) => {
+                panic!();
+                x.data_count as _
+            }
             CreateChanFail(_) => 0,
             AccessRightsRes(_) => 0,
             EventAdd(x) => x.data_count,
-            EventAddRes(x) => x.data_count,
+            EventAddRes(x) => {
+                panic!();
+                x.data_count as _
+            }
             ReadNotify(x) => x.data_count,
-            ReadNotifyRes(x) => x.data_count,
+            ReadNotifyRes(x) => {
+                panic!();
+                x.data_count as _
+            }
             Echo => 0,
-            IssueDataCount(..) => panic!(),
         }
     }
 
@@ -500,7 +506,6 @@ impl CaMsgTy {
             ReadNotify(x) => x.sid,
             ReadNotifyRes(x) => x.sid,
             Echo => 0,
-            IssueDataCount(..) => panic!(),
         }
     }
 
@@ -524,7 +529,6 @@ impl CaMsgTy {
             ReadNotify(x) => x.ioid,
             ReadNotifyRes(x) => x.ioid,
             Echo => 0,
-            IssueDataCount(..) => panic!(),
         }
     }
 
@@ -589,7 +593,6 @@ impl CaMsgTy {
             ReadNotify(_) => {}
             ReadNotifyRes(_) => {}
             Echo => {}
-            IssueDataCount(..) => {}
         }
     }
 }
@@ -626,9 +629,14 @@ macro_rules! convert_wave_value {
 #[derive(Debug)]
 pub struct CaMsg {
     pub ty: CaMsgTy,
+    pub ts: Instant,
 }
 
 impl CaMsg {
+    pub fn from_ty_ts(ty: CaMsgTy, ts: Instant) -> Self {
+        Self { ty, ts }
+    }
+
     fn len(&self) -> usize {
         self.ty.len()
     }
@@ -706,11 +714,14 @@ impl CaMsg {
         Ok(val)
     }
 
-    pub fn from_proto_infos(hi: &HeadInfo, payload: &[u8], array_truncate: usize) -> Result<Self, Error> {
+    pub fn from_proto_infos(
+        hi: &HeadInfo,
+        payload: &[u8],
+        tsnow: Instant,
+        array_truncate: usize,
+    ) -> Result<Self, Error> {
         let msg = match hi.cmdid {
-            0x00 => CaMsg {
-                ty: CaMsgTy::VersionRes(hi.data_count),
-            },
+            0x00 => CaMsg::from_ty_ts(CaMsgTy::VersionRes(hi.data_count), tsnow),
             0x0b => {
                 let mut s = String::new();
                 s.extend(format!("{:?}", &payload[..payload.len().min(16)]).chars());
@@ -723,20 +734,16 @@ impl CaMsg {
                     eid: hi.param2,
                     msg: s,
                 };
-                CaMsg { ty: CaMsgTy::Error(e) }
+                CaMsg::from_ty_ts(CaMsgTy::Error(e), tsnow)
             }
             20 => {
                 let name = std::ffi::CString::new(payload)
                     .map(|s| s.into_string().unwrap_or_else(|e| format!("{e:?}")))
                     .unwrap_or_else(|e| format!("{e:?}"));
-                CaMsg {
-                    ty: CaMsgTy::ClientNameRes(ClientNameRes { name }),
-                }
+                CaMsg::from_ty_ts(CaMsgTy::ClientNameRes(ClientNameRes { name }), tsnow)
             }
             // TODO make response type for host name:
-            21 => CaMsg {
-                ty: CaMsgTy::HostName("TODOx5288".into()),
-            },
+            21 => CaMsg::from_ty_ts(CaMsgTy::HostName("TODOx5288".into()), tsnow),
             6 => {
                 if hi.payload_len() != 8 {
                     warn!("protocol error: search result is expected with fixed payload size 8");
@@ -748,40 +755,36 @@ impl CaMsg {
                     return Err(Error::CaProtoVersionMissing);
                 }
                 let proto_version = u16::from_be_bytes(payload[0..2].try_into().map_err(|_| Error::BadSlice)?);
-                CaMsg {
-                    ty: CaMsgTy::SearchRes(SearchRes {
-                        tcp_port: hi.data_type,
-                        addr: hi.param1,
-                        id: hi.param2,
-                        proto_version,
-                    }),
-                }
+                let ty = CaMsgTy::SearchRes(SearchRes {
+                    tcp_port: hi.data_type,
+                    addr: hi.param1,
+                    id: hi.param2,
+                    proto_version,
+                });
+                CaMsg::from_ty_ts(ty, tsnow)
             }
             18 => {
-                CaMsg {
-                    // TODO use different structs for request and response:
-                    ty: CaMsgTy::CreateChanRes(CreateChanRes {
-                        data_type: hi.data_type,
-                        data_count: hi.data_count,
-                        cid: hi.param1,
-                        sid: hi.param2,
-                    }),
-                }
+                let ty = CaMsgTy::CreateChanRes(CreateChanRes {
+                    data_type: hi.data_type,
+                    // TODO what am I supposed to use here in case of extended header?
+                    data_count: hi.data_count() as _,
+                    cid: hi.param1,
+                    sid: hi.param2,
+                });
+                CaMsg::from_ty_ts(ty, tsnow)
             }
             22 => {
-                CaMsg {
-                    // TODO use different structs for request and response:
-                    ty: CaMsgTy::AccessRightsRes(AccessRightsRes {
-                        cid: hi.param1,
-                        rights: hi.param2,
-                    }),
-                }
+                // TODO use different structs for request and response:
+                let ty = CaMsgTy::AccessRightsRes(AccessRightsRes {
+                    cid: hi.param1,
+                    rights: hi.param2,
+                });
+                CaMsg::from_ty_ts(ty, tsnow)
             }
             26 => {
-                CaMsg {
-                    // TODO use different structs for request and response:
-                    ty: CaMsgTy::CreateChanFail(CreateChanFail { cid: hi.param1 }),
-                }
+                // TODO use different structs for request and response:
+                let ty = CaMsgTy::CreateChanFail(CreateChanFail { cid: hi.param1 });
+                CaMsg::from_ty_ts(ty, tsnow)
             }
             1 => {
                 use netpod::Shape;
@@ -797,14 +800,8 @@ impl CaMsg {
                 let ca_severity = u16::from_be_bytes(payload[2..4].try_into().map_err(|_| Error::BadSlice)?);
                 let ca_secs = u32::from_be_bytes(payload[4..8].try_into().map_err(|_| Error::BadSlice)?);
                 let ca_nanos = u32::from_be_bytes(payload[8..12].try_into().map_err(|_| Error::BadSlice)?);
-                if hi.data_count == 0 || hi.data_count > 1024 * 32 {
-                    let msg = CaMsg {
-                        ty: CaMsgTy::IssueDataCount(hi.clone(), ca_status, ca_severity, ca_secs, ca_nanos),
-                    };
-                    return Ok(msg);
-                }
-                let ca_sh = Shape::from_ca_count(hi.data_count).map_err(|_| {
-                    error!("BadCaCount  hi.data_count {}", hi.data_count);
+                let ca_sh = Shape::from_ca_count(hi.data_count() as _).map_err(|_| {
+                    error!("BadCaCount  {hi:?}");
                     Error::BadCaCount
                 })?;
                 let meta_padding = match ca_dbr_ty.meta {
@@ -841,21 +838,20 @@ impl CaMsg {
                 };
                 let ts = SEC * (ca_secs as u64 + EPICS_EPOCH_OFFSET) + ca_nanos as u64;
                 let value = CaEventValue {
-                    ts: NonZeroU64::new(ts),
-                    status: NonZeroU16::new(ca_status),
-                    severity: NonZeroU16::new(ca_severity),
+                    ts,
+                    status: ca_status,
+                    severity: ca_severity,
                     data: value,
                 };
                 let d = EventAddRes {
                     data_type: hi.data_type,
-                    data_count: hi.data_count,
+                    data_count: hi.data_count() as _,
                     status: hi.param1,
                     subid: hi.param2,
                     value,
                 };
-                CaMsg {
-                    ty: CaMsgTy::EventAddRes(d),
-                }
+                let ty = CaMsgTy::EventAddRes(d);
+                CaMsg::from_ty_ts(ty, tsnow)
             }
             15 => {
                 if payload.len() == 8 {
@@ -872,17 +868,16 @@ impl CaMsg {
                         &payload[..payload.len().min(12)],
                     );
                 }
-                CaMsg {
-                    // TODO use different structs for request and response:
-                    ty: CaMsgTy::ReadNotifyRes(ReadNotifyRes {
-                        data_type: hi.data_type,
-                        data_count: hi.data_count,
-                        sid: hi.param1,
-                        ioid: hi.param2,
-                    }),
-                }
+                // TODO use different structs for request and response:
+                let ty = CaMsgTy::ReadNotifyRes(ReadNotifyRes {
+                    data_type: hi.data_type,
+                    data_count: hi.data_count() as _,
+                    sid: hi.param1,
+                    ioid: hi.param2,
+                });
+                CaMsg::from_ty_ts(ty, tsnow)
             }
-            0x17 => CaMsg { ty: CaMsgTy::Echo },
+            0x17 => CaMsg::from_ty_ts(CaMsgTy::Echo, tsnow),
             x => return Err(Error::CaCommandNotSupported(x)),
         };
         Ok(msg)
@@ -1065,6 +1060,7 @@ impl CaProto {
 
     fn loop_body(mut self: Pin<&mut Self>, cx: &mut Context) -> Result<Option<Poll<CaItem>>, Error> {
         use Poll::*;
+        let tsnow = Instant::now();
         let output_res_1: Option<Poll<()>> = 'll1: loop {
             if self.out.len() == 0 {
                 break None;
@@ -1152,7 +1148,7 @@ impl CaProto {
                 Ok(None)
             }
         }?;
-        let parse_res: Option<CaItem> = self.parse_item()?;
+        let parse_res: Option<CaItem> = self.parse_item(tsnow)?;
         match (output_res_2, read_res, parse_res) {
             (_, _, Some(item)) => Ok(Some(Ready(item))),
             (Some(Pending), _, _) => Ok(Some(Pending)),
@@ -1165,7 +1161,7 @@ impl CaProto {
         }
     }
 
-    fn parse_item(&mut self) -> Result<Option<CaItem>, Error> {
+    fn parse_item(&mut self, tsnow: Instant) -> Result<Option<CaItem>, Error> {
         loop {
             if self.buf.len() < self.state.need_min() {
                 break Ok(None);
@@ -1178,17 +1174,12 @@ impl CaProto {
                         if hi.payload_size == 0xffff {
                             if hi.data_count != 0 {
                                 warn!("protocol error: {hi:?}");
-                                return Err(Error::UnexpectedHeader);
+                                return Err(Error::ExtendedHeaderBadCount);
                             }
                         }
                         if hi.payload_size == 0xffff {
                         } else if hi.payload_size > 16368 {
-                            if self.logged_proto_error_for_cid.contains_key(&sid) {
-                                // TODO emit this as Item so that downstream can translate SID to name.
-                                self.logged_proto_error_for_cid.insert(sid, true);
-                            }
-                            warn!("protocol error: {hi:?}");
-                            return Err(Error::UnexpectedHeader);
+                            self.stats.payload_std_too_large().inc();
                         }
                     }
                     if hi.cmdid > 26 {
@@ -1199,9 +1190,11 @@ impl CaProto {
                         self.state = CaState::ExtHead(hi);
                         Ok(None)
                     } else {
+                        // For extended messages, ingest on receive of extended header
+                        self.stats.payload_size().ingest(hi.payload_len() as u32);
                         if hi.payload_size == 0 {
                             self.state = CaState::StdHead;
-                            let msg = CaMsg::from_proto_infos(&hi, &[], self.array_truncate)?;
+                            let msg = CaMsg::from_proto_infos(&hi, &[], tsnow, self.array_truncate)?;
                             Ok(Some(CaItem::Msg(msg)))
                         } else {
                             self.state = CaState::Payload(hi);
@@ -1212,8 +1205,9 @@ impl CaProto {
                 CaState::ExtHead(hi) => {
                     let payload_size = self.buf.read_u32_be()?;
                     let data_count = self.buf.read_u32_be()?;
+                    self.stats.payload_size().ingest(hi.payload_len() as u32);
                     if payload_size > 1024 * 1024 * 32 {
-                        self.stats.payload_very_large().inc();
+                        self.stats.payload_ext_very_large().inc();
                         if false {
                             warn!(
                                 "ExtHead  data_type {}  payload_size {payload_size}  data_count {data_count}",
@@ -1227,9 +1221,6 @@ impl CaProto {
                             "ExtHead  data_type {}  payload_size {payload_size}  data_count {data_count}",
                             hi.data_type
                         );
-                        // let msg = CaMsg::from_proto_infos(hi, &[], self.array_truncate)?;
-                        // self.state = CaState::StdHead;
-                        // Ok(Some(CaItem::Msg(msg)))
                     }
                     let hi = hi.clone().with_ext(payload_size, data_count);
                     self.state = CaState::Payload(hi);
@@ -1237,7 +1228,11 @@ impl CaProto {
                 }
                 CaState::Payload(hi) => {
                     let g = self.buf.read_bytes(hi.payload_len())?;
-                    let msg = CaMsg::from_proto_infos(hi, g, self.array_truncate)?;
+                    let msg = CaMsg::from_proto_infos(hi, g, tsnow, self.array_truncate)?;
+                    // data-count is only reasonable for event messages
+                    if let CaMsgTy::EventAddRes(e) = &msg.ty {
+                        self.stats.data_count().ingest(hi.data_count() as u32);
+                    }
                     self.state = CaState::StdHead;
                     Ok(Some(CaItem::Msg(msg)))
                 }

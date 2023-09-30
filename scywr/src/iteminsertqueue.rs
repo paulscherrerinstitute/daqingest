@@ -269,9 +269,11 @@ struct InsParCom {
     series: u64,
     ts_msp: u64,
     ts_lsp: u64,
+    ts_local: u64,
     pulse: u64,
     ttl: u32,
     do_insert: bool,
+    stats: Arc<InsertWorkerStats>,
 }
 
 fn insert_scalar_gen_fut<ST>(par: InsParCom, val: ST, qu: Arc<PreparedStatement>, scy: Arc<ScySession>) -> InsertFut
@@ -286,7 +288,7 @@ where
         val,
         par.ttl as i32,
     );
-    InsertFut::new(scy, qu, params)
+    InsertFut::new(scy, qu, params, par.ts_local, par.stats)
 }
 
 fn insert_array_gen_fut<ST>(par: InsParCom, val: ST, qu: Arc<PreparedStatement>, scy: Arc<ScySession>) -> InsertFut
@@ -301,7 +303,7 @@ where
         val,
         par.ttl as i32,
     );
-    InsertFut::new(scy, qu, params)
+    InsertFut::new(scy, qu, params, par.ts_local, par.stats)
 }
 
 #[pin_project::pin_project]
@@ -320,10 +322,24 @@ impl InsertFut {
         scy: Arc<ScySession>,
         qu: Arc<PreparedStatement>,
         params: V,
+        // timestamp when we first encountered the data to-be inserted, for metrics
+        tsnet: u64,
+        stats: Arc<InsertWorkerStats>,
     ) -> Self {
         let scy_ref = unsafe { NonNull::from(scy.as_ref()).as_ref() };
         let qu_ref = unsafe { NonNull::from(qu.as_ref()).as_ref() };
         let fut = scy_ref.execute_paged(qu_ref, params, None);
+        let fut = fut.map(move |x| {
+            let item_ts_local = tsnet;
+            let tsnow_u64 = {
+                let ts = SystemTime::now();
+                let epoch = ts.duration_since(std::time::UNIX_EPOCH).unwrap();
+                epoch.as_secs() * SEC + epoch.subsec_nanos() as u64
+            };
+            let dt = ((tsnow_u64 / 1000000) as u32).saturating_sub((item_ts_local / 1000000) as u32);
+            stats.item_lat_net_store().ingest(dt);
+            x
+        });
         let fut = taskrun::tokio::task::unconstrained(fut);
         let fut = Box::pin(fut);
         // let fut = StackFuture::from(fut);
@@ -416,8 +432,8 @@ pub async fn insert_item(
     item: InsertItem,
     ttls: &Ttls,
     data_store: &DataStore,
-    stats: &InsertWorkerStats,
     do_insert: bool,
+    stats: &Arc<InsertWorkerStats>,
 ) -> Result<(), Error> {
     if item.msp_bump {
         let params = (item.series.id() as i64, item.ts_msp as i64, ttls.index.as_secs() as i32);
@@ -446,9 +462,11 @@ pub async fn insert_item(
                 series: item.series.id(),
                 ts_msp: item.ts_msp,
                 ts_lsp: item.ts_lsp,
+                ts_local: item.ts_local,
                 pulse: item.pulse,
                 ttl: ttls.d0.as_secs() as _,
                 do_insert,
+                stats: stats.clone(),
             };
             use ScalarValue::*;
             match val {
@@ -467,9 +485,11 @@ pub async fn insert_item(
                 series: item.series.id(),
                 ts_msp: item.ts_msp,
                 ts_lsp: item.ts_lsp,
+                ts_local: item.ts_local,
                 pulse: item.pulse,
                 ttl: ttls.d1.as_secs() as _,
                 do_insert,
+                stats: stats.clone(),
             };
             use ArrayValue::*;
             match val {
@@ -489,15 +509,24 @@ pub async fn insert_item(
 pub fn insert_msp_fut(
     series: SeriesId,
     ts_msp: u64,
+    // for stats, the timestamp when we received that data
+    tsnet: u64,
     ttls: &Ttls,
     scy: Arc<ScySession>,
     qu: Arc<PreparedStatement>,
+    stats: Arc<InsertWorkerStats>,
 ) -> InsertFut {
     let params = (series.id() as i64, ts_msp as i64, ttls.index.as_secs() as i32);
-    InsertFut::new(scy, qu, params)
+    InsertFut::new(scy, qu, params, tsnet, stats)
 }
 
-pub fn insert_item_fut(item: InsertItem, ttls: &Ttls, data_store: &DataStore, do_insert: bool) -> InsertFut {
+pub fn insert_item_fut(
+    item: InsertItem,
+    ttls: &Ttls,
+    data_store: &DataStore,
+    do_insert: bool,
+    stats: &Arc<InsertWorkerStats>,
+) -> InsertFut {
     let scy = data_store.scy.clone();
     use DataValue::*;
     match item.val {
@@ -506,9 +535,11 @@ pub fn insert_item_fut(item: InsertItem, ttls: &Ttls, data_store: &DataStore, do
                 series: item.series.id(),
                 ts_msp: item.ts_msp,
                 ts_lsp: item.ts_lsp,
+                ts_local: item.ts_local,
                 pulse: item.pulse,
                 ttl: ttls.d0.as_secs() as _,
                 do_insert,
+                stats: stats.clone(),
             };
             use ScalarValue::*;
             match val {
@@ -527,9 +558,11 @@ pub fn insert_item_fut(item: InsertItem, ttls: &Ttls, data_store: &DataStore, do
                 series: item.series.id(),
                 ts_msp: item.ts_msp,
                 ts_lsp: item.ts_lsp,
+                ts_local: item.ts_local,
                 pulse: item.pulse,
                 ttl: ttls.d1.as_secs() as _,
                 do_insert,
+                stats: stats.clone(),
             };
             use ArrayValue::*;
             match val {
@@ -544,13 +577,20 @@ pub fn insert_item_fut(item: InsertItem, ttls: &Ttls, data_store: &DataStore, do
     }
 }
 
-pub fn insert_connection_status_fut(item: ConnectionStatusItem, ttls: &Ttls, data_store: &DataStore) -> InsertFut {
+pub fn insert_connection_status_fut(
+    item: ConnectionStatusItem,
+    ttls: &Ttls,
+    data_store: &DataStore,
+    stats: Arc<InsertWorkerStats>,
+) -> InsertFut {
     let tsunix = item.ts.duration_since(UNIX_EPOCH).unwrap_or(Duration::ZERO);
     let secs = tsunix.as_secs() * SEC;
     let nanos = tsunix.subsec_nanos() as u64;
     let ts = secs + nanos;
     let ts_msp = ts / CONNECTION_STATUS_DIV * CONNECTION_STATUS_DIV;
     let ts_lsp = ts - ts_msp;
+    // TODO is that the good tsnet to use?
+    let tsnet = ts;
     let kind = item.status.to_kind();
     let addr = format!("{}", item.addr);
     let params = (
@@ -564,6 +604,8 @@ pub fn insert_connection_status_fut(item: ConnectionStatusItem, ttls: &Ttls, dat
         data_store.scy.clone(),
         data_store.qu_insert_connection_status.clone(),
         params,
+        tsnet,
+        stats,
     )
 }
 
@@ -571,6 +613,7 @@ pub fn insert_channel_status_fut(
     item: ChannelStatusItem,
     ttls: &Ttls,
     data_store: &DataStore,
+    stats: Arc<InsertWorkerStats>,
 ) -> SmallVec<[InsertFut; 4]> {
     let tsunix = item.ts.duration_since(UNIX_EPOCH).unwrap_or(Duration::ZERO);
     let secs = tsunix.as_secs() * SEC;
@@ -578,6 +621,7 @@ pub fn insert_channel_status_fut(
     let ts = secs + nanos;
     let ts_msp = ts / CONNECTION_STATUS_DIV * CONNECTION_STATUS_DIV;
     let ts_lsp = ts - ts_msp;
+    let tsnet = ts;
     let kind = item.status.to_kind();
     let cssid = item.cssid.id();
     let params = (
@@ -591,6 +635,8 @@ pub fn insert_channel_status_fut(
         data_store.scy.clone(),
         data_store.qu_insert_channel_status.clone(),
         params,
+        tsnet,
+        stats.clone(),
     );
     let params = (
         ts_msp as i64,
@@ -603,6 +649,8 @@ pub fn insert_channel_status_fut(
         data_store.scy.clone(),
         data_store.qu_insert_channel_status_by_ts_msp.clone(),
         params,
+        tsnet,
+        stats,
     );
     smallvec![fut1, fut2]
 }

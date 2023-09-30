@@ -1,6 +1,7 @@
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use std::time::Instant;
 
 const US: u64 = 1000;
 const MS: u64 = US * 1000;
@@ -207,7 +208,35 @@ impl IntervalEma {
     }
 }
 
-// #[cfg(DISABLED)]
+pub struct XorShift32 {
+    state: u32,
+}
+
+impl XorShift32 {
+    pub fn new(state: u32) -> Self {
+        Self { state }
+    }
+
+    pub fn new_from_time() -> Self {
+        use std::time::SystemTime;
+        Self::new(
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .subsec_micros(),
+        )
+    }
+
+    pub fn next(&mut self) -> u32 {
+        let mut x = self.state;
+        x ^= x << 13;
+        x ^= x >> 17;
+        x ^= x << 5;
+        self.state = x;
+        x
+    }
+}
+
 stats_proc::stats_struct!((
     stats_struct(
         name(CaProtoStats),
@@ -216,9 +245,11 @@ stats_proc::stats_struct!((
             tcp_recv_count,
             tcp_recv_bytes,
             protocol_issue,
-            payload_very_large,
+            payload_std_too_large,
             payload_ext_but_small,
+            payload_ext_very_large,
         ),
+        histolog2s(payload_size, data_count,),
     ),
     stats_struct(
         name(CaConnSetStats),
@@ -301,24 +332,10 @@ stats_proc::stats_struct!((
             inserts_msp_grid,
             inserts_value,
             ratelimit_drop,
-            item_latency_neg,
-            item_latency_025ms,
-            item_latency_050ms,
-            item_latency_100ms,
-            item_latency_200ms,
-            item_latency_400ms,
-            item_latency_800ms,
-            item_latency_1600ms,
-            item_latency_3200ms,
-            item_latency_large,
-            item_commit_latency_0050ms,
-            item_commit_latency_0200ms,
-            item_commit_latency_0800ms,
-            item_commit_latency_3200ms,
-            item_commit_latency_large,
             worker_start,
             worker_finish,
-        )
+        ),
+        histolog2s(item_lat_net_worker, item_lat_net_store,),
     ),
     stats_struct(
         name(IocFinderStats),
@@ -346,7 +363,6 @@ stats_proc::stats_struct!((
     ),
 ));
 
-// #[cfg(DISABLED)]
 stats_proc::stats_struct!((
     stats_struct(
         name(CaConnStats),
@@ -399,19 +415,8 @@ stats_proc::stats_struct!((
             channel_alive_count,
             channel_not_alive_count,
             channel_series_lookup_already_pending,
-            ca_ts_off_1,
-            ca_ts_off_2,
-            ca_ts_off_3,
-            ca_ts_off_4,
             ping_start,
             ping_no_proto,
-            pong_recv_010ms,
-            pong_recv_025ms,
-            pong_recv_050ms,
-            pong_recv_100ms,
-            pong_recv_200ms,
-            pong_recv_400ms,
-            pong_recv_slow,
             pong_timeout,
             ca_conn_poll_fn_begin,
             ca_conn_poll_loop_begin,
@@ -419,13 +424,13 @@ stats_proc::stats_struct!((
             ca_conn_poll_pending,
             ca_conn_poll_no_progress_no_pending,
         ),
-        values(inter_ivl_ema)
+        values(inter_ivl_ema),
+        histolog2s(pong_recv_lat, ca_ts_off,),
     ),
     agg(name(CaConnStatsAgg), parent(CaConnStats)),
     diff(name(CaConnStatsAggDiff), input(CaConnStatsAgg)),
 ));
 
-// #[cfg(DISABLED)]
 stats_proc::stats_struct!((
     stats_struct(
         name(DaemonStats),

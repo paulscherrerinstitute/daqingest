@@ -17,6 +17,7 @@ struct StatsStructDef {
     prefix: Option<syn::Ident>,
     counters: Vec<syn::Ident>,
     values: Vec<syn::Ident>,
+    histolog2s: Vec<syn::Ident>,
 }
 
 #[derive(Debug)]
@@ -49,7 +50,11 @@ fn stats_struct_impl(st: &StatsStructDef) -> String {
         .values
         .iter()
         .map(|x| format!("{:12}{}: stats_types::Value::new()", "", x.to_string()));
-    let inits: Vec<_> = inits1.into_iter().chain(inits2).collect();
+    let init_histolog2s = st
+        .histolog2s
+        .iter()
+        .map(|x| format!("{:12}{}: stats_types::HistoLog2::new(0)", "", x.to_string()));
+    let inits: Vec<_> = inits1.into_iter().chain(inits2).chain(init_histolog2s).collect();
     let inits = inits.join(",\n");
     let incers: String = st
         .counters
@@ -76,7 +81,22 @@ fn stats_struct_impl(st: &StatsStructDef) -> String {
             write!(
                 buf,
                 "
-    pub fn {nn}(&self) -> &stats_types::Value {{
+        pub fn {nn}(&self) -> &stats_types::Value {{
+            &self.{nn}
+        }}
+    "
+            )
+            .unwrap();
+        }
+        buf
+    };
+    let histolog2s = {
+        let mut buf = String::new();
+        for nn in &st.histolog2s {
+            write!(
+                buf,
+                "
+    pub fn {nn}(&self) -> &stats_types::HistoLog2 {{
         &self.{nn}
     }}
 "
@@ -110,6 +130,17 @@ fn stats_struct_impl(st: &StatsStructDef) -> String {
                 "ret.push_str(&format!(\"daqingest{}_{} {{}}\\n\", self.{}.load()));\n",
                 pre, n, n
             ));
+        }
+        for x in &st.histolog2s {
+            let n = x.to_string();
+            let fullname = if let Some(x) = &st.prefix {
+                format!("daqingest_{x}_{n}")
+            } else {
+                format!("daqingest_{n}")
+            };
+            buf.push_str(&format!("let fullname = \"{fullname}\";\n"));
+            buf.push_str(&format!("let s = self.{n}.to_prometheus(fullname);\n"));
+            buf.push_str(&format!("ret.push_str(&s);\n"));
         }
         format!(
             "
@@ -158,6 +189,8 @@ impl {name} {{
 
     {values}
 
+    {histolog2s}
+
     {fn_prometheus}
 
     {fn_snapshot}
@@ -185,6 +218,11 @@ fn stats_struct_decl_impl(st: &StatsStructDef) -> String {
         .iter()
         .map(|x| format!("{:4}pub {}: stats_types::Value,\n", "", x.to_string()))
         .fold(String::new(), extend_str);
+    let histolog2s_decl = st
+        .histolog2s
+        .iter()
+        .map(|x| format!("{:4}pub {}: stats_types::HistoLog2,\n", "", x.to_string()))
+        .fold(String::new(), extend_str);
     let structt = format!(
         "
 pub struct {name} {{
@@ -192,6 +230,7 @@ pub struct {name} {{
     dropped: stats_types::Value,
 {counters_decl}
 {values_decl}
+{histolog2s_decl}
 }}
 
 "
@@ -407,7 +446,8 @@ fn idents_from_exprs(inp: PunctExpr) -> syn::Result<Vec<syn::Ident>> {
 
 fn func_name_from_expr(inp: syn::Expr) -> syn::Result<syn::Ident> {
     use syn::spanned::Spanned;
-    use syn::{Error, Expr};
+    use syn::Error;
+    use syn::Expr;
     match inp {
         Expr::Path(k) => {
             if k.path.segments.len() != 1 {
@@ -425,7 +465,8 @@ fn func_name_from_expr(inp: syn::Expr) -> syn::Result<syn::Ident> {
 impl FuncCallWithArgs {
     fn from_expr(inp: syn::Expr) -> Result<Self, syn::Error> {
         use syn::spanned::Spanned;
-        use syn::{Error, Expr};
+        use syn::Error;
+        use syn::Expr;
         let span_all = inp.span();
         match inp {
             Expr::Call(k) => {
@@ -448,6 +489,7 @@ impl StatsStructDef {
             prefix: syn::parse_str("__empty").unwrap(),
             counters: Vec::new(),
             values: Vec::new(),
+            histolog2s: Vec::new(),
         }
     }
 
@@ -456,6 +498,7 @@ impl StatsStructDef {
         let mut prefix = None;
         let mut counters = None;
         let mut values = None;
+        let mut histolog2s = None;
         for k in inp {
             let fa = FuncCallWithArgs::from_expr(k)?;
             if fa.name == "name" {
@@ -470,6 +513,9 @@ impl StatsStructDef {
             } else if fa.name == "values" {
                 let idents = idents_from_exprs(fa.args)?;
                 values = Some(idents);
+            } else if fa.name == "histolog2s" {
+                let idents = idents_from_exprs(fa.args)?;
+                histolog2s = Some(idents);
             } else {
                 panic!("fa.name: {:?}", fa.name);
             }
@@ -479,6 +525,7 @@ impl StatsStructDef {
             prefix,
             counters: counters.unwrap_or(Vec::new()),
             values: values.unwrap_or(Vec::new()),
+            histolog2s: histolog2s.unwrap_or(Vec::new()),
         };
         Ok(ret)
     }
@@ -587,6 +634,7 @@ pub fn stats_struct(ts: TokenStream) -> TokenStream {
                 prefix: None,
                 counters: j.stats.counters.clone(),
                 values: Vec::new(),
+                histolog2s: Vec::new(),
             };
             def.stats_struct_defs.push(h);
         }
@@ -620,6 +668,8 @@ pub fn stats_struct(ts: TokenStream) -> TokenStream {
                     counters: j.stats.counters.clone(),
                     // TODO compute values
                     values: Vec::new(),
+                    // TODO not supported yet
+                    histolog2s: Vec::new(),
                 };
                 let s = diff_decl_impl(k, &p);
                 code.push_str(&s);

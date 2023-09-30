@@ -191,31 +191,11 @@ async fn worker(
                     let epoch = ts.duration_since(std::time::UNIX_EPOCH).unwrap();
                     epoch.as_secs() * SEC + epoch.subsec_nanos() as u64
                 };
-                let dt = (tsnow / 1000000) as i64 - (item_ts_local / 1000000) as i64;
-                if dt < 0 {
-                    stats.item_latency_neg().inc();
-                } else if dt <= 25 {
-                    stats.item_latency_025ms().inc();
-                } else if dt <= 50 {
-                    stats.item_latency_050ms().inc();
-                } else if dt <= 100 {
-                    stats.item_latency_100ms().inc();
-                } else if dt <= 200 {
-                    stats.item_latency_200ms().inc();
-                } else if dt <= 400 {
-                    stats.item_latency_400ms().inc();
-                } else if dt <= 800 {
-                    stats.item_latency_800ms().inc();
-                } else if dt <= 1600 {
-                    stats.item_latency_1600ms().inc();
-                } else if dt <= 3200 {
-                    stats.item_latency_3200ms().inc();
-                } else {
-                    stats.item_latency_large().inc();
-                }
+                let dt = ((tsnow / 1000000) as u32).saturating_sub((item_ts_local / 1000000) as u32);
+                stats.item_lat_net_worker().ingest(dt);
                 let insert_frac = insert_worker_opts.insert_frac.load(Ordering::Acquire);
                 let do_insert = i1 % 1000 < insert_frac;
-                match insert_item(item, &ttls, &data_store, &stats, do_insert).await {
+                match insert_item(item, &ttls, &data_store, do_insert, &stats).await {
                     Ok(_) => {
                         stats.inserted_values().inc();
                         let tsnow = {
@@ -223,18 +203,8 @@ async fn worker(
                             let epoch = ts.duration_since(std::time::UNIX_EPOCH).unwrap();
                             epoch.as_secs() * SEC + epoch.subsec_nanos() as u64
                         };
-                        let dt = (tsnow / 1000000) as i64 - (item_ts_local / 1000000) as i64;
-                        if dt <= 50 {
-                            stats.item_commit_latency_0050ms().inc();
-                        } else if dt <= 200 {
-                            stats.item_commit_latency_0200ms().inc();
-                        } else if dt <= 800 {
-                            stats.item_commit_latency_0800ms().inc();
-                        } else if dt <= 3200 {
-                            stats.item_commit_latency_3200ms().inc();
-                        } else {
-                            stats.item_commit_latency_large().inc();
-                        }
+                        let dt = ((tsnow / 1000000) as u32).saturating_sub((item_ts_local / 1000000) as u32);
+                        stats.item_lat_net_store().ingest(dt);
                         backoff = backoff_0;
                     }
                     Err(e) => {
@@ -367,16 +337,21 @@ async fn worker_streamed(
     let mut stream = item_inp
         .map(|item| {
             stats.item_recv.inc();
+            let tsnow_u64 = {
+                let ts = SystemTime::now();
+                let epoch = ts.duration_since(std::time::UNIX_EPOCH).unwrap();
+                epoch.as_secs() * SEC + epoch.subsec_nanos() as u64
+            };
             match item {
-                QueryItem::Insert(item) => prepare_query_insert_futs(item, &ttls, &data_store, &stats),
+                QueryItem::Insert(item) => prepare_query_insert_futs(item, &ttls, &data_store, &stats, tsnow_u64),
                 QueryItem::ConnectionStatus(item) => {
                     stats.inserted_connection_status().inc();
-                    let fut = insert_connection_status_fut(item, &ttls, &data_store);
+                    let fut = insert_connection_status_fut(item, &ttls, &data_store, stats.clone());
                     smallvec![fut]
                 }
                 QueryItem::ChannelStatus(item) => {
                     stats.inserted_channel_status().inc();
-                    insert_channel_status_fut(item, &ttls, &data_store)
+                    insert_channel_status_fut(item, &ttls, &data_store, stats.clone())
                 }
                 _ => {
                     // TODO
@@ -420,23 +395,29 @@ fn prepare_query_insert_futs(
     item: InsertItem,
     ttls: &Ttls,
     data_store: &Arc<DataStore>,
-    stats: &InsertWorkerStats,
+    stats: &Arc<InsertWorkerStats>,
+    tsnow_u64: u64,
 ) -> SmallVec<[InsertFut; 4]> {
     stats.inserts_value().inc();
+    let item_ts_local = item.ts_local;
+    let dt = ((tsnow_u64 / 1000000) as u32).saturating_sub((item_ts_local / 1000000) as u32);
+    stats.item_lat_net_worker().ingest(dt);
     let msp_bump = item.msp_bump;
     let series = item.series.clone();
     let ts_msp = item.ts_msp;
     let do_insert = true;
-    let fut = insert_item_fut(item, &ttls, &data_store, do_insert);
+    let fut = insert_item_fut(item, &ttls, &data_store, do_insert, stats);
     let mut futs = smallvec![fut];
     if msp_bump {
         stats.inserts_msp().inc();
         let fut = insert_msp_fut(
             series,
             ts_msp,
+            item_ts_local,
             ttls,
             data_store.scy.clone(),
             data_store.qu_insert_ts_msp.clone(),
+            stats.clone(),
         );
         futs.push(fut);
     }

@@ -65,6 +65,14 @@ impl Value {
         self.0.store(x, Release);
     }
 
+    pub fn inc(&self) {
+        self.0.fetch_add(1, AcqRel);
+    }
+
+    pub fn dec(&self) {
+        self.0.fetch_sub(1, AcqRel);
+    }
+
     pub fn load(&self) -> u64 {
         self.0.load(Acquire)
     }
@@ -108,3 +116,106 @@ struct StatsAReader {
 }
 
 impl StatsAReader {}
+
+pub struct HistoLog2 {
+    histo: [AtomicU64; 16],
+    sub: u16,
+}
+
+macro_rules! rep16 {
+    ([$x:expr]) => {
+        [$x, $x, $x, $x, $x, $x, $x, $x, $x, $x, $x, $x, $x, $x, $x, $x]
+    };
+}
+
+impl HistoLog2 {
+    pub fn new(sub: u16) -> Self {
+        Self {
+            histo: rep16!([AtomicU64::new(0)]),
+            sub,
+        }
+    }
+
+    #[inline]
+    pub fn ingest(&self, mut v: u32) {
+        v >>= self.sub;
+        let mut po = 0;
+        while v != 0 && po < self.histo.len() - 1 {
+            v >>= 1;
+            po += 1;
+        }
+        self.histo[po].fetch_add(1, AcqRel);
+    }
+
+    pub fn to_prometheus(&self, name: &str) -> String {
+        let mut ret = String::with_capacity(2048);
+        ret.push_str("# HELP ");
+        ret.push_str(name);
+        ret.push_str(" help-text-missing\n");
+        ret.push_str("# TYPE ");
+        ret.push_str(name);
+        ret.push_str(" histogram\n");
+        let mut cnt = 0;
+        let mut sum = 0;
+        for (i, a) in self.histo.iter().enumerate() {
+            use std::ops::Sub;
+            let i = i as u32;
+            let le = 2u32.pow(i).sub(1);
+            let v = a.load(Acquire);
+            cnt += v;
+            sum += v * le as u64;
+            ret.push_str(name);
+            ret.push_str("_bucket{le=\"");
+            ret.push_str(&le.to_string());
+            ret.push_str("\"} ");
+            ret.push_str(&cnt.to_string());
+            ret.push_str("\n");
+        }
+        ret.push_str(name);
+        ret.push_str("_bucket{le=\"+Inf\"} ");
+        ret.push_str(&cnt.to_string());
+        ret.push_str("\n");
+        ret.push_str(name);
+        ret.push_str("_count ");
+        ret.push_str(&cnt.to_string());
+        ret.push_str("\n");
+        ret.push_str(name);
+        ret.push_str("_sum ");
+        ret.push_str(&sum.to_string());
+        ret.push_str("\n");
+        ret
+    }
+}
+
+#[test]
+fn histo_00() {
+    let histo = HistoLog2::new(0);
+    // histo.ingest(0);
+    // histo.ingest(1);
+    // histo.ingest(2);
+    histo.ingest(3);
+    histo.ingest(4);
+    let exp = r##"# HELP latA help-text-missing
+# TYPE latA histogram
+latA_bucket{le="0"} 0
+latA_bucket{le="1"} 0
+latA_bucket{le="3"} 1
+latA_bucket{le="7"} 2
+latA_bucket{le="15"} 2
+latA_bucket{le="31"} 2
+latA_bucket{le="63"} 2
+latA_bucket{le="127"} 2
+latA_bucket{le="255"} 2
+latA_bucket{le="511"} 2
+latA_bucket{le="1023"} 2
+latA_bucket{le="2047"} 2
+latA_bucket{le="4095"} 2
+latA_bucket{le="8191"} 2
+latA_bucket{le="16383"} 2
+latA_bucket{le="32767"} 2
+latA_bucket{le="+Inf"} 2
+latA_count 2
+latA_sum 10
+"##;
+    assert_eq!(histo.to_prometheus("latA"), exp);
+}

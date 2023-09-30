@@ -274,6 +274,7 @@ impl FindIocStream {
         sock: i32,
         stats: &IocFinderStats,
     ) -> Poll<Result<(SocketAddrV4, Vec<(SearchId, SocketAddrV4)>), Error>> {
+        let tsnow = Instant::now();
         let mut saddr_mem = [0u8; std::mem::size_of::<libc::sockaddr>()];
         let mut saddr_len: libc::socklen_t = saddr_mem.len() as _;
         let mut buf = vec![0u8; 1024];
@@ -343,7 +344,7 @@ impl FindIocStream {
                     error!("incomplete message, missing payload");
                     break;
                 }
-                let msg = CaMsg::from_proto_infos(&hi, nb.data(), 32).map_err(|e| e.to_string())?;
+                let msg = CaMsg::from_proto_infos(&hi, nb.data(), tsnow, 32).map_err(|e| e.to_string())?;
                 nb.adv(hi.payload_len()).map_err(|e| e.to_string())?;
                 msgs.push(msg);
                 accounted += 16 + hi.payload_len();

@@ -42,6 +42,7 @@ use series::SeriesId;
 use stats::CaConnStats;
 use stats::CaProtoStats;
 use stats::IntervalEma;
+use stats::XorShift32;
 use std::collections::BTreeMap;
 use std::collections::VecDeque;
 use std::net::SocketAddrV4;
@@ -59,6 +60,7 @@ use taskrun::tokio;
 use tokio::net::TcpStream;
 
 const CONNECTING_TIMEOUT: Duration = Duration::from_millis(6000);
+const IOC_PING_IVL: Duration = Duration::from_millis(80000);
 
 #[allow(unused)]
 macro_rules! trace2 {
@@ -171,7 +173,7 @@ struct CreatedState {
     #[allow(unused)]
     sid: u32,
     data_type: u16,
-    data_count: u16,
+    data_count: u32,
     scalar_type: ScalarType,
     shape: Shape,
     #[allow(unused)]
@@ -501,6 +503,7 @@ pub struct CaConn {
     inserts_counter: u64,
     extra_inserts_conf: ExtraInsertsConf,
     ioc_ping_last: Instant,
+    ioc_ping_next: Instant,
     ioc_ping_start: Option<Instant>,
     storage_insert_sender: SenderPolling<QueryItem>,
     ca_conn_event_out_queue: VecDeque<CaConnEvent>,
@@ -510,6 +513,7 @@ pub struct CaConn {
     thr_msg_poll: ThrottleTrace,
     ca_proto_stats: Arc<CaProtoStats>,
     weird_count: usize,
+    rng: XorShift32,
 }
 
 #[cfg(DISABLED)]
@@ -531,6 +535,7 @@ impl CaConn {
         ca_proto_stats: Arc<CaProtoStats>,
     ) -> Self {
         let (cq_tx, cq_rx) = async_channel::bounded(32);
+        let mut rng = XorShift32::new_from_time();
         Self {
             opts,
             backend,
@@ -556,6 +561,7 @@ impl CaConn {
             inserts_counter: 0,
             extra_inserts_conf: ExtraInsertsConf::new(),
             ioc_ping_last: Instant::now(),
+            ioc_ping_next: Instant::now() + Self::ioc_ping_ivl_rng(&mut rng),
             ioc_ping_start: None,
             storage_insert_sender: SenderPolling::new(storage_insert_tx),
             ca_conn_event_out_queue: VecDeque::new(),
@@ -565,7 +571,12 @@ impl CaConn {
             thr_msg_poll: ThrottleTrace::new(Duration::from_millis(10000)),
             ca_proto_stats,
             weird_count: 0,
+            rng,
         }
+    }
+
+    fn ioc_ping_ivl_rng(rng: &mut XorShift32) -> Duration {
+        IOC_PING_IVL * 100 / (70 + (rng.next() % 60))
     }
 
     fn new_self_ticker() -> Pin<Box<tokio::time::Sleep>> {
@@ -965,12 +976,11 @@ impl CaConn {
                 self.trigger_shutdown(ChannelStatusClosedReason::IocTimeout);
             }
         } else {
-            // TODO randomize delay a bit
-            if self.ioc_ping_last.elapsed() > Duration::from_millis(120000) {
+            if self.ioc_ping_next < tsnow {
                 if let Some(proto) = &mut self.proto {
                     self.stats.ping_start().inc();
                     self.ioc_ping_start = Some(Instant::now());
-                    let msg = CaMsg { ty: CaMsgTy::Echo };
+                    let msg = CaMsg::from_ty_ts(CaMsgTy::Echo, tsnow);
                     proto.push_out(msg);
                 } else {
                     self.stats.ping_no_proto().inc();
@@ -1046,7 +1056,7 @@ impl CaConn {
         cid: Cid,
         sid: u32,
         data_type: u16,
-        data_count: u16,
+        data_count: u32,
         series: SeriesId,
     ) -> Result<(), Error> {
         let tsnow = Instant::now();
@@ -1069,14 +1079,13 @@ impl CaConn {
         self.cid_by_subid.insert(subid, cid);
         // TODO convert first to CaDbrType, set to `Time`, then convert to ix:
         let data_type_asked = data_type + 14;
-        let msg = CaMsg {
-            ty: CaMsgTy::EventAdd(EventAdd {
-                sid,
-                data_type: data_type_asked,
-                data_count,
-                subid,
-            }),
-        };
+        let ty = CaMsgTy::EventAdd(EventAdd {
+            sid,
+            data_type: data_type_asked,
+            data_count: data_count as _,
+            subid,
+        });
+        let msg = CaMsg::from_ty_ts(ty, tsnow);
         let proto = self.proto.as_mut().unwrap();
         proto.push_out(msg);
         // TODO handle not-found error:
@@ -1271,19 +1280,9 @@ impl CaConn {
                     let epoch = ts.duration_since(std::time::UNIX_EPOCH).unwrap();
                     epoch.as_secs() * SEC + epoch.subsec_nanos() as u64
                 };
-                let ts = ev.value.ts.map_or(0, |x| x.get());
+                let ts = ev.value.ts;
                 let ts_diff = ts.abs_diff(ts_local);
-                if ts_diff > SEC * 300 {
-                    self.stats.ca_ts_off_4.inc();
-                    //warn!("Bad time for {name}  {ts} vs {ts_local}  diff {}", ts_diff / SEC);
-                    // TODO mute this channel for some time, discard the event.
-                } else if ts_diff > SEC * 120 {
-                    self.stats.ca_ts_off_3.inc();
-                } else if ts_diff > SEC * 20 {
-                    self.stats.ca_ts_off_2.inc();
-                } else if ts_diff > SEC * 3 {
-                    self.stats.ca_ts_off_1.inc();
-                }
+                self.stats.ca_ts_off().ingest((ts_diff / MS) as u32);
                 if tsnow >= st.insert_next_earliest {
                     //let channel_state = self.channels.get_mut(&cid).unwrap();
                     let item_queue = &mut self.insert_item_queue;
@@ -1441,12 +1440,13 @@ impl CaConn {
                         Ok(k) => k.to_string(),
                         Err(e) => return Err(e),
                     };
-                    let msg = CaMsg {
-                        ty: CaMsgTy::CreateChan(CreateChan {
+                    let msg = CaMsg::from_ty_ts(
+                        CaMsgTy::CreateChan(CreateChan {
                             cid: cid.0,
                             channel: name.into(),
                         }),
-                    };
+                        Instant::now(),
+                    );
                     msgs_tmp.push(msg);
                     // TODO handle not-found error:
                     let ch_s = self.channels.get_mut(&cid).unwrap();
@@ -1573,28 +1573,15 @@ impl CaConn {
                             CaMsgTy::Echo => {
                                 // let addr = &self.remote_addr_dbg;
                                 if let Some(started) = self.ioc_ping_start {
-                                    let dt = started.elapsed().as_secs_f32() * 1e3;
-                                    if dt <= 10. {
-                                        self.stats.pong_recv_010ms().inc();
-                                    } else if dt <= 25. {
-                                        self.stats.pong_recv_025ms().inc();
-                                    } else if dt <= 50. {
-                                        self.stats.pong_recv_050ms().inc();
-                                    } else if dt <= 100. {
-                                        self.stats.pong_recv_100ms().inc();
-                                    } else if dt <= 200. {
-                                        self.stats.pong_recv_200ms().inc();
-                                    } else if dt <= 400. {
-                                        self.stats.pong_recv_400ms().inc();
-                                    } else {
-                                        self.stats.pong_recv_slow().inc();
-                                        // warn!("Received Echo  {dt:10.0}ms  {addr:?}");
-                                    }
+                                    let dt = started.elapsed();
+                                    let dt = dt.as_secs() as u32 + dt.subsec_millis();
+                                    self.stats.pong_recv_lat().ingest(dt);
                                 } else {
                                     let addr = &self.remote_addr_dbg;
                                     warn!("Received Echo even though we didn't asked for it  {addr:?}");
                                 }
-                                self.ioc_ping_last = Instant::now();
+                                self.ioc_ping_last = tsnow;
+                                self.ioc_ping_next = tsnow + Self::ioc_ping_ivl_rng(&mut self.rng);
                                 self.ioc_ping_start = None;
                             }
                             CaMsgTy::CreateChanFail(msg) => {
@@ -1622,6 +1609,7 @@ impl CaConn {
                                     warn!("CaConn sees: {msg:?}");
                                 }
                             }
+                            #[cfg(DISABLED)]
                             CaMsgTy::IssueDataCount(hi, stat, sev, secs, nanos) => {
                                 let cid = *self.cid_by_subid.get(&hi.param2()).unwrap();
                                 let name = self.name_by_cid.get(&cid).unwrap();
@@ -1676,7 +1664,7 @@ impl CaConn {
         Break(Pending)
     }
 
-    fn handle_conn_state(&mut self, cx: &mut Context) -> Result<Poll<Option<()>>, Error> {
+    fn handle_conn_state(&mut self, tsnow: Instant, cx: &mut Context) -> Result<Poll<Option<()>>, Error> {
         use Poll::*;
         match &mut self.state {
             CaConnState::Unconnected(_since) => {
@@ -1694,6 +1682,7 @@ impl CaConn {
                     Ready(connect_result) => {
                         match connect_result {
                             Ok(Ok(tcp)) => {
+                                self.stats.tcp_connected.inc();
                                 let addr = addr.clone();
                                 self.insert_item_queue
                                     .push_back(QueryItem::ConnectionStatus(ConnectionStatusItem {
@@ -1761,15 +1750,11 @@ impl CaConn {
                 trace4!("Init");
                 let hostname = self.local_epics_hostname.clone();
                 let proto = self.proto.as_mut().unwrap();
-                let msg = CaMsg { ty: CaMsgTy::Version };
+                let msg = CaMsg::from_ty_ts(CaMsgTy::Version, tsnow);
                 proto.push_out(msg);
-                let msg = CaMsg {
-                    ty: CaMsgTy::ClientName,
-                };
+                let msg = CaMsg::from_ty_ts(CaMsgTy::ClientName, tsnow);
                 proto.push_out(msg);
-                let msg = CaMsg {
-                    ty: CaMsgTy::HostName(hostname),
-                };
+                let msg = CaMsg::from_ty_ts(CaMsgTy::HostName(hostname), tsnow);
                 proto.push_out(msg);
                 self.state = CaConnState::Listen;
                 Ok(Ready(Some(())))
@@ -1820,6 +1805,7 @@ impl CaConn {
 
     fn loop_inner(&mut self, cx: &mut Context) -> Result<Poll<Option<()>>, Error> {
         use Poll::*;
+        let tsnow = Instant::now();
         let mut have_progress = false;
         for _ in 0..64 {
             self.stats.caconn_loop2_count.inc();
@@ -1828,7 +1814,7 @@ impl CaConn {
             } else if self.insert_item_queue.len() >= self.opts.insert_queue_max {
                 break;
             } else {
-                match self.handle_conn_state(cx) {
+                match self.handle_conn_state(tsnow, cx) {
                     Ok(x) => match x {
                         Ready(Some(())) => {
                             have_progress = true;
