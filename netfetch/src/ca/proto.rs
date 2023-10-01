@@ -118,6 +118,7 @@ pub struct EventAddRes {
     pub status: u32,
     pub subid: u32,
     pub value: CaEventValue,
+    pub payload_len: u32,
 }
 
 #[derive(Debug)]
@@ -849,6 +850,7 @@ impl CaMsg {
                     status: hi.param1,
                     subid: hi.param2,
                     value,
+                    payload_len: hi.payload_len() as u32,
                 };
                 let ty = CaMsgTy::EventAddRes(d);
                 CaMsg::from_ty_ts(ty, tsnow)

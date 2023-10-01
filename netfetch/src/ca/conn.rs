@@ -113,6 +113,7 @@ pub struct ChannelStateInfo {
     // #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(serialize_with = "ser_instant")]
     pub ts_event_last: Option<Instant>,
+    pub recv_count: Option<u64>,
     // #[serde(skip_serializing_if = "Option::is_none")]
     pub item_recv_ivl_ema: Option<f32>,
     pub interest_score: f32,
@@ -156,6 +157,8 @@ enum ChannelError {
 #[derive(Clone, Debug)]
 struct EventedState {
     ts_last: Instant,
+    recv_count: u64,
+    recv_bytes: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -234,6 +237,13 @@ impl ChannelState {
             },
             _ => None,
         };
+        let recv_count = match self {
+            ChannelState::Created(_series, s) => match &s.state {
+                MonitoringState::Evented(_, s) => Some(s.recv_count),
+                _ => None,
+            },
+            _ => None,
+        };
         let item_recv_ivl_ema = match self {
             ChannelState::Created(_series, s) => {
                 let ema = s.item_recv_ivl_ema.ema();
@@ -259,6 +269,7 @@ impl ChannelState {
             shape,
             ts_created,
             ts_event_last,
+            recv_count,
             item_recv_ivl_ema,
             interest_score,
         }
@@ -1253,19 +1264,30 @@ impl CaConn {
                 st.item_recv_ivl_ema.tick(tsnow);
                 let scalar_type = st.scalar_type.clone();
                 let shape = st.shape.clone();
-                match st.state {
-                    MonitoringState::AddingEvent(ref series) => {
+                match &mut st.state {
+                    MonitoringState::AddingEvent(series) => {
                         let series = series.clone();
                         series_2 = Some(series.clone());
-                        st.state = MonitoringState::Evented(series, EventedState { ts_last: tsnow });
+                        st.state = MonitoringState::Evented(
+                            series,
+                            EventedState {
+                                ts_last: tsnow,
+                                recv_count: 0,
+                                recv_bytes: 0,
+                            },
+                        );
                     }
-                    MonitoringState::Evented(ref series, ref mut st) => {
+                    MonitoringState::Evented(series, st) => {
                         series_2 = Some(series.clone());
                         st.ts_last = tsnow;
                     }
                     _ => {
                         error!("unexpected state: EventAddRes while having {:?}", st.state);
                     }
+                }
+                if let MonitoringState::Evented(_, st2) = &mut st.state {
+                    st2.recv_count += 1;
+                    st2.recv_bytes += ev.payload_len as u64;
                 }
                 let series = match series_2 {
                     Some(k) => k,
