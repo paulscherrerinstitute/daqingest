@@ -54,6 +54,7 @@ pub struct DaemonOpts {
     insert_worker_count: usize,
     insert_scylla_sessions: usize,
     insert_frac: Arc<AtomicU64>,
+    store_workers_rate: Arc<AtomicU64>,
 }
 
 impl DaemonOpts {
@@ -139,11 +140,11 @@ impl Daemon {
             }
         });
 
-        let use_rate_limit_queue = false;
+        let use_rate_limit_queue = true;
 
         let ttls = opts.ttls.clone();
         let insert_worker_opts = InsertWorkerOpts {
-            store_workers_rate: Arc::new(AtomicU64::new(20000000)),
+            store_workers_rate: opts.store_workers_rate.clone(),
             insert_workers_running: Arc::new(AtomicU64::new(0)),
             insert_frac: opts.insert_frac.clone(),
             array_truncate: Arc::new(AtomicU64::new(opts.array_truncate)),
@@ -579,6 +580,7 @@ pub async fn run(opts: CaIngestOpts, channels: Vec<String>) -> Result<(), Error>
     }
 
     let insert_frac = Arc::new(AtomicU64::new(opts.insert_frac()));
+    let store_workers_rate = Arc::new(AtomicU64::new(opts.store_workers_rate()));
 
     let opts2 = DaemonOpts {
         backend: opts.backend().into(),
@@ -597,6 +599,7 @@ pub async fn run(opts: CaIngestOpts, channels: Vec<String>) -> Result<(), Error>
         insert_worker_count: opts.insert_worker_count(),
         insert_scylla_sessions: opts.insert_scylla_sessions(),
         insert_frac: insert_frac.clone(),
+        store_workers_rate,
     };
     let daemon = Daemon::new(opts2, opts.clone()).await?;
     let tx = daemon.tx.clone();

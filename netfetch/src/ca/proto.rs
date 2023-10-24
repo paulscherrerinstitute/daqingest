@@ -852,6 +852,30 @@ impl CaMsg {
                     value,
                     payload_len: hi.payload_len() as u32,
                 };
+                // TODO quick test only
+                if false {
+                    let nn = 4;
+                    let mut blob = vec![0; nn];
+                    for (i, x) in blob.iter_mut().enumerate() {
+                        *x = i as _;
+                    }
+                    let d = EventAddRes {
+                        // i32 with time and status
+                        data_type: 19,
+                        data_count: nn as u32,
+                        status: hi.param1,
+                        subid: hi.param2,
+                        value: CaEventValue {
+                            ts,
+                            status: ca_status,
+                            severity: ca_severity,
+                            data: CaDataValue::Array(CaDataArrayValue::I32(blob)),
+                        },
+                        payload_len: hi.payload_len() as u32,
+                    };
+                    let ty = CaMsgTy::EventAddRes(d);
+                    return Ok(CaMsg::from_ty_ts(ty, tsnow));
+                }
                 let ty = CaMsgTy::EventAddRes(d);
                 CaMsg::from_ty_ts(ty, tsnow)
             }
