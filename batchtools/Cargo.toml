@@ -8,4 +8,4 @@ edition = "2021"
 log = { path = "../log" }
 err = { path = "../../daqbuffer/crates/err" }
 taskrun = { path = "../../daqbuffer/crates/taskrun" }
-async-channel = "1.9.0"
+async-channel = "2.0.0"

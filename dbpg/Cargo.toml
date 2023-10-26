@@ -14,5 +14,5 @@ stats = { path = "../stats" }
 series = { path = "../series" }
 tokio-postgres = { version = "0.7.10", features = ["with-chrono-0_4"] }
 futures-util = "0.3"
-async-channel = "1.9.0"
+async-channel = "2.0.0"
 md-5 = "0.10"
