@@ -509,8 +509,8 @@ pub struct CaConn {
     local_epics_hostname: String,
     stats: Arc<CaConnStats>,
     insert_ivl_min_mus: u64,
-    conn_command_tx: Sender<ConnCommand>,
-    conn_command_rx: Receiver<ConnCommand>,
+    conn_command_tx: Pin<Box<Sender<ConnCommand>>>,
+    conn_command_rx: Pin<Box<Receiver<ConnCommand>>>,
     conn_backoff: f32,
     conn_backoff_beg: f32,
     inserts_counter: u64,
@@ -518,10 +518,10 @@ pub struct CaConn {
     ioc_ping_last: Instant,
     ioc_ping_next: Instant,
     ioc_ping_start: Option<Instant>,
-    storage_insert_sender: SenderPolling<QueryItem>,
+    storage_insert_sender: Pin<Box<SenderPolling<QueryItem>>>,
     ca_conn_event_out_queue: VecDeque<CaConnEvent>,
     channel_info_query_queue: VecDeque<ChannelInfoQuery>,
-    channel_info_query_sending: SenderPolling<ChannelInfoQuery>,
+    channel_info_query_sending: Pin<Box<SenderPolling<ChannelInfoQuery>>>,
     time_binners: BTreeMap<Cid, ConnTimeBin>,
     thr_msg_poll: ThrottleTrace,
     ca_proto_stats: Arc<CaProtoStats>,
@@ -567,8 +567,8 @@ impl CaConn {
             local_epics_hostname,
             stats,
             insert_ivl_min_mus: 1000 * 6,
-            conn_command_tx: cq_tx,
-            conn_command_rx: cq_rx,
+            conn_command_tx: Box::pin(cq_tx),
+            conn_command_rx: Box::pin(cq_rx),
             conn_backoff: 0.02,
             conn_backoff_beg: 0.02,
             inserts_counter: 0,
@@ -576,10 +576,10 @@ impl CaConn {
             ioc_ping_last: Instant::now(),
             ioc_ping_next: Instant::now() + Self::ioc_ping_ivl_rng(&mut rng),
             ioc_ping_start: None,
-            storage_insert_sender: SenderPolling::new(storage_insert_tx),
+            storage_insert_sender: Box::pin(SenderPolling::new(storage_insert_tx)),
             ca_conn_event_out_queue: VecDeque::new(),
             channel_info_query_queue: VecDeque::new(),
-            channel_info_query_sending: SenderPolling::new(channel_info_query_tx),
+            channel_info_query_sending: Box::pin(SenderPolling::new(channel_info_query_tx)),
             time_binners: BTreeMap::new(),
             thr_msg_poll: ThrottleTrace::new(Duration::from_millis(10000)),
             ca_proto_stats,
@@ -596,8 +596,8 @@ impl CaConn {
         Box::pin(tokio::time::sleep(Duration::from_millis(500)))
     }
 
-    pub fn conn_command_tx(&self) -> async_channel::Sender<ConnCommand> {
-        self.conn_command_tx.clone()
+    pub fn conn_command_tx(&self) -> Sender<ConnCommand> {
+        self.conn_command_tx.as_ref().get_ref().clone()
     }
 
     fn is_shutdown(&self) -> bool {
@@ -794,7 +794,8 @@ impl CaConn {
         if self.is_shutdown() {
             Ok(Ready(None))
         } else {
-            match pin!(self.conn_command_rx).poll_next(cx) {
+            let rx = self.conn_command_rx.as_mut();
+            match rx.poll_next(cx) {
                 Ready(Some(a)) => {
                     trace3!("handle_conn_command received a command  {}", self.remote_addr_dbg);
                     match a.kind {
@@ -1570,7 +1571,7 @@ impl CaConn {
                                 *ch_s = ChannelState::FetchingSeriesId(created_state);
                                 // TODO handle error in different way. Should most likely not abort.
                                 let tx = SendSeriesLookup {
-                                    tx: self.conn_command_tx.clone(),
+                                    tx: self.conn_command_tx(),
                                 };
                                 let query = ChannelInfoQuery {
                                     backend: self.backend.clone(),
@@ -1934,7 +1935,7 @@ impl CaConn {
             let sd = &mut self.storage_insert_sender;
             if sd.is_idle() {
                 if let Some(item) = self.insert_item_queue.pop_front() {
-                    self.storage_insert_sender.send(item);
+                    self.storage_insert_sender.as_mut().send_pin(item);
                 }
             }
             if self.storage_insert_sender.is_sending() {
@@ -1959,12 +1960,12 @@ impl CaConn {
         if self.is_shutdown() {
             Ok(Ready(None))
         } else {
-            let sd = &mut self.channel_info_query_sending;
+            let sd = self.channel_info_query_sending.as_mut();
             if sd.is_idle() {
                 if let Some(item) = self.channel_info_query_queue.pop_front() {
                     trace3!("send series query {item:?}");
-                    let sd = &mut self.channel_info_query_sending;
-                    sd.send(item);
+                    let sd = self.channel_info_query_sending.as_mut();
+                    sd.send_pin(item);
                 }
             }
             let sd = &mut self.channel_info_query_sending;

@@ -71,9 +71,12 @@ impl<T> SenderPolling<T> {
         }
     }
 
-    pub fn drop(&mut self) {
-        self.fut = None;
-        self.sender = None;
+    pub fn drop(self: Pin<&mut Self>) {
+        unsafe {
+            let this = self.get_unchecked_mut();
+            this.fut = None;
+            this.sender = None;
+        }
     }
 
     pub fn len(&self) -> Option<usize> {
@@ -87,17 +90,21 @@ where
 {
     type Output = Result<(), Error<T>>;
 
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
+    fn poll(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
         use Poll::*;
-        let this = self.project();
-        match this.fut.as_pin_mut() {
+        let mut this = self.project();
+        match this.fut.as_mut().as_pin_mut() {
             Some(fut) => match fut.poll(cx) {
                 Ready(Ok(())) => {
-                    self.fut = None;
+                    unsafe {
+                        *this.fut.get_unchecked_mut() = None;
+                    }
                     Ready(Ok(()))
                 }
                 Ready(Err(e)) => {
-                    self.fut = None;
+                    unsafe {
+                        *this.fut.get_unchecked_mut() = None;
+                    }
                     Ready(Err(Error::Closed(e.0)))
                 }
                 Pending => Pending,

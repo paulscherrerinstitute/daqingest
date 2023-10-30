@@ -9,7 +9,6 @@ use err::thiserror;
 use err::ThisError;
 use futures_util::pin_mut;
 use futures_util::Stream;
-use futures_util::StreamExt;
 use netpod::log::*;
 use netpod::timeunits::SEC;
 use serde_json::Value as JsVal;
@@ -116,8 +115,8 @@ pub struct Zmtp {
     peer_ver: (u8, u8),
     frames: Vec<ZmtpFrame>,
     inp_eof: bool,
-    data_tx: Sender<u32>,
-    data_rx: Receiver<u32>,
+    data_tx: Pin<Box<Sender<u32>>>,
+    data_rx: Pin<Box<Receiver<u32>>>,
     input_state: Vec<InpState>,
     input_state_ix: usize,
     conn_state_log: Vec<ConnState>,
@@ -143,8 +142,8 @@ impl Zmtp {
             peer_ver: (0, 0),
             frames: Vec::new(),
             inp_eof: false,
-            data_tx: tx,
-            data_rx: rx,
+            data_tx: Box::pin(tx),
+            data_rx: Box::pin(rx),
             input_state: vec![0; 64].iter().map(|_| InpState::default()).collect(),
             input_state_ix: 0,
             conn_state_log: vec![0; 64].iter().map(|_| ConnState::InitSend).collect(),
@@ -153,17 +152,13 @@ impl Zmtp {
     }
 
     pub fn out_channel(&self) -> Sender<u32> {
-        self.data_tx.clone()
+        self.data_tx.as_ref().get_ref().clone()
     }
 
     fn inpbuf_conn(&mut self, need_min: usize) -> Result<(&mut TcpStream, ReadBuf), Error> {
         let buf = self.buf.available_writable_area(need_min)?;
         let buf = ReadBuf::new(buf);
         Ok((&mut self.conn, buf))
-    }
-
-    fn outbuf_conn(&mut self) -> (&mut TcpStream, &[u8]) {
-        (&mut self.conn, self.outbuf.data())
     }
 
     #[allow(unused)]
@@ -214,8 +209,8 @@ impl Zmtp {
         let mut item_count = 0;
         // TODO should I better keep one serialized item in Self so that I know how much space it needs?
         let serialized: Int<Result<(), Error>> = if self.out_enable && self.outbuf.wcap() >= self.outbuf.cap() / 2 {
-            let data_rx = std::pin::pin!(self.data_rx);
-            match data_rx.poll_next(cx) {
+            let rx = self.data_rx.as_mut();
+            match rx.poll_next(cx) {
                 Ready(Some(_item)) => {
                     // TODO item should be something that we can convert into a zmtp message.
                     Int::Empty
@@ -230,7 +225,10 @@ impl Zmtp {
         let write: Int<Result<(), Error>> = if item_count > 0 {
             Int::NoWork
         } else if self.outbuf.len() > 0 {
-            let (w, b) = self.outbuf_conn();
+            fn connout(this: &mut Zmtp) -> (&mut TcpStream, &[u8]) {
+                (&mut this.conn, this.outbuf.data())
+            }
+            let (w, b) = connout(&mut self);
             pin_mut!(w);
             match w.poll_write(cx, b) {
                 Ready(k) => match k {

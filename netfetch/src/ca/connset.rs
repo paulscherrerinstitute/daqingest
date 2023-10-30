@@ -331,7 +331,6 @@ impl CanSendChannelInfoResult for SeriesLookupSender {
     }
 }
 
-#[pin_project::pin_project]
 pub struct CaConnSet {
     backend: String,
     local_epics_hostname: String,
@@ -339,16 +338,16 @@ pub struct CaConnSet {
     channel_states: ChannelStateMap,
     connset_inp_rx: Pin<Box<Receiver<CaConnSetEvent>>>,
     channel_info_query_queue: VecDeque<ChannelInfoQuery>,
-    channel_info_query_sender: SenderPolling<ChannelInfoQuery>,
+    channel_info_query_sender: Pin<Box<SenderPolling<ChannelInfoQuery>>>,
     channel_info_query_tx: Option<Sender<ChannelInfoQuery>>,
     channel_info_res_tx: Pin<Box<Sender<Result<ChannelInfoResult, Error>>>>,
     channel_info_res_rx: Pin<Box<Receiver<Result<ChannelInfoResult, Error>>>>,
     find_ioc_query_queue: VecDeque<IocAddrQuery>,
-    find_ioc_query_sender: SenderPolling<IocAddrQuery>,
+    find_ioc_query_sender: Pin<Box<SenderPolling<IocAddrQuery>>>,
     find_ioc_res_rx: Pin<Box<Receiver<VecDeque<FindIocRes>>>>,
     storage_insert_tx: Pin<Box<Sender<QueryItem>>>,
     storage_insert_queue: VecDeque<QueryItem>,
-    storage_insert_sender: SenderPolling<QueryItem>,
+    storage_insert_sender: Pin<Box<SenderPolling<QueryItem>>>,
     ca_conn_res_tx: Pin<Box<Sender<(SocketAddr, CaConnEvent)>>>,
     ca_conn_res_rx: Pin<Box<Receiver<(SocketAddr, CaConnEvent)>>>,
     connset_out_queue: VecDeque<CaConnSetItem>,
@@ -400,16 +399,16 @@ impl CaConnSet {
             channel_states: ChannelStateMap::new(),
             connset_inp_rx: Box::pin(connset_inp_rx),
             channel_info_query_queue: VecDeque::new(),
-            channel_info_query_sender: SenderPolling::new(channel_info_query_tx.clone()),
+            channel_info_query_sender: Box::pin(SenderPolling::new(channel_info_query_tx.clone())),
             channel_info_query_tx: Some(channel_info_query_tx),
             channel_info_res_tx: Box::pin(channel_info_res_tx),
             channel_info_res_rx: Box::pin(channel_info_res_rx),
             find_ioc_query_queue: VecDeque::new(),
-            find_ioc_query_sender: SenderPolling::new(find_ioc_query_tx),
+            find_ioc_query_sender: Box::pin(SenderPolling::new(find_ioc_query_tx)),
             find_ioc_res_rx: Box::pin(find_ioc_res_rx),
             storage_insert_tx: Box::pin(storage_insert_tx.clone()),
             storage_insert_queue: VecDeque::new(),
-            storage_insert_sender: SenderPolling::new(storage_insert_tx),
+            storage_insert_sender: Box::pin(SenderPolling::new(storage_insert_tx)),
             ca_conn_res_tx: Box::pin(ca_conn_res_tx),
             ca_conn_res_rx: Box::pin(ca_conn_res_rx),
             shutdown_stopping: false,
@@ -459,7 +458,7 @@ impl CaConnSet {
         // );
         debug!("CaConnSet EndOfStream");
         debug!("join ioc_finder_jh A  {:?}", this.find_ioc_query_sender.len());
-        this.find_ioc_query_sender.drop();
+        this.find_ioc_query_sender.as_mut().drop();
         debug!("join ioc_finder_jh B  {:?}", this.find_ioc_query_sender.len());
         this.ioc_finder_jh
             .await
@@ -801,9 +800,9 @@ impl CaConnSet {
         debug!("handle_shutdown");
         self.shutdown_stopping = true;
         self.find_ioc_res_rx.close();
-        self.channel_info_query_sender.drop();
+        self.channel_info_query_sender.as_mut().drop();
         self.channel_info_query_tx = None;
-        self.find_ioc_query_sender.drop();
+        self.find_ioc_query_sender.as_mut().drop();
         for (_addr, res) in self.ca_conn_ress.iter() {
             let item = ConnCommand::shutdown();
             // TODO not the nicest
@@ -1519,7 +1518,7 @@ impl Stream for CaConnSet {
             if self.storage_insert_sender.is_idle() {
                 if let Some(item) = self.storage_insert_queue.pop_front() {
                     self.stats.logic_error().inc();
-                    self.storage_insert_sender.send(item);
+                    self.storage_insert_sender.as_mut().send_pin(item);
                 }
             }
             if self.storage_insert_sender.is_sending() {
@@ -1540,7 +1539,7 @@ impl Stream for CaConnSet {
 
             if self.find_ioc_query_sender.is_idle() {
                 if let Some(item) = self.find_ioc_query_queue.pop_front() {
-                    self.find_ioc_query_sender.send(item);
+                    self.find_ioc_query_sender.as_mut().send_pin(item);
                 }
             }
             if self.find_ioc_query_sender.is_sending() {
@@ -1561,7 +1560,7 @@ impl Stream for CaConnSet {
 
             if self.channel_info_query_sender.is_idle() {
                 if let Some(item) = self.channel_info_query_queue.pop_front() {
-                    self.channel_info_query_sender.send(item);
+                    self.channel_info_query_sender.as_mut().send_pin(item);
                 }
             }
             if self.channel_info_query_sender.is_sending() {
@@ -1580,7 +1579,7 @@ impl Stream for CaConnSet {
                 }
             }
 
-            match pin!(self.find_ioc_res_rx).poll_next(cx) {
+            match self.find_ioc_res_rx.as_mut().poll_next(cx) {
                 Ready(Some(x)) => match self.handle_ioc_query_result(x) {
                     Ok(()) => {
                         have_progress = true;
@@ -1593,7 +1592,7 @@ impl Stream for CaConnSet {
                 }
             }
 
-            match pin!(self.ca_conn_res_rx).poll_next(cx) {
+            match self.ca_conn_res_rx.as_mut().poll_next(cx) {
                 Ready(Some((addr, ev))) => match self.handle_ca_conn_event(addr, ev) {
                     Ok(()) => {
                         have_progress = true;
@@ -1606,7 +1605,7 @@ impl Stream for CaConnSet {
                 }
             }
 
-            match pin!(self.channel_info_res_rx).poll_next(cx) {
+            match self.channel_info_res_rx.as_mut().poll_next(cx) {
                 Ready(Some(x)) => match self.handle_series_lookup_result(x) {
                     Ok(()) => {
                         have_progress = true;
@@ -1619,7 +1618,7 @@ impl Stream for CaConnSet {
                 }
             }
 
-            match pin!(self.connset_inp_rx).poll_next(cx) {
+            match self.connset_inp_rx.as_mut().poll_next(cx) {
                 Ready(Some(x)) => match self.handle_event(x) {
                     Ok(()) => {
                         have_progress = true;
