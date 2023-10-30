@@ -3,6 +3,7 @@ use super::ExtraInsertsConf;
 use crate::senderpolling::SenderPolling;
 use crate::throttletrace::ThrottleTrace;
 use crate::timebin::ConnTimeBin;
+use async_channel::Receiver;
 use async_channel::Sender;
 use core::fmt;
 use dbpg::seriesbychannel::CanSendChannelInfoResult;
@@ -47,6 +48,7 @@ use std::collections::BTreeMap;
 use std::collections::VecDeque;
 use std::net::SocketAddrV4;
 use std::ops::ControlFlow;
+use std::pin::pin;
 use std::pin::Pin;
 use std::sync::atomic;
 use std::sync::atomic::AtomicUsize;
@@ -507,8 +509,8 @@ pub struct CaConn {
     local_epics_hostname: String,
     stats: Arc<CaConnStats>,
     insert_ivl_min_mus: u64,
-    conn_command_tx: async_channel::Sender<ConnCommand>,
-    conn_command_rx: async_channel::Receiver<ConnCommand>,
+    conn_command_tx: Sender<ConnCommand>,
+    conn_command_rx: Receiver<ConnCommand>,
     conn_backoff: f32,
     conn_backoff_beg: f32,
     inserts_counter: u64,
@@ -792,7 +794,7 @@ impl CaConn {
         if self.is_shutdown() {
             Ok(Ready(None))
         } else {
-            match self.conn_command_rx.poll_next_unpin(cx) {
+            match pin!(self.conn_command_rx).poll_next(cx) {
                 Ready(Some(a)) => {
                     trace3!("handle_conn_command received a command  {}", self.remote_addr_dbg);
                     match a.kind {
@@ -1886,7 +1888,8 @@ impl CaConn {
     fn handle_own_ticker_tick(self: Pin<&mut Self>, _cx: &mut Context) -> Result<(), Error> {
         // debug!("tick  CaConn  {}", self.remote_addr_dbg);
         let tsnow = Instant::now();
-        let this = self.get_mut();
+        // TODO use safe version
+        let this = unsafe { self.get_unchecked_mut() };
         match &this.state {
             CaConnState::Unconnected(since) => {}
             CaConnState::Connecting(since, _addr, _) => {

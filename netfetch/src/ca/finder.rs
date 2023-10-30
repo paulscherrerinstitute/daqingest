@@ -251,14 +251,14 @@ async fn finder_worker_single(
 }
 
 async fn finder_network_if_not_found(
-    mut rx: Receiver<VecDeque<FindIocRes>>,
+    rx: Receiver<VecDeque<FindIocRes>>,
     tx: Sender<VecDeque<FindIocRes>>,
     opts: CaIngestOpts,
     stats: Arc<IocFinderStats>,
 ) -> Result<(), Error> {
     let (net_tx, net_rx, jh, jhs) = ca_search_workers_start(&opts, stats.clone()).await.unwrap();
     let jh2 = taskrun::spawn(process_net_result(net_rx, tx.clone(), opts.clone()));
-    'outer: while let Some(item) = rx.next().await {
+    'outer: while let Ok(item) = rx.recv().await {
         let mut res = VecDeque::new();
         let mut net = VecDeque::new();
         for e in item {
@@ -287,7 +287,7 @@ async fn finder_network_if_not_found(
 }
 
 async fn process_net_result(
-    mut net_rx: Receiver<Result<VecDeque<FindIocRes>, Error>>,
+    net_rx: Receiver<Result<VecDeque<FindIocRes>, Error>>,
     tx: Sender<VecDeque<FindIocRes>>,
     opts: CaIngestOpts,
 ) -> Result<(), Error> {
@@ -304,7 +304,7 @@ async fn process_net_result(
         ioc_search_index_worker_jhs.push(jh);
     }
     drop(dbrx);
-    while let Some(item) = net_rx.next().await {
+    while let Ok(item) = net_rx.recv().await {
         match item {
             Ok(item) => {
                 for e in item.iter() {

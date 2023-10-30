@@ -48,7 +48,8 @@ impl BsreadDumper {
             self.source_addr.clone()
         };
         let conn = tokio::net::TcpStream::connect(&src).await?;
-        let mut zmtp = Zmtp::new(conn, SocketType::PULL);
+        let zmtp = Zmtp::new(conn, SocketType::PULL);
+        let mut zmtp = Box::pin(zmtp);
         let mut i1 = 0u64;
         let mut msgc = 0u64;
         let mut dh_md5_last = String::new();

@@ -55,7 +55,8 @@ fn test_service() -> Result<(), Error> {
             info!("accepting...");
             let (conn, remote) = sock.accept().await?;
             info!("new connection from {:?}", remote);
-            let mut zmtp = Zmtp::new(conn, SocketType::PUSH);
+            let zmtp = Zmtp::new(conn, SocketType::PUSH);
+            let mut zmtp = Box::pin(zmtp);
             let fut = async move {
                 while let Some(item) = zmtp.next().await {
                     info!("item from {:?}  {:?}", remote, item);

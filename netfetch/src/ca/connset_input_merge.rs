@@ -4,8 +4,8 @@ use crate::ca::connset::ConnSetCmd;
 use async_channel::Receiver;
 use dbpg::seriesbychannel::ChannelInfoResult;
 use err::Error;
-use futures_util::StreamExt;
 use std::collections::VecDeque;
+use std::pin::pin;
 use std::pin::Pin;
 use std::task::Context;
 use std::task::Poll;
@@ -43,7 +43,7 @@ impl futures_util::Stream for InputMerge {
         use Poll::*;
         let ret = {
             if let Some(inp) = &mut self.inp3 {
-                match inp.poll_next_unpin(cx) {
+                match pin!(*inp).poll_next(cx) {
                     Ready(Some(x)) => Some(CaConnSetEvent::ConnSetCmd(todo!())),
                     Ready(None) => {
                         self.inp2 = None;
@@ -59,7 +59,7 @@ impl futures_util::Stream for InputMerge {
             Some(x)
         } else {
             if let Some(inp) = &mut self.inp2 {
-                match inp.poll_next_unpin(cx) {
+                match pin!(*inp).poll_next(cx) {
                     Ready(Some(x)) => Some(CaConnSetEvent::ConnSetCmd(todo!())),
                     Ready(None) => {
                         self.inp2 = None;
@@ -75,7 +75,7 @@ impl futures_util::Stream for InputMerge {
             Ready(Some(x))
         } else {
             if let Some(inp) = &mut self.inp1 {
-                match inp.poll_next_unpin(cx) {
+                match pin!(*inp).poll_next(cx) {
                     Ready(Some(x)) => Ready(Some(x)),
                     Ready(None) => {
                         self.inp1 = None;

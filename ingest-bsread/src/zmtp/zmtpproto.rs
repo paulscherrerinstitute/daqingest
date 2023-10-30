@@ -214,7 +214,8 @@ impl Zmtp {
         let mut item_count = 0;
         // TODO should I better keep one serialized item in Self so that I know how much space it needs?
         let serialized: Int<Result<(), Error>> = if self.out_enable && self.outbuf.wcap() >= self.outbuf.cap() / 2 {
-            match self.data_rx.poll_next_unpin(cx) {
+            let data_rx = std::pin::pin!(self.data_rx);
+            match data_rx.poll_next(cx) {
                 Ready(Some(_item)) => {
                     // TODO item should be something that we can convert into a zmtp message.
                     Int::Empty

@@ -7,7 +7,6 @@ use err::Error;
 use futures_util::Future;
 use futures_util::FutureExt;
 use futures_util::Stream;
-use futures_util::StreamExt;
 use libc::c_int;
 use log::*;
 use stats::IocFinderStats;
@@ -88,7 +87,7 @@ pub struct FindIocRes {
 
 pub struct FindIocStream {
     tgts: Vec<SocketAddrV4>,
-    channels_input: Receiver<String>,
+    channels_input: Pin<Box<Receiver<String>>>,
     in_flight: BTreeMap<BatchId, SearchBatch>,
     in_flight_max: usize,
     bid_by_sid: BTreeMap<SearchId, BatchId>,
@@ -129,7 +128,7 @@ impl FindIocStream {
         let afd = AsyncFd::new(sock.0).unwrap();
         Self {
             tgts,
-            channels_input,
+            channels_input: Box::pin(channels_input),
             in_flight: BTreeMap::new(),
             bid_by_sid: BTreeMap::new(),
             batch_send_queue: VecDeque::new(),
@@ -548,7 +547,8 @@ impl FindIocStream {
         use Poll::*;
         let mut ret = Vec::new();
         loop {
-            break match self.channels_input.poll_next_unpin(cx) {
+            let rx = self.channels_input.as_mut();
+            break match rx.poll_next(cx) {
                 Ready(Some(item)) => {
                     ret.push(item);
                     if ret.len() < self.channels_per_batch {

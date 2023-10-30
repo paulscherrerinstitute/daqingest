@@ -2,7 +2,6 @@ use async_channel::Send;
 use async_channel::Sender;
 use err::thiserror;
 use futures_util::Future;
-use futures_util::FutureExt;
 use pin_project::pin_project;
 use std::marker::PhantomPinned;
 use std::pin::Pin;
@@ -24,6 +23,7 @@ where
 {
     sender: Option<Box<Sender<T>>>,
     sender_ptr: NonNull<Sender<T>>,
+    #[pin]
     fut: Option<Send<'static, T>>,
     _pin: PhantomPinned,
 }
@@ -81,20 +81,23 @@ impl<T> SenderPolling<T> {
     }
 }
 
-impl<T> Future for SenderPolling<T> {
+impl<T> Future for SenderPolling<T>
+where
+    T: Unpin,
+{
     type Output = Result<(), Error<T>>;
 
-    fn poll(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
         use Poll::*;
         let this = self.project();
-        match this.fut {
-            Some(fut) => match fut.poll_unpin(cx) {
+        match this.fut.as_pin_mut() {
+            Some(fut) => match fut.poll(cx) {
                 Ready(Ok(())) => {
-                    *this.fut = None;
+                    self.fut = None;
                     Ready(Ok(()))
                 }
                 Ready(Err(e)) => {
-                    *this.fut = None;
+                    self.fut = None;
                     Ready(Err(Error::Closed(e.0)))
                 }
                 Pending => Pending,

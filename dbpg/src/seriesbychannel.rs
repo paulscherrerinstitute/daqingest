@@ -289,7 +289,8 @@ impl Worker {
     }
 
     async fn work(&mut self) -> Result<(), Error> {
-        while let Some(batch) = self.batch_rx.next().await {
+        let batch_rx = &self.batch_rx;
+        while let Ok(batch) = batch_rx.recv().await {
             self.stats.recv_batch().inc();
             self.stats.recv_items().add(batch.len() as _);
             for x in &batch {

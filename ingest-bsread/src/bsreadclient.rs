@@ -214,7 +214,8 @@ impl BsreadClient {
         if let Some(v) = self.rcvbuf {
             ingest_linux::net::set_rcv_sock_opts(&mut conn, v as u32)?;
         }
-        let mut zmtp = Zmtp::new(conn, SocketType::PULL);
+        let zmtp = Zmtp::new(conn, SocketType::PULL);
+        let mut zmtp = Box::pin(zmtp);
         let mut i1 = 0u64;
         let mut msgc = 0u64;
         let mut dh_md5_last = String::new();

@@ -54,6 +54,7 @@ use std::collections::BTreeMap;
 use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::net::SocketAddrV4;
+use std::pin::pin;
 use std::pin::Pin;
 use std::sync::atomic;
 use std::sync::Arc;
@@ -330,27 +331,28 @@ impl CanSendChannelInfoResult for SeriesLookupSender {
     }
 }
 
+#[pin_project::pin_project]
 pub struct CaConnSet {
     backend: String,
     local_epics_hostname: String,
     ca_conn_ress: BTreeMap<SocketAddr, CaConnRes>,
     channel_states: ChannelStateMap,
-    connset_inp_rx: Receiver<CaConnSetEvent>,
+    connset_inp_rx: Pin<Box<Receiver<CaConnSetEvent>>>,
     channel_info_query_queue: VecDeque<ChannelInfoQuery>,
     channel_info_query_sender: SenderPolling<ChannelInfoQuery>,
     channel_info_query_tx: Option<Sender<ChannelInfoQuery>>,
-    channel_info_res_tx: Sender<Result<ChannelInfoResult, Error>>,
-    channel_info_res_rx: Receiver<Result<ChannelInfoResult, Error>>,
+    channel_info_res_tx: Pin<Box<Sender<Result<ChannelInfoResult, Error>>>>,
+    channel_info_res_rx: Pin<Box<Receiver<Result<ChannelInfoResult, Error>>>>,
     find_ioc_query_queue: VecDeque<IocAddrQuery>,
     find_ioc_query_sender: SenderPolling<IocAddrQuery>,
-    find_ioc_res_rx: Receiver<VecDeque<FindIocRes>>,
-    storage_insert_tx: Sender<QueryItem>,
+    find_ioc_res_rx: Pin<Box<Receiver<VecDeque<FindIocRes>>>>,
+    storage_insert_tx: Pin<Box<Sender<QueryItem>>>,
     storage_insert_queue: VecDeque<QueryItem>,
     storage_insert_sender: SenderPolling<QueryItem>,
-    ca_conn_res_tx: Sender<(SocketAddr, CaConnEvent)>,
-    ca_conn_res_rx: Receiver<(SocketAddr, CaConnEvent)>,
+    ca_conn_res_tx: Pin<Box<Sender<(SocketAddr, CaConnEvent)>>>,
+    ca_conn_res_rx: Pin<Box<Receiver<(SocketAddr, CaConnEvent)>>>,
     connset_out_queue: VecDeque<CaConnSetItem>,
-    connset_out_tx: Sender<CaConnSetItem>,
+    connset_out_tx: Pin<Box<Sender<CaConnSetItem>>>,
     shutdown_stopping: bool,
     shutdown_done: bool,
     chan_check_next: Option<Channel>,
@@ -396,26 +398,26 @@ impl CaConnSet {
             local_epics_hostname,
             ca_conn_ress: BTreeMap::new(),
             channel_states: ChannelStateMap::new(),
-            connset_inp_rx,
+            connset_inp_rx: Box::pin(connset_inp_rx),
             channel_info_query_queue: VecDeque::new(),
             channel_info_query_sender: SenderPolling::new(channel_info_query_tx.clone()),
             channel_info_query_tx: Some(channel_info_query_tx),
-            channel_info_res_tx,
-            channel_info_res_rx,
+            channel_info_res_tx: Box::pin(channel_info_res_tx),
+            channel_info_res_rx: Box::pin(channel_info_res_rx),
             find_ioc_query_queue: VecDeque::new(),
             find_ioc_query_sender: SenderPolling::new(find_ioc_query_tx),
-            find_ioc_res_rx,
-            storage_insert_tx: storage_insert_tx.clone(),
+            find_ioc_res_rx: Box::pin(find_ioc_res_rx),
+            storage_insert_tx: Box::pin(storage_insert_tx.clone()),
             storage_insert_queue: VecDeque::new(),
             storage_insert_sender: SenderPolling::new(storage_insert_tx),
-            ca_conn_res_tx,
-            ca_conn_res_rx,
+            ca_conn_res_tx: Box::pin(ca_conn_res_tx),
+            ca_conn_res_rx: Box::pin(ca_conn_res_rx),
             shutdown_stopping: false,
             shutdown_done: false,
             chan_check_next: None,
             stats: stats.clone(),
             ca_conn_stats: ca_conn_stats.clone(),
-            connset_out_tx,
+            connset_out_tx: Box::pin(connset_out_tx),
             connset_out_queue: VecDeque::new(),
             // connset_out_sender: SenderPolling::new(connset_out_tx),
             ioc_finder_jh,
@@ -542,14 +544,13 @@ impl CaConnSet {
             running_cmd_id: None,
             health_timeout_count: 0,
         });
+        let tx = self.channel_info_res_tx.as_ref().get_ref().clone();
         let item = ChannelInfoQuery {
             backend: cmd.backend,
             channel: cmd.name,
             scalar_type: CHANNEL_STATUS_DUMMY_SCALAR_TYPE,
             shape_dims: Vec::new(),
-            tx: Box::pin(SeriesLookupSender {
-                tx: self.channel_info_res_tx.clone(),
-            }),
+            tx: Box::pin(SeriesLookupSender { tx }),
         };
         self.channel_info_query_queue.push_back(item);
         Ok(())
@@ -965,7 +966,7 @@ impl CaConnSet {
             add.backend.clone(),
             addr_v4,
             add.local_epics_hostname,
-            self.storage_insert_tx.clone(),
+            self.storage_insert_tx.as_ref().get_ref().clone(),
             self.channel_info_query_tx
                 .clone()
                 .ok_or_else(|| Error::with_msg_no_trace("no more channel_info_query_tx available"))?,
@@ -974,8 +975,8 @@ impl CaConnSet {
         );
         let conn_tx = conn.conn_command_tx();
         let conn_stats = conn.stats();
-        let tx1 = self.ca_conn_res_tx.clone();
-        let tx2 = self.storage_insert_tx.clone();
+        let tx1 = self.ca_conn_res_tx.as_ref().get_ref().clone();
+        let tx2 = self.storage_insert_tx.as_ref().get_ref().clone();
         let jh = tokio::spawn(Self::ca_conn_item_merge(conn, tx1, tx2, addr, self.stats.clone()));
         let ca_conn_res = CaConnRes {
             state: CaConnState::new(CaConnStateValue::Fresh),
@@ -997,7 +998,7 @@ impl CaConnSet {
         stats.ca_conn_task_begin().inc();
         trace2!("ca_conn_consumer  begin  {}", addr);
         let connstats = conn.stats();
-        let mut conn = conn;
+        let mut conn = Box::pin(conn);
         let mut ret = Ok(());
         while let Some(item) = conn.next().await {
             match item {
@@ -1579,7 +1580,7 @@ impl Stream for CaConnSet {
                 }
             }
 
-            match self.find_ioc_res_rx.poll_next_unpin(cx) {
+            match pin!(self.find_ioc_res_rx).poll_next(cx) {
                 Ready(Some(x)) => match self.handle_ioc_query_result(x) {
                     Ok(()) => {
                         have_progress = true;
@@ -1592,7 +1593,7 @@ impl Stream for CaConnSet {
                 }
             }
 
-            match self.ca_conn_res_rx.poll_next_unpin(cx) {
+            match pin!(self.ca_conn_res_rx).poll_next(cx) {
                 Ready(Some((addr, ev))) => match self.handle_ca_conn_event(addr, ev) {
                     Ok(()) => {
                         have_progress = true;
@@ -1605,7 +1606,7 @@ impl Stream for CaConnSet {
                 }
             }
 
-            match self.channel_info_res_rx.poll_next_unpin(cx) {
+            match pin!(self.channel_info_res_rx).poll_next(cx) {
                 Ready(Some(x)) => match self.handle_series_lookup_result(x) {
                     Ok(()) => {
                         have_progress = true;
@@ -1618,7 +1619,7 @@ impl Stream for CaConnSet {
                 }
             }
 
-            match self.connset_inp_rx.poll_next_unpin(cx) {
+            match pin!(self.connset_inp_rx).poll_next(cx) {
                 Ready(Some(x)) => match self.handle_event(x) {
                     Ok(()) => {
                         have_progress = true;

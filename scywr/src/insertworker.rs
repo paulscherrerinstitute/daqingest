@@ -334,6 +334,8 @@ async fn worker_streamed(
     insert_worker_opts
         .insert_workers_running
         .fetch_add(1, atomic::Ordering::AcqRel);
+    // TODO possible without box?
+    let item_inp = Box::pin(item_inp);
     let mut stream = item_inp
         .map(|item| {
             stats.item_recv.inc();

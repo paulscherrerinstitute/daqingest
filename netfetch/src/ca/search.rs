@@ -238,7 +238,8 @@ async fn search_tgts_from_opts(opts: &CaIngestOpts) -> Result<(Vec<SocketAddrV4>
     Ok((addrs, blacklist))
 }
 
-async fn finder_run(mut finder: FindIocStream, tx: Sender<Result<VecDeque<FindIocRes>, Error>>) -> Result<(), Error> {
+async fn finder_run(finder: FindIocStream, tx: Sender<Result<VecDeque<FindIocRes>, Error>>) -> Result<(), Error> {
+    let mut finder = Box::pin(finder);
     while let Some(item) = finder.next().await {
         if let Err(_) = tx.send(item).await {
             break;
