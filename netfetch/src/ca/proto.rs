@@ -402,13 +402,14 @@ impl CaMsgTy {
 
     fn payload_len(&self) -> usize {
         use CaMsgTy::*;
+        trace!("payload_len for {self:?}");
         match self {
             Version => 0,
             VersionRes(_) => 0,
             Error(x) => (16 + x.msg.len() + 1 + 7) / 8 * 8,
             ClientName => 0x10,
             ClientNameRes(x) => (x.name.len() + 1 + 7) / 8 * 8,
-            HostName(_) => 0x18,
+            HostName(x) => (x.len() + 1 + 7) / 8 * 8,
             Search(x) => (x.channel.len() + 1 + 7) / 8 * 8,
             SearchRes(_) => 8,
             CreateChan(x) => (x.channel.len() + 1 + 7) / 8 * 8,

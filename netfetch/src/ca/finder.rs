@@ -217,7 +217,7 @@ async fn finder_worker_single(
                         items.extend(to_add.into_iter());
                         let items = items;
                         for e in &items {
-                            if crate::ca::connset::trigger.contains(&e.channel.as_str()) {
+                            if true || crate::ca::connset::trigger.contains(&e.channel.as_str()) {
                                 debug!("found in database: {e:?}");
                             }
                         }
@@ -262,6 +262,7 @@ async fn finder_network_if_not_found(
         let mut res = VecDeque::new();
         let mut net = VecDeque::new();
         for e in item {
+            trace!("finder_network_if_not_found sees {e:?}");
             if e.addr.is_none() {
                 net.push_back(e.channel);
             } else {

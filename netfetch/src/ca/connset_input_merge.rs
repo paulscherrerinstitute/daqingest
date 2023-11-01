@@ -47,13 +47,16 @@ impl Stream for InputMerge {
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
         use Poll::*;
-        let selfp = self.project();
         let ret = {
-            if let Some(inp) = selfp.inp3.as_pin_mut() {
+            let mut selfp = self.as_mut().project();
+            if let Some(inp) = selfp.inp3.as_mut().as_pin_mut() {
                 match inp.poll_next(cx) {
                     Ready(Some(x)) => Some(CaConnSetEvent::ConnSetCmd(todo!())),
                     Ready(None) => {
-                        // self.inp3 = None;
+                        unsafe {
+                            // TODO what guarantees that I can drop the content here like this?
+                            self.as_mut().get_unchecked_mut().inp3 = None;
+                        }
                         None
                     }
                     Pending => None,
@@ -65,11 +68,15 @@ impl Stream for InputMerge {
         let ret = if let Some(x) = ret {
             Some(x)
         } else {
-            if let Some(inp) = selfp.inp2.as_pin_mut() {
+            let mut selfp = self.as_mut().project();
+            if let Some(inp) = selfp.inp2.as_mut().as_pin_mut() {
                 match inp.poll_next(cx) {
                     Ready(Some(x)) => Some(CaConnSetEvent::ConnSetCmd(todo!())),
                     Ready(None) => {
-                        // self.inp2 = None;
+                        unsafe {
+                            // TODO what guarantees that I can drop the content here like this?
+                            self.as_mut().get_unchecked_mut().inp2 = None;
+                        }
                         None
                     }
                     Pending => None,
@@ -81,11 +88,15 @@ impl Stream for InputMerge {
         if let Some(x) = ret {
             Ready(Some(x))
         } else {
-            if let Some(inp) = selfp.inp1.as_pin_mut() {
+            let mut selfp = self.as_mut().project();
+            if let Some(inp) = selfp.inp1.as_mut().as_pin_mut() {
                 match inp.poll_next(cx) {
                     Ready(Some(x)) => Ready(Some(x)),
                     Ready(None) => {
-                        // self.inp1 = None;
+                        unsafe {
+                            // TODO what guarantees that I can drop the content here like this?
+                            self.as_mut().get_unchecked_mut().inp1 = None;
+                        }
                         Ready(None)
                     }
                     Pending => Pending,

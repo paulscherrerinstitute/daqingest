@@ -13,12 +13,12 @@ bytes = "1.4.0"
 md-5 = "0.10.5"
 hex = "0.4.3"
 pin-project = "1"
+slidebuf = "0.0.1"
 log = { path = "../log" }
 series = { path = "../series" }
 stats = { path = "../stats" }
 scywr = { path = "../scywr" }
 dbpg = { path = "../dbpg" }
-slidebuf = { path = "../slidebuf" }
 ingest-linux = { path = "../ingest-linux" }
 err = { path = "../../daqbuffer/crates/err" }
 netpod = { path = "../../daqbuffer/crates/netpod" }

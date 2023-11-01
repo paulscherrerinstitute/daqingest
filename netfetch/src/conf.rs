@@ -22,7 +22,7 @@ pub struct CaIngestOpts {
     whitelist: Option<String>,
     blacklist: Option<String>,
     max_simul: Option<usize>,
-    #[serde(with = "humantime_serde")]
+    #[serde(default, with = "humantime_serde")]
     timeout: Option<Duration>,
     postgresql: Database,
     scylla: ScyllaConfig,
@@ -35,13 +35,13 @@ pub struct CaIngestOpts {
     store_workers_rate: Option<u64>,
     insert_frac: Option<u64>,
     use_rate_limit_queue: Option<bool>,
-    #[serde(with = "humantime_serde")]
+    #[serde(default, with = "humantime_serde")]
     ttl_index: Option<Duration>,
-    #[serde(with = "humantime_serde")]
+    #[serde(default, with = "humantime_serde")]
     ttl_d0: Option<Duration>,
-    #[serde(with = "humantime_serde")]
+    #[serde(default, with = "humantime_serde")]
     ttl_d1: Option<Duration>,
-    #[serde(with = "humantime_serde")]
+    #[serde(default, with = "humantime_serde")]
     ttl_binned: Option<Duration>,
     pub test_bsread_addr: Option<String>,
 }
@@ -138,8 +138,7 @@ impl CaIngestOpts {
 fn parse_config_minimal() {
     let conf = r###"
 backend: scylla
-ttl_d1: 10m 3s
-ttl_binned: 70d
+ttl_d1: 10m 3s 45ms
 api_bind: "0.0.0.0:3011"
 channels: /some/path/file.txt
 search:
@@ -158,14 +157,13 @@ scylla:
   keyspace: ks1
 "###;
     let res: Result<CaIngestOpts, _> = serde_yaml::from_slice(conf.as_bytes());
-    assert_eq!(res.is_ok(), true);
     let conf = res.unwrap();
     assert_eq!(conf.channels, PathBuf::from("/some/path/file.txt"));
     assert_eq!(conf.api_bind, Some("0.0.0.0:3011".to_string()));
     assert_eq!(conf.search.get(0), Some(&"172.26.0.255".to_string()));
     assert_eq!(conf.scylla.hosts.get(1), Some(&"sf-nube-12:19042".to_string()));
     assert_eq!(conf.ttl_d1, Some(Duration::from_millis(1000 * (60 * 10 + 3) + 45)));
-    assert_eq!(conf.ttl_binned, Some(Duration::from_secs(60 * 60 * 70)));
+    assert_eq!(conf.ttl_binned, None);
 }
 
 #[test]

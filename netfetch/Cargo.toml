@@ -4,6 +4,9 @@ version = "0.0.3"
 authors = ["Dominik Werder <dominik.werder@gmail.com>"]
 edition = "2021"
 
+[lib]
+doctest = false
+
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -29,13 +32,13 @@ humantime-serde = "1.1.1"
 pin-project = "1"
 lazy_static = "1"
 libc = "0.2"
+slidebuf = "0.0.1"
 log = { path = "../log" }
 series = { path = "../series" }
 stats = { path = "../stats" }
 scywr = { path = "../scywr" }
 dbpg = { path = "../dbpg" }
 ingest-linux = { path = "../ingest-linux" }
-slidebuf = { path = "../slidebuf" }
 err = { path = "../../daqbuffer/crates/err" }
 netpod = { path = "../../daqbuffer/crates/netpod" }
 items_0 = { path = "../../daqbuffer/crates/items_0" }
