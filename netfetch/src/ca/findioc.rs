@@ -398,14 +398,16 @@ impl FindIocStream {
         buf.extend_from_slice(&[0, 0, 0, 0]);
         buf.extend_from_slice(&[0, 0, 0, 0]);
         for (sid, ch) in batch.sids.iter().zip(batch.channels.iter()) {
+            use bytes::BufMut;
             let chb = ch.as_bytes();
             let npadded = (chb.len() + 1 + 7) / 8 * 8;
             let npad = npadded - chb.len();
-            buf.extend_from_slice(&[0, 6]);
-            buf.extend_from_slice(&(npadded as u16).to_be_bytes());
-            buf.extend_from_slice(&[0, 0, 0, 13]);
-            buf.extend_from_slice(&[0, 0, 0, 0]);
-            buf.extend_from_slice(&sid.0.to_be_bytes());
+            buf.put_u16(0x06);
+            buf.put_u16(npadded as _);
+            buf.put_u16(0);
+            buf.put_u16(13);
+            buf.put_u32(sid.0);
+            buf.put_u32(sid.0);
             buf.extend_from_slice(chb);
             buf.extend_from_slice(&vec![0u8; npad]);
         }
