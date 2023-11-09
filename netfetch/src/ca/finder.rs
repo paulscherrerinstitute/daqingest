@@ -217,8 +217,10 @@ async fn finder_worker_single(
                         items.extend(to_add.into_iter());
                         let items = items;
                         for e in &items {
-                            if true || crate::ca::connset::trigger.contains(&e.channel.as_str()) {
+                            if crate::ca::connset::trigger.contains(&e.channel.as_str()) {
                                 debug!("found in database: {e:?}");
+                            } else {
+                                trace!("found in database: {e:?}");
                             }
                         }
                         let items_len = items.len();

@@ -368,9 +368,6 @@ impl FindIocStream {
                 }
             } else {
                 stats.ca_udp_first_msg_not_version().inc();
-                // debug!("first message is not a version: {:?}", msgs[0].ty);
-                // Seems like a bug in many IOCs
-                //good = false;
             }
             let mut res = Vec::new();
             if good {
@@ -380,7 +377,6 @@ impl FindIocStream {
                             let addr = SocketAddrV4::new(src_addr, k.tcp_port);
                             res.push((SearchId(k.id), addr));
                         }
-                        //CaMsgTy::VersionRes(13) => {}
                         _ => {
                             stats.ca_udp_error().inc();
                             warn!("try_read: unknown message received  {:?}", msg.ty);

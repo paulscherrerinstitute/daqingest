@@ -1283,7 +1283,7 @@ impl CaConnSet {
                                 Assigned(st4) => {
                                     if st4.updated + CHANNEL_HEALTH_TIMEOUT < tsnow {
                                         self.stats.channel_health_timeout().inc();
-                                        debug!("health timeout  channel {ch:?}  ~~~~~~~~~~~~~~~~~~~");
+                                        trace!("health timeout  channel {ch:?}  ~~~~~~~~~~~~~~~~~~~");
                                         let addr = SocketAddr::V4(*addr_v4);
                                         cmd_remove_channel.push((addr, ch.clone()));
                                         if st.health_timeout_count < 3 {
