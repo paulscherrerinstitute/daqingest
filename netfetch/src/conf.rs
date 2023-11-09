@@ -15,7 +15,7 @@ use tokio::io::AsyncReadExt;
 pub struct CaIngestOpts {
     backend: String,
     channels: PathBuf,
-    api_bind: Option<String>,
+    api_bind: String,
     search: Vec<String>,
     #[serde(default)]
     search_blacklist: Vec<String>,
@@ -52,7 +52,7 @@ impl CaIngestOpts {
     }
 
     pub fn api_bind(&self) -> String {
-        self.api_bind.clone().unwrap_or_else(|| "0.0.0.0:3011".into())
+        self.api_bind.clone()
     }
 
     pub fn postgresql_config(&self) -> &Database {
@@ -159,7 +159,7 @@ scylla:
     let res: Result<CaIngestOpts, _> = serde_yaml::from_slice(conf.as_bytes());
     let conf = res.unwrap();
     assert_eq!(conf.channels, PathBuf::from("/some/path/file.txt"));
-    assert_eq!(conf.api_bind, Some("0.0.0.0:3011".to_string()));
+    assert_eq!(&conf.api_bind, "0.0.0.0:3011");
     assert_eq!(conf.search.get(0), Some(&"172.26.0.255".to_string()));
     assert_eq!(conf.scylla.hosts.get(1), Some(&"sf-nube-12:19042".to_string()));
     assert_eq!(conf.ttl_d1, Some(Duration::from_millis(1000 * (60 * 10 + 3) + 45)));

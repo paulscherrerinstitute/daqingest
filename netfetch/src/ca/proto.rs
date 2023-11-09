@@ -1026,7 +1026,7 @@ impl CaProto {
             tcp,
             remote_addr_dbg,
             state: CaState::StdHead,
-            buf: SlideBuf::new(1024 * 512),
+            buf: SlideBuf::new(1024 * 1024 * 4),
             outbuf: SlideBuf::new(1024 * 128),
             out: VecDeque::new(),
             array_truncate,

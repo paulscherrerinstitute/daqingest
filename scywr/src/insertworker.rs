@@ -421,7 +421,9 @@ fn prepare_query_insert_futs(
             data_store.qu_insert_ts_msp.clone(),
             stats.clone(),
         );
-        futs.push(fut);
+        if item_ts_local % 100000 == 7461 {
+            futs.push(fut);
+        }
     }
     #[cfg(DISABLED)]
     if let Some(ts_msp_grid) = item.ts_msp_grid {
