@@ -1,4 +1,5 @@
 use async_channel::Send;
+use async_channel::SendError;
 use async_channel::Sender;
 use err::thiserror;
 use futures_util::Future;
@@ -82,6 +83,20 @@ impl<T> SenderPolling<T> {
     pub fn len(&self) -> Option<usize> {
         self.sender.as_ref().map(|x| x.len())
     }
+
+    pub async fn send_async_pin(self: Pin<&mut Self>, item: T) -> Result<(), SendError<T>> {
+        unsafe { Pin::get_unchecked_mut(self) }.send_async(item).await
+    }
+
+    pub async fn send_async(&mut self, item: T) -> Result<(), SendError<T>> {
+        if self.is_sending() {
+            let fut = self.fut.take().unwrap();
+            if let Err(e) = fut.await {
+                return Err(e);
+            }
+        }
+        self.sender.as_ref().unwrap().send(item).await
+    }
 }
 
 impl<T> Future for SenderPolling<T>
@@ -111,5 +126,18 @@ where
             },
             None => Ready(Err(Error::NoSendInProgress)),
         }
+    }
+}
+
+impl<T> Clone for SenderPolling<T> {
+    fn clone(&self) -> Self {
+        let sender = self.sender.as_ref().unwrap().as_ref().clone();
+        SenderPolling::new(sender)
+    }
+}
+
+impl<T> From<Sender<T>> for SenderPolling<T> {
+    fn from(value: Sender<T>) -> Self {
+        SenderPolling::new(value)
     }
 }

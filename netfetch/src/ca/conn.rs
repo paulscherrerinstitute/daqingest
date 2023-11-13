@@ -664,6 +664,7 @@ impl CaConn {
     }
 
     fn cmd_check_health(&mut self) {
+        debug!("cmd_check_health");
         match self.check_channels_alive() {
             Ok(_) => {}
             Err(e) => {
@@ -856,38 +857,23 @@ impl CaConn {
         self.stats.clone()
     }
 
-    fn channel_add_expl(
-        channel: String,
-        cssid: ChannelStatusSeriesId,
-        channels: &mut BTreeMap<Cid, ChannelState>,
-        cid_by_name: &mut BTreeMap<String, Cid>,
-        name_by_cid: &mut BTreeMap<Cid, String>,
-        cid_store: &mut CidStore,
-        init_state_count: &mut u64,
-    ) {
-        if cid_by_name.contains_key(&channel) {
+    pub fn channel_add(&mut self, channel: String, cssid: ChannelStatusSeriesId) {
+        if self.cid_by_name.contains_key(&channel) {
             return;
         }
-        let cid = Self::cid_by_name_expl(&channel, cid_by_name, name_by_cid, cid_store);
-        if channels.contains_key(&cid) {
-            error!("logic error");
-        } else {
-            channels.insert(cid, ChannelState::Init(cssid));
-            // TODO do not count, use separate queue for those channels.
-            *init_state_count += 1;
-        }
-    }
-
-    pub fn channel_add(&mut self, channel: String, cssid: ChannelStatusSeriesId) {
-        Self::channel_add_expl(
-            channel,
-            cssid,
-            &mut self.channels,
+        let cid = Self::cid_by_name_expl(
+            &channel,
             &mut self.cid_by_name,
             &mut self.name_by_cid,
             &mut self.cid_store,
-            &mut self.init_state_count,
-        )
+        );
+        if self.channels.contains_key(&cid) {
+            error!("logic error");
+        } else {
+            self.channels.insert(cid, ChannelState::Init(cssid));
+            // TODO do not count, use separate queue for those channels.
+            self.init_state_count += 1;
+        }
     }
 
     pub fn channel_remove(&mut self, channel: String) {
@@ -1547,7 +1533,12 @@ impl CaConn {
             .add((ts2.duration_since(ts1) * MS as u32).as_secs());
         ts1 = ts2;
         let tsnow = Instant::now();
-        let res = match self.proto.as_mut().unwrap().poll_next_unpin(cx) {
+        let proto = if let Some(x) = self.proto.as_mut() {
+            x
+        } else {
+            return Ready(Some(Err(Error::with_msg_no_trace("handle_peer_ready but no proto"))));
+        };
+        let res = match proto.poll_next_unpin(cx) {
             Ready(Some(Ok(k))) => {
                 match k {
                     CaItem::Msg(camsg) => {

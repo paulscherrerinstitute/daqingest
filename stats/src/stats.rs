@@ -270,6 +270,7 @@ stats_proc::stats_struct!((
             ca_conn_eos_ok,
             ca_conn_eos_unexpected,
             response_tx_fail,
+            try_push_ca_conn_cmds_sent,
             try_push_ca_conn_cmds_full,
             try_push_ca_conn_cmds_closed,
             logic_error,

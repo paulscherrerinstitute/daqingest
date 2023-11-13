@@ -117,7 +117,7 @@ pub struct CmdId(SocketAddrV4, usize);
 
 pub struct CaConnRes {
     state: CaConnState,
-    sender: Sender<ConnCommand>,
+    sender: Pin<Box<SenderPolling<ConnCommand>>>,
     stats: Arc<CaConnStats>,
     cmd_queue: VecDeque<ConnCommand>,
     // TODO await on jh
@@ -364,7 +364,6 @@ pub struct CaConnSet {
     did_connset_out_queue: bool,
     ca_proto_stats: Arc<CaProtoStats>,
     rogue_channel_count: u64,
-    have_conn_command: bool,
     connect_fail_count: usize,
 }
 
@@ -426,7 +425,6 @@ impl CaConnSet {
             did_connset_out_queue: false,
             ca_proto_stats: ca_proto_stats.clone(),
             rogue_channel_count: 0,
-            have_conn_command: false,
             connect_fail_count: 0,
         };
         // TODO await on jh
@@ -637,7 +635,6 @@ impl CaConnSet {
                     let conn_ress = self.ca_conn_ress.get_mut(&cmd.addr).unwrap();
                     let cmd = ConnCommand::channel_add(cmd.name, cmd.cssid);
                     conn_ress.cmd_queue.push_back(cmd);
-                    self.have_conn_command = true;
                 }
             }
         }
@@ -746,6 +743,7 @@ impl CaConnSet {
     }
 
     fn handle_check_health(&mut self, ts1: Instant) -> Result<(), Error> {
+        debug!("handle_check_health");
         if self.shutdown_stopping {
             return Ok(());
         }
@@ -764,8 +762,12 @@ impl CaConnSet {
         for (_, res) in self.ca_conn_ress.iter_mut() {
             let item = ConnCommand::check_health();
             res.cmd_queue.push_back(item);
+            debug!(
+                "handle_check_health pushed check command  {:?}  {:?}",
+                res.cmd_queue.len(),
+                res.sender.len()
+            );
         }
-        self.have_conn_command = true;
 
         let ts2 = Instant::now();
         let item = CaConnSetItem::Healthy(ts1, ts2);
@@ -806,8 +808,8 @@ impl CaConnSet {
         for (_addr, res) in self.ca_conn_ress.iter() {
             let item = ConnCommand::shutdown();
             // TODO not the nicest
-            let tx = res.sender.clone();
-            tokio::spawn(async move { tx.send(item).await });
+            let mut tx = res.sender.clone();
+            tokio::spawn(async move { tx.as_mut().send_async_pin(item).await });
         }
         Ok(())
     }
@@ -820,6 +822,7 @@ impl CaConnSet {
     }
 
     fn apply_ca_conn_health_update(&mut self, addr: SocketAddr, res: CheckHealthResult) -> Result<(), Error> {
+        debug!("apply_ca_conn_health_update  {addr}");
         let tsnow = SystemTime::now();
         self.rogue_channel_count = 0;
         for (k, v) in res.channel_statuses {
@@ -979,7 +982,7 @@ impl CaConnSet {
         let jh = tokio::spawn(Self::ca_conn_item_merge(conn, tx1, tx2, addr, self.stats.clone()));
         let ca_conn_res = CaConnRes {
             state: CaConnState::new(CaConnStateValue::Fresh),
-            sender: conn_tx,
+            sender: Box::pin(conn_tx.into()),
             stats: conn_stats,
             cmd_queue: VecDeque::new(),
             jh,
@@ -1340,7 +1343,6 @@ impl CaConnSet {
             if let Some(g) = self.ca_conn_ress.get_mut(&addr) {
                 let cmd = ConnCommand::channel_remove(ch.id().into());
                 g.cmd_queue.push_back(cmd);
-                self.have_conn_command = true;
             }
             let cmd = ChannelRemove { name: ch.id().into() };
             self.handle_remove_channel(cmd)?;
@@ -1421,27 +1423,31 @@ impl CaConnSet {
         (search_pending, assigned_without_health_update)
     }
 
-    fn try_push_ca_conn_cmds(&mut self) {
-        if self.have_conn_command {
-            self.have_conn_command = false;
-            for (_, v) in self.ca_conn_ress.iter_mut() {
+    fn try_push_ca_conn_cmds(&mut self, cx: &mut Context) {
+        use Poll::*;
+        for (_, v) in self.ca_conn_ress.iter_mut() {
+            'level2: loop {
+                let tx = &mut v.sender;
+                if v.cmd_queue.len() != 0 || tx.is_sending() {
+                    debug!("try_push_ca_conn_cmds  {:?}  {:?}", v.cmd_queue.len(), tx.len());
+                }
                 loop {
-                    break if let Some(item) = v.cmd_queue.pop_front() {
-                        match v.sender.try_send(item) {
-                            Ok(()) => continue,
-                            Err(e) => match e {
-                                async_channel::TrySendError::Full(e) => {
-                                    self.stats.try_push_ca_conn_cmds_full.inc();
-                                    v.cmd_queue.push_front(e);
-                                    self.have_conn_command = true;
-                                }
-                                async_channel::TrySendError::Closed(_) => {
-                                    // TODO
-                                    self.stats.try_push_ca_conn_cmds_closed.inc();
-                                    self.have_conn_command = true;
-                                }
-                            },
+                    break if tx.is_sending() {
+                        match tx.poll_unpin(cx) {
+                            Ready(Ok(())) => {
+                                self.stats.try_push_ca_conn_cmds_sent.inc();
+                                continue;
+                            }
+                            Ready(Err(e)) => {
+                                error!("try_push_ca_conn_cmds {e}");
+                            }
+                            Pending => {
+                                break 'level2;
+                            }
                         }
+                    } else if let Some(item) = v.cmd_queue.pop_front() {
+                        tx.as_mut().send_pin(item);
+                        continue;
                     };
                 }
             }
@@ -1479,7 +1485,7 @@ impl Stream for CaConnSet {
             let mut have_pending = false;
             let mut have_progress = false;
 
-            self.try_push_ca_conn_cmds();
+            self.try_push_ca_conn_cmds(cx);
 
             if self.did_connset_out_queue {
                 self.did_connset_out_queue = false;

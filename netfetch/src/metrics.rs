@@ -217,6 +217,17 @@ fn make_routes(dcom: Arc<DaemonComm>, connset_cmd_tx: Sender<CaConnSetEvent>, st
             }),
         )
         .route(
+            "/metricbeat",
+            get({
+                //
+                || async move {
+                    axum::Json(serde_json::json!({
+                        "v1": 42_u32,
+                    }))
+                }
+            }),
+        )
+        .route(
             "/daqingest/find/channel",
             get({
                 let dcom = dcom.clone();
