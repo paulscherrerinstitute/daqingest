@@ -1,3 +1,5 @@
+pub use rand_xoshiro;
+
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -367,6 +369,7 @@ stats_proc::stats_struct!((
 stats_proc::stats_struct!((
     stats_struct(
         name(CaConnStats),
+        prefix(caconn),
         counters(
             insert_item_create,
             inserts_val,
@@ -383,35 +386,34 @@ stats_proc::stats_struct!((
             // TODO maybe rename: this is now only the recv of the intermediate queue:
             store_worker_item_recv,
             // TODO rename to make clear that this drop is voluntary because of user config choice:
-            store_worker_fraction_drop,
-            store_worker_ratelimit_drop,
-            store_worker_insert_done,
-            store_worker_insert_binned_done,
-            store_worker_insert_overload,
-            store_worker_insert_timeout,
-            store_worker_insert_unavailable,
-            store_worker_insert_error,
+            // store_worker_fraction_drop,
+            // store_worker_ratelimit_drop,
+            // store_worker_insert_done,
+            // store_worker_insert_binned_done,
+            // store_worker_insert_overload,
+            // store_worker_insert_timeout,
+            // store_worker_insert_unavailable,
+            // store_worker_insert_error,
             connection_status_insert_done,
             channel_status_insert_done,
             channel_info_insert_done,
             ivl_insert_done,
             mute_insert_done,
-            caconn_poll_count,
-            caconn_loop1_count,
-            caconn_loop2_count,
-            caconn_loop3_count,
-            caconn_loop4_count,
-            caconn_command_can_not_reply,
-            caconn_recv_data,
+            poll_count,
+            loop1_count,
+            loop2_count,
+            loop3_count,
+            loop4_count,
+            command_can_not_reply,
             time_handle_conn_listen,
             time_handle_peer_ready,
             time_check_channels_state_init,
             time_handle_event_add_res,
             tcp_connected,
             get_series_id_ok,
-            conn_item_count,
-            conn_stream_ready,
-            conn_stream_pending,
+            item_count,
+            stream_ready,
+            stream_pending,
             channel_all_count,
             channel_alive_count,
             channel_not_alive_count,
@@ -419,11 +421,17 @@ stats_proc::stats_struct!((
             ping_start,
             ping_no_proto,
             pong_timeout,
-            ca_conn_poll_fn_begin,
-            ca_conn_poll_loop_begin,
-            ca_conn_poll_reloop,
-            ca_conn_poll_pending,
-            ca_conn_poll_no_progress_no_pending,
+            poll_fn_begin,
+            poll_loop_begin,
+            poll_reloop,
+            poll_pending,
+            poll_no_progress_no_pending,
+            storage_queue_send,
+            storage_queue_pending,
+            storage_queue_above_8,
+            storage_queue_above_32,
+            storage_queue_above_128,
+            event_add_res_recv,
         ),
         values(inter_ivl_ema),
         histolog2s(pong_recv_lat, ca_ts_off,),
@@ -490,4 +498,18 @@ fn test0_diff() {
     stats_b.count0().inc();
     let diff = TestStats0Diff::diff_from(&stats_a, &stats_b);
     assert_eq!(diff.count0.load(), 3);
+}
+
+pub fn xoshiro_from_time() -> rand_xoshiro::Xoshiro128StarStar {
+    use rand_xoshiro::rand_core::SeedableRng;
+    use std::time::SystemTime;
+    let a = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap()
+        .subsec_nanos() as u64;
+    let b = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap()
+        .subsec_nanos() as u64;
+    rand_xoshiro::Xoshiro128StarStar::seed_from_u64(a << 32 ^ b)
 }

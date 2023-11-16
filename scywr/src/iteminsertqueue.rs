@@ -713,3 +713,37 @@ pub async fn insert_channel_status(
         .await?;
     Ok(())
 }
+
+pub struct InsertFut2 {
+    data_store: Arc<DataStore>,
+    stats: Arc<InsertWorkerStats>,
+    kind: InsertFutKind,
+}
+
+impl Future for InsertFut2 {
+    type Output = Result<(), Error>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
+        use Poll::*;
+        todo!()
+    }
+}
+
+pub enum InsertFutKind {
+    Value,
+}
+
+pub struct InsertItemFut {
+    data_store: Arc<DataStore>,
+    stats: Arc<InsertWorkerStats>,
+    item: InsertItem,
+}
+
+impl Future for InsertItemFut {
+    type Output = Result<(), Error>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
+        use Poll::*;
+        todo!()
+    }
+}

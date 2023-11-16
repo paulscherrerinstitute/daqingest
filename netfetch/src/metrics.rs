@@ -223,6 +223,15 @@ fn make_routes(dcom: Arc<DaemonComm>, connset_cmd_tx: Sender<CaConnSetEvent>, st
                 || async move {
                     axum::Json(serde_json::json!({
                         "v1": 42_u32,
+                        "o1": {
+                            "v2": 56,
+                            "o2": {
+                                "v3": "test",
+                            },
+                        },
+                        "o5": {
+                            "v6": 89,
+                        },
                     }))
                 }
             }),

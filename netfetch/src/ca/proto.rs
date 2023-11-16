@@ -1,13 +1,12 @@
 use crate::netbuf;
 use err::thiserror;
 use err::ThisError;
-use futures_util::pin_mut;
 use futures_util::Stream;
 use log::*;
 use netpod::timeunits::*;
 use slidebuf::SlideBuf;
 use stats::CaProtoStats;
-use std::collections::BTreeMap;
+use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::io;
 use std::net::SocketAddrV4;
@@ -46,6 +45,8 @@ pub enum Error {
     ParseAttemptInDoneState,
     UnexpectedHeader,
     ExtendedHeaderBadCount,
+    NoReadBufferSpace,
+    NeitherPendingNorProgress,
 }
 
 const CA_PROTO_VERSION: u16 = 13;
@@ -1016,8 +1017,9 @@ pub struct CaProto {
     outbuf: SlideBuf,
     out: VecDeque<CaMsg>,
     array_truncate: usize,
-    logged_proto_error_for_cid: BTreeMap<u32, bool>,
+    logged_proto_error_for_cid: HashMap<u32, bool>,
     stats: Arc<CaProtoStats>,
+    resqu: VecDeque<CaItem>,
 }
 
 impl CaProto {
@@ -1026,12 +1028,13 @@ impl CaProto {
             tcp,
             remote_addr_dbg,
             state: CaState::StdHead,
-            buf: SlideBuf::new(1024 * 1024 * 4),
+            buf: SlideBuf::new(1024 * 1024 * 8),
             outbuf: SlideBuf::new(1024 * 128),
             out: VecDeque::new(),
             array_truncate,
-            logged_proto_error_for_cid: BTreeMap::new(),
+            logged_proto_error_for_cid: HashMap::new(),
             stats,
+            resqu: VecDeque::with_capacity(256),
         }
     }
 
@@ -1063,14 +1066,14 @@ impl CaProto {
         }
     }
 
-    fn attempt_output(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<(), Error>> {
+    fn attempt_output(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<usize, Error>> {
         use Poll::*;
         let (w, b) = self.outbuf_conn();
-        pin_mut!(w);
+        let w = Pin::new(w);
         match w.poll_write(cx, b) {
             Ready(k) => match k {
                 Ok(k) => match self.outbuf.adv(k) {
-                    Ok(()) => Ready(Ok(())),
+                    Ok(()) => Ready(Ok(k)),
                     Err(e) => {
                         error!("advance error {:?}", e);
                         Ready(Err(e.into()))
@@ -1085,13 +1088,12 @@ impl CaProto {
         }
     }
 
-    fn loop_body(mut self: Pin<&mut Self>, cx: &mut Context) -> Result<Option<Poll<CaItem>>, Error> {
+    fn loop_body(mut self: Pin<&mut Self>, cx: &mut Context) -> Result<Poll<()>, Error> {
         use Poll::*;
+        let mut have_pending = false;
+        let mut have_progress = false;
         let tsnow = Instant::now();
-        let output_res_1: Option<Poll<()>> = 'll1: loop {
-            if self.out.len() == 0 {
-                break None;
-            }
+        'l1: while self.out.len() != 0 {
             while let Some((msg, buf)) = self.out_msg_buf() {
                 let msglen = msg.len();
                 if msglen > buf.len() {
@@ -1103,168 +1105,184 @@ impl CaProto {
                     self.out.pop_front();
                 }
             }
-            while self.outbuf.len() > 0 {
+            while self.outbuf.len() != 0 {
                 match Self::attempt_output(self.as_mut(), cx)? {
-                    Ready(()) => {}
+                    Ready(n) => {
+                        if n != 0 {
+                            have_progress = true;
+                        } else {
+                            // Should not occur to begin with. TODO restructure.
+                            break 'l1;
+                        }
+                    }
                     Pending => {
-                        break 'll1 Some(Pending);
+                        have_pending = true;
+                        break 'l1;
                     }
                 }
             }
-        };
-        let output_res_2: Option<Poll<()>> = if let Some(Pending) = output_res_1 {
-            Some(Pending)
-        } else {
-            loop {
-                if self.outbuf.len() == 0 {
-                    break None;
+        }
+        'l1: while self.outbuf.len() != 0 {
+            match Self::attempt_output(self.as_mut(), cx)? {
+                Ready(n) => {
+                    if n != 0 {
+                        have_progress = true;
+                    } else {
+                        // Should not occur to begin with. TODO restructure.
+                        break 'l1;
+                    }
                 }
-                match Self::attempt_output(self.as_mut(), cx)? {
-                    Ready(()) => {}
-                    Pending => break Some(Pending),
+                Pending => {
+                    have_pending = true;
+                    break 'l1;
                 }
             }
-        };
+        }
         let need_min = self.state.need_min();
-        let read_res = {
-            if self.buf.cap() < need_min {
-                self.state = CaState::Done;
-                let e = Error::BufferTooSmallForNeedMin(self.buf.cap(), self.state.need_min());
-                Err(e)
-            } else if self.buf.len() < need_min {
-                let (w, mut rbuf) = self.inpbuf_conn(need_min)?;
-                pin_mut!(w);
-                match w.poll_read(cx, &mut rbuf) {
-                    Ready(k) => match k {
-                        Ok(()) => {
-                            let nf = rbuf.filled().len();
-                            if nf == 0 {
-                                info!(
-                                    "EOF  peer  {:?}  {:?}  {:?}",
-                                    self.tcp.peer_addr(),
-                                    self.remote_addr_dbg,
-                                    self.state
-                                );
-                                // TODO may need another state, if not yet done when input is EOF.
-                                self.state = CaState::Done;
-                                Ok(Some(Ready(CaItem::empty())))
-                            } else {
-                                if false {
-                                    info!("received {} bytes", rbuf.filled().len());
-                                    let t = rbuf.filled().len().min(32);
-                                    info!("received data  {:?}", &rbuf.filled()[0..t]);
+        if self.buf.cap() < need_min {
+            self.state = CaState::Done;
+            let e = Error::BufferTooSmallForNeedMin(self.buf.cap(), self.state.need_min());
+            return Err(e);
+        }
+        if self.buf.len() < need_min {
+            let (w, mut rbuf) = self.inpbuf_conn(need_min)?;
+            if rbuf.remaining() == 0 {
+                return Err(Error::NoReadBufferSpace);
+            }
+            let w = Pin::new(w);
+            match w.poll_read(cx, &mut rbuf) {
+                Ready(k) => match k {
+                    Ok(()) => {
+                        let nf = rbuf.filled().len();
+                        if nf == 0 {
+                            info!(
+                                "EOF  peer  {:?}  {:?}  {:?}",
+                                self.tcp.peer_addr(),
+                                self.remote_addr_dbg,
+                                self.state
+                            );
+                            // TODO may need another state, if not yet done when input is EOF.
+                            self.state = CaState::Done;
+                        } else {
+                            if false {
+                                info!("received {} bytes", rbuf.filled().len());
+                                let t = rbuf.filled().len().min(32);
+                                info!("received data  {:?}", &rbuf.filled()[0..t]);
+                            }
+                            match self.buf.wadv(nf) {
+                                Ok(()) => {
+                                    have_progress = true;
+                                    self.stats.tcp_recv_bytes().add(nf as _);
+                                    self.stats.tcp_recv_count().inc();
                                 }
-                                match self.buf.wadv(nf) {
-                                    Ok(()) => {
-                                        self.stats.tcp_recv_bytes().add(nf as _);
-                                        self.stats.tcp_recv_count().inc();
-                                        Ok(Some(Ready(CaItem::empty())))
-                                    }
-                                    Err(e) => {
-                                        error!("netbuf wadv fail  nf {nf}");
-                                        Err(e.into())
-                                    }
+                                Err(e) => {
+                                    error!("netbuf wadv fail  nf {nf}");
+                                    return Err(e.into());
                                 }
                             }
                         }
-                        Err(e) => Err(e.into()),
-                    },
-                    Pending => Ok(Some(Pending)),
+                    }
+                    Err(e) => {
+                        return Err(e.into());
+                    }
+                },
+                Pending => {
+                    have_pending = true;
                 }
+            }
+        }
+        while self.resqu.len() < self.resqu.capacity() {
+            if let Some(item) = self.parse_item(tsnow)? {
+                have_progress = true;
+                self.resqu.push_back(item);
             } else {
-                Ok(None)
+                break;
             }
-        }?;
-        let parse_res: Option<CaItem> = self.parse_item(tsnow)?;
-        match (output_res_2, read_res, parse_res) {
-            (_, _, Some(item)) => Ok(Some(Ready(item))),
-            (Some(Pending), _, _) => Ok(Some(Pending)),
-            (_, Some(Pending), _) => Ok(Some(Pending)),
-            (_, None, None) => {
-                // TODO constrain how often we can go to this case consecutively.
-                Ok(None)
-            }
-            (_, Some(_), None) => Ok(None),
+        }
+        if have_progress {
+            Ok(Ready(()))
+        } else if have_pending {
+            Ok(Pending)
+        } else {
+            Err(Error::NeitherPendingNorProgress)
         }
     }
 
     fn parse_item(&mut self, tsnow: Instant) -> Result<Option<CaItem>, Error> {
-        loop {
-            if self.buf.len() < self.state.need_min() {
-                break Ok(None);
-            }
-            break match &self.state {
-                CaState::StdHead => {
-                    let hi = HeadInfo::from_netbuf(&mut self.buf)?;
-                    if hi.cmdid == 1 || hi.cmdid == 15 {
-                        let sid = hi.param1;
-                        if hi.payload_size == 0xffff {
-                            if hi.data_count != 0 {
-                                warn!("protocol error: {hi:?}");
-                                return Err(Error::ExtendedHeaderBadCount);
-                            }
+        if self.buf.len() < self.state.need_min() {
+            return Ok(None);
+        }
+        match &self.state {
+            CaState::StdHead => {
+                let hi = HeadInfo::from_netbuf(&mut self.buf)?;
+                if hi.cmdid == 1 || hi.cmdid == 15 {
+                    let sid = hi.param1;
+                    if hi.payload_size == 0xffff {
+                        if hi.data_count != 0 {
+                            warn!("protocol error: {hi:?}");
+                            return Err(Error::ExtendedHeaderBadCount);
                         }
-                        if hi.payload_size == 0xffff {
-                        } else if hi.payload_size > 16368 {
-                            self.stats.payload_std_too_large().inc();
-                        }
-                    }
-                    if hi.cmdid > 26 {
-                        // TODO count as logic error
-                        self.stats.protocol_issue().inc();
                     }
                     if hi.payload_size == 0xffff {
-                        self.state = CaState::ExtHead(hi);
-                        Ok(None)
-                    } else {
-                        // For extended messages, ingest on receive of extended header
-                        self.stats.payload_size().ingest(hi.payload_len() as u32);
-                        if hi.payload_size == 0 {
-                            self.state = CaState::StdHead;
-                            let msg = CaMsg::from_proto_infos(&hi, &[], tsnow, self.array_truncate)?;
-                            Ok(Some(CaItem::Msg(msg)))
-                        } else {
-                            self.state = CaState::Payload(hi);
-                            Ok(None)
-                        }
+                    } else if hi.payload_size > 16368 {
+                        self.stats.payload_std_too_large().inc();
                     }
                 }
-                CaState::ExtHead(hi) => {
-                    let payload_size = self.buf.read_u32_be()?;
-                    let data_count = self.buf.read_u32_be()?;
+                if hi.cmdid > 26 {
+                    // TODO count as logic error
+                    self.stats.protocol_issue().inc();
+                }
+                if hi.payload_size == 0xffff {
+                    self.state = CaState::ExtHead(hi);
+                    Ok(None)
+                } else {
+                    // For extended messages, ingest on receive of extended header
                     self.stats.payload_size().ingest(hi.payload_len() as u32);
-                    if payload_size > 1024 * 1024 * 32 {
-                        self.stats.payload_ext_very_large().inc();
-                        if false {
-                            warn!(
-                                "ExtHead  data_type {}  payload_size {payload_size}  data_count {data_count}",
-                                hi.data_type
-                            );
-                        }
+                    if hi.payload_size == 0 {
+                        self.state = CaState::StdHead;
+                        let msg = CaMsg::from_proto_infos(&hi, &[], tsnow, self.array_truncate)?;
+                        Ok(Some(CaItem::Msg(msg)))
+                    } else {
+                        self.state = CaState::Payload(hi);
+                        Ok(None)
                     }
-                    if payload_size <= 16368 {
-                        self.stats.payload_ext_but_small().inc();
+                }
+            }
+            CaState::ExtHead(hi) => {
+                let payload_size = self.buf.read_u32_be()?;
+                let data_count = self.buf.read_u32_be()?;
+                self.stats.payload_size().ingest(hi.payload_len() as u32);
+                if payload_size > 1024 * 1024 * 32 {
+                    self.stats.payload_ext_very_large().inc();
+                    if false {
                         warn!(
                             "ExtHead  data_type {}  payload_size {payload_size}  data_count {data_count}",
                             hi.data_type
                         );
                     }
-                    let hi = hi.clone().with_ext(payload_size, data_count);
-                    self.state = CaState::Payload(hi);
-                    Ok(None)
                 }
-                CaState::Payload(hi) => {
-                    let g = self.buf.read_bytes(hi.payload_len())?;
-                    let msg = CaMsg::from_proto_infos(hi, g, tsnow, self.array_truncate)?;
-                    // data-count is only reasonable for event messages
-                    if let CaMsgTy::EventAddRes(e) = &msg.ty {
-                        self.stats.data_count().ingest(hi.data_count() as u32);
-                    }
-                    self.state = CaState::StdHead;
-                    Ok(Some(CaItem::Msg(msg)))
+                if payload_size <= 16368 {
+                    self.stats.payload_ext_but_small().inc();
+                    warn!(
+                        "ExtHead  data_type {}  payload_size {payload_size}  data_count {data_count}",
+                        hi.data_type
+                    );
                 }
-                CaState::Done => Err(Error::ParseAttemptInDoneState),
-            };
+                let hi = hi.clone().with_ext(payload_size, data_count);
+                self.state = CaState::Payload(hi);
+                Ok(None)
+            }
+            CaState::Payload(hi) => {
+                let g = self.buf.read_bytes(hi.payload_len())?;
+                let msg = CaMsg::from_proto_infos(hi, g, tsnow, self.array_truncate)?;
+                // data-count is only reasonable for event messages
+                if let CaMsgTy::EventAddRes(e) = &msg.ty {
+                    self.stats.data_count().ingest(hi.data_count() as u32);
+                }
+                self.state = CaState::StdHead;
+                Ok(Some(CaItem::Msg(msg)))
+            }
+            CaState::Done => Err(Error::ParseAttemptInDoneState),
         }
     }
 }
@@ -1274,16 +1292,16 @@ impl Stream for CaProto {
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
         use Poll::*;
-
         loop {
-            break if let CaState::Done = self.state {
+            break if let Some(item) = self.resqu.pop_front() {
+                Ready(Some(Ok(item)))
+            } else if let CaState::Done = self.state {
                 Ready(None)
             } else {
                 let k = Self::loop_body(self.as_mut(), cx);
                 match k {
-                    Ok(Some(Ready(k))) => Ready(Some(Ok(k))),
-                    Ok(Some(Pending)) => Pending,
-                    Ok(None) => continue,
+                    Ok(Ready(())) => continue,
+                    Ok(Pending) => Pending,
                     Err(e) => Ready(Some(Err(e))),
                 }
             };

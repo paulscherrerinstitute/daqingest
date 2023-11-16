@@ -22,6 +22,7 @@ use scywriiq::QueryItem;
 use stats::DaemonStats;
 use stats::InsertWorkerStats;
 use stats::SeriesByChannelStats;
+use std::collections::VecDeque;
 use std::sync::atomic;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::AtomicUsize;
@@ -42,29 +43,18 @@ enum CheckPeriodic {
 }
 
 pub struct DaemonOpts {
-    backend: String,
-    local_epics_hostname: String,
-    array_truncate: u64,
-    insert_item_queue_cap: usize,
     pgconf: Database,
     scyconf: ScyllaConfig,
     ttls: Ttls,
     #[allow(unused)]
     test_bsread_addr: Option<String>,
-    insert_worker_count: usize,
-    insert_scylla_sessions: usize,
     insert_frac: Arc<AtomicU64>,
     store_workers_rate: Arc<AtomicU64>,
 }
 
-impl DaemonOpts {
-    pub fn backend(&self) -> &str {
-        &self.backend
-    }
-}
-
 pub struct Daemon {
     opts: DaemonOpts,
+    ingest_opts: CaIngestOpts,
     tx: Sender<DaemonEvent>,
     rx: Receiver<DaemonEvent>,
     insert_queue_counter: Arc<AtomicUsize>,
@@ -84,7 +74,7 @@ pub struct Daemon {
     connset_status_last: CheckPeriodic,
     // TODO should be a stats object?
     insert_workers_running: AtomicU64,
-    query_item_tx_weak: WeakSender<QueryItem>,
+    query_item_tx_weak: WeakSender<VecDeque<QueryItem>>,
     connset_health_lat_ema: f32,
 }
 
@@ -101,20 +91,20 @@ impl Daemon {
                 .await
                 .map_err(|e| Error::with_msg_no_trace(e.to_string()))?;
 
-        let (query_item_tx, query_item_rx) = async_channel::bounded(opts.insert_item_queue_cap);
+        let (query_item_tx, query_item_rx) = async_channel::bounded(ingest_opts.insert_item_queue_cap());
         let query_item_tx_weak = query_item_tx.downgrade();
 
         let insert_queue_counter = Arc::new(AtomicUsize::new(0));
 
         // Insert queue hook
-        let query_item_rx = inserthook::active_channel_insert_hook(query_item_rx);
+        // let query_item_rx = inserthook::active_channel_insert_hook(query_item_rx);
 
         let conn_set_ctrl = CaConnSet::start(
-            opts.backend.clone(),
-            opts.local_epics_hostname.clone(),
+            ingest_opts.backend().into(),
+            ingest_opts.local_epics_hostname(),
             query_item_tx,
             channel_info_query_tx,
-            ingest_opts,
+            ingest_opts.clone(),
         );
 
         // TODO remove
@@ -140,24 +130,44 @@ impl Daemon {
             }
         });
 
-        let use_rate_limit_queue = true;
+        // #[cfg(DISABLED)]
+        let query_item_rx = {
+            // TODO only testing, remove
+            tokio::spawn({
+                let rx = query_item_rx;
+                async move {
+                    while let Ok(item) = rx.recv().await {
+                        drop(item);
+                    }
+                }
+            });
+            let (tx, rx) = async_channel::bounded(128);
+            tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(Duration::from_millis(2000)).await;
+                    tx.len();
+                }
+            });
+            rx
+        };
 
         let ttls = opts.ttls.clone();
         let insert_worker_opts = InsertWorkerOpts {
             store_workers_rate: opts.store_workers_rate.clone(),
             insert_workers_running: Arc::new(AtomicU64::new(0)),
             insert_frac: opts.insert_frac.clone(),
-            array_truncate: Arc::new(AtomicU64::new(opts.array_truncate)),
+            array_truncate: Arc::new(AtomicU64::new(ingest_opts.array_truncate())),
         };
         let insert_worker_opts = Arc::new(insert_worker_opts);
         let insert_workers_jh = scywr::insertworker::spawn_scylla_insert_workers(
             opts.scyconf.clone(),
-            opts.insert_scylla_sessions,
-            opts.insert_worker_count,
+            ingest_opts.insert_scylla_sessions(),
+            ingest_opts.insert_worker_count(),
+            ingest_opts.insert_worker_concurrency(),
             query_item_rx,
             insert_worker_opts,
             insert_worker_stats.clone(),
-            use_rate_limit_queue,
+            ingest_opts.use_rate_limit_queue(),
             ttls,
         )
         .await?;
@@ -199,6 +209,7 @@ impl Daemon {
 
         let ret = Self {
             opts,
+            ingest_opts,
             tx: daemon_ev_tx,
             rx: daemon_ev_rx,
             insert_queue_counter,
@@ -230,7 +241,7 @@ impl Daemon {
     async fn check_caconn_chans(&mut self, ts1: Instant) -> Result<(), Error> {
         match &self.connset_status_last {
             CheckPeriodic::Waiting(since) => {
-                if *since + Duration::from_millis(500) < ts1 {
+                if *since + Duration::from_millis(2000) < ts1 {
                     self.connset_ctrl.check_health().await?;
                     self.connset_status_last = CheckPeriodic::Ongoing(ts1);
                 }
@@ -297,9 +308,9 @@ impl Daemon {
         // debug!("handle_channel_add {ch:?}");
         self.connset_ctrl
             .add_channel(
-                self.opts.backend.clone(),
+                self.ingest_opts.backend().into(),
                 ch.id().into(),
-                self.opts.local_epics_hostname.clone(),
+                self.ingest_opts.local_epics_hostname(),
             )
             .await?;
         Ok(())
@@ -365,23 +376,23 @@ impl Daemon {
         use CaConnSetItem::*;
         match item {
             Healthy(ts1, ts2) => {
-                let ts3 = Instant::now();
-                let dt1 = ts2.duration_since(ts1).as_secs_f32() * 1e3;
-                let dt2 = ts3.duration_since(ts2).as_secs_f32() * 1e3;
+                let tsnow = Instant::now();
+                let dt1 = tsnow.duration_since(ts1).as_secs_f32() * 1e3;
+                let dt2 = tsnow.duration_since(ts2).as_secs_f32() * 1e3;
                 match &self.connset_status_last {
                     CheckPeriodic::Waiting(_since) => {
                         error!("received CaConnSet health report without having asked  {dt1:.0} ms  {dt2:.0} ms");
                     }
                     CheckPeriodic::Ongoing(since) => {
                         // TODO insert response time as series to scylla.
-                        let dtsince = ts3.duration_since(*since).as_secs_f32() * 1e6;
+                        let dtsince = tsnow.duration_since(*since).as_secs_f32() * 1e3;
                         {
                             let v = &mut self.connset_health_lat_ema;
                             *v += (dtsince - *v) * 0.2;
                             self.stats.connset_health_lat_ema().set(*v as _);
                         }
-                        // debug!("========================================   received CaConnSet healthy  dtsince {dtsince:.0} ms  {dt1:.0} ms  {dt2:.0} ms");
-                        self.connset_status_last = CheckPeriodic::Waiting(ts3);
+                        debug!("received CaConnSet  Healthy  dtsince {dtsince:.0} ms  {dt1:.0} ms  {dt2:.0} ms");
+                        self.connset_status_last = CheckPeriodic::Waiting(tsnow);
                         self.stats.caconnset_health_response().inc();
                     }
                 }
@@ -583,10 +594,6 @@ pub async fn run(opts: CaIngestOpts, channels: Vec<String>) -> Result<(), Error>
     let store_workers_rate = Arc::new(AtomicU64::new(opts.store_workers_rate()));
 
     let opts2 = DaemonOpts {
-        backend: opts.backend().into(),
-        local_epics_hostname: opts.local_epics_hostname().into(),
-        array_truncate: opts.array_truncate(),
-        insert_item_queue_cap: opts.insert_item_queue_cap(),
         pgconf: opts.postgresql_config().clone(),
         scyconf: opts.scylla_config().clone(),
         ttls: Ttls {
@@ -596,8 +603,6 @@ pub async fn run(opts: CaIngestOpts, channels: Vec<String>) -> Result<(), Error>
             binned: opts.ttl_binned(),
         },
         test_bsread_addr: opts.test_bsread_addr.clone(),
-        insert_worker_count: opts.insert_worker_count(),
-        insert_scylla_sessions: opts.insert_scylla_sessions(),
         insert_frac: insert_frac.clone(),
         store_workers_rate,
     };

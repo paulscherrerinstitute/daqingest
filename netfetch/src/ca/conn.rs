@@ -41,11 +41,15 @@ use scywriiq::QueryItem;
 use serde::Serialize;
 use series::ChannelStatusSeriesId;
 use series::SeriesId;
+use stats::rand_xoshiro::rand_core::RngCore;
+use stats::rand_xoshiro::rand_core::SeedableRng;
+use stats::rand_xoshiro::Xoshiro128StarStar;
 use stats::CaConnStats;
 use stats::CaProtoStats;
 use stats::IntervalEma;
 use stats::XorShift32;
 use std::collections::BTreeMap;
+use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::net::SocketAddrV4;
 use std::ops::ControlFlow;
@@ -149,10 +153,10 @@ fn ser_instant<S: serde::Serializer>(val: &Option<Instant>, ser: S) -> Result<S:
     }
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 struct Cid(pub u32);
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 struct Subid(pub u32);
 
 #[derive(Clone, Debug)]
@@ -521,11 +525,11 @@ pub struct CaConn {
     proto: Option<CaProto>,
     cid_store: CidStore,
     subid_store: SubidStore,
-    channels: BTreeMap<Cid, ChannelState>,
-    cid_by_name: BTreeMap<String, Cid>,
-    cid_by_subid: BTreeMap<Subid, Cid>,
-    name_by_cid: BTreeMap<Cid, String>,
-    time_binners: BTreeMap<Cid, ConnTimeBin>,
+    channels: HashMap<Cid, ChannelState>,
+    cid_by_name: HashMap<String, Cid>,
+    cid_by_subid: HashMap<Subid, Cid>,
+    name_by_cid: HashMap<Cid, String>,
+    time_binners: HashMap<Cid, ConnTimeBin>,
     init_state_count: u64,
     insert_item_queue: VecDeque<QueryItem>,
     remote_addr_dbg: SocketAddrV4,
@@ -541,14 +545,14 @@ pub struct CaConn {
     ioc_ping_last: Instant,
     ioc_ping_next: Instant,
     ioc_ping_start: Option<Instant>,
-    storage_insert_sender: Pin<Box<SenderPolling<QueryItem>>>,
+    storage_insert_sender: Pin<Box<SenderPolling<VecDeque<QueryItem>>>>,
     ca_conn_event_out_queue: VecDeque<CaConnEvent>,
     channel_info_query_queue: VecDeque<ChannelInfoQuery>,
     channel_info_query_sending: Pin<Box<SenderPolling<ChannelInfoQuery>>>,
     thr_msg_poll: ThrottleTrace,
     ca_proto_stats: Arc<CaProtoStats>,
     weird_count: usize,
-    rng: XorShift32,
+    rng: Xoshiro128StarStar,
 }
 
 #[cfg(DISABLED)]
@@ -564,13 +568,13 @@ impl CaConn {
         backend: String,
         remote_addr_dbg: SocketAddrV4,
         local_epics_hostname: String,
-        storage_insert_tx: Sender<QueryItem>,
+        storage_insert_tx: Sender<VecDeque<QueryItem>>,
         channel_info_query_tx: Sender<ChannelInfoQuery>,
         stats: Arc<CaConnStats>,
         ca_proto_stats: Arc<CaProtoStats>,
     ) -> Self {
         let (cq_tx, cq_rx) = async_channel::bounded(32);
-        let mut rng = XorShift32::new_from_time();
+        let mut rng = stats::xoshiro_from_time();
         Self {
             opts,
             backend,
@@ -580,16 +584,16 @@ impl CaConn {
             cid_store: CidStore::new_from_time(),
             subid_store: SubidStore::new_from_time(),
             init_state_count: 0,
-            channels: BTreeMap::new(),
-            cid_by_name: BTreeMap::new(),
-            cid_by_subid: BTreeMap::new(),
-            name_by_cid: BTreeMap::new(),
-            time_binners: BTreeMap::new(),
+            channels: HashMap::new(),
+            cid_by_name: HashMap::new(),
+            cid_by_subid: HashMap::new(),
+            name_by_cid: HashMap::new(),
+            time_binners: HashMap::new(),
             insert_item_queue: VecDeque::new(),
             remote_addr_dbg,
             local_epics_hostname,
             stats,
-            insert_ivl_min_mus: 1000 * 6,
+            insert_ivl_min_mus: 1000 * 4,
             conn_command_tx: Box::pin(cq_tx),
             conn_command_rx: Box::pin(cq_rx),
             conn_backoff: 0.02,
@@ -610,8 +614,8 @@ impl CaConn {
         }
     }
 
-    fn ioc_ping_ivl_rng(rng: &mut XorShift32) -> Duration {
-        IOC_PING_IVL * 100 / (70 + (rng.next() % 60))
+    fn ioc_ping_ivl_rng(rng: &mut Xoshiro128StarStar) -> Duration {
+        IOC_PING_IVL * 100 / (70 + (rng.next_u32() % 60))
     }
 
     fn new_self_ticker() -> Pin<Box<tokio::time::Sleep>> {
@@ -813,7 +817,7 @@ impl CaConn {
     fn handle_conn_command(&mut self, cx: &mut Context) -> Result<Poll<Option<()>>, Error> {
         // TODO if this loops for too long time, yield and make sure we get wake up again.
         use Poll::*;
-        self.stats.caconn_loop3_count.inc();
+        self.stats.loop3_count.inc();
         if self.is_shutdown() {
             Ok(Ready(None))
         } else {
@@ -896,11 +900,11 @@ impl CaConn {
 
     fn channel_remove_expl(
         name: String,
-        channels: &mut BTreeMap<Cid, ChannelState>,
-        cid_by_name: &mut BTreeMap<String, Cid>,
-        name_by_cid: &mut BTreeMap<Cid, String>,
+        channels: &mut HashMap<Cid, ChannelState>,
+        cid_by_name: &mut HashMap<String, Cid>,
+        name_by_cid: &mut HashMap<Cid, String>,
         cid_store: &mut CidStore,
-        time_binners: &mut BTreeMap<Cid, ConnTimeBin>,
+        time_binners: &mut HashMap<Cid, ConnTimeBin>,
     ) {
         let cid = Self::cid_by_name_expl(&name, cid_by_name, name_by_cid, cid_store);
         if channels.contains_key(&cid) {
@@ -924,8 +928,8 @@ impl CaConn {
 
     fn cid_by_name_expl(
         name: &str,
-        cid_by_name: &mut BTreeMap<String, Cid>,
-        name_by_cid: &mut BTreeMap<Cid, String>,
+        cid_by_name: &mut HashMap<String, Cid>,
+        name_by_cid: &mut HashMap<Cid, String>,
         cid_store: &mut CidStore,
     ) -> Cid {
         if let Some(cid) = cid_by_name.get(name) {
@@ -1214,9 +1218,7 @@ impl CaConn {
         let ema = em.ema();
         let ivl_min = (insert_ivl_min_mus as f32) * 1e-6;
         let dt = (ivl_min - ema).max(0.) / em.k();
-        st.insert_next_earliest = tsnow
-            .checked_add(Duration::from_micros((dt * 1e6) as u64))
-            .ok_or_else(|| Error::with_msg_no_trace("time overflow in next insert"))?;
+        st.insert_next_earliest = tsnow + Duration::from_micros((dt * 1e6) as u64);
         let ts_msp_last = st.ts_msp_last;
         // TODO get event timestamp from channel access field
         let ts_msp_grid = (ts / TS_MSP_GRID_UNIT / TS_MSP_GRID_SPACING * TS_MSP_GRID_SPACING) as u32;
@@ -1555,7 +1557,7 @@ impl CaConn {
                             }
                             CaMsgTy::EventAddRes(k) => {
                                 trace4!("got EventAddRes: {k:?}");
-                                self.stats.caconn_recv_data.inc();
+                                self.stats.event_add_res_recv.inc();
                                 let res = Self::handle_event_add_res(self, k, tsnow);
                                 let ts2 = Instant::now();
                                 self.stats
@@ -1866,7 +1868,7 @@ impl CaConn {
         let tsnow = Instant::now();
         let mut have_progress = false;
         for _ in 0..64 {
-            self.stats.caconn_loop2_count.inc();
+            self.stats.loop2_count.inc();
             if self.is_shutdown() {
                 break;
             } else if self.insert_item_queue.len() >= self.opts.insert_queue_max {
@@ -1963,21 +1965,50 @@ impl CaConn {
 
     fn attempt_flush_storage_queue(mut self: Pin<&mut Self>, cx: &mut Context) -> Result<Poll<Option<()>>, Error> {
         use Poll::*;
+        let (qu, sd, stats) = Self::storage_queue_vars(&mut self);
+        {
+            let n = qu.len();
+            if n >= 128 {
+                stats.storage_queue_above_128().inc();
+            } else if n >= 32 {
+                stats.storage_queue_above_32().inc();
+            } else if n >= 8 {
+                stats.storage_queue_above_8().inc();
+            }
+        }
         let mut have_progress = false;
-        for _ in 0..128 {
-            let sd = &mut self.storage_insert_sender;
+        let mut i = 0;
+        loop {
+            i += 1;
+            if i > 120 {
+                break;
+            }
+            if !sd.has_sender() {
+                return Err(Error::with_msg_no_trace("attempt_flush_storage_queue  no more sender"));
+            }
             if sd.is_idle() {
-                if let Some(item) = self.insert_item_queue.pop_front() {
-                    self.storage_insert_sender.as_mut().send_pin(item);
+                if qu.len() != 0 {
+                    let item: VecDeque<_> = qu.drain(..).collect();
+                    stats.storage_queue_send().add(item.len() as _);
+                    sd.as_mut().send_pin(item);
+                } else {
+                    break;
                 }
             }
-            if self.storage_insert_sender.is_sending() {
-                match self.storage_insert_sender.poll_unpin(cx) {
+            if sd.is_sending() {
+                match sd.poll_unpin(cx) {
                     Ready(Ok(())) => {
                         have_progress = true;
                     }
-                    Ready(Err(_)) => return Err(Error::with_msg_no_trace("can not send into channel")),
-                    Pending => return Ok(Pending),
+                    Ready(Err(_)) => {
+                        return Err(Error::with_msg_no_trace(
+                            "attempt_flush_storage_queue  can not send into channel",
+                        ));
+                    }
+                    Pending => {
+                        stats.storage_queue_pending().inc();
+                        return Ok(Pending);
+                    }
                 }
             }
         }
@@ -1988,12 +2019,32 @@ impl CaConn {
         }
     }
 
+    // TODO refactor, put together in separate type:
+    fn storage_queue_vars(
+        this: &mut CaConn,
+    ) -> (
+        &mut VecDeque<QueryItem>,
+        &mut Pin<Box<SenderPolling<VecDeque<QueryItem>>>>,
+        &CaConnStats,
+    ) {
+        (
+            &mut this.insert_item_queue,
+            &mut this.storage_insert_sender,
+            &this.stats,
+        )
+    }
+
     fn attempt_flush_channel_info_query(mut self: Pin<&mut Self>, cx: &mut Context) -> Result<Poll<Option<()>>, Error> {
         use Poll::*;
         if self.is_shutdown() {
             Ok(Ready(None))
         } else {
             let sd = self.channel_info_query_sending.as_mut();
+            if !sd.has_sender() {
+                return Err(Error::with_msg_no_trace(
+                    "attempt_flush_channel_info_query  no more sender",
+                ));
+            }
             if sd.is_idle() {
                 if let Some(item) = self.channel_info_query_queue.pop_front() {
                     trace3!("send series query {item:?}");
@@ -2005,7 +2056,9 @@ impl CaConn {
             if sd.is_sending() {
                 match sd.poll_unpin(cx) {
                     Ready(Ok(())) => Ok(Ready(Some(()))),
-                    Ready(Err(_)) => Err(Error::with_msg_no_trace("can not send into channel")),
+                    Ready(Err(_)) => Err(Error::with_msg_no_trace(
+                        "attempt_flush_channel_info_query  can not send into channel",
+                    )),
                     Pending => Ok(Pending),
                 }
             } else {
@@ -2020,11 +2073,11 @@ impl Stream for CaConn {
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
         use Poll::*;
-        self.stats.caconn_poll_count.inc();
+        self.stats.poll_count().inc();
         let poll_ts1 = Instant::now();
-        self.stats.ca_conn_poll_fn_begin().inc();
+        self.stats.poll_fn_begin().inc();
         let ret = loop {
-            self.stats.ca_conn_poll_loop_begin().inc();
+            self.stats.poll_loop_begin().inc();
             let qlen = self.insert_item_queue.len();
             if qlen >= self.opts.insert_queue_max * 2 / 3 {
                 self.stats.insert_item_queue_pressure().inc();
@@ -2108,10 +2161,10 @@ impl Stream for CaConn {
                 } else {
                     // debug!("queues_out_flushed false");
                     if have_progress {
-                        self.stats.ca_conn_poll_reloop().inc();
+                        self.stats.poll_reloop().inc();
                         continue;
                     } else if have_pending {
-                        self.stats.ca_conn_poll_pending().inc();
+                        self.stats.poll_pending().inc();
                         Pending
                     } else {
                         // TODO error
@@ -2123,13 +2176,13 @@ impl Stream for CaConn {
                 }
             } else {
                 if have_progress {
-                    self.stats.ca_conn_poll_reloop().inc();
+                    self.stats.poll_reloop().inc();
                     continue;
                 } else if have_pending {
-                    self.stats.ca_conn_poll_pending().inc();
+                    self.stats.poll_pending().inc();
                     Pending
                 } else {
-                    self.stats.ca_conn_poll_no_progress_no_pending().inc();
+                    self.stats.poll_no_progress_no_pending().inc();
                     let e = Error::with_msg_no_trace("no progress no pending");
                     Ready(Some(Err(e)))
                 }

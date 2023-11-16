@@ -98,6 +98,7 @@ pub async fn spawn_scylla_insert_workers(
     scyconf: ScyllaConfig,
     insert_scylla_sessions: usize,
     insert_worker_count: usize,
+    insert_worker_concurrency: usize,
     item_inp: Receiver<QueryItem>,
     insert_worker_opts: Arc<InsertWorkerOpts>,
     store_stats: Arc<stats::InsertWorkerStats>,
@@ -128,7 +129,7 @@ pub async fn spawn_scylla_insert_workers(
         ));
         let jh = tokio::spawn(worker_streamed(
             worker_ix,
-            insert_worker_count * 3,
+            insert_worker_concurrency,
             item_inp.clone(),
             ttls.clone(),
             insert_worker_opts.clone(),
@@ -363,6 +364,10 @@ async fn worker_streamed(
         })
         .map(|x| futures_util::stream::iter(x))
         .flatten_unordered(Some(1))
+        // .map(|x| async move {
+        //     drop(x);
+        //     Ok(())
+        // })
         .buffer_unordered(concurrency);
     while let Some(item) = stream.next().await {
         match item {
@@ -408,23 +413,27 @@ fn prepare_query_insert_futs(
     let series = item.series.clone();
     let ts_msp = item.ts_msp;
     let do_insert = true;
-    let fut = insert_item_fut(item, &ttls, &data_store, do_insert, stats);
-    let mut futs = smallvec![fut];
-    if msp_bump {
-        stats.inserts_msp().inc();
-        let fut = insert_msp_fut(
-            series,
-            ts_msp,
-            item_ts_local,
-            ttls,
-            data_store.scy.clone(),
-            data_store.qu_insert_ts_msp.clone(),
-            stats.clone(),
-        );
-        if item_ts_local % 100000 == 7461 {
+    let mut futs = smallvec![];
+
+    // TODO
+    if true || item_ts_local & 0x3f00000 < 0x0a00000 {
+        let fut = insert_item_fut(item, &ttls, &data_store, do_insert, stats);
+        futs.push(fut);
+        if msp_bump {
+            stats.inserts_msp().inc();
+            let fut = insert_msp_fut(
+                series,
+                ts_msp,
+                item_ts_local,
+                ttls,
+                data_store.scy.clone(),
+                data_store.qu_insert_ts_msp.clone(),
+                stats.clone(),
+            );
             futs.push(fut);
         }
     }
+
     #[cfg(DISABLED)]
     if let Some(ts_msp_grid) = item.ts_msp_grid {
         let params = (
@@ -441,5 +450,6 @@ fn prepare_query_insert_futs(
             .await?;
         stats.inserts_msp_grid().inc();
     }
+
     futs
 }

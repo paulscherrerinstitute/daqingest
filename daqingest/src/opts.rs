@@ -1,14 +1,12 @@
-use clap::ArgAction::Count;
-use clap::Parser;
 #[cfg(feature = "bsread")]
 use ingest_bsread::zmtp::ZmtpClientOpts;
 use std::net::SocketAddr;
 
-#[derive(Debug, Parser)]
+#[derive(Debug, clap::Parser)]
 #[command(author, version, about)]
 pub struct DaqIngestOpts {
-    #[arg(long, action(Count))]
-    pub verbose: u32,
+    #[arg(long, action(clap::ArgAction::Count))]
+    pub verbose: u8,
     #[clap(long)]
     pub tag: Option<String>,
     #[command(subcommand)]
@@ -17,7 +15,7 @@ pub struct DaqIngestOpts {
     pub nworkers: Option<usize>,
 }
 
-#[derive(Debug, Parser)]
+#[derive(Debug, clap::Parser)]
 pub enum SubCmd {
     ListPkey,
     ListPulses,
@@ -31,7 +29,7 @@ pub enum SubCmd {
     Version,
 }
 
-#[derive(Debug, Parser)]
+#[derive(Debug, clap::Parser)]
 pub struct Bsread {
     #[arg(long)]
     pub backend: String,
@@ -61,7 +59,7 @@ impl From<Bsread> for ZmtpClientOpts {
     }
 }
 
-#[derive(Debug, Parser)]
+#[derive(Debug, clap::Parser)]
 pub struct FetchEvents {
     #[arg(long, num_args(1..))]
     pub scylla: Vec<String>,
@@ -71,24 +69,24 @@ pub struct FetchEvents {
     pub backend: String,
 }
 
-#[derive(Debug, Parser)]
+#[derive(Debug, clap::Parser)]
 pub struct BsreadDump {
     pub source: String,
 }
 
-#[derive(Debug, Parser)]
+#[derive(Debug, clap::Parser)]
 pub enum ChannelAccess {
     CaIngest(CaConfig),
     #[cfg(DISABLED)]
     CaSearch(CaSearch),
 }
 
-#[derive(Debug, Parser)]
+#[derive(Debug, clap::Parser)]
 pub struct CaSearch {
     pub config: String,
 }
 
-#[derive(Debug, Parser)]
+#[derive(Debug, clap::Parser)]
 pub struct CaConfig {
     pub config: String,
 }

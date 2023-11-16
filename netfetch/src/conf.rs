@@ -28,6 +28,7 @@ pub struct CaIngestOpts {
     scylla: ScyllaConfig,
     array_truncate: Option<u64>,
     insert_worker_count: Option<usize>,
+    insert_worker_concurrency: Option<usize>,
     insert_scylla_sessions: Option<usize>,
     insert_queue_max: Option<usize>,
     insert_item_queue_cap: Option<usize>,
@@ -76,7 +77,11 @@ impl CaIngestOpts {
     }
 
     pub fn insert_worker_count(&self) -> usize {
-        self.insert_worker_count.unwrap_or(800)
+        self.insert_worker_count.unwrap_or(4)
+    }
+
+    pub fn insert_worker_concurrency(&self) -> usize {
+        self.insert_worker_concurrency.unwrap_or(32)
     }
 
     pub fn insert_scylla_sessions(&self) -> usize {

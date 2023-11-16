@@ -261,7 +261,13 @@ impl CaConnSetCtrl {
 
     pub async fn check_health(&self) -> Result<(), Error> {
         let cmd = ConnSetCmd::CheckHealth(Instant::now());
+        let n = self.tx.len();
+        if n > 0 {
+            debug!("check_health  self.tx.len() {:?}", n);
+        }
+        let s = format!("{:?}", cmd);
         self.tx.send(CaConnSetEvent::ConnSetCmd(cmd)).await?;
+        debug!("check_health  enqueued {s}");
         Ok(())
     }
 
@@ -345,9 +351,9 @@ pub struct CaConnSet {
     find_ioc_query_queue: VecDeque<IocAddrQuery>,
     find_ioc_query_sender: Pin<Box<SenderPolling<IocAddrQuery>>>,
     find_ioc_res_rx: Pin<Box<Receiver<VecDeque<FindIocRes>>>>,
-    storage_insert_tx: Pin<Box<Sender<QueryItem>>>,
-    storage_insert_queue: VecDeque<QueryItem>,
-    storage_insert_sender: Pin<Box<SenderPolling<QueryItem>>>,
+    storage_insert_tx: Pin<Box<Sender<VecDeque<QueryItem>>>>,
+    storage_insert_queue: VecDeque<VecDeque<QueryItem>>,
+    storage_insert_sender: Pin<Box<SenderPolling<VecDeque<QueryItem>>>>,
     ca_conn_res_tx: Pin<Box<Sender<(SocketAddr, CaConnEvent)>>>,
     ca_conn_res_rx: Pin<Box<Receiver<(SocketAddr, CaConnEvent)>>>,
     connset_out_queue: VecDeque<CaConnSetItem>,
@@ -361,7 +367,6 @@ pub struct CaConnSet {
     await_ca_conn_jhs: VecDeque<(SocketAddr, JoinHandle<Result<(), Error>>)>,
     thr_msg_poll_1: ThrottleTrace,
     thr_msg_storage_len: ThrottleTrace,
-    did_connset_out_queue: bool,
     ca_proto_stats: Arc<CaProtoStats>,
     rogue_channel_count: u64,
     connect_fail_count: usize,
@@ -371,7 +376,7 @@ impl CaConnSet {
     pub fn start(
         backend: String,
         local_epics_hostname: String,
-        storage_insert_tx: Sender<QueryItem>,
+        storage_insert_tx: Sender<VecDeque<QueryItem>>,
         channel_info_query_tx: Sender<ChannelInfoQuery>,
         ingest_opts: CaIngestOpts,
     ) -> CaConnSetCtrl {
@@ -422,7 +427,6 @@ impl CaConnSet {
             await_ca_conn_jhs: VecDeque::new(),
             thr_msg_poll_1: ThrottleTrace::new(Duration::from_millis(2000)),
             thr_msg_storage_len: ThrottleTrace::new(Duration::from_millis(1000)),
-            did_connset_out_queue: false,
             ca_proto_stats: ca_proto_stats.clone(),
             rogue_channel_count: 0,
             connect_fail_count: 0,
@@ -491,7 +495,8 @@ impl CaConnSet {
             CaConnEventValue::EchoTimeout => Ok(()),
             CaConnEventValue::ConnCommandResult(x) => self.handle_conn_command_result(addr, x),
             CaConnEventValue::QueryItem(item) => {
-                self.storage_insert_queue.push_back(item);
+                todo!("remove this insert case");
+                // self.storage_insert_queue.push_back(item);
                 Ok(())
             }
             CaConnEventValue::ChannelCreateFail(x) => self.handle_channel_create_fail(addr, x),
@@ -743,7 +748,7 @@ impl CaConnSet {
     }
 
     fn handle_check_health(&mut self, ts1: Instant) -> Result<(), Error> {
-        debug!("handle_check_health");
+        trace2!("handle_check_health");
         if self.shutdown_stopping {
             return Ok(());
         }
@@ -754,15 +759,11 @@ impl CaConnSet {
         self.check_channel_states()?;
 
         // Trigger already the next health check, but use the current data that we have.
-
-        // TODO try to deliver a command to CaConn
-        // Add some queue for commands to CaConn to the ress.
-        // Fail here if that queue gets too long.
-        // Try to push the commands periodically.
+        // TODO do the full check before sending the reply to daemon.
         for (_, res) in self.ca_conn_ress.iter_mut() {
             let item = ConnCommand::check_health();
             res.cmd_queue.push_back(item);
-            debug!(
+            trace2!(
                 "handle_check_health pushed check command  {:?}  {:?}",
                 res.cmd_queue.len(),
                 res.sender.len()
@@ -822,7 +823,7 @@ impl CaConnSet {
     }
 
     fn apply_ca_conn_health_update(&mut self, addr: SocketAddr, res: CheckHealthResult) -> Result<(), Error> {
-        debug!("apply_ca_conn_health_update  {addr}");
+        trace2!("apply_ca_conn_health_update  {addr}");
         let tsnow = SystemTime::now();
         self.rogue_channel_count = 0;
         for (k, v) in res.channel_statuses {
@@ -993,7 +994,7 @@ impl CaConnSet {
     async fn ca_conn_item_merge(
         conn: CaConn,
         tx1: Sender<(SocketAddr, CaConnEvent)>,
-        tx2: Sender<QueryItem>,
+        tx2: Sender<VecDeque<QueryItem>>,
         addr: SocketAddr,
         stats: Arc<CaConnSetStats>,
     ) -> Result<(), Error> {
@@ -1005,10 +1006,13 @@ impl CaConnSet {
         while let Some(item) = conn.next().await {
             match item {
                 Ok(item) => {
-                    connstats.conn_item_count.inc();
+                    connstats.item_count.inc();
                     match item.value {
                         CaConnEventValue::QueryItem(x) => {
-                            if let Err(_) = tx2.send(x).await {
+                            warn!("ca_conn_item_merge should not go here often");
+                            let mut v = VecDeque::new();
+                            v.push_back(x);
+                            if let Err(_) = tx2.send(v).await {
                                 break;
                             }
                         }
@@ -1076,7 +1080,9 @@ impl CaConnSet {
             };
         }
         let item = QueryItem::ChannelStatus(item);
-        self.storage_insert_queue.push_back(item);
+        let mut v = VecDeque::new();
+        v.push_back(item);
+        self.storage_insert_queue.push_back(v);
         Ok(())
     }
 
@@ -1423,35 +1429,37 @@ impl CaConnSet {
         (search_pending, assigned_without_health_update)
     }
 
-    fn try_push_ca_conn_cmds(&mut self, cx: &mut Context) {
+    fn try_push_ca_conn_cmds(&mut self, cx: &mut Context) -> Result<(), Error> {
         use Poll::*;
         for (_, v) in self.ca_conn_ress.iter_mut() {
-            'level2: loop {
-                let tx = &mut v.sender;
-                if v.cmd_queue.len() != 0 || tx.is_sending() {
-                    debug!("try_push_ca_conn_cmds  {:?}  {:?}", v.cmd_queue.len(), tx.len());
+            let tx = &mut v.sender;
+            loop {
+                if false {
+                    if v.cmd_queue.len() != 0 || tx.is_sending() {
+                        debug!("try_push_ca_conn_cmds  {:?}  {:?}", v.cmd_queue.len(), tx.len());
+                    }
                 }
-                loop {
-                    break if tx.is_sending() {
-                        match tx.poll_unpin(cx) {
-                            Ready(Ok(())) => {
-                                self.stats.try_push_ca_conn_cmds_sent.inc();
-                                continue;
-                            }
-                            Ready(Err(e)) => {
-                                error!("try_push_ca_conn_cmds {e}");
-                            }
-                            Pending => {
-                                break 'level2;
-                            }
+                break if tx.is_sending() {
+                    match tx.poll_unpin(cx) {
+                        Ready(Ok(())) => {
+                            self.stats.try_push_ca_conn_cmds_sent.inc();
+                            continue;
                         }
-                    } else if let Some(item) = v.cmd_queue.pop_front() {
-                        tx.as_mut().send_pin(item);
-                        continue;
-                    };
-                }
+                        Ready(Err(e)) => {
+                            error!("try_push_ca_conn_cmds {e}");
+                            return Err(Error::with_msg_no_trace(format!("{e}")));
+                        }
+                        Pending => (),
+                    }
+                } else if let Some(item) = v.cmd_queue.pop_front() {
+                    tx.as_mut().send_pin(item);
+                    continue;
+                } else {
+                    ()
+                };
             }
         }
+        Ok(())
     }
 }
 
@@ -1459,9 +1467,11 @@ impl Stream for CaConnSet {
     type Item = CaConnSetItem;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
+        trace4!("CaConnSet  poll  begin");
         use Poll::*;
         self.stats.poll_fn_begin().inc();
-        loop {
+        let res = loop {
+            trace4!("CaConnSet  poll  loop");
             self.stats.poll_loop_begin().inc();
 
             self.stats.storage_insert_tx_len.set(self.storage_insert_tx.len() as _);
@@ -1485,15 +1495,12 @@ impl Stream for CaConnSet {
             let mut have_pending = false;
             let mut have_progress = false;
 
-            self.try_push_ca_conn_cmds(cx);
+            if let Err(e) = self.try_push_ca_conn_cmds(cx) {
+                break Ready(Some(CaConnSetItem::Error(e)));
+            }
 
-            if self.did_connset_out_queue {
-                self.did_connset_out_queue = false;
-            } else {
-                if let Some(item) = self.connset_out_queue.pop_front() {
-                    self.did_connset_out_queue = true;
-                    break Ready(Some(item));
-                }
+            if let Some(item) = self.connset_out_queue.pop_front() {
+                break Ready(Some(item));
             }
 
             if let Some((addr, jh)) = self.await_ca_conn_jhs.front_mut() {
@@ -1634,7 +1641,9 @@ impl Stream for CaConnSet {
                     }
                     Err(e) => break Ready(Some(CaConnSetItem::Error(e))),
                 },
-                Ready(None) => {}
+                Ready(None) => {
+                    warn!("connset_inp_rx broken?")
+                }
                 Pending => {
                     have_pending = true;
                 }
@@ -1663,6 +1672,8 @@ impl Stream for CaConnSet {
                     }
                 }
             };
-        }
+        };
+        trace4!("CaConnSet  poll  done");
+        res
     }
 }

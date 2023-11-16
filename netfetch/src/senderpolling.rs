@@ -43,6 +43,10 @@ impl<T> SenderPolling<T> {
         ret
     }
 
+    pub fn has_sender(&self) -> bool {
+        self.sender.is_some()
+    }
+
     pub fn is_idle(&self) -> bool {
         self.sender.is_some() && self.fut.is_none()
     }
@@ -97,6 +101,18 @@ impl<T> SenderPolling<T> {
         }
         self.sender.as_ref().unwrap().send(item).await
     }
+
+    unsafe fn reset_fut(futopt: Pin<&mut Option<Send<'_, T>>>) {
+        let y = futopt.get_unchecked_mut();
+        let z = y.as_mut().unwrap_unchecked();
+        std::ptr::drop_in_place(z);
+        std::ptr::write(y, None);
+    }
+
+    #[allow(unused)]
+    unsafe fn reset_fut_old(futopt: Pin<&mut Option<Send<'_, T>>>) {
+        *futopt.get_unchecked_mut() = None;
+    }
 }
 
 impl<T> Future for SenderPolling<T>
@@ -109,16 +125,16 @@ where
         use Poll::*;
         let mut this = self.project();
         match this.fut.as_mut().as_pin_mut() {
-            Some(fut) => match fut.poll(cx) {
+            Some(mut fut) => match fut.as_mut().poll(cx) {
                 Ready(Ok(())) => {
                     unsafe {
-                        *this.fut.get_unchecked_mut() = None;
+                        Self::reset_fut(this.fut);
                     }
                     Ready(Ok(()))
                 }
                 Ready(Err(e)) => {
                     unsafe {
-                        *this.fut.get_unchecked_mut() = None;
+                        Self::reset_fut(this.fut);
                     }
                     Ready(Err(Error::Closed(e.0)))
                 }
