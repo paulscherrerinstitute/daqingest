@@ -14,7 +14,7 @@ use tokio::io::AsyncReadExt;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CaIngestOpts {
     backend: String,
-    channels: PathBuf,
+    channels: Option<PathBuf>,
     api_bind: String,
     search: Vec<String>,
     #[serde(default)]
@@ -30,7 +30,6 @@ pub struct CaIngestOpts {
     insert_worker_count: Option<usize>,
     insert_worker_concurrency: Option<usize>,
     insert_scylla_sessions: Option<usize>,
-    insert_queue_max: Option<usize>,
     insert_item_queue_cap: Option<usize>,
     local_epics_hostname: Option<String>,
     store_workers_rate: Option<u64>,
@@ -86,10 +85,6 @@ impl CaIngestOpts {
 
     pub fn insert_scylla_sessions(&self) -> usize {
         self.insert_scylla_sessions.unwrap_or(1)
-    }
-
-    pub fn insert_queue_max(&self) -> usize {
-        self.insert_queue_max.unwrap_or(64)
     }
 
     pub fn array_truncate(&self) -> u64 {
@@ -163,7 +158,7 @@ scylla:
 "###;
     let res: Result<CaIngestOpts, _> = serde_yaml::from_slice(conf.as_bytes());
     let conf = res.unwrap();
-    assert_eq!(conf.channels, PathBuf::from("/some/path/file.txt"));
+    assert_eq!(conf.channels, Some(PathBuf::from("/some/path/file.txt")));
     assert_eq!(&conf.api_bind, "0.0.0.0:3011");
     assert_eq!(conf.search.get(0), Some(&"172.26.0.255".to_string()));
     assert_eq!(conf.scylla.hosts.get(1), Some(&"sf-nube-12:19042".to_string()));
@@ -192,7 +187,7 @@ fn test_duration_parse() {
     assert_eq!(a.dur, Duration::from_millis(3170));
 }
 
-pub async fn parse_config(config: PathBuf) -> Result<(CaIngestOpts, Vec<String>), Error> {
+pub async fn parse_config(config: PathBuf) -> Result<(CaIngestOpts, Option<Vec<String>>), Error> {
     let mut file = OpenOptions::new().read(true).open(config).await?;
     let mut buf = Vec::new();
     file.read_to_end(&mut buf).await?;
@@ -200,27 +195,32 @@ pub async fn parse_config(config: PathBuf) -> Result<(CaIngestOpts, Vec<String>)
     drop(file);
     let re_p = regex::Regex::new(&conf.whitelist.clone().unwrap_or("--nothing-whitelisted--".into()))?;
     let re_n = regex::Regex::new(&conf.blacklist.clone().unwrap_or("--nothing-blacklisted--".into()))?;
-    let mut file = OpenOptions::new().read(true).open(&conf.channels).await?;
-    let mut buf = Vec::new();
-    file.read_to_end(&mut buf).await?;
-    let lines = buf.split(|&x| x == 0x0a);
-    let mut channels = Vec::new();
-    for line in lines {
-        let line = String::from_utf8_lossy(line);
-        let line = line.trim();
-        let use_line = if line.is_empty() {
-            false
-        } else if let Some(_cs) = re_p.captures(&line) {
-            true
-        } else if re_n.is_match(&line) {
-            false
-        } else {
-            true
-        };
-        if use_line {
-            channels.push(line.into());
+    let channels = if let Some(fname) = conf.channels.as_ref() {
+        let mut file = OpenOptions::new().read(true).open(fname).await?;
+        let mut buf = Vec::new();
+        file.read_to_end(&mut buf).await?;
+        let lines = buf.split(|&x| x == 0x0a);
+        let mut channels = Vec::new();
+        for line in lines {
+            let line = String::from_utf8_lossy(line);
+            let line = line.trim();
+            let use_line = if line.is_empty() {
+                false
+            } else if let Some(_cs) = re_p.captures(&line) {
+                true
+            } else if re_n.is_match(&line) {
+                false
+            } else {
+                true
+            };
+            if use_line {
+                channels.push(line.into());
+            }
         }
-    }
-    info!("Parsed {} channels", channels.len());
+        info!("Parsed {} channels", channels.len());
+        Some(channels)
+    } else {
+        None
+    };
     Ok((conf, channels))
 }

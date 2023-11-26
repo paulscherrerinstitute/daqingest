@@ -43,17 +43,15 @@ use series::ChannelStatusSeriesId;
 use series::SeriesId;
 use stats::rand_xoshiro::rand_core::RngCore;
 use stats::rand_xoshiro::rand_core::SeedableRng;
-use stats::rand_xoshiro::Xoshiro128StarStar;
+use stats::rand_xoshiro::Xoshiro128PlusPlus;
 use stats::CaConnStats;
 use stats::CaProtoStats;
 use stats::IntervalEma;
-use stats::XorShift32;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::net::SocketAddrV4;
 use std::ops::ControlFlow;
-use std::pin::pin;
 use std::pin::Pin;
 use std::sync::atomic;
 use std::sync::atomic::AtomicUsize;
@@ -322,13 +320,13 @@ fn wait_fut(dt: u64) -> Pin<Box<dyn Future<Output = ()> + Send>> {
 }
 
 struct CidStore {
-    rng: XorShift32,
+    rng: Xoshiro128PlusPlus,
 }
 
 impl CidStore {
     fn new(seed: u32) -> Self {
         Self {
-            rng: XorShift32::new(seed),
+            rng: Xoshiro128PlusPlus::seed_from_u64(seed as _),
         }
     }
 
@@ -342,18 +340,18 @@ impl CidStore {
     }
 
     fn next(&mut self) -> Cid {
-        Cid(self.rng.next())
+        Cid(self.rng.next_u32())
     }
 }
 
 struct SubidStore {
-    rng: XorShift32,
+    rng: Xoshiro128PlusPlus,
 }
 
 impl SubidStore {
     fn new(seed: u32) -> Self {
         Self {
-            rng: XorShift32::new(seed),
+            rng: Xoshiro128PlusPlus::seed_from_u64(seed as _),
         }
     }
 
@@ -367,7 +365,7 @@ impl SubidStore {
     }
 
     fn next(&mut self) -> Subid {
-        Subid(self.rng.next())
+        Subid(self.rng.next_u32())
     }
 }
 
@@ -375,6 +373,8 @@ fn info_store_msp_from_time(ts: SystemTime) -> u32 {
     let dt = ts.duration_since(SystemTime::UNIX_EPOCH).unwrap_or(Duration::ZERO);
     (dt.as_secs() / 60 * 60) as u32
 }
+
+pub type CmdResTx = Sender<Result<(), Error>>;
 
 #[derive(Debug)]
 pub enum ConnCommandKind {
@@ -552,7 +552,7 @@ pub struct CaConn {
     thr_msg_poll: ThrottleTrace,
     ca_proto_stats: Arc<CaProtoStats>,
     weird_count: usize,
-    rng: Xoshiro128StarStar,
+    rng: Xoshiro128PlusPlus,
 }
 
 #[cfg(DISABLED)]
@@ -614,7 +614,7 @@ impl CaConn {
         }
     }
 
-    fn ioc_ping_ivl_rng(rng: &mut Xoshiro128StarStar) -> Duration {
+    fn ioc_ping_ivl_rng(rng: &mut Xoshiro128PlusPlus) -> Duration {
         IOC_PING_IVL * 100 / (70 + (rng.next_u32() % 60))
     }
 
@@ -668,7 +668,7 @@ impl CaConn {
     }
 
     fn cmd_check_health(&mut self) {
-        debug!("cmd_check_health");
+        trace!("cmd_check_health");
         match self.check_channels_alive() {
             Ok(_) => {}
             Err(e) => {
@@ -743,8 +743,6 @@ impl CaConn {
 
     fn cmd_channel_add(&mut self, name: String, cssid: ChannelStatusSeriesId) {
         self.channel_add(name, cssid);
-        // TODO return the result
-        //self.stats.caconn_command_can_not_reply.inc();
     }
 
     fn cmd_channel_remove(&mut self, name: String) {
@@ -2168,9 +2166,9 @@ impl Stream for CaConn {
                         Pending
                     } else {
                         // TODO error
-                        error!("logic error");
+                        error!("shutting down, queues not flushed, no progress, no pending");
                         self.stats.logic_error().inc();
-                        let e = Error::with_msg_no_trace("shutdown, not done, no progress, no pending");
+                        let e = Error::with_msg_no_trace("shutting down, queues not flushed, no progress, no pending");
                         Ready(Some(Err(e)))
                     }
                 }

@@ -12,7 +12,9 @@ pub struct DaqIngestOpts {
     #[command(subcommand)]
     pub subcmd: SubCmd,
     #[arg(long)]
-    pub nworkers: Option<usize>,
+    pub worker_threads: Option<usize>,
+    #[arg(long)]
+    pub blocking_threads: Option<usize>,
 }
 
 #[derive(Debug, clap::Parser)]

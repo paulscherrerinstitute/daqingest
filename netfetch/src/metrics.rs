@@ -9,8 +9,12 @@ use async_channel::Receiver;
 use async_channel::Sender;
 use async_channel::WeakSender;
 use axum::extract::Query;
+use axum::http;
+use axum::response::IntoResponse;
+use axum::response::Response;
 use err::Error;
 use http::Request;
+use http::StatusCode;
 use log::*;
 use scywr::iteminsertqueue::QueryItem;
 use serde::Deserialize;
@@ -32,6 +36,41 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 use taskrun::tokio;
+
+struct PublicErrorMsg(String);
+
+trait ToPublicErrorMsg {
+    fn to_public_err_msg(&self) -> PublicErrorMsg;
+}
+
+impl ToPublicErrorMsg for err::Error {
+    fn to_public_err_msg(&self) -> PublicErrorMsg {
+        todo!()
+    }
+}
+
+impl IntoResponse for PublicErrorMsg {
+    fn into_response(self) -> axum::response::Response {
+        todo!()
+    }
+}
+
+struct CustomErrorResponse(Response);
+
+impl<T> From<T> for CustomErrorResponse
+where
+    T: ToPublicErrorMsg,
+{
+    fn from(value: T) -> Self {
+        todo!()
+    }
+}
+
+impl IntoResponse for CustomErrorResponse {
+    fn into_response(self) -> Response {
+        todo!()
+    }
+}
 
 pub struct StatsSet {
     daemon: Arc<DaemonStats>,
@@ -79,6 +118,12 @@ impl ExtraInsertsConf {
     }
 }
 
+async fn always_error(params: HashMap<String, String>) -> Result<axum::Json<bool>, Response> {
+    Err(Error::with_public_msg_no_trace("The-public-message")
+        .to_public_err_msg()
+        .into_response())
+}
+
 async fn find_channel(
     params: HashMap<String, String>,
     dcom: Arc<DaemonComm>,
@@ -91,20 +136,26 @@ async fn find_channel(
 }
 
 async fn channel_add_inner(params: HashMap<String, String>, dcom: Arc<DaemonComm>) -> Result<(), Error> {
-    if let (Some(backend), Some(name)) = (params.get("backend"), params.get("name")) {
-        error!("TODO channel_add_inner");
-        Err(Error::with_msg_no_trace(format!("TODO channel_add_inner")))
+    if let Some(name) = params.get("name") {
+        let ch = crate::daemon_common::Channel::new(name.into());
+        let (tx, rx) = async_channel::bounded(1);
+        let ev = DaemonEvent::ChannelAdd(ch, tx);
+        dcom.tx.send(ev).await?;
+        match rx.recv().await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(e)) => Err(Error::with_msg_no_trace(format!("{e}"))),
+            Err(e) => Err(Error::with_msg_no_trace(format!("{e}"))),
+        }
     } else {
         Err(Error::with_msg_no_trace(format!("wrong parameters given")))
     }
 }
 
-async fn channel_add(params: HashMap<String, String>, dcom: Arc<DaemonComm>) -> axum::Json<bool> {
-    let ret = match channel_add_inner(params, dcom).await {
-        Ok(_) => true,
-        Err(_) => false,
-    };
-    axum::Json(ret)
+async fn channel_add(params: HashMap<String, String>, dcom: Arc<DaemonComm>) -> Result<axum::Json<bool>, Response> {
+    match channel_add_inner(params, dcom).await {
+        Ok(_) => Ok(axum::Json::from(true)),
+        Err(e) => Err(e.to_public_err_msg().into_response()),
+    }
 }
 
 async fn channel_remove(params: HashMap<String, String>, dcom: Arc<DaemonComm>) -> axum::Json<serde_json::Value> {
@@ -198,7 +249,8 @@ fn make_routes(dcom: Arc<DaemonComm>, connset_cmd_tx: Sender<CaConnSetEvent>, st
                 .route(
                     "/path2",
                     get(|qu: Query<DummyQuery>| async move { (StatusCode::OK, format!("{qu:?}")) }),
-                ),
+                )
+                .route("/path3/", get(|| async { (StatusCode::OK, format!("Hello there!")) })),
         )
         .route(
             "/metrics",
@@ -235,6 +287,10 @@ fn make_routes(dcom: Arc<DaemonComm>, connset_cmd_tx: Sender<CaConnSetEvent>, st
                     }))
                 }
             }),
+        )
+        .route(
+            "/daqingest/always-error/",
+            get(|Query(params): Query<HashMap<String, String>>| always_error(params)),
         )
         .route(
             "/daqingest/find/channel",
@@ -326,11 +382,7 @@ pub async fn metrics_service(
         .unwrap()
 }
 
-pub async fn metrics_agg_task(
-    query_item_chn: WeakSender<QueryItem>,
-    local_stats: Arc<CaConnStats>,
-    store_stats: Arc<CaConnStats>,
-) -> Result<(), Error> {
+pub async fn metrics_agg_task(local_stats: Arc<CaConnStats>, store_stats: Arc<CaConnStats>) -> Result<(), Error> {
     let mut agg_last = CaConnStatsAgg::new();
     loop {
         tokio::time::sleep(Duration::from_millis(671)).await;
@@ -352,11 +404,6 @@ pub async fn metrics_agg_task(
             for (_, g) in conn_stats_guard.iter() {
                 agg.push(g.stats());
             }
-        }
-        {
-            warn!("TODO provide metrics with a weak ref to the query_item_channel");
-            let nitems = query_item_chn.upgrade().map_or(0, |x| x.len());
-            agg.store_worker_recv_queue_len.__set(nitems as u64);
         }
         #[cfg(DISABLED)]
         {

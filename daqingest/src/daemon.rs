@@ -5,6 +5,7 @@ use async_channel::Sender;
 use async_channel::WeakSender;
 use err::Error;
 use log::*;
+use netfetch::ca::conn;
 use netfetch::ca::connset::CaConnSet;
 use netfetch::ca::connset::CaConnSetCtrl;
 use netfetch::ca::connset::CaConnSetItem;
@@ -33,13 +34,16 @@ use std::time::SystemTime;
 use taskrun::tokio;
 use tokio::task::JoinHandle;
 
+const CHECK_HEALTH_IVL: Duration = Duration::from_millis(2000);
+const CHECK_HEALTH_TIMEOUT: Duration = Duration::from_millis(1500);
 const PRINT_ACTIVE_INTERVAL: Duration = Duration::from_millis(60000);
 const PRINT_STATUS_INTERVAL: Duration = Duration::from_millis(20000);
+const CHECK_CHANNEL_SLOW_WARN: Duration = Duration::from_millis(500);
 
 #[derive(Debug)]
 enum CheckPeriodic {
     Waiting(Instant),
-    Ongoing(Instant),
+    Ongoing(u32, Instant),
 }
 
 pub struct DaemonOpts {
@@ -130,7 +134,7 @@ impl Daemon {
             }
         });
 
-        // #[cfg(DISABLED)]
+        #[cfg(DISABLED)]
         let query_item_rx = {
             // TODO only testing, remove
             tokio::spawn({
@@ -241,16 +245,16 @@ impl Daemon {
     async fn check_caconn_chans(&mut self, ts1: Instant) -> Result<(), Error> {
         match &self.connset_status_last {
             CheckPeriodic::Waiting(since) => {
-                if *since + Duration::from_millis(2000) < ts1 {
-                    self.connset_ctrl.check_health().await?;
-                    self.connset_status_last = CheckPeriodic::Ongoing(ts1);
+                if *since + CHECK_HEALTH_IVL <= ts1 {
+                    let id = self.connset_ctrl.check_health().await?;
+                    self.connset_status_last = CheckPeriodic::Ongoing(id, ts1);
                 }
             }
-            CheckPeriodic::Ongoing(since) => {
+            CheckPeriodic::Ongoing(idexp, since) => {
                 let dt = ts1.saturating_duration_since(*since);
-                if dt > Duration::from_millis(2000) {
+                if dt > CHECK_HEALTH_TIMEOUT {
                     error!(
-                        "CaConnSet has not reported health status  since {:.0}",
+                        "CaConnSet has not reported health status  since {:.0}  idexp {idexp:08x}",
                         dt.as_secs_f32() * 1e3
                     );
                 }
@@ -285,8 +289,8 @@ impl Daemon {
         let ts1 = Instant::now();
         self.check_caconn_chans(ts1).await?;
         let dt = ts1.elapsed();
-        if dt > Duration::from_millis(500) {
-            info!("slow check_chans  {}ms", dt.as_secs_f32() * 1e3);
+        if dt > CHECK_CHANNEL_SLOW_WARN {
+            info!("slow check_chans  {:.0} ms", dt.as_secs_f32() * 1e3);
         }
         if false && tsnow.duration_since(self.last_status_print).unwrap_or(Duration::ZERO) >= PRINT_STATUS_INTERVAL {
             self.last_status_print = tsnow;
@@ -304,14 +308,10 @@ impl Daemon {
         Ok(())
     }
 
-    async fn handle_channel_add(&mut self, ch: Channel) -> Result<(), Error> {
+    async fn handle_channel_add(&mut self, ch: Channel, restx: netfetch::ca::conn::CmdResTx) -> Result<(), Error> {
         // debug!("handle_channel_add {ch:?}");
         self.connset_ctrl
-            .add_channel(
-                self.ingest_opts.backend().into(),
-                ch.id().into(),
-                self.ingest_opts.local_epics_hostname(),
-            )
+            .add_channel(self.ingest_opts.backend().into(), ch.id().into(), restx)
             .await?;
         Ok(())
     }
@@ -375,7 +375,7 @@ impl Daemon {
     async fn handle_ca_conn_set_item(&mut self, item: CaConnSetItem) -> Result<(), Error> {
         use CaConnSetItem::*;
         match item {
-            Healthy(ts1, ts2) => {
+            Healthy(id, ts1, ts2) => {
                 let tsnow = Instant::now();
                 let dt1 = tsnow.duration_since(ts1).as_secs_f32() * 1e3;
                 let dt2 = tsnow.duration_since(ts2).as_secs_f32() * 1e3;
@@ -383,7 +383,10 @@ impl Daemon {
                     CheckPeriodic::Waiting(_since) => {
                         error!("received CaConnSet health report without having asked  {dt1:.0} ms  {dt2:.0} ms");
                     }
-                    CheckPeriodic::Ongoing(since) => {
+                    CheckPeriodic::Ongoing(idexp, since) => {
+                        if id != *idexp {
+                            warn!("unexpected check health answer  id {id:08x}  idexp {idexp:08x}");
+                        }
                         // TODO insert response time as series to scylla.
                         let dtsince = tsnow.duration_since(*since).as_secs_f32() * 1e3;
                         {
@@ -391,7 +394,7 @@ impl Daemon {
                             *v += (dtsince - *v) * 0.2;
                             self.stats.connset_health_lat_ema().set(*v as _);
                         }
-                        debug!("received CaConnSet  Healthy  dtsince {dtsince:.0} ms  {dt1:.0} ms  {dt2:.0} ms");
+                        trace!("received CaConnSet  Healthy  dtsince {dtsince:.0} ms  {dt1:.0} ms  {dt2:.0} ms");
                         self.connset_status_last = CheckPeriodic::Waiting(tsnow);
                         self.stats.caconnset_health_response().inc();
                     }
@@ -457,7 +460,7 @@ impl Daemon {
                 let _ = ts1.elapsed();
                 ret
             }
-            ChannelAdd(ch) => self.handle_channel_add(ch).await,
+            ChannelAdd(ch, tx) => self.handle_channel_add(ch, tx).await,
             ChannelRemove(ch) => self.handle_channel_remove(ch).await,
             CaConnSetItem(item) => self.handle_ca_conn_set_item(item).await,
             Shutdown => self.handle_shutdown().await,
@@ -563,7 +566,7 @@ fn handler_sigterm(_a: libc::c_int, _b: *const libc::siginfo_t, _c: *const libc:
     let _ = ingest_linux::signal::unset_signal_handler(libc::SIGTERM);
 }
 
-pub async fn run(opts: CaIngestOpts, channels: Vec<String>) -> Result<(), Error> {
+pub async fn run(opts: CaIngestOpts, channels: Option<Vec<String>>) -> Result<(), Error> {
     info!("start up {opts:?}");
     ingest_linux::signal::set_signal_handler(libc::SIGINT, handler_sigint).map_err(Error::from_string)?;
     ingest_linux::signal::set_signal_handler(libc::SIGTERM, handler_sigterm).map_err(Error::from_string)?;
@@ -587,7 +590,7 @@ pub async fn run(opts: CaIngestOpts, channels: Vec<String>) -> Result<(), Error>
 
     let mut channels = channels;
     if opts.test_bsread_addr.is_some() {
-        channels.clear();
+        channels = None;
     }
 
     let insert_frac = Arc::new(AtomicU64::new(opts.insert_frac()));
@@ -634,19 +637,24 @@ pub async fn run(opts: CaIngestOpts, channels: Vec<String>) -> Result<(), Error>
 
     let daemon_jh = taskrun::spawn(daemon.daemon());
 
-    debug!("will configure {} channels", channels.len());
-    let mut thr_msg = ThrottleTrace::new(Duration::from_millis(1000));
-    let mut i = 0;
-    for s in &channels {
-        let ch = Channel::new(s.into());
-        match tx.send(DaemonEvent::ChannelAdd(ch)).await {
-            Ok(()) => {}
-            Err(_) => break,
+    if let Some(channels) = channels {
+        debug!("will configure {} channels", channels.len());
+        let mut thr_msg = ThrottleTrace::new(Duration::from_millis(1000));
+        let mut i = 0;
+        for s in &channels {
+            let ch = Channel::new(s.into());
+            match tx.send(DaemonEvent::ChannelAdd(ch, async_channel::bounded(1).0)).await {
+                Ok(()) => {}
+                Err(e) => {
+                    error!("{e}");
+                    break;
+                }
+            }
+            thr_msg.trigger("daemon sent ChannelAdd", &[&i as &_]);
+            i += 1;
         }
-        thr_msg.trigger("daemon sent ChannelAdd", &[&i as &_]);
-        i += 1;
+        debug!("{} configured channels applied", channels.len());
     }
-    debug!("{} configured channels applied", channels.len());
     daemon_jh.await.map_err(|e| Error::with_msg_no_trace(e.to_string()))??;
     info!("Daemon joined.");
     metrics_shutdown_tx.send(1).await?;

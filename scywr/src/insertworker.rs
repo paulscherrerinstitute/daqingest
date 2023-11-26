@@ -22,6 +22,7 @@ use netpod::ScyllaConfig;
 use smallvec::smallvec;
 use smallvec::SmallVec;
 use stats::InsertWorkerStats;
+use std::collections::VecDeque;
 use std::pin::Pin;
 use std::sync::atomic;
 use std::sync::atomic::AtomicU64;
@@ -99,7 +100,7 @@ pub async fn spawn_scylla_insert_workers(
     insert_scylla_sessions: usize,
     insert_worker_count: usize,
     insert_worker_concurrency: usize,
-    item_inp: Receiver<QueryItem>,
+    item_inp: Receiver<VecDeque<QueryItem>>,
     insert_worker_opts: Arc<InsertWorkerOpts>,
     store_stats: Arc<stats::InsertWorkerStats>,
     use_rate_limit_queue: bool,
@@ -324,7 +325,7 @@ async fn worker(
 async fn worker_streamed(
     worker_ix: usize,
     concurrency: usize,
-    item_inp: Receiver<QueryItem>,
+    item_inp: Receiver<VecDeque<QueryItem>>,
     ttls: Ttls,
     insert_worker_opts: Arc<InsertWorkerOpts>,
     data_store: Arc<DataStore>,
@@ -338,29 +339,34 @@ async fn worker_streamed(
     // TODO possible without box?
     let item_inp = Box::pin(item_inp);
     let mut stream = item_inp
-        .map(|item| {
+        .map(|batch| {
             stats.item_recv.inc();
             let tsnow_u64 = {
                 let ts = SystemTime::now();
                 let epoch = ts.duration_since(std::time::UNIX_EPOCH).unwrap();
                 epoch.as_secs() * SEC + epoch.subsec_nanos() as u64
             };
-            match item {
-                QueryItem::Insert(item) => prepare_query_insert_futs(item, &ttls, &data_store, &stats, tsnow_u64),
-                QueryItem::ConnectionStatus(item) => {
-                    stats.inserted_connection_status().inc();
-                    let fut = insert_connection_status_fut(item, &ttls, &data_store, stats.clone());
-                    smallvec![fut]
-                }
-                QueryItem::ChannelStatus(item) => {
-                    stats.inserted_channel_status().inc();
-                    insert_channel_status_fut(item, &ttls, &data_store, stats.clone())
-                }
-                _ => {
-                    // TODO
-                    SmallVec::new()
-                }
+            let mut res = Vec::with_capacity(32);
+            for item in batch {
+                let futs = match item {
+                    QueryItem::Insert(item) => prepare_query_insert_futs(item, &ttls, &data_store, &stats, tsnow_u64),
+                    QueryItem::ConnectionStatus(item) => {
+                        stats.inserted_connection_status().inc();
+                        let fut = insert_connection_status_fut(item, &ttls, &data_store, stats.clone());
+                        smallvec![fut]
+                    }
+                    QueryItem::ChannelStatus(item) => {
+                        stats.inserted_channel_status().inc();
+                        insert_channel_status_fut(item, &ttls, &data_store, stats.clone())
+                    }
+                    _ => {
+                        // TODO
+                        SmallVec::new()
+                    }
+                };
+                res.extend(futs.into_iter());
             }
+            res
         })
         .map(|x| futures_util::stream::iter(x))
         .flatten_unordered(Some(1))
@@ -416,7 +422,7 @@ fn prepare_query_insert_futs(
     let mut futs = smallvec![];
 
     // TODO
-    if true || item_ts_local & 0x3f00000 < 0x0a00000 {
+    if true || item_ts_local & 0x3f00000 < 0x0600000 {
         let fut = insert_item_fut(item, &ttls, &data_store, do_insert, stats);
         futs.push(fut);
         if msp_bump {

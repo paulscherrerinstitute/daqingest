@@ -286,6 +286,7 @@ stats_proc::stats_struct!((
             poll_no_progress_no_pending,
             handle_add_channel_with_addr,
             create_ca_conn,
+            command_reply_fail,
         ),
         values(
             storage_insert_queue_len,
@@ -382,7 +383,6 @@ stats_proc::stats_struct!((
             insert_item_queue_full,
             channel_fast_item_drop,
             logic_error,
-            store_worker_recv_queue_len,
             // TODO maybe rename: this is now only the recv of the intermediate queue:
             store_worker_item_recv,
             // TODO rename to make clear that this drop is voluntary because of user config choice:
@@ -500,7 +500,7 @@ fn test0_diff() {
     assert_eq!(diff.count0.load(), 3);
 }
 
-pub fn xoshiro_from_time() -> rand_xoshiro::Xoshiro128StarStar {
+pub fn xoshiro_from_time() -> rand_xoshiro::Xoshiro128PlusPlus {
     use rand_xoshiro::rand_core::SeedableRng;
     use std::time::SystemTime;
     let a = SystemTime::now()
@@ -511,5 +511,5 @@ pub fn xoshiro_from_time() -> rand_xoshiro::Xoshiro128StarStar {
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap()
         .subsec_nanos() as u64;
-    rand_xoshiro::Xoshiro128StarStar::seed_from_u64(a << 32 ^ b)
+    rand_xoshiro::Xoshiro128PlusPlus::seed_from_u64(a << 32 ^ b)
 }

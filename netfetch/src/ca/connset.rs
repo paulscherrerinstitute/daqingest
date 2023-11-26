@@ -46,6 +46,8 @@ use statemap::ChannelStateValue;
 use statemap::WithStatusSeriesIdState;
 use statemap::WithStatusSeriesIdStateInner;
 use statemap::CHANNEL_STATUS_DUMMY_SCALAR_TYPE;
+use stats::rand_xoshiro::rand_core::RngCore;
+use stats::rand_xoshiro::Xoshiro128PlusPlus;
 use stats::CaConnSetStats;
 use stats::CaConnStats;
 use stats::CaProtoStats;
@@ -134,7 +136,6 @@ impl CaConnRes {
 pub struct ChannelAddWithAddr {
     backend: String,
     name: String,
-    local_epics_hostname: String,
     cssid: ChannelStatusSeriesId,
     addr: SocketAddr,
 }
@@ -143,7 +144,6 @@ pub struct ChannelAddWithAddr {
 pub struct ChannelAddWithStatusId {
     backend: String,
     name: String,
-    local_epics_hostname: String,
     cssid: ChannelStatusSeriesId,
 }
 
@@ -151,7 +151,7 @@ pub struct ChannelAddWithStatusId {
 pub struct ChannelAdd {
     backend: String,
     name: String,
-    local_epics_hostname: String,
+    restx: crate::ca::conn::CmdResTx,
 }
 
 #[derive(Debug, Clone)]
@@ -196,7 +196,7 @@ impl fmt::Debug for ChannelStatusesRequest {
 pub enum ConnSetCmd {
     ChannelAdd(ChannelAdd),
     ChannelRemove(ChannelRemove),
-    CheckHealth(Instant),
+    CheckHealth(u32, Instant),
     Shutdown,
     ChannelStatuses(ChannelStatusesRequest),
 }
@@ -213,7 +213,7 @@ impl CaConnSetEvent {
 #[derive(Debug, Clone)]
 pub enum CaConnSetItem {
     Error(Error),
-    Healthy(Instant, Instant),
+    Healthy(u32, Instant, Instant),
 }
 
 pub struct CaConnSetCtrl {
@@ -224,9 +224,15 @@ pub struct CaConnSetCtrl {
     ca_proto_stats: Arc<CaProtoStats>,
     ioc_finder_stats: Arc<IocFinderStats>,
     jh: JoinHandle<Result<(), Error>>,
+    rng: Xoshiro128PlusPlus,
+    idcnt: u32,
 }
 
 impl CaConnSetCtrl {
+    pub fn new() -> Self {
+        todo!()
+    }
+
     pub fn sender(&self) -> Sender<CaConnSetEvent> {
         self.tx.clone()
     }
@@ -235,12 +241,13 @@ impl CaConnSetCtrl {
         self.rx.clone()
     }
 
-    pub async fn add_channel(&self, backend: String, name: String, local_epics_hostname: String) -> Result<(), Error> {
-        let cmd = ChannelAdd {
-            backend,
-            name,
-            local_epics_hostname,
-        };
+    pub async fn add_channel(
+        &self,
+        backend: String,
+        name: String,
+        restx: crate::ca::conn::CmdResTx,
+    ) -> Result<(), Error> {
+        let cmd = ChannelAdd { backend, name, restx };
         let cmd = ConnSetCmd::ChannelAdd(cmd);
         self.tx.send(CaConnSetEvent::ConnSetCmd(cmd)).await?;
         Ok(())
@@ -259,16 +266,17 @@ impl CaConnSetCtrl {
         Ok(())
     }
 
-    pub async fn check_health(&self) -> Result<(), Error> {
-        let cmd = ConnSetCmd::CheckHealth(Instant::now());
+    pub async fn check_health(&mut self) -> Result<u32, Error> {
+        let id = self.make_id();
+        let cmd = ConnSetCmd::CheckHealth(id, Instant::now());
         let n = self.tx.len();
         if n > 0 {
             debug!("check_health  self.tx.len() {:?}", n);
         }
         let s = format!("{:?}", cmd);
         self.tx.send(CaConnSetEvent::ConnSetCmd(cmd)).await?;
-        debug!("check_health  enqueued {s}");
-        Ok(())
+        trace!("check_health  enqueued {s}");
+        Ok(id)
     }
 
     pub async fn join(self) -> Result<(), Error> {
@@ -290,6 +298,12 @@ impl CaConnSetCtrl {
 
     pub fn ioc_finder_stats(&self) -> &Arc<IocFinderStats> {
         &self.ioc_finder_stats
+    }
+
+    fn make_id(&mut self) -> u32 {
+        let id = self.idcnt;
+        self.idcnt += 1;
+        self.rng.next_u32() & 0xffff | (id << 16)
     }
 }
 
@@ -441,6 +455,8 @@ impl CaConnSet {
             ca_proto_stats,
             ioc_finder_stats,
             jh,
+            idcnt: 0,
+            rng: stats::xoshiro_from_time(),
         }
     }
 
@@ -482,49 +498,11 @@ impl CaConnSet {
                 ConnSetCmd::ChannelRemove(x) => self.handle_remove_channel(x),
                 // ConnSetCmd::IocAddrQueryResult(x) => self.handle_ioc_query_result(x).await,
                 // ConnSetCmd::SeriesLookupResult(x) => self.handle_series_lookup_result(x).await,
-                ConnSetCmd::CheckHealth(ts1) => self.handle_check_health(ts1),
+                ConnSetCmd::CheckHealth(id, ts1) => self.handle_check_health(id, ts1),
                 ConnSetCmd::Shutdown => self.handle_shutdown(),
                 ConnSetCmd::ChannelStatuses(x) => self.handle_channel_statuses_req(x),
             },
         }
-    }
-
-    fn handle_ca_conn_event(&mut self, addr: SocketAddr, ev: CaConnEvent) -> Result<(), Error> {
-        match ev.value {
-            CaConnEventValue::None => Ok(()),
-            CaConnEventValue::EchoTimeout => Ok(()),
-            CaConnEventValue::ConnCommandResult(x) => self.handle_conn_command_result(addr, x),
-            CaConnEventValue::QueryItem(item) => {
-                todo!("remove this insert case");
-                // self.storage_insert_queue.push_back(item);
-                Ok(())
-            }
-            CaConnEventValue::ChannelCreateFail(x) => self.handle_channel_create_fail(addr, x),
-            CaConnEventValue::EndOfStream => self.handle_ca_conn_eos(addr),
-            CaConnEventValue::ConnectFail => self.handle_connect_fail(addr),
-        }
-    }
-
-    fn handle_series_lookup_result(&mut self, res: Result<ChannelInfoResult, Error>) -> Result<(), Error> {
-        if self.shutdown_stopping {
-            return Ok(());
-        }
-        trace3!("handle_series_lookup_result  {res:?}");
-        match res {
-            Ok(res) => {
-                let add = ChannelAddWithStatusId {
-                    backend: res.backend,
-                    name: res.channel,
-                    local_epics_hostname: self.local_epics_hostname.clone(),
-                    cssid: ChannelStatusSeriesId::new(res.series.into_inner().id()),
-                };
-                self.handle_add_channel_with_status_id(add)?;
-            }
-            Err(e) => {
-                warn!("TODO handle error {e}");
-            }
-        }
-        Ok(())
     }
 
     fn handle_add_channel(&mut self, cmd: ChannelAdd) -> Result<(), Error> {
@@ -555,6 +533,46 @@ impl CaConnSet {
             tx: Box::pin(SeriesLookupSender { tx }),
         };
         self.channel_info_query_queue.push_back(item);
+        if let Err(_) = cmd.restx.try_send(Ok(())) {
+            self.stats.command_reply_fail().inc();
+        }
+        Ok(())
+    }
+
+    fn handle_ca_conn_event(&mut self, addr: SocketAddr, ev: CaConnEvent) -> Result<(), Error> {
+        match ev.value {
+            CaConnEventValue::None => Ok(()),
+            CaConnEventValue::EchoTimeout => Ok(()),
+            CaConnEventValue::ConnCommandResult(x) => self.handle_conn_command_result(addr, x),
+            CaConnEventValue::QueryItem(item) => {
+                todo!("remove this insert case");
+                // self.storage_insert_queue.push_back(item);
+                Ok(())
+            }
+            CaConnEventValue::ChannelCreateFail(x) => self.handle_channel_create_fail(addr, x),
+            CaConnEventValue::EndOfStream => self.handle_ca_conn_eos(addr),
+            CaConnEventValue::ConnectFail => self.handle_connect_fail(addr),
+        }
+    }
+
+    fn handle_series_lookup_result(&mut self, res: Result<ChannelInfoResult, Error>) -> Result<(), Error> {
+        if self.shutdown_stopping {
+            return Ok(());
+        }
+        trace3!("handle_series_lookup_result  {res:?}");
+        match res {
+            Ok(res) => {
+                let add = ChannelAddWithStatusId {
+                    backend: res.backend,
+                    name: res.channel,
+                    cssid: ChannelStatusSeriesId::new(res.series.into_inner().id()),
+                };
+                self.handle_add_channel_with_status_id(add)?;
+            }
+            Err(e) => {
+                warn!("TODO handle error {e}");
+            }
+        }
         Ok(())
     }
 
@@ -721,7 +739,6 @@ impl CaConnSet {
                                     name: res.channel,
                                     addr: SocketAddr::V4(addr),
                                     cssid: status_series_id.clone(),
-                                    local_epics_hostname: self.local_epics_hostname.clone(),
                                 };
                                 self.handle_add_channel_with_addr(cmd)?;
                             }
@@ -747,8 +764,8 @@ impl CaConnSet {
         Ok(())
     }
 
-    fn handle_check_health(&mut self, ts1: Instant) -> Result<(), Error> {
-        trace2!("handle_check_health");
+    fn handle_check_health(&mut self, id: u32, ts1: Instant) -> Result<(), Error> {
+        trace2!("handle_check_health {id:08x}");
         if self.shutdown_stopping {
             return Ok(());
         }
@@ -771,7 +788,7 @@ impl CaConnSet {
         }
 
         let ts2 = Instant::now();
-        let item = CaConnSetItem::Healthy(ts1, ts2);
+        let item = CaConnSetItem::Healthy(id, ts1, ts2);
         self.connset_out_queue.push_back(item);
         Ok(())
     }
@@ -968,7 +985,7 @@ impl CaConnSet {
             opts,
             add.backend.clone(),
             addr_v4,
-            add.local_epics_hostname,
+            self.local_epics_hostname.clone(),
             self.storage_insert_tx.as_ref().get_ref().clone(),
             self.channel_info_query_tx
                 .clone()
@@ -1281,7 +1298,6 @@ impl CaConnSet {
                                             let cmd = ChannelAddWithAddr {
                                                 backend: self.backend.clone(),
                                                 name: ch.id().into(),
-                                                local_epics_hostname: self.local_epics_hostname.clone(),
                                                 cssid: status_series_id.clone(),
                                                 addr: SocketAddr::V4(*addr_v4),
                                             };

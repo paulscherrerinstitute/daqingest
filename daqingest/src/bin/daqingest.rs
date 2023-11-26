@@ -7,7 +7,7 @@ use netfetch::conf::parse_config;
 pub fn main() -> Result<(), Error> {
     let opts = DaqIngestOpts::parse();
     // TODO offer again function to get runtime and configure tracing in one call
-    let runtime = taskrun::get_runtime_opts(opts.nworkers.unwrap_or(12), 32);
+    let runtime = taskrun::get_runtime_opts(opts.worker_threads.unwrap_or(8), opts.blocking_threads.unwrap_or(256));
     match taskrun::tracing_init() {
         Ok(()) => {}
         Err(()) => return Err(Error::with_msg_no_trace("tracing init failed")),
