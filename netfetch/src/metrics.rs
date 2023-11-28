@@ -72,6 +72,7 @@ impl IntoResponse for CustomErrorResponse {
     }
 }
 
+#[derive(Clone)]
 pub struct StatsSet {
     daemon: Arc<DaemonStats>,
     ca_conn_set: Arc<CaConnSetStats>,
@@ -230,6 +231,26 @@ impl DaemonComm {
     }
 }
 
+fn metricbeat(stats_set: &StatsSet) -> axum::Json<serde_json::Value> {
+    let mut map = serde_json::Map::new();
+    map.insert("daemon".to_string(), stats_set.daemon.json());
+    map.insert("insert_worker_stats".to_string(), stats_set.insert_worker_stats.json());
+    let mut ret = serde_json::Map::new();
+    ret.insert("daqingest".to_string(), serde_json::Value::Object(map));
+    axum::Json(serde_json::Value::Object(ret))
+}
+
+fn metrics(stats_set: &StatsSet) -> String {
+    let s1 = stats_set.daemon.prometheus();
+    let s2 = stats_set.ca_conn_set.prometheus();
+    let s3 = stats_set.insert_worker_stats.prometheus();
+    let s4 = stats_set.ca_conn.prometheus();
+    let s5 = stats_set.series_by_channel_stats.prometheus();
+    let s6 = stats_set.ca_proto.prometheus();
+    let s7 = stats_set.ioc_finder_stats.prometheus();
+    [s1, s2, s3, s4, s5, s6, s7].join("")
+}
+
 fn make_routes(dcom: Arc<DaemonComm>, connset_cmd_tx: Sender<CaConnSetEvent>, stats_set: StatsSet) -> axum::Router {
     use axum::extract;
     use axum::routing::get;
@@ -255,37 +276,29 @@ fn make_routes(dcom: Arc<DaemonComm>, connset_cmd_tx: Sender<CaConnSetEvent>, st
         .route(
             "/metrics",
             get({
-                //
-                || async move {
-                    let s1 = stats_set.daemon.prometheus();
-                    let s2 = stats_set.ca_conn_set.prometheus();
-                    let s3 = stats_set.insert_worker_stats.prometheus();
-                    let s4 = stats_set.ca_conn.prometheus();
-                    let s5 = stats_set.series_by_channel_stats.prometheus();
-                    let s6 = stats_set.ca_proto.prometheus();
-                    let s7 = stats_set.ioc_finder_stats.prometheus();
-                    [s1, s2, s3, s4, s5, s6, s7].join("")
-                }
+                let stats_set = stats_set.clone();
+                || async move { metrics(&stats_set) }
+            }),
+        )
+        .route(
+            "/daqingest/metrics",
+            get({
+                let stats_set = stats_set.clone();
+                || async move { metrics(&stats_set) }
+            }),
+        )
+        .route(
+            "/daqingest/metricbeat",
+            get({
+                let stats_set = stats_set.clone();
+                || async move { metricbeat(&stats_set) }
             }),
         )
         .route(
             "/metricbeat",
             get({
-                //
-                || async move {
-                    axum::Json(serde_json::json!({
-                        "v1": 42_u32,
-                        "o1": {
-                            "v2": 56,
-                            "o2": {
-                                "v3": "test",
-                            },
-                        },
-                        "o5": {
-                            "v6": 89,
-                        },
-                    }))
-                }
+                let stats_set = stats_set.clone();
+                || async move { metricbeat(&stats_set) }
             }),
         )
         .route(

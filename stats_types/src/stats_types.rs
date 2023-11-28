@@ -1,3 +1,5 @@
+pub use serde_json;
+
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering::AcqRel;
 use std::sync::atomic::Ordering::Acquire;
@@ -191,6 +193,10 @@ impl HistoLog2 {
         ret.push_str(&sum.to_string());
         ret.push_str("\n");
         ret
+    }
+
+    pub fn to_json(&self, _name: &str) -> serde_json::Value {
+        serde_json::Value::Null
     }
 }
 

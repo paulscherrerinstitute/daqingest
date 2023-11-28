@@ -7,4 +7,5 @@ edition = "2021"
 [lib]
 path = "src/stats_types.rs"
 
-#[dependencies]
+[dependencies]
+serde_json = "1"

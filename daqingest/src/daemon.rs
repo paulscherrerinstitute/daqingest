@@ -103,9 +103,10 @@ impl Daemon {
         // Insert queue hook
         // let query_item_rx = inserthook::active_channel_insert_hook(query_item_rx);
 
+        let local_epics_hostname = ingest_linux::net::local_hostname();
         let conn_set_ctrl = CaConnSet::start(
             ingest_opts.backend().into(),
-            ingest_opts.local_epics_hostname(),
+            local_epics_hostname,
             query_item_tx,
             channel_info_query_tx,
             ingest_opts.clone(),
@@ -557,6 +558,7 @@ static SIGTERM: AtomicUsize = AtomicUsize::new(0);
 static SHUTDOWN_SENT: AtomicUsize = AtomicUsize::new(0);
 
 fn handler_sigint(_a: libc::c_int, _b: *const libc::siginfo_t, _c: *const libc::c_void) {
+    std::process::exit(13);
     SIGINT.store(1, atomic::Ordering::Release);
     let _ = ingest_linux::signal::unset_signal_handler(libc::SIGINT);
 }

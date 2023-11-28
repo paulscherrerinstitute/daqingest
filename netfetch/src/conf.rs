@@ -31,7 +31,6 @@ pub struct CaIngestOpts {
     insert_worker_concurrency: Option<usize>,
     insert_scylla_sessions: Option<usize>,
     insert_item_queue_cap: Option<usize>,
-    local_epics_hostname: Option<String>,
     store_workers_rate: Option<u64>,
     insert_frac: Option<u64>,
     use_rate_limit_queue: Option<bool>,
@@ -93,10 +92,6 @@ impl CaIngestOpts {
 
     pub fn insert_item_queue_cap(&self) -> usize {
         self.insert_item_queue_cap.unwrap_or(80000)
-    }
-
-    pub fn local_epics_hostname(&self) -> String {
-        self.local_epics_hostname.clone().unwrap_or_else(local_hostname)
     }
 
     pub fn store_workers_rate(&self) -> u64 {

@@ -152,6 +152,36 @@ fn stats_struct_impl(st: &StatsStructDef) -> String {
         "
         )
     };
+    let fn_json = {
+        let mut buf = String::new();
+        for x in &st.counters {
+            buf.push_str(&format!(
+                "ret.insert(\"{x}\".to_string(), Value::Number(Number::from(self.{x}.load())));\n"
+            ));
+        }
+        for x in &st.values {
+            buf.push_str(&format!(
+                "ret.insert(\"{x}\".to_string(), Value::Number(Number::from(self.{x}.load())));\n"
+            ));
+        }
+        for x in &st.histolog2s {
+            buf.push_str(&format!("let v = self.{x}.to_json(\"__dummyname__\");\n"));
+            buf.push_str(&format!("ret.insert(\"{x}\".to_string(), v);\n"));
+        }
+        format!(
+            "
+            pub fn json(&self) -> stats_types::serde_json::Value {{
+                use serde_json::Map;
+                use serde_json::Number;
+                use serde_json::Value;
+                use stats_types::serde_json;
+                let mut ret = Map::new();
+                // {buf}
+                Value::Object(ret)
+            }}
+        "
+        )
+    };
     let fn_snapshot = {
         let mut init_counters = String::new();
         for x in &st.counters {
@@ -192,6 +222,8 @@ impl {name} {{
     {histolog2s}
 
     {fn_prometheus}
+
+    {fn_json}
 
     {fn_snapshot}
 }}
