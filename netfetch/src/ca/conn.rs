@@ -1,5 +1,4 @@
 use super::proto;
-use super::proto::CreateChanRes;
 use super::ExtraInsertsConf;
 use crate::senderpolling::SenderPolling;
 use crate::throttletrace::ThrottleTrace;
@@ -105,7 +104,7 @@ pub enum ChannelConnectedInfo {
 
 #[derive(Clone, Debug, Serialize)]
 pub struct ChannelStateInfo {
-    pub name: String,
+    pub cssid: ChannelStatusSeriesId,
     pub addr: SocketAddrV4,
     pub series: Option<SeriesId>,
     pub channel_connected_info: ChannelConnectedInfo,
@@ -159,7 +158,7 @@ struct Subid(pub u32);
 
 #[derive(Clone, Debug)]
 enum ChannelError {
-    CreateChanFail,
+    CreateChanFail(ChannelStatusSeriesId),
 }
 
 #[derive(Clone, Debug)]
@@ -213,18 +212,18 @@ enum ChannelState {
     FetchingSeriesId(CreatedState),
     Created(SeriesId, CreatedState),
     Error(ChannelError),
-    Ended,
+    Ended(ChannelStatusSeriesId),
 }
 
 impl ChannelState {
-    fn to_info(&self, name: String, addr: SocketAddrV4) -> ChannelStateInfo {
+    fn to_info(&self, cssid: ChannelStatusSeriesId, addr: SocketAddrV4) -> ChannelStateInfo {
         let channel_connected_info = match self {
             ChannelState::Init(..) => ChannelConnectedInfo::Disconnected,
             ChannelState::Creating { .. } => ChannelConnectedInfo::Connecting,
-            ChannelState::FetchingSeriesId(..) => ChannelConnectedInfo::Connecting,
+            ChannelState::FetchingSeriesId(_) => ChannelConnectedInfo::Connecting,
             ChannelState::Created(..) => ChannelConnectedInfo::Connected,
-            ChannelState::Error(..) => ChannelConnectedInfo::Error,
-            ChannelState::Ended => ChannelConnectedInfo::Ended,
+            ChannelState::Error(_) => ChannelConnectedInfo::Error,
+            ChannelState::Ended(_) => ChannelConnectedInfo::Ended,
         };
         let scalar_type = match self {
             ChannelState::Created(_series, s) => Some(s.scalar_type.clone()),
@@ -269,7 +268,7 @@ impl ChannelState {
         };
         let interest_score = 1. / item_recv_ivl_ema.unwrap_or(1e10).max(1e-6).min(1e10);
         ChannelStateInfo {
-            name,
+            cssid,
             addr,
             series,
             channel_connected_info,
@@ -280,6 +279,19 @@ impl ChannelState {
             recv_count,
             item_recv_ivl_ema,
             interest_score,
+        }
+    }
+
+    fn cssid(&self) -> ChannelStatusSeriesId {
+        match self {
+            ChannelState::Init(cssid) => cssid.clone(),
+            ChannelState::Creating { cssid, .. } => cssid.clone(),
+            ChannelState::FetchingSeriesId(st) => st.cssid.clone(),
+            ChannelState::Created(_, st) => st.cssid.clone(),
+            ChannelState::Error(e) => match e {
+                ChannelError::CreateChanFail(cssid) => cssid.clone(),
+            },
+            ChannelState::Ended(cssid) => cssid.clone(),
         }
     }
 }
@@ -320,12 +332,14 @@ fn wait_fut(dt: u64) -> Pin<Box<dyn Future<Output = ()> + Send>> {
 }
 
 struct CidStore {
+    cnt: u32,
     rng: Xoshiro128PlusPlus,
 }
 
 impl CidStore {
     fn new(seed: u32) -> Self {
         Self {
+            cnt: 0,
             rng: Xoshiro128PlusPlus::seed_from_u64(seed as _),
         }
     }
@@ -340,17 +354,25 @@ impl CidStore {
     }
 
     fn next(&mut self) -> Cid {
-        Cid(self.rng.next_u32())
+        let c = self.cnt << 8;
+        self.cnt += 1;
+        let r = self.rng.next_u32();
+        let r = r ^ (r >> 8);
+        let r = r ^ (r >> 8);
+        let r = r ^ (r >> 8);
+        Cid(c | r)
     }
 }
 
 struct SubidStore {
+    cnt: u32,
     rng: Xoshiro128PlusPlus,
 }
 
 impl SubidStore {
     fn new(seed: u32) -> Self {
         Self {
+            cnt: 0,
             rng: Xoshiro128PlusPlus::seed_from_u64(seed as _),
         }
     }
@@ -365,7 +387,13 @@ impl SubidStore {
     }
 
     fn next(&mut self) -> Subid {
-        Subid(self.rng.next_u32())
+        let c = self.cnt << 8;
+        self.cnt += 1;
+        let r = self.rng.next_u32();
+        let r = r ^ (r >> 8);
+        let r = r ^ (r >> 8);
+        let r = r ^ (r >> 8);
+        Subid(c | r)
     }
 }
 
@@ -381,7 +409,6 @@ pub enum ConnCommandKind {
     SeriesLookupResult(Result<ChannelInfoResult, dbpg::seriesbychannel::Error>),
     ChannelAdd(String, ChannelStatusSeriesId),
     ChannelRemove(String),
-    CheckHealth,
     Shutdown,
 }
 
@@ -413,13 +440,6 @@ impl ConnCommand {
         }
     }
 
-    pub fn check_health() -> Self {
-        Self {
-            id: Self::make_id(),
-            kind: ConnCommandKind::CheckHealth,
-        }
-    }
-
     pub fn shutdown() -> Self {
         Self {
             id: Self::make_id(),
@@ -438,13 +458,13 @@ impl ConnCommand {
 }
 
 #[derive(Debug)]
-pub struct CheckHealthResult {
-    pub channel_statuses: BTreeMap<String, ChannelStateInfo>,
+pub struct ChannelStatusPartial {
+    pub channel_statuses: BTreeMap<ChannelStatusSeriesId, ChannelStateInfo>,
 }
 
 #[derive(Debug)]
 pub enum ConnCommandResultKind {
-    CheckHealth(CheckHealthResult),
+    Unused,
 }
 
 #[derive(Debug)]
@@ -469,6 +489,7 @@ pub enum CaConnEventValue {
     None,
     EchoTimeout,
     ConnCommandResult(ConnCommandResult),
+    ChannelStatus(ChannelStatusPartial),
     QueryItem(QueryItem),
     ChannelCreateFail(String),
     EndOfStream,
@@ -526,10 +547,12 @@ pub struct CaConn {
     cid_store: CidStore,
     subid_store: SubidStore,
     channels: HashMap<Cid, ChannelState>,
-    cid_by_name: HashMap<String, Cid>,
+    // btree because require order:
+    cid_by_name: BTreeMap<String, Cid>,
     cid_by_subid: HashMap<Subid, Cid>,
     name_by_cid: HashMap<Cid, String>,
     time_binners: HashMap<Cid, ConnTimeBin>,
+    channel_status_last_done: Option<Cid>,
     init_state_count: u64,
     insert_item_queue: VecDeque<QueryItem>,
     remote_addr_dbg: SocketAddrV4,
@@ -585,10 +608,11 @@ impl CaConn {
             subid_store: SubidStore::new_from_time(),
             init_state_count: 0,
             channels: HashMap::new(),
-            cid_by_name: HashMap::new(),
+            cid_by_name: BTreeMap::new(),
             cid_by_subid: HashMap::new(),
             name_by_cid: HashMap::new(),
             time_binners: HashMap::new(),
+            channel_status_last_done: None,
             insert_item_queue: VecDeque::new(),
             remote_addr_dbg,
             local_epics_hostname,
@@ -668,7 +692,16 @@ impl CaConn {
     }
 
     fn cmd_check_health(&mut self) {
+        // TODO
+        // no longer in use.
+        // CaConn emits health updates by iteself.
+        // Make sure that we do also the checks here on regular intervals.
+
         trace!("cmd_check_health");
+
+        // TODO
+        // what actions are taken here?
+        // what status is modified here?
         match self.check_channels_alive() {
             Ok(_) => {}
             Err(e) => {
@@ -676,25 +709,42 @@ impl CaConn {
                 self.trigger_shutdown(ChannelStatusClosedReason::InternalError);
             }
         }
-        // TODO return the result
+
+        // TODO
+        // Time this, is it fast enough?
+
+        let mut kit = self.cid_by_name.values();
+        if let Some(mut kk) = kit.next().map(Clone::clone) {
+            let mut start = Some(kk.clone());
+            if let Some(last) = self.channel_status_last_done.take() {
+                while kk <= last {
+                    kk = if let Some(x) = kit.next().map(Clone::clone) {
+                        start = Some(x.clone());
+                        x
+                    } else {
+                        start = None;
+                        break;
+                    };
+                }
+            }
+            if let Some(mut kk) = start {
+                loop {
+                    kk = if let Some(x) = kit.next().map(Clone::clone) {
+                        x
+                    } else {
+                        break;
+                    };
+                }
+            } else {
+                // Nothing to do, will continue on next call from front.
+            }
+        }
+        while let Some(kk) = kit.next() {}
         let mut channel_statuses = BTreeMap::new();
         for (k, v) in self.channels.iter() {
-            let name = self
-                .name_by_cid(*k)
-                .map_or_else(|| format!("{k:?}"), ToString::to_string);
-            let info = v.to_info(name.clone(), self.remote_addr_dbg);
-            channel_statuses.insert(name, info);
+            let info = v.to_info(v.cssid(), self.remote_addr_dbg);
+            channel_statuses.insert(v.cssid(), info);
         }
-        let health = CheckHealthResult { channel_statuses };
-        let res = ConnCommandResult {
-            id: ConnCommandResult::make_id(),
-            kind: ConnCommandResultKind::CheckHealth(health),
-        };
-        let item = CaConnEvent {
-            ts: Instant::now(),
-            value: CaConnEventValue::ConnCommandResult(res),
-        };
-        self.ca_conn_event_out_queue.push_back(item);
     }
 
     fn cmd_find_channel(&self, pattern: &str) {
@@ -713,7 +763,7 @@ impl CaConn {
     fn cmd_channel_state(&self, name: String) {
         let res = match self.cid_by_name.get(&name) {
             Some(cid) => match self.channels.get(cid) {
-                Some(state) => Some(state.to_info(name, self.remote_addr_dbg.clone())),
+                Some(state) => Some(state.to_info(state.cssid(), self.remote_addr_dbg.clone())),
                 None => None,
             },
             None => None,
@@ -730,11 +780,11 @@ impl CaConn {
             .channels
             .iter()
             .map(|(cid, state)| {
-                let name = self
-                    .name_by_cid
-                    .get(cid)
-                    .map_or("--unknown--".into(), |x| x.to_string());
-                state.to_info(name, self.remote_addr_dbg.clone())
+                // let name = self
+                //     .name_by_cid
+                //     .get(cid)
+                //     .map_or("--unknown--".into(), |x| x.to_string());
+                state.to_info(state.cssid(), self.remote_addr_dbg.clone())
             })
             .collect();
         let msg = (self.remote_addr_dbg.clone(), res);
@@ -832,10 +882,6 @@ impl CaConn {
                             self.cmd_channel_remove(name);
                             Ok(Ready(Some(())))
                         }
-                        ConnCommandKind::CheckHealth => {
-                            self.cmd_check_health();
-                            Ok(Ready(Some(())))
-                        }
                         ConnCommandKind::Shutdown => {
                             self.cmd_shutdown();
                             Ok(Ready(Some(())))
@@ -899,7 +945,7 @@ impl CaConn {
     fn channel_remove_expl(
         name: String,
         channels: &mut HashMap<Cid, ChannelState>,
-        cid_by_name: &mut HashMap<String, Cid>,
+        cid_by_name: &mut BTreeMap<String, Cid>,
         name_by_cid: &mut HashMap<Cid, String>,
         cid_store: &mut CidStore,
         time_binners: &mut HashMap<Cid, ConnTimeBin>,
@@ -926,7 +972,7 @@ impl CaConn {
 
     fn cid_by_name_expl(
         name: &str,
-        cid_by_name: &mut HashMap<String, Cid>,
+        cid_by_name: &mut BTreeMap<String, Cid>,
         name_by_cid: &mut HashMap<Cid, String>,
         cid_store: &mut CidStore,
     ) -> Cid {
@@ -955,17 +1001,18 @@ impl CaConn {
     }
 
     fn channel_state_on_shutdown(&mut self, channel_reason: ChannelStatusClosedReason) {
+        // TODO  can I reuse emit_channel_info_insert_items ?
         trace!("channel_state_on_shutdown  channels {}", self.channels.len());
         for (_cid, chst) in &mut self.channels {
             match chst {
-                ChannelState::Init(..) => {
-                    *chst = ChannelState::Ended;
+                ChannelState::Init(cssid) => {
+                    *chst = ChannelState::Ended(cssid.clone());
                 }
-                ChannelState::Creating { .. } => {
-                    *chst = ChannelState::Ended;
+                ChannelState::Creating { cssid, .. } => {
+                    *chst = ChannelState::Ended(cssid.clone());
                 }
-                ChannelState::FetchingSeriesId(..) => {
-                    *chst = ChannelState::Ended;
+                ChannelState::FetchingSeriesId(st) => {
+                    *chst = ChannelState::Ended(st.cssid.clone());
                 }
                 ChannelState::Created(series, st2) => {
                     let item = QueryItem::ChannelStatus(ChannelStatusItem {
@@ -974,12 +1021,13 @@ impl CaConn {
                         status: ChannelStatus::Closed(channel_reason.clone()),
                     });
                     self.insert_item_queue.push_back(item);
-                    *chst = ChannelState::Ended;
+                    *chst = ChannelState::Ended(st2.cssid.clone());
                 }
                 ChannelState::Error(..) => {
-                    *chst = ChannelState::Ended;
+                    warn!("TODO emit error status");
+                    // *chst = ChannelState::Ended;
                 }
-                ChannelState::Ended => {}
+                ChannelState::Ended(cssid) => {}
             }
         }
     }
@@ -1070,7 +1118,7 @@ impl CaConn {
                 ChannelState::Error(_) => {
                     // TODO need last-save-ts for this state.
                 }
-                ChannelState::Ended => {}
+                ChannelState::Ended(_) => {}
             }
         }
         Ok(())
@@ -1261,6 +1309,17 @@ impl CaConn {
     }
 
     fn handle_event_add_res(&mut self, ev: proto::EventAddRes, tsnow: Instant) -> Result<(), Error> {
+        trace!("got EventAddRes: {ev:?}");
+        self.stats.event_add_res_recv.inc();
+        let res = Self::handle_event_add_res_inner(self, ev, tsnow);
+        let ts2 = Instant::now();
+        self.stats
+            .time_handle_event_add_res
+            .add((ts2.duration_since(tsnow) * MS as u32).as_secs());
+        res
+    }
+
+    fn handle_event_add_res_inner(&mut self, ev: proto::EventAddRes, tsnow: Instant) -> Result<(), Error> {
         let subid = Subid(ev.subid);
         // TODO handle subid-not-found which can also be peer error:
         let cid = if let Some(x) = self.cid_by_subid.get(&subid) {
@@ -1446,6 +1505,7 @@ impl CaConn {
                     }
                     CaItem::Msg(msg) => match msg.ty {
                         CaMsgTy::VersionRes(n) => {
+                            debug!("see incoming  {:?}  {:?}", self.remote_addr_dbg, msg);
                             if n < 12 || n > 13 {
                                 error!("See some unexpected version {n}  channel search may not work.");
                                 Ready(Some(Ok(())))
@@ -1553,18 +1613,7 @@ impl CaConn {
                                 self.handle_create_chan_res(k, tsnow)?;
                                 do_wake_again = true;
                             }
-                            CaMsgTy::EventAddRes(k) => {
-                                trace4!("got EventAddRes: {k:?}");
-                                self.stats.event_add_res_recv.inc();
-                                let res = Self::handle_event_add_res(self, k, tsnow);
-                                let ts2 = Instant::now();
-                                self.stats
-                                    .time_handle_event_add_res
-                                    .add((ts2.duration_since(ts1) * MS as u32).as_secs());
-                                ts1 = ts2;
-                                let _ = ts1;
-                                res?
-                            }
+                            CaMsgTy::EventAddRes(k) => self.handle_event_add_res(k, tsnow)?,
                             CaMsgTy::Echo => {
                                 // let addr = &self.remote_addr_dbg;
                                 if let Some(started) = self.ioc_ping_start {
@@ -1649,7 +1698,7 @@ impl CaConn {
         res.map_err(|e| Error::from(e.to_string()))
     }
 
-    fn handle_create_chan_res(&mut self, k: CreateChanRes, tsnow: Instant) -> Result<(), Error> {
+    fn handle_create_chan_res(&mut self, k: proto::CreateChanRes, tsnow: Instant) -> Result<(), Error> {
         // TODO handle cid-not-found which can also indicate peer error.
         let cid = Cid(k.cid);
         let sid = k.sid;
@@ -1947,6 +1996,24 @@ impl CaConn {
         Ok(())
     }
 
+    fn emit_channel_status(&mut self) {
+        // TODO limit the queue length.
+        // Maybe factor the actual push item into new function.
+        // What to do if limit reached?
+        // Increase some error counter.
+
+        // if self.ca_conn_event_out_queue.len()>
+
+        let val = ChannelStatusPartial {
+            channel_statuses: Default::default(),
+        };
+        let item = CaConnEvent {
+            ts: Instant::now(),
+            value: CaConnEventValue::ChannelStatus(val),
+        };
+        self.ca_conn_event_out_queue.push_back(item);
+    }
+
     fn check_ticker_connecting_timeout(&mut self, since: Instant) -> Result<(), Error> {
         Ok(())
     }
@@ -2071,10 +2138,13 @@ impl Stream for CaConn {
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
         use Poll::*;
-        self.stats.poll_count().inc();
         let poll_ts1 = Instant::now();
+        self.stats.poll_count().inc();
         self.stats.poll_fn_begin().inc();
+        let mut reloops: u32 = 0;
         let ret = loop {
+            let lts1 = Instant::now();
+
             self.stats.poll_loop_begin().inc();
             let qlen = self.insert_item_queue.len();
             if qlen >= self.opts.insert_queue_max * 2 / 3 {
@@ -2092,6 +2162,8 @@ impl Stream for CaConn {
             if let Some(item) = self.ca_conn_event_out_queue.pop_front() {
                 break Ready(Some(Ok(item)));
             }
+
+            let lts2 = Instant::now();
 
             match self.as_mut().handle_own_ticker(cx) {
                 Ok(Ready(())) => {
@@ -2114,6 +2186,8 @@ impl Stream for CaConn {
                 Err(e) => break Ready(Some(Err(e))),
             }
 
+            let lts3 = Instant::now();
+
             match self.as_mut().attempt_flush_channel_info_query(cx) {
                 Ok(Ready(Some(()))) => {
                     have_progress = true;
@@ -2125,6 +2199,8 @@ impl Stream for CaConn {
                 Err(e) => break Ready(Some(Err(e))),
             }
 
+            let lts2 = Instant::now();
+
             match self.as_mut().handle_conn_command(cx) {
                 Ok(Ready(Some(()))) => {
                     have_progress = true;
@@ -2135,6 +2211,8 @@ impl Stream for CaConn {
                 }
                 Err(e) => break Ready(Some(Err(e))),
             }
+
+            let lts4 = Instant::now();
 
             match self.loop_inner(cx) {
                 Ok(Ready(Some(()))) => {
@@ -2151,6 +2229,26 @@ impl Stream for CaConn {
                 }
             }
 
+            let lts5 = Instant::now();
+
+            let max = Duration::from_millis(14);
+            let dt = lts2.saturating_duration_since(lts1);
+            if dt > max {
+                debug!("LONG OPERATION  2  {dt:?}");
+            }
+            let dt = lts3.saturating_duration_since(lts2);
+            if dt > max {
+                debug!("LONG OPERATION  3  {dt:?}");
+            }
+            let dt = lts4.saturating_duration_since(lts3);
+            if dt > max {
+                debug!("LONG OPERATION  4  {dt:?}");
+            }
+            let dt = lts5.saturating_duration_since(lts4);
+            if dt > max {
+                debug!("LONG OPERATION  5  {dt:?}");
+            }
+
             break if self.is_shutdown() {
                 if self.queues_out_flushed() {
                     // debug!("end of stream {}", self.remote_addr_dbg);
@@ -2160,6 +2258,7 @@ impl Stream for CaConn {
                     // debug!("queues_out_flushed false");
                     if have_progress {
                         self.stats.poll_reloop().inc();
+                        reloops += 1;
                         continue;
                     } else if have_pending {
                         self.stats.poll_pending().inc();
@@ -2174,8 +2273,18 @@ impl Stream for CaConn {
                 }
             } else {
                 if have_progress {
-                    self.stats.poll_reloop().inc();
-                    continue;
+                    if poll_ts1.elapsed() > Duration::from_millis(5) {
+                        self.stats.poll_wake_break().inc();
+                        cx.waker().wake_by_ref();
+                        break Ready(Some(Ok(CaConnEvent {
+                            ts: poll_ts1,
+                            value: CaConnEventValue::None,
+                        })));
+                    } else {
+                        self.stats.poll_reloop().inc();
+                        reloops += 1;
+                        continue;
+                    }
                 } else if have_pending {
                     self.stats.poll_pending().inc();
                     Pending
@@ -2186,13 +2295,20 @@ impl Stream for CaConn {
                 }
             };
         };
+        if reloops >= 512 {
+            self.stats.poll_reloops_512().inc();
+        } else if reloops >= 64 {
+            self.stats.poll_reloops_64().inc();
+        } else if reloops >= 8 {
+            self.stats.poll_reloops_8().inc();
+        }
         let poll_ts2 = Instant::now();
         let dt = poll_ts2.saturating_duration_since(poll_ts1);
         if dt > Duration::from_millis(80) {
             warn!("long poll duration {:.0} ms", dt.as_secs_f32() * 1e3)
         } else if dt > Duration::from_millis(40) {
             info!("long poll duration {:.0} ms", dt.as_secs_f32() * 1e3)
-        } else if false && dt > Duration::from_millis(5) {
+        } else if dt > Duration::from_millis(14) {
             debug!("long poll duration {:.0} ms", dt.as_secs_f32() * 1e3)
         }
         ret

@@ -35,16 +35,10 @@ use taskrun::tokio;
 use tokio::task::JoinHandle;
 
 const CHECK_HEALTH_IVL: Duration = Duration::from_millis(2000);
-const CHECK_HEALTH_TIMEOUT: Duration = Duration::from_millis(1500);
+const CHECK_HEALTH_TIMEOUT: Duration = Duration::from_millis(5000);
 const PRINT_ACTIVE_INTERVAL: Duration = Duration::from_millis(60000);
 const PRINT_STATUS_INTERVAL: Duration = Duration::from_millis(20000);
 const CHECK_CHANNEL_SLOW_WARN: Duration = Duration::from_millis(500);
-
-#[derive(Debug)]
-enum CheckPeriodic {
-    Waiting(Instant),
-    Ongoing(u32, Instant),
-}
 
 pub struct DaemonOpts {
     pgconf: Database,
@@ -75,7 +69,7 @@ pub struct Daemon {
     series_by_channel_stats: Arc<SeriesByChannelStats>,
     shutting_down: bool,
     connset_ctrl: CaConnSetCtrl,
-    connset_status_last: CheckPeriodic,
+    connset_status_last: Instant,
     // TODO should be a stats object?
     insert_workers_running: AtomicU64,
     query_item_tx_weak: WeakSender<VecDeque<QueryItem>>,
@@ -231,7 +225,7 @@ impl Daemon {
             series_by_channel_stats,
             shutting_down: false,
             connset_ctrl: conn_set_ctrl,
-            connset_status_last: CheckPeriodic::Waiting(Instant::now()),
+            connset_status_last: Instant::now(),
             insert_workers_running: AtomicU64::new(0),
             query_item_tx_weak,
             connset_health_lat_ema: 0.,
@@ -243,23 +237,18 @@ impl Daemon {
         &self.stats
     }
 
-    async fn check_caconn_chans(&mut self, ts1: Instant) -> Result<(), Error> {
-        match &self.connset_status_last {
-            CheckPeriodic::Waiting(since) => {
-                if *since + CHECK_HEALTH_IVL <= ts1 {
-                    let id = self.connset_ctrl.check_health().await?;
-                    self.connset_status_last = CheckPeriodic::Ongoing(id, ts1);
-                }
-            }
-            CheckPeriodic::Ongoing(idexp, since) => {
-                let dt = ts1.saturating_duration_since(*since);
-                if dt > CHECK_HEALTH_TIMEOUT {
-                    error!(
-                        "CaConnSet has not reported health status  since {:.0}  idexp {idexp:08x}",
-                        dt.as_secs_f32() * 1e3
-                    );
-                }
-            }
+    async fn check_health(&mut self, ts1: Instant) -> Result<(), Error> {
+        self.check_health_connset(ts1)?;
+        Ok(())
+    }
+
+    fn check_health_connset(&mut self, ts1: Instant) -> Result<(), Error> {
+        let dt = self.connset_status_last.elapsed();
+        if dt > CHECK_HEALTH_TIMEOUT {
+            error!(
+                "CaConnSet has not reported health status  since {:.0}",
+                dt.as_secs_f32() * 1e3
+            );
         }
         Ok(())
     }
@@ -288,7 +277,7 @@ impl Daemon {
             SIGTERM.store(2, atomic::Ordering::Release);
         }
         let ts1 = Instant::now();
-        self.check_caconn_chans(ts1).await?;
+        self.check_health(ts1).await?;
         let dt = ts1.elapsed();
         if dt > CHECK_CHANNEL_SLOW_WARN {
             info!("slow check_chans  {:.0} ms", dt.as_secs_f32() * 1e3);
@@ -376,30 +365,10 @@ impl Daemon {
     async fn handle_ca_conn_set_item(&mut self, item: CaConnSetItem) -> Result<(), Error> {
         use CaConnSetItem::*;
         match item {
-            Healthy(id, ts1, ts2) => {
+            Healthy => {
                 let tsnow = Instant::now();
-                let dt1 = tsnow.duration_since(ts1).as_secs_f32() * 1e3;
-                let dt2 = tsnow.duration_since(ts2).as_secs_f32() * 1e3;
-                match &self.connset_status_last {
-                    CheckPeriodic::Waiting(_since) => {
-                        error!("received CaConnSet health report without having asked  {dt1:.0} ms  {dt2:.0} ms");
-                    }
-                    CheckPeriodic::Ongoing(idexp, since) => {
-                        if id != *idexp {
-                            warn!("unexpected check health answer  id {id:08x}  idexp {idexp:08x}");
-                        }
-                        // TODO insert response time as series to scylla.
-                        let dtsince = tsnow.duration_since(*since).as_secs_f32() * 1e3;
-                        {
-                            let v = &mut self.connset_health_lat_ema;
-                            *v += (dtsince - *v) * 0.2;
-                            self.stats.connset_health_lat_ema().set(*v as _);
-                        }
-                        trace!("received CaConnSet  Healthy  dtsince {dtsince:.0} ms  {dt1:.0} ms  {dt2:.0} ms");
-                        self.connset_status_last = CheckPeriodic::Waiting(tsnow);
-                        self.stats.caconnset_health_response().inc();
-                    }
-                }
+                self.connset_status_last = tsnow;
+                self.stats.caconnset_health_response().inc();
             }
             Error(e) => {
                 error!("error from CaConnSet: {e}");

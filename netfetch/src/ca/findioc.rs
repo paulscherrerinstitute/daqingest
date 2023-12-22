@@ -616,10 +616,10 @@ impl Stream for FindIocStream {
                                 match batch.tgts.pop_front() {
                                     Some(tgtix) => {
                                         Self::serialize_batch(buf1, batch);
+                                        debug!("serialized for search {:?}", batch.channels);
                                         match self.tgts.get(tgtix) {
                                             Some(tgt) => {
                                                 let tgt = tgt.clone();
-                                                //info!("Serialize and queue {bid:?}");
                                                 self.send_addr = tgt.clone();
                                                 self.batch_send_queue.push_back(bid);
                                                 have_progress = true;

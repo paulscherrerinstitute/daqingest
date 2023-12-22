@@ -1,9 +1,13 @@
 use crate::ca::conn::ChannelStateInfo;
 use crate::daemon_common::Channel;
+use dashmap::DashMap;
 use serde::Serialize;
 use series::ChannelStatusSeriesId;
+use std::collections::btree_map::RangeMut;
 use std::collections::BTreeMap;
+use std::collections::HashMap;
 use std::net::SocketAddrV4;
+use std::ops::RangeBounds;
 use std::time::Instant;
 use std::time::SystemTime;
 
@@ -117,14 +121,51 @@ pub struct ChannelState {
 #[derive(Debug, Clone, Serialize)]
 pub struct ChannelStateMap {
     map: BTreeMap<Channel, ChannelState>,
+    #[serde(skip)]
+    map2: HashMap<Channel, ChannelState>,
+    // TODO implement same interface via dashmap and compare
+    #[serde(skip)]
+    map3: DashMap<Channel, ChannelState>,
 }
 
 impl ChannelStateMap {
     pub fn new() -> Self {
-        Self { map: BTreeMap::new() }
+        Self {
+            map: BTreeMap::new(),
+            map2: HashMap::new(),
+            map3: DashMap::new(),
+        }
     }
 
-    pub fn inner(&mut self) -> &mut BTreeMap<Channel, ChannelState> {
-        &mut self.map
+    pub fn insert(&mut self, k: Channel, v: ChannelState) -> Option<ChannelState> {
+        self.map.insert(k, v)
     }
+
+    pub fn get_mut(&mut self, k: &Channel) -> Option<&mut ChannelState> {
+        self.map.iter_mut();
+        self.map.get_mut(k)
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&Channel, &ChannelState)> {
+        self.map.iter()
+    }
+
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = (&Channel, &mut ChannelState)> {
+        self.map.iter_mut()
+    }
+
+    pub fn iter_mut_dash(&mut self) -> ChannelStateIter {
+        todo!()
+    }
+
+    pub fn range_mut<R>(&mut self, range: R) -> RangeMut<Channel, ChannelState>
+    where
+        R: RangeBounds<Channel>,
+    {
+        self.map.range_mut(range)
+    }
+}
+
+pub struct ChannelStateIter<'a> {
+    _m1: &'a u32,
 }

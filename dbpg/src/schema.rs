@@ -18,6 +18,30 @@ impl Error {
     }
 }
 
+async fn has_table(table: &str, pgc: &PgClient) -> Result<bool, Error> {
+    let rows = pgc
+        .query(
+            "select count(*) as c from information_schema.tables where table_name = $1 and table_type = 'BASE TABLE' limit 10",
+            &[&table],
+        )
+        .await?;
+    if rows.len() == 1 {
+        let c: i64 = rows[0].get(0);
+        if c == 0 {
+            Ok(false)
+        } else if c == 1 {
+            Ok(true)
+        } else {
+            Err(Error::from_logic_msg(format!("has_table bad count {}", c)))
+        }
+    } else {
+        Err(Error::from_logic_msg(format!(
+            "has_columns bad row count {}",
+            rows.len()
+        )))
+    }
+}
+
 async fn has_column(table: &str, column: &str, pgc: &PgClient) -> Result<bool, Error> {
     let rows = pgc
         .query(
@@ -32,19 +56,51 @@ async fn has_column(table: &str, column: &str, pgc: &PgClient) -> Result<bool, E
         } else if c == 1 {
             Ok(true)
         } else {
-            Err(Error::from_logic_msg(format!("has_columns bad count {}", c)))
+            Err(Error::from_logic_msg(format!("has_column bad count {}", c)))
         }
-    } else if rows.len() == 0 {
-        Ok(false)
     } else {
         Err(Error::from_logic_msg(format!(
-            "has_columns bad row count {}",
+            "has_column bad row count {}",
             rows.len()
         )))
     }
 }
 
 async fn migrate_00(pgc: &PgClient) -> Result<(), Error> {
+    if !has_table("ioc_by_channel_log", pgc).await? {
+        let _ = pgc
+            .execute(
+                "
+create table if not exists ioc_by_channel_log (
+    facility text not null,
+    channel text not null,
+    tscreate timestamptz not null default now(),
+    tsmod timestamptz not null default now(),
+    archived int not null default 0,
+    queryaddr text,
+    responseaddr text,
+    addr text
+)
+",
+                &[],
+            )
+            .await;
+        let _ = pgc
+            .execute(
+                "
+create index if not exists ioc_by_channel_log_channel on ioc_by_channel_log (
+    facility,
+    channel
+)
+",
+                &[],
+            )
+            .await;
+    }
+    Ok(())
+}
+
+async fn migrate_01(pgc: &PgClient) -> Result<(), Error> {
     if !has_column("ioc_by_channel_log", "tscreate", pgc).await? {
         pgc.execute(
             "alter table ioc_by_channel_log add tscreate timestamptz not null default now()",
@@ -79,6 +135,7 @@ async fn migrate_00(pgc: &PgClient) -> Result<(), Error> {
 
 pub async fn schema_check(pgc: &PgClient) -> Result<(), Error> {
     migrate_00(&pgc).await?;
+    migrate_01(&pgc).await?;
     info!("schema_check done");
     Ok(())
 }

@@ -30,7 +30,7 @@ impl SeriesId {
     }
 }
 
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Serialize)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Hash, Serialize)]
 pub struct ChannelStatusSeriesId(u64);
 
 impl ChannelStatusSeriesId {

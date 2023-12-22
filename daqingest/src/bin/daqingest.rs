@@ -3,67 +3,74 @@ use daqingest::opts::DaqIngestOpts;
 use err::Error;
 use log::*;
 use netfetch::conf::parse_config;
+use taskrun::TracingMode;
 
 pub fn main() -> Result<(), Error> {
     let opts = DaqIngestOpts::parse();
     // TODO offer again function to get runtime and configure tracing in one call
     let runtime = taskrun::get_runtime_opts(opts.worker_threads.unwrap_or(8), opts.blocking_threads.unwrap_or(256));
-    match taskrun::tracing_init() {
+    match taskrun::tracing_init(TracingMode::Production) {
         Ok(()) => {}
         Err(()) => return Err(Error::with_msg_no_trace("tracing init failed")),
     }
-    let res = runtime.block_on(async move {
-        use daqingest::opts::ChannelAccess;
-        use daqingest::opts::SubCmd;
-        match opts.subcmd {
-            SubCmd::ListPkey => {
-                // TODO must take scylla config from CLI
-                let scylla_conf = err::todoval();
-                scywr::tools::list_pkey(&scylla_conf).await?
-            }
-            SubCmd::ListPulses => {
-                // TODO must take scylla config from CLI
-                let scylla_conf = err::todoval();
-                scywr::tools::list_pulses(&scylla_conf).await?
-            }
-            SubCmd::FetchEvents(k) => {
-                // TODO must take scylla config from CLI
-                let scylla_conf = err::todoval();
-                scywr::tools::fetch_events(&k.backend, &k.channel, &scylla_conf).await?
-            }
-            SubCmd::ChannelAccess(k) => match k {
-                #[cfg(DISABLED)]
-                ChannelAccess::CaSearch(k) => {
-                    info!("daqingest version {}", clap::crate_version!());
-                    let (conf, channels) = parse_config(k.config.into()).await?;
-                    netfetch::ca::search::ca_search(conf, &channels).await?
-                }
-                ChannelAccess::CaIngest(k) => {
-                    info!("daqingest version {}", clap::crate_version!());
-                    let (conf, channels) = parse_config(k.config.into()).await?;
-                    daqingest::daemon::run(conf, channels).await?
-                }
-            },
-            #[cfg(feature = "bsread")]
-            SubCmd::Bsread(k) => ingest_bsread::zmtp::zmtp_client(k.into())
-                .await
-                .map_err(|e| Error::from(e.to_string()))?,
-            #[cfg(feature = "bsread")]
-            SubCmd::BsreadDump(k) => {
-                let mut f = ingest_bsread::zmtp::dumper::BsreadDumper::new(k.source);
-                f.run().await.map_err(|e| Error::from(e.to_string()))?
-            }
-            SubCmd::Version => {
-                println!("{}", clap::crate_version!());
-            }
-        }
-        Ok(())
-    });
+    let res = runtime.block_on(main_run(opts));
     match res {
         Ok(k) => Ok(k),
         Err(e) => {
-            error!("Catched: {:?}", e);
+            error!("catched: {:?}", e);
             Err(e)
         }
     }
+}
+
+async fn main_run(opts: DaqIngestOpts) -> Result<(), Error> {
+    taskrun::tokio::spawn(main_run_inner(opts)).await?
+}
+
+async fn main_run_inner(opts: DaqIngestOpts) -> Result<(), Error> {
+    use daqingest::opts::ChannelAccess;
+    use daqingest::opts::SubCmd;
+    match opts.subcmd {
+        SubCmd::ListPkey => {
+            // TODO must take scylla config from CLI
+            let scylla_conf = err::todoval();
+            scywr::tools::list_pkey(&scylla_conf).await?
+        }
+        SubCmd::ListPulses => {
+            // TODO must take scylla config from CLI
+            let scylla_conf = err::todoval();
+            scywr::tools::list_pulses(&scylla_conf).await?
+        }
+        SubCmd::FetchEvents(k) => {
+            // TODO must take scylla config from CLI
+            let scylla_conf = err::todoval();
+            scywr::tools::fetch_events(&k.backend, &k.channel, &scylla_conf).await?
+        }
+        SubCmd::ChannelAccess(k) => match k {
+            #[cfg(DISABLED)]
+            ChannelAccess::CaSearch(k) => {
+                info!("daqingest version {}", clap::crate_version!());
+                let (conf, channels) = parse_config(k.config.into()).await?;
+                netfetch::ca::search::ca_search(conf, &channels).await?
+            }
+            ChannelAccess::CaIngest(k) => {
+                info!("daqingest version {}", clap::crate_version!());
+                let (conf, channels) = parse_config(k.config.into()).await?;
+                daqingest::daemon::run(conf, channels).await?
+            }
+        },
+        #[cfg(feature = "bsread")]
+        SubCmd::Bsread(k) => ingest_bsread::zmtp::zmtp_client(k.into())
+            .await
+            .map_err(|e| Error::from(e.to_string()))?,
+        #[cfg(feature = "bsread")]
+        SubCmd::BsreadDump(k) => {
+            let mut f = ingest_bsread::zmtp::dumper::BsreadDumper::new(k.source);
+            f.run().await.map_err(|e| Error::from(e.to_string()))?
+        }
+        SubCmd::Version => {
+            println!("{}", clap::crate_version!());
+        }
+    }
+    Ok(())
 }

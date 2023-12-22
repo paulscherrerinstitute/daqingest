@@ -1,16 +1,6 @@
-use super::conn::ChannelStateInfo;
-use super::conn::CheckHealthResult;
-use super::conn::ConnCommandResult;
 use super::findioc::FindIocRes;
-use super::statemap;
-use super::statemap::ChannelState;
-use super::statemap::ConnectionState;
-use super::statemap::ConnectionStateValue;
-use crate::ca::conn::CaConn;
-use crate::ca::conn::CaConnEvent;
-use crate::ca::conn::CaConnEventValue;
-use crate::ca::conn::CaConnOpts;
-use crate::ca::conn::ConnCommand;
+use crate::ca::conn;
+use crate::ca::statemap;
 use crate::ca::statemap::CaConnState;
 use crate::ca::statemap::WithAddressState;
 use crate::conf::CaIngestOpts;
@@ -22,6 +12,14 @@ use crate::throttletrace::ThrottleTrace;
 use async_channel::Receiver;
 use async_channel::Sender;
 use atomic::AtomicUsize;
+use conn::CaConn;
+use conn::CaConnEvent;
+use conn::CaConnEventValue;
+use conn::CaConnOpts;
+use conn::ChannelStateInfo;
+use conn::ChannelStatusPartial;
+use conn::ConnCommand;
+use conn::ConnCommandResult;
 use core::fmt;
 use dbpg::seriesbychannel::BoxedSend;
 use dbpg::seriesbychannel::CanSendChannelInfoResult;
@@ -41,8 +39,11 @@ use serde::Serialize;
 use series::ChannelStatusSeriesId;
 use statemap::ActiveChannelState;
 use statemap::CaConnStateValue;
+use statemap::ChannelState;
 use statemap::ChannelStateMap;
 use statemap::ChannelStateValue;
+use statemap::ConnectionState;
+use statemap::ConnectionStateValue;
 use statemap::WithStatusSeriesIdState;
 use statemap::WithStatusSeriesIdStateInner;
 use statemap::CHANNEL_STATUS_DUMMY_SCALAR_TYPE;
@@ -53,6 +54,7 @@ use stats::CaConnStats;
 use stats::CaProtoStats;
 use stats::IocFinderStats;
 use std::collections::BTreeMap;
+use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::net::SocketAddrV4;
@@ -196,7 +198,6 @@ impl fmt::Debug for ChannelStatusesRequest {
 pub enum ConnSetCmd {
     ChannelAdd(ChannelAdd),
     ChannelRemove(ChannelRemove),
-    CheckHealth(u32, Instant),
     Shutdown,
     ChannelStatuses(ChannelStatusesRequest),
 }
@@ -213,7 +214,7 @@ impl CaConnSetEvent {
 #[derive(Debug, Clone)]
 pub enum CaConnSetItem {
     Error(Error),
-    Healthy(u32, Instant, Instant),
+    Healthy,
 }
 
 pub struct CaConnSetCtrl {
@@ -264,19 +265,6 @@ impl CaConnSetCtrl {
         let cmd = ConnSetCmd::Shutdown;
         self.tx.send(CaConnSetEvent::ConnSetCmd(cmd)).await?;
         Ok(())
-    }
-
-    pub async fn check_health(&mut self) -> Result<u32, Error> {
-        let id = self.make_id();
-        let cmd = ConnSetCmd::CheckHealth(id, Instant::now());
-        let n = self.tx.len();
-        if n > 0 {
-            debug!("check_health  self.tx.len() {:?}", n);
-        }
-        let s = format!("{:?}", cmd);
-        self.tx.send(CaConnSetEvent::ConnSetCmd(cmd)).await?;
-        trace!("check_health  enqueued {s}");
-        Ok(id)
     }
 
     pub async fn join(self) -> Result<(), Error> {
@@ -352,6 +340,7 @@ impl CanSendChannelInfoResult for SeriesLookupSender {
 }
 
 pub struct CaConnSet {
+    ticker: Pin<Box<tokio::time::Sleep>>,
     backend: String,
     local_epics_hostname: String,
     ca_conn_ress: BTreeMap<SocketAddr, CaConnRes>,
@@ -384,9 +373,14 @@ pub struct CaConnSet {
     ca_proto_stats: Arc<CaProtoStats>,
     rogue_channel_count: u64,
     connect_fail_count: usize,
+    name_by_cssid: HashMap<ChannelStatusSeriesId, String>,
 }
 
 impl CaConnSet {
+    pub fn self_name() -> &'static str {
+        std::any::type_name::<Self>()
+    }
+
     pub fn start(
         backend: String,
         local_epics_hostname: String,
@@ -411,6 +405,7 @@ impl CaConnSet {
         let ca_proto_stats = Arc::new(CaProtoStats::new());
         let ca_conn_stats = Arc::new(CaConnStats::new());
         let connset = Self {
+            ticker: Self::new_self_ticker(),
             backend,
             local_epics_hostname,
             ca_conn_ress: BTreeMap::new(),
@@ -444,6 +439,7 @@ impl CaConnSet {
             ca_proto_stats: ca_proto_stats.clone(),
             rogue_channel_count: 0,
             connect_fail_count: 0,
+            name_by_cssid: HashMap::new(),
         };
         // TODO await on jh
         let jh = tokio::spawn(CaConnSet::run(connset));
@@ -458,6 +454,10 @@ impl CaConnSet {
             idcnt: 0,
             rng: stats::xoshiro_from_time(),
         }
+    }
+
+    fn new_self_ticker() -> Pin<Box<tokio::time::Sleep>> {
+        Box::pin(tokio::time::sleep(Duration::from_millis(500)))
     }
 
     async fn run(mut this: CaConnSet) -> Result<(), Error> {
@@ -498,7 +498,6 @@ impl CaConnSet {
                 ConnSetCmd::ChannelRemove(x) => self.handle_remove_channel(x),
                 // ConnSetCmd::IocAddrQueryResult(x) => self.handle_ioc_query_result(x).await,
                 // ConnSetCmd::SeriesLookupResult(x) => self.handle_series_lookup_result(x).await,
-                ConnSetCmd::CheckHealth(id, ts1) => self.handle_check_health(id, ts1),
                 ConnSetCmd::Shutdown => self.handle_shutdown(),
                 ConnSetCmd::ChannelStatuses(x) => self.handle_channel_statuses_req(x),
             },
@@ -517,13 +516,19 @@ impl CaConnSet {
         self.stats.channel_add().inc();
         // TODO should I add the transition through ActiveChannelState::Init as well?
         let ch = Channel::new(cmd.name.clone());
-        let _st = self.channel_states.inner().entry(ch).or_insert_with(|| ChannelState {
-            value: ChannelStateValue::Active(ActiveChannelState::WaitForStatusSeriesId {
-                since: SystemTime::now(),
-            }),
-            running_cmd_id: None,
-            health_timeout_count: 0,
-        });
+        let _st = if let Some(e) = self.channel_states.get_mut(&ch) {
+            e
+        } else {
+            let item = ChannelState {
+                value: ChannelStateValue::Active(ActiveChannelState::WaitForStatusSeriesId {
+                    since: SystemTime::now(),
+                }),
+                running_cmd_id: None,
+                health_timeout_count: 0,
+            };
+            self.channel_states.insert(ch.clone(), item);
+            self.channel_states.get_mut(&ch).unwrap()
+        };
         let tx = self.channel_info_res_tx.as_ref().get_ref().clone();
         let item = ChannelInfoQuery {
             backend: cmd.backend,
@@ -545,13 +550,17 @@ impl CaConnSet {
             CaConnEventValue::EchoTimeout => Ok(()),
             CaConnEventValue::ConnCommandResult(x) => self.handle_conn_command_result(addr, x),
             CaConnEventValue::QueryItem(item) => {
-                todo!("remove this insert case");
+                error!("TODO remove this insert case");
                 // self.storage_insert_queue.push_back(item);
                 Ok(())
             }
             CaConnEventValue::ChannelCreateFail(x) => self.handle_channel_create_fail(addr, x),
             CaConnEventValue::EndOfStream => self.handle_ca_conn_eos(addr),
             CaConnEventValue::ConnectFail => self.handle_connect_fail(addr),
+            CaConnEventValue::ChannelStatus(st) => {
+                error!("TODO handle_ca_conn_event update channel status view");
+                Ok(())
+            }
         }
     }
 
@@ -562,10 +571,12 @@ impl CaConnSet {
         trace3!("handle_series_lookup_result  {res:?}");
         match res {
             Ok(res) => {
+                let cssid = ChannelStatusSeriesId::new(res.series.into_inner().id());
+                self.name_by_cssid.insert(cssid.clone(), res.channel.clone());
                 let add = ChannelAddWithStatusId {
                     backend: res.backend,
                     name: res.channel,
-                    cssid: ChannelStatusSeriesId::new(res.series.into_inner().id()),
+                    cssid,
                 };
                 self.handle_add_channel_with_status_id(add)?;
             }
@@ -587,7 +598,7 @@ impl CaConnSet {
             debug!("handle_add_channel_with_status_id  {cmd:?}");
         }
         let ch = Channel::new(cmd.name.clone());
-        if let Some(chst) = self.channel_states.inner().get_mut(&ch) {
+        if let Some(chst) = self.channel_states.get_mut(&ch) {
             if let ChannelStateValue::Active(chst2) = &mut chst.value {
                 if let ActiveChannelState::WaitForStatusSeriesId { .. } = chst2 {
                     *chst2 = ActiveChannelState::WithStatusSeriesId {
@@ -631,7 +642,7 @@ impl CaConnSet {
             debug!("handle_add_channel_with_addr  {cmd:?}");
         }
         let ch = Channel::new(cmd.name.clone());
-        if let Some(chst) = self.channel_states.inner().get_mut(&ch) {
+        if let Some(chst) = self.channel_states.get_mut(&ch) {
             if let ChannelStateValue::Active(ast) = &mut chst.value {
                 if let ActiveChannelState::WithStatusSeriesId {
                     status_series_id: _,
@@ -669,7 +680,7 @@ impl CaConnSet {
             return Ok(());
         }
         let ch = Channel::new(cmd.name);
-        if let Some(k) = self.channel_states.inner().get_mut(&ch) {
+        if let Some(k) = self.channel_states.get_mut(&ch) {
             match &k.value {
                 ChannelStateValue::Active(j) => match j {
                     ActiveChannelState::Init { .. } => {
@@ -717,7 +728,7 @@ impl CaConnSet {
             if trigger.contains(&ch.id()) {
                 debug!("handle_ioc_query_result  {res:?}");
             }
-            if let Some(chst) = self.channel_states.inner().get_mut(&ch) {
+            if let Some(chst) = self.channel_states.get_mut(&ch) {
                 if let ChannelStateValue::Active(ast) = &mut chst.value {
                     if let ActiveChannelState::WithStatusSeriesId {
                         status_series_id,
@@ -764,33 +775,20 @@ impl CaConnSet {
         Ok(())
     }
 
-    fn handle_check_health(&mut self, id: u32, ts1: Instant) -> Result<(), Error> {
-        trace2!("handle_check_health {id:08x}");
+    fn handle_check_health(&mut self) -> Result<(), Error> {
+        trace2!("handle_check_health");
         if self.shutdown_stopping {
-            return Ok(());
+            Ok(())
+        } else {
+            if false {
+                self.thr_msg_storage_len
+                    .trigger("connset handle_check_health", &[&self.storage_insert_sender.len()]);
+            }
+            self.check_channel_states()?;
+            let item = CaConnSetItem::Healthy;
+            self.connset_out_queue.push_back(item);
+            Ok(())
         }
-        if false {
-            self.thr_msg_storage_len
-                .trigger("connset handle_check_health", &[&self.storage_insert_sender.len()]);
-        }
-        self.check_channel_states()?;
-
-        // Trigger already the next health check, but use the current data that we have.
-        // TODO do the full check before sending the reply to daemon.
-        for (_, res) in self.ca_conn_ress.iter_mut() {
-            let item = ConnCommand::check_health();
-            res.cmd_queue.push_back(item);
-            trace2!(
-                "handle_check_health pushed check command  {:?}  {:?}",
-                res.cmd_queue.len(),
-                res.sender.len()
-            );
-        }
-
-        let ts2 = Instant::now();
-        let item = CaConnSetItem::Healthy(id, ts1, ts2);
-        self.connset_out_queue.push_back(item);
-        Ok(())
     }
 
     fn handle_channel_statuses_req(&mut self, req: ChannelStatusesRequest) -> Result<(), Error> {
@@ -801,7 +799,6 @@ impl CaConnSet {
         let reg1 = regex::Regex::new(&req.name)?;
         let channels_ca_conn_set = self
             .channel_states
-            .inner()
             .iter()
             .filter(|(k, _)| reg1.is_match(k.id()))
             .map(|(k, v)| (k.id().to_string(), v.clone()))
@@ -835,17 +832,23 @@ impl CaConnSet {
     fn handle_conn_command_result(&mut self, addr: SocketAddr, res: ConnCommandResult) -> Result<(), Error> {
         use crate::ca::conn::ConnCommandResultKind::*;
         match res.kind {
-            CheckHealth(res) => self.apply_ca_conn_health_update(addr, res),
+            Unused => Ok(()),
+            //CheckHealth(res) => self.apply_ca_conn_health_update(addr, res),
         }
     }
 
-    fn apply_ca_conn_health_update(&mut self, addr: SocketAddr, res: CheckHealthResult) -> Result<(), Error> {
+    fn apply_ca_conn_health_update(&mut self, addr: SocketAddr, res: ChannelStatusPartial) -> Result<(), Error> {
         trace2!("apply_ca_conn_health_update  {addr}");
         let tsnow = SystemTime::now();
         self.rogue_channel_count = 0;
         for (k, v) in res.channel_statuses {
-            let ch = Channel::new(k);
-            if let Some(st1) = self.channel_states.inner().get_mut(&ch) {
+            let name = if let Some(x) = self.name_by_cssid.get(&v.cssid) {
+                x
+            } else {
+                return Err(Error::with_msg_no_trace(format!("unknown cssid {:?}", v.cssid)));
+            };
+            let ch = Channel::new(name.clone());
+            if let Some(st1) = self.channel_states.get_mut(&ch) {
                 if let ChannelStateValue::Active(st2) = &mut st1.value {
                     if let ActiveChannelState::WithStatusSeriesId {
                         status_series_id: _,
@@ -888,7 +891,7 @@ impl CaConnSet {
         trace!("handle_channel_create_fail {addr} {name}");
         let tsnow = SystemTime::now();
         let ch = Channel::new(name);
-        if let Some(st1) = self.channel_states.inner().get_mut(&ch) {
+        if let Some(st1) = self.channel_states.get_mut(&ch) {
             if let ChannelStateValue::Active(st2) = &mut st1.value {
                 if let ActiveChannelState::WithStatusSeriesId {
                     status_series_id: _,
@@ -921,7 +924,7 @@ impl CaConnSet {
     fn handle_connect_fail(&mut self, addr: SocketAddr) -> Result<(), Error> {
         trace2!("handle_connect_fail {addr}");
         let tsnow = SystemTime::now();
-        for (ch, st1) in self.channel_states.inner().iter_mut() {
+        for (ch, st1) in self.channel_states.iter_mut() {
             match &mut st1.value {
                 ChannelStateValue::Active(st2) => match st2 {
                     ActiveChannelState::Init { since: _ } => {}
@@ -1033,32 +1036,13 @@ impl CaConnSet {
                                 break;
                             }
                         }
-                        CaConnEventValue::None => {
-                            if let Err(_) = tx1.send((addr, item)).await {
-                                break;
-                            }
-                        }
-                        CaConnEventValue::EchoTimeout => {
-                            if let Err(_) = tx1.send((addr, item)).await {
-                                break;
-                            }
-                        }
-                        CaConnEventValue::ConnCommandResult(_) => {
-                            if let Err(_) = tx1.send((addr, item)).await {
-                                break;
-                            }
-                        }
-                        CaConnEventValue::ChannelCreateFail(_) => {
-                            if let Err(_) = tx1.send((addr, item)).await {
-                                break;
-                            }
-                        }
-                        CaConnEventValue::EndOfStream => {
-                            if let Err(_) = tx1.send((addr, item)).await {
-                                break;
-                            }
-                        }
-                        CaConnEventValue::ConnectFail => {
+                        CaConnEventValue::None
+                        | CaConnEventValue::EchoTimeout
+                        | CaConnEventValue::ConnCommandResult(..)
+                        | CaConnEventValue::ChannelCreateFail(..)
+                        | CaConnEventValue::EndOfStream
+                        | CaConnEventValue::ConnectFail
+                        | CaConnEventValue::ChannelStatus(..) => {
                             if let Err(_) = tx1.send((addr, item)).await {
                                 break;
                             }
@@ -1240,9 +1224,9 @@ impl CaConnSet {
         let k = self.chan_check_next.take();
         let it = if let Some(last) = k {
             trace!("check_chans  start at {:?}", last);
-            self.channel_states.inner().range_mut(last..)
+            self.channel_states.range_mut(last..)
         } else {
-            self.channel_states.inner().range_mut(..)
+            self.channel_states.range_mut(..)
         };
 
         let tsnow = SystemTime::now();
@@ -1306,11 +1290,14 @@ impl CaConnSet {
                                     }
                                 }
                                 Assigned(st4) => {
+                                    if st4.updated + CHANNEL_HEALTH_TIMEOUT / 3 < tsnow {
+                                        warn!("soon health timeout  channel {ch:?}  ~~~~~~~~~~~~~~~~~~~");
+                                    }
                                     if st4.updated + CHANNEL_HEALTH_TIMEOUT < tsnow {
                                         self.stats.channel_health_timeout().inc();
                                         trace!("health timeout  channel {ch:?}  ~~~~~~~~~~~~~~~~~~~");
                                         // TODO
-                                        error!("health timeout  channel {ch:?}  ~~~~~~~~~~~~~~~~~~~");
+                                        error!("TODO  health timeout  channel {ch:?}  ~~~~~~~~~~~~~~~~~~~");
                                         std::process::exit(1);
                                         let addr = SocketAddr::V4(*addr_v4);
                                         cmd_remove_channel.push((addr, ch.clone()));
@@ -1385,7 +1372,7 @@ impl CaConnSet {
         let mut connected = 0;
         let mut maybe_wrong_address = 0;
         let mut assigned_without_health_update = 0;
-        for (_ch, st) in self.channel_states.inner().iter() {
+        for (_ch, st) in self.channel_states.iter() {
             match &st.value {
                 ChannelStateValue::Active(st2) => match st2 {
                     ActiveChannelState::Init { .. } => {
@@ -1477,16 +1464,28 @@ impl CaConnSet {
         }
         Ok(())
     }
+
+    fn handle_own_ticker_tick(mut self: Pin<&mut Self>, cx: &mut Context) -> Result<(), Error> {
+        debug!("handle_own_ticker_tick  {}", Self::self_name());
+        if !self.ready_for_end_of_stream() {
+            self.ticker = Self::new_self_ticker();
+            let _ = self.ticker.poll_unpin(cx);
+            // cx.waker().wake_by_ref();
+        }
+        self.handle_check_health()?;
+        Ok(())
+    }
 }
 
 impl Stream for CaConnSet {
     type Item = CaConnSetItem;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
-        trace4!("CaConnSet  poll  begin");
         use Poll::*;
+        trace4!("CaConnSet  poll  begin");
+        let poll_ts1 = Instant::now();
         self.stats.poll_fn_begin().inc();
-        let res = loop {
+        let ret = loop {
             trace4!("CaConnSet  poll  loop");
             self.stats.poll_loop_begin().inc();
 
@@ -1517,6 +1516,22 @@ impl Stream for CaConnSet {
 
             if let Some(item) = self.connset_out_queue.pop_front() {
                 break Ready(Some(item));
+            }
+
+            match self.ticker.poll_unpin(cx) {
+                Ready(()) => match self.as_mut().handle_own_ticker_tick(cx) {
+                    Ok(()) => {
+                        have_progress = true;
+                    }
+                    Err(e) => {
+                        have_progress = true;
+                        error!("ticker {e}");
+                        break Ready(Some(CaConnSetItem::Error(e)));
+                    }
+                },
+                Pending => {
+                    have_pending = true;
+                }
             }
 
             if let Some((addr, jh)) = self.await_ca_conn_jhs.front_mut() {
@@ -1591,6 +1606,7 @@ impl Stream for CaConnSet {
             }
 
             if self.channel_info_query_sender.is_idle() {
+                // if self.channel_info_query_sender.len().unwrap_or(0) <= 10 {}
                 if let Some(item) = self.channel_info_query_queue.pop_front() {
                     self.channel_info_query_sender.as_mut().send_pin(item);
                 }
@@ -1690,6 +1706,15 @@ impl Stream for CaConnSet {
             };
         };
         trace4!("CaConnSet  poll  done");
-        res
+        let poll_ts2 = Instant::now();
+        let dt = poll_ts2.saturating_duration_since(poll_ts1);
+        if dt > Duration::from_millis(80) {
+            warn!("long poll duration {:.0} ms", dt.as_secs_f32() * 1e3)
+        } else if dt > Duration::from_millis(40) {
+            info!("long poll duration {:.0} ms", dt.as_secs_f32() * 1e3)
+        } else if dt > Duration::from_millis(5) {
+            debug!("long poll duration {:.0} ms", dt.as_secs_f32() * 1e3)
+        }
+        ret
     }
 }

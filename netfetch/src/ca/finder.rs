@@ -1,12 +1,9 @@
-use super::connset::CaConnSetEvent;
 use super::connset::IocAddrQuery;
 use super::connset::CURRENT_SEARCH_PENDING_MAX;
 use super::connset::SEARCH_BATCH_MAX;
 use super::search::ca_search_workers_start;
 use crate::ca::findioc::FindIocRes;
-use crate::ca::findioc::FindIocStream;
 use crate::conf::CaIngestOpts;
-use crate::daemon_common::DaemonEvent;
 use async_channel::Receiver;
 use async_channel::Sender;
 use dbpg::conn::make_pg_client;
@@ -14,16 +11,11 @@ use dbpg::iocindex::IocItem;
 use dbpg::iocindex::IocSearchIndexWorker;
 use dbpg::postgres::Row as PgRow;
 use err::Error;
-use futures_util::FutureExt;
-use futures_util::StreamExt;
 use log::*;
 use netpod::Database;
 use stats::IocFinderStats;
 use std::collections::HashMap;
 use std::collections::VecDeque;
-use std::net::SocketAddrV4;
-use std::sync::atomic;
-use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
@@ -31,10 +23,6 @@ use taskrun::tokio;
 use tokio::task::JoinHandle;
 
 const SEARCH_DB_PIPELINE_LEN: usize = 4;
-const FINDER_JOB_QUEUE_LEN_MAX: usize = 10;
-const FINDER_BATCH_SIZE: usize = 8;
-const FINDER_IN_FLIGHT_MAX: usize = 800;
-const FINDER_TIMEOUT: Duration = Duration::from_millis(100);
 
 #[allow(unused)]
 macro_rules! debug_batch {

@@ -2,7 +2,7 @@ use crate::ca::connset::CaConnSetItem;
 use async_channel::Sender;
 use serde::Serialize;
 
-#[derive(Clone, Debug, Serialize, PartialEq, PartialOrd, Eq, Ord)]
+#[derive(Clone, Debug, Serialize, PartialEq, PartialOrd, Eq, Ord, Hash)]
 pub struct Channel {
     id: String,
 }

@@ -10,7 +10,11 @@ use futures_util::FutureExt;
 use netpod::timeunits::SEC;
 use netpod::ScalarType;
 use netpod::Shape;
+use scylla::frame::value::Value;
+use scylla::frame::value::ValueList;
 use scylla::prepared_statement::PreparedStatement;
+use scylla::serialize::row::SerializeRow;
+use scylla::serialize::value::SerializeCql;
 use scylla::transport::errors::DbError;
 use scylla::transport::errors::QueryError;
 use scylla::QueryResult;
@@ -18,7 +22,6 @@ use series::ChannelStatusSeriesId;
 use series::SeriesId;
 use smallvec::smallvec;
 use smallvec::SmallVec;
-use stackfuture::StackFuture;
 use stats::InsertWorkerStats;
 use std::net::SocketAddrV4;
 use std::pin::Pin;
@@ -278,7 +281,7 @@ struct InsParCom {
 
 fn insert_scalar_gen_fut<ST>(par: InsParCom, val: ST, qu: Arc<PreparedStatement>, scy: Arc<ScySession>) -> InsertFut
 where
-    ST: scylla::frame::value::Value + Send + 'static,
+    ST: Value + SerializeCql + Send + 'static,
 {
     let params = (
         par.series as i64,
@@ -293,7 +296,7 @@ where
 
 fn insert_array_gen_fut<ST>(par: InsParCom, val: ST, qu: Arc<PreparedStatement>, scy: Arc<ScySession>) -> InsertFut
 where
-    ST: scylla::frame::value::Value + Send + 'static,
+    ST: Value + SerializeCql + Send + 'static,
 {
     let params = (
         par.series as i64,
@@ -318,7 +321,7 @@ pub struct InsertFut {
 }
 
 impl InsertFut {
-    pub fn new<V: scylla::frame::value::ValueList + Send + 'static>(
+    pub fn new<V: ValueList + SerializeRow + Send + 'static>(
         scy: Arc<ScySession>,
         qu: Arc<PreparedStatement>,
         params: V,
@@ -363,7 +366,7 @@ async fn insert_scalar_gen<ST>(
     data_store: &DataStore,
 ) -> Result<(), Error>
 where
-    ST: scylla::frame::value::Value,
+    ST: Value + SerializeCql,
 {
     let params = (
         par.series as i64,
@@ -399,7 +402,7 @@ async fn insert_array_gen<ST>(
     data_store: &DataStore,
 ) -> Result<(), Error>
 where
-    ST: scylla::frame::value::Value,
+    ST: Value + SerializeCql,
 {
     if par.do_insert {
         let params = (

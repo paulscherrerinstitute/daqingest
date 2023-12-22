@@ -4,7 +4,7 @@ use futures_util::Future;
 use futures_util::FutureExt;
 use netpod::log::*;
 use scylla::batch::Batch;
-use scylla::frame::value::BatchValues;
+use scylla::serialize::batch::BatchValues;
 use scylla::transport::errors::QueryError;
 use scylla::QueryResult;
 use std::pin::Pin;

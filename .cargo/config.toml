@@ -9,7 +9,7 @@ rustflags = [
     #"-C", "inline-threshold=1000",
     #"-Z", "time-passes=yes",
     #"-Z", "time-llvm-passes=yes",
-    #"--cfg", "tokio_unstable",
+    "--cfg", "tokio_unstable",
 ]
 
 rustdocflags = [

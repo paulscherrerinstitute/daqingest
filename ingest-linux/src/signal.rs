@@ -1,10 +1,8 @@
-use log::*;
 use std::ffi::CStr;
 use std::mem::MaybeUninit;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
-#[error("{self}")]
 pub enum Error {
     SignalHandlerSet,
     SignalHandlerUnset,
