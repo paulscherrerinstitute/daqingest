@@ -35,6 +35,7 @@ slidebuf = "0.0.1"
 dashmap = "5.5.3"
 log = { path = "../log" }
 series = { path = "../series" }
+serieswriter = { path = "../serieswriter" }
 stats = { path = "../stats" }
 scywr = { path = "../scywr" }
 dbpg = { path = "../dbpg" }

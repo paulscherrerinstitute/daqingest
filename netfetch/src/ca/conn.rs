@@ -37,6 +37,7 @@ use scywriiq::InsertItem;
 use scywriiq::IvlItem;
 use scywriiq::MuteItem;
 use scywriiq::QueryItem;
+use serde::Deserialize;
 use serde::Serialize;
 use series::ChannelStatusSeriesId;
 use series::SeriesId;
@@ -93,7 +94,7 @@ macro_rules! trace4 {
     };
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum ChannelConnectedInfo {
     Disconnected,
     Connecting,
@@ -102,7 +103,7 @@ pub enum ChannelConnectedInfo {
     Ended,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ChannelStateInfo {
     pub cssid: ChannelStatusSeriesId,
     pub addr: SocketAddrV4,
@@ -112,10 +113,10 @@ pub struct ChannelStateInfo {
     pub shape: Option<Shape>,
     // NOTE: this solution can yield to the same Instant serialize to different string representations.
     // #[serde(skip_serializing_if = "Option::is_none")]
-    #[serde(serialize_with = "ser_instant")]
+    #[serde(with = "ser_instant")]
     pub ts_created: Option<Instant>,
     // #[serde(skip_serializing_if = "Option::is_none")]
-    #[serde(serialize_with = "ser_instant")]
+    #[serde(with = "ser_instant")]
     pub ts_event_last: Option<Instant>,
     pub recv_count: Option<u64>,
     // #[serde(skip_serializing_if = "Option::is_none")]
@@ -123,30 +124,47 @@ pub struct ChannelStateInfo {
     pub interest_score: f32,
 }
 
-fn ser_instant<S: serde::Serializer>(val: &Option<Instant>, ser: S) -> Result<S::Ok, S::Error> {
-    match val {
-        Some(val) => {
-            let now = chrono::Utc::now();
-            let tsnow = Instant::now();
-            let t1 = if tsnow >= *val {
-                let dur = tsnow.duration_since(*val);
-                let dur2 = chrono::Duration::seconds(dur.as_secs() as i64)
-                    .checked_add(&chrono::Duration::microseconds(dur.subsec_micros() as i64))
-                    .unwrap();
-                now.checked_sub_signed(dur2).unwrap()
-            } else {
-                let dur = (*val).duration_since(tsnow);
-                let dur2 = chrono::Duration::seconds(dur.as_secs() as i64)
-                    .checked_sub(&chrono::Duration::microseconds(dur.subsec_micros() as i64))
-                    .unwrap();
-                now.checked_add_signed(dur2).unwrap()
-            };
-            //info!("formatting {:?}", t1);
-            let s = t1.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
-            //info!("final string {:?}", s);
-            ser.serialize_str(&s)
+mod ser_instant {
+    use super::*;
+    use serde::Deserializer;
+    use serde::Serializer;
+
+    pub fn serialize<S>(val: &Option<Instant>, ser: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match val {
+            Some(val) => {
+                let now = chrono::Utc::now();
+                let tsnow = Instant::now();
+                let t1 = if tsnow >= *val {
+                    let dur = tsnow.duration_since(*val);
+                    let dur2 = chrono::Duration::seconds(dur.as_secs() as i64)
+                        .checked_add(&chrono::Duration::microseconds(dur.subsec_micros() as i64))
+                        .unwrap();
+                    now.checked_sub_signed(dur2).unwrap()
+                } else {
+                    let dur = (*val).duration_since(tsnow);
+                    let dur2 = chrono::Duration::seconds(dur.as_secs() as i64)
+                        .checked_sub(&chrono::Duration::microseconds(dur.subsec_micros() as i64))
+                        .unwrap();
+                    now.checked_add_signed(dur2).unwrap()
+                };
+                //info!("formatting {:?}", t1);
+                let s = t1.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
+                //info!("final string {:?}", s);
+                ser.serialize_str(&s)
+            }
+            None => ser.serialize_none(),
         }
-        None => ser.serialize_none(),
+    }
+
+    pub fn deserialize<'de, D>(de: D) -> Result<Option<Instant>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let e = serde::de::Error::custom("todo deserialize for ser_instant");
+        Err(e)
     }
 }
 
@@ -552,7 +570,7 @@ pub struct CaConn {
     cid_by_subid: HashMap<Subid, Cid>,
     name_by_cid: HashMap<Cid, String>,
     time_binners: HashMap<Cid, ConnTimeBin>,
-    channel_status_last_done: Option<Cid>,
+    channel_status_emit_last: Instant,
     init_state_count: u64,
     insert_item_queue: VecDeque<QueryItem>,
     remote_addr_dbg: SocketAddrV4,
@@ -570,6 +588,7 @@ pub struct CaConn {
     ioc_ping_start: Option<Instant>,
     storage_insert_sender: Pin<Box<SenderPolling<VecDeque<QueryItem>>>>,
     ca_conn_event_out_queue: VecDeque<CaConnEvent>,
+    ca_conn_event_out_queue_max: usize,
     channel_info_query_queue: VecDeque<ChannelInfoQuery>,
     channel_info_query_sending: Pin<Box<SenderPolling<ChannelInfoQuery>>>,
     thr_msg_poll: ThrottleTrace,
@@ -612,7 +631,7 @@ impl CaConn {
             cid_by_subid: HashMap::new(),
             name_by_cid: HashMap::new(),
             time_binners: HashMap::new(),
-            channel_status_last_done: None,
+            channel_status_emit_last: Instant::now(),
             insert_item_queue: VecDeque::new(),
             remote_addr_dbg,
             local_epics_hostname,
@@ -629,6 +648,7 @@ impl CaConn {
             ioc_ping_start: None,
             storage_insert_sender: Box::pin(SenderPolling::new(storage_insert_tx)),
             ca_conn_event_out_queue: VecDeque::new(),
+            ca_conn_event_out_queue_max: 2000,
             channel_info_query_queue: VecDeque::new(),
             channel_info_query_sending: Box::pin(SenderPolling::new(channel_info_query_tx)),
             thr_msg_poll: ThrottleTrace::new(Duration::from_millis(10000)),
@@ -713,38 +733,38 @@ impl CaConn {
         // TODO
         // Time this, is it fast enough?
 
-        let mut kit = self.cid_by_name.values();
-        if let Some(mut kk) = kit.next().map(Clone::clone) {
-            let mut start = Some(kk.clone());
-            if let Some(last) = self.channel_status_last_done.take() {
-                while kk <= last {
-                    kk = if let Some(x) = kit.next().map(Clone::clone) {
-                        start = Some(x.clone());
-                        x
-                    } else {
-                        start = None;
-                        break;
-                    };
-                }
-            }
-            if let Some(mut kk) = start {
-                loop {
-                    kk = if let Some(x) = kit.next().map(Clone::clone) {
-                        x
-                    } else {
-                        break;
-                    };
-                }
-            } else {
-                // Nothing to do, will continue on next call from front.
-            }
-        }
-        while let Some(kk) = kit.next() {}
-        let mut channel_statuses = BTreeMap::new();
-        for (k, v) in self.channels.iter() {
-            let info = v.to_info(v.cssid(), self.remote_addr_dbg);
-            channel_statuses.insert(v.cssid(), info);
-        }
+        // let mut kit = self.cid_by_name.values();
+        // if let Some(mut kk) = kit.next().map(Clone::clone) {
+        //     let mut start = Some(kk.clone());
+        //     if let Some(last) = self.channel_status_last_done.take() {
+        //         while kk <= last {
+        //             kk = if let Some(x) = kit.next().map(Clone::clone) {
+        //                 start = Some(x.clone());
+        //                 x
+        //             } else {
+        //                 start = None;
+        //                 break;
+        //             };
+        //         }
+        //     }
+        //     if let Some(mut kk) = start {
+        //         loop {
+        //             kk = if let Some(x) = kit.next().map(Clone::clone) {
+        //                 x
+        //             } else {
+        //                 break;
+        //             };
+        //         }
+        //     } else {
+        //         // Nothing to do, will continue on next call from front.
+        //     }
+        // }
+        // while let Some(kk) = kit.next() {}
+        // let mut channel_statuses = BTreeMap::new();
+        // for (k, v) in self.channels.iter() {
+        //     let info = v.to_info(v.cssid(), self.remote_addr_dbg);
+        //     channel_statuses.insert(v.cssid(), info);
+        // }
     }
 
     fn cmd_find_channel(&self, pattern: &str) {
@@ -1968,9 +1988,13 @@ impl CaConn {
         }
     }
 
-    fn handle_own_ticker_tick(self: Pin<&mut Self>, _cx: &mut Context) -> Result<(), Error> {
+    fn handle_own_ticker_tick(mut self: Pin<&mut Self>, _cx: &mut Context) -> Result<(), Error> {
         // debug!("tick  CaConn  {}", self.remote_addr_dbg);
         let tsnow = Instant::now();
+        // TODO add some random variation
+        if self.channel_status_emit_last + Duration::from_millis(3000) <= tsnow {
+            self.emit_channel_status()?;
+        }
         // TODO use safe version
         let this = unsafe { self.get_unchecked_mut() };
         match &this.state {
@@ -1996,22 +2020,28 @@ impl CaConn {
         Ok(())
     }
 
-    fn emit_channel_status(&mut self) {
-        // TODO limit the queue length.
-        // Maybe factor the actual push item into new function.
-        // What to do if limit reached?
-        // Increase some error counter.
-
-        // if self.ca_conn_event_out_queue.len()>
-
-        let val = ChannelStatusPartial {
-            channel_statuses: Default::default(),
-        };
+    fn emit_channel_status(&mut self) -> Result<(), Error> {
+        let mut channel_statuses = BTreeMap::new();
+        for e in self.channels.iter() {
+            let ch = &e.1;
+            let chinfo = ch.to_info(ch.cssid(), self.remote_addr_dbg);
+            channel_statuses.insert(ch.cssid(), chinfo);
+        }
+        let val = ChannelStatusPartial { channel_statuses };
         let item = CaConnEvent {
             ts: Instant::now(),
             value: CaConnEventValue::ChannelStatus(val),
         };
-        self.ca_conn_event_out_queue.push_back(item);
+        // TODO limit the queue length.
+        // Maybe factor the actual push item into new function.
+        // What to do if limit reached?
+        // Increase some error counter.
+        if self.ca_conn_event_out_queue.len() > self.ca_conn_event_out_queue_max {
+            self.stats.out_queue_full().inc();
+        } else {
+            self.ca_conn_event_out_queue.push_back(item);
+        }
+        Ok(())
     }
 
     fn check_ticker_connecting_timeout(&mut self, since: Instant) -> Result<(), Error> {

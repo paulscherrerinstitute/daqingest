@@ -5,6 +5,7 @@ use err::thiserror;
 use err::ThisError;
 use futures_util::Future;
 use futures_util::StreamExt;
+use futures_util::TryFutureExt;
 use log::*;
 use md5::Digest;
 use netpod::Database;
@@ -61,6 +62,14 @@ pub trait CanSendChannelInfoResult: Sync {
     fn make_send(&self, item: Result<ChannelInfoResult, Error>) -> BoxedSend;
 }
 
+impl CanSendChannelInfoResult for async_channel::Sender<Result<ChannelInfoResult, Error>> {
+    fn make_send(&self, item: Result<ChannelInfoResult, Error>) -> BoxedSend {
+        let tx = self.clone();
+        let fut = async move { tx.send(item).map_err(|_| ()).await };
+        Box::pin(fut)
+    }
+}
+
 pub struct ChannelInfoQuery {
     pub backend: String,
     pub channel: String,
@@ -100,6 +109,7 @@ struct Worker {
     qu_insert: PgStatement,
     batch_rx: Receiver<Vec<ChannelInfoQuery>>,
     stats: Arc<SeriesByChannelStats>,
+    pg_client_jh: JoinHandle<Result<(), crate::err::Error>>,
 }
 
 impl Worker {
@@ -108,7 +118,7 @@ impl Worker {
         batch_rx: Receiver<Vec<ChannelInfoQuery>>,
         stats: Arc<SeriesByChannelStats>,
     ) -> Result<Self, Error> {
-        let (pg, jh) = crate::conn::make_pg_client(db).await?;
+        let (pg, pg_client_jh) = crate::conn::make_pg_client(db).await?;
         let sql = concat!(
             "with q1 as (select * from unnest($1::text[], $2::text[], $3::int[], $4::text[], $5::int[])",
             " as inp (backend, channel, scalar_type, shape_dims, rid))",
@@ -133,6 +143,7 @@ impl Worker {
             qu_insert,
             batch_rx,
             stats,
+            pg_client_jh,
         };
         Ok(ret)
     }

@@ -381,6 +381,7 @@ stats_proc::stats_struct!((
             inserts_queue_drop,
             insert_item_queue_pressure,
             insert_item_queue_full,
+            out_queue_full,
             channel_fast_item_drop,
             logic_error,
             // TODO maybe rename: this is now only the recv of the intermediate queue:

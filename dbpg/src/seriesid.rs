@@ -18,13 +18,12 @@ pub enum Error {
     CanNotInsertSeriesId,
 }
 
-// TODO don't need byte_order or compression from ChannelDescDecoded for channel registration.
-pub async fn get_series_id(
+async fn _get_series_id(
+    backend: &str,
     name: &str,
     scalar_type: &ScalarType,
     shape: &Shape,
     pg_client: &PgClient,
-    backend: String,
 ) -> Result<Existence<SeriesId>, Error> {
     let channel_name = name;
     let scalar_type = scalar_type.to_scylla_i32();
