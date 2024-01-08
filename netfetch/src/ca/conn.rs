@@ -18,6 +18,7 @@ use log::*;
 use netpod::timeunits::*;
 use netpod::ScalarType;
 use netpod::Shape;
+use netpod::TsNano;
 use netpod::TS_MSP_GRID_SPACING;
 use netpod::TS_MSP_GRID_UNIT;
 use proto::CaItem;
@@ -27,6 +28,7 @@ use proto::CaProto;
 use proto::CreateChan;
 use proto::EventAdd;
 use scywr::iteminsertqueue as scywriiq;
+use scywr::iteminsertqueue::DataValue;
 use scywriiq::ChannelInfoItem;
 use scywriiq::ChannelStatus;
 use scywriiq::ChannelStatusClosedReason;
@@ -41,6 +43,7 @@ use serde::Deserialize;
 use serde::Serialize;
 use series::ChannelStatusSeriesId;
 use series::SeriesId;
+use serieswriter::writer::SeriesWriter;
 use stats::rand_xoshiro::rand_core::RngCore;
 use stats::rand_xoshiro::rand_core::SeedableRng;
 use stats::rand_xoshiro::Xoshiro128PlusPlus;
@@ -1223,7 +1226,7 @@ impl CaConn {
         shape: Shape,
         ts: u64,
         ts_local: u64,
-        ev: proto::EventAddRes,
+        val: DataValue,
         item_queue: &mut VecDeque<QueryItem>,
         ts_msp_last: u64,
         ts_msp_grid: Option<u32>,
@@ -1254,11 +1257,13 @@ impl CaConn {
             pulse: 0,
             scalar_type,
             shape,
-            val: ev.value.data.into(),
+            val,
             ts_msp_grid,
             ts_local,
         };
         item_queue.push_back(QueryItem::Insert(item));
+
+        // TODO count these events also when using SeriesWriter
         stats.insert_item_create.inc();
         Ok(())
     }
@@ -1286,7 +1291,9 @@ impl CaConn {
         let dt = (ivl_min - ema).max(0.) / em.k();
         st.insert_next_earliest = tsnow + Duration::from_micros((dt * 1e6) as u64);
         let ts_msp_last = st.ts_msp_last;
+
         // TODO get event timestamp from channel access field
+
         let ts_msp_grid = (ts / TS_MSP_GRID_UNIT / TS_MSP_GRID_SPACING * TS_MSP_GRID_SPACING) as u32;
         let ts_msp_grid = if st.ts_msp_grid_last != ts_msp_grid {
             st.ts_msp_grid_last = ts_msp_grid;
@@ -1294,6 +1301,8 @@ impl CaConn {
         } else {
             None
         };
+
+        let val: DataValue = ev.value.data.into();
         for (i, &(m, l)) in extra_inserts_conf.copies.iter().enumerate().rev() {
             if *inserts_counter % m == l {
                 Self::event_add_insert(
@@ -1303,7 +1312,7 @@ impl CaConn {
                     shape.clone(),
                     ts - 1 - i as u64,
                     ts_local - 1 - i as u64,
-                    ev.clone(),
+                    val.clone(),
                     item_queue,
                     ts_msp_last,
                     ts_msp_grid,
@@ -1318,12 +1327,17 @@ impl CaConn {
             shape,
             ts,
             ts_local,
-            ev,
+            val.clone(),
             item_queue,
             ts_msp_last,
             ts_msp_grid,
             stats,
         )?;
+        let writer: &mut SeriesWriter = err::todoval();
+
+        // TODO must give the writer also a &mut Trait where it can append some item.
+        writer.write(TsNano::from_ns(ts), TsNano::from_ns(ts_local), val, item_queue);
+
         *inserts_counter += 1;
         Ok(())
     }
@@ -1353,8 +1367,6 @@ impl CaConn {
             let name = self.name_by_cid(cid);
             info!("event {name:?} {ev:?}");
         }
-        // TODO handle not-found error:
-        let mut series_2 = None;
         let ch_s = if let Some(x) = self.channels.get_mut(&cid) {
             x
         } else {
@@ -1371,44 +1383,45 @@ impl CaConn {
             return Ok(());
         };
         match ch_s {
-            ChannelState::Created(_series, st) => {
+            ChannelState::Created(series_0, st) => {
                 st.ts_alive_last = tsnow;
                 st.item_recv_ivl_ema.tick(tsnow);
                 let scalar_type = st.scalar_type.clone();
                 let shape = st.shape.clone();
-                match &mut st.state {
+                let series = match &mut st.state {
                     MonitoringState::AddingEvent(series) => {
                         let series = series.clone();
-                        series_2 = Some(series.clone());
                         st.state = MonitoringState::Evented(
-                            series,
+                            series.clone(),
                             EventedState {
                                 ts_last: tsnow,
                                 recv_count: 0,
                                 recv_bytes: 0,
                             },
                         );
+                        series
                     }
                     MonitoringState::Evented(series, st) => {
-                        series_2 = Some(series.clone());
                         st.ts_last = tsnow;
+                        series.clone()
                     }
                     _ => {
-                        error!("unexpected state: EventAddRes while having {:?}", st.state);
+                        let e =
+                            Error::from_string(format!("unexpected state: EventAddRes while having {:?}", st.state));
+                        error!("{e}");
+                        return Err(e);
                     }
+                };
+                if series != *series_0 {
+                    let e = Error::with_msg_no_trace(format!(
+                        "event_add_res series != series_0  {series:?} != {series_0:?}"
+                    ));
+                    return Err(e);
                 }
                 if let MonitoringState::Evented(_, st2) = &mut st.state {
                     st2.recv_count += 1;
                     st2.recv_bytes += ev.payload_len as u64;
                 }
-                let series = match series_2 {
-                    Some(k) => k,
-                    None => {
-                        error!("handle_event_add_res  but no series");
-                        // TODO allow return Result
-                        return Err(format!("no series id on insert").into());
-                    }
-                };
                 let ts_local = {
                     let ts = SystemTime::now();
                     let epoch = ts.duration_since(std::time::UNIX_EPOCH).unwrap();

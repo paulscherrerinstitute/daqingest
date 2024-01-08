@@ -11,4 +11,7 @@ log = { path = "../log" }
 err = { path = "../../daqbuffer/crates/err" }
 netpod = { path = "../../daqbuffer/crates/netpod" }
 dbpg = { path = "../dbpg" }
+scywr = { path = "../scywr" }
 series = { path = "../series" }
+stats = { path = "../stats" }
+taskrun = { path = "../../daqbuffer/crates/taskrun" }

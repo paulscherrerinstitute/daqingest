@@ -67,6 +67,22 @@ async fn has_column(table: &str, column: &str, pgc: &PgClient) -> Result<bool, E
 }
 
 async fn migrate_00(pgc: &PgClient) -> Result<(), Error> {
+    let _ = pgc
+        .execute(
+            "
+create table if not exists series_by_channel (
+    series bigint not null primary key,
+    facility text not null,
+    channel text not null,
+    scalar_type int not null,
+    shape_dims int[] not null,
+    agg_kind int not null
+)
+",
+            &[],
+        )
+        .await;
+
     if !has_table("ioc_by_channel_log", pgc).await? {
         let _ = pgc
             .execute(
@@ -134,8 +150,10 @@ async fn migrate_01(pgc: &PgClient) -> Result<(), Error> {
 }
 
 pub async fn schema_check(pgc: &PgClient) -> Result<(), Error> {
+    pgc.execute("set client_min_messages = 'warning'", &[]).await?;
     migrate_00(&pgc).await?;
     migrate_01(&pgc).await?;
+    pgc.execute("reset client_min_messages", &[]).await?;
     info!("schema_check done");
     Ok(())
 }

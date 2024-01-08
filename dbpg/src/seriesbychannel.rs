@@ -270,11 +270,11 @@ impl Worker {
             let mut all_good = true;
             for h in &mut hashers {
                 let mut good = false;
-                for _ in 0..400 {
+                for _ in 0..800 {
                     h.update(tsbeg.elapsed().subsec_nanos().to_ne_bytes());
                     let f = h.clone().finalize();
                     let series = u64::from_le_bytes(f.as_slice()[0..8].try_into().unwrap());
-                    if series >= 100000000000000000 && series <= i64::MAX as u64 {
+                    if series >= 1000000000000000000 && series <= i64::MAX as u64 {
                         seriess.push(series as i64);
                         good = true;
                         break;
