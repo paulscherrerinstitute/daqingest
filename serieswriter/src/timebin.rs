@@ -1,8 +1,7 @@
-use crate::ca::proto;
-use crate::ca::proto::CaDataValue;
-use crate::ca::proto::CaEventValue;
 use crate::patchcollect::PatchCollect;
-use err::Error;
+use core::fmt;
+use err::thiserror;
+use err::ThisError;
 use items_0::scalar_ops::ScalarOps;
 use items_0::timebin::TimeBinner;
 use items_0::Appendable;
@@ -18,6 +17,8 @@ use netpod::BinnedRangeEnum;
 use netpod::ScalarType;
 use netpod::Shape;
 use netpod::TsNano;
+use scywr::iteminsertqueue::DataValue;
+use scywr::iteminsertqueue::GetValHelp;
 use scywr::iteminsertqueue::QueryItem;
 use scywr::iteminsertqueue::TimeBinPatchSimpleF32;
 use series::SeriesId;
@@ -35,6 +36,15 @@ macro_rules! trace2 {
     };
 }
 
+#[derive(Debug, ThisError)]
+pub enum Error {
+    PatchWithoutBins,
+    PatchUnexpectedContainer,
+    GetValHelpMismatch,
+    HaveBinsButNoneReturned,
+    ErrError(#[from] err::Error),
+}
+
 struct TickParams<'a> {
     series: SeriesId,
     acc: &'a mut Box<dyn Any + Send>,
@@ -43,14 +53,35 @@ struct TickParams<'a> {
     iiq: &'a mut VecDeque<QueryItem>,
 }
 
+pub struct PushFnParams<'a> {
+    sid: SeriesId,
+    acc: &'a mut Box<dyn Any + Send>,
+    ts: TsNano,
+    val: &'a DataValue,
+}
+
 pub struct ConnTimeBin {
     did_setup: bool,
     series: SeriesId,
     acc: Box<dyn Any + Send>,
-    push_fn: Box<dyn Fn(SeriesId, &mut Box<dyn Any + Send>, u64, &CaEventValue) -> Result<(), Error> + Send>,
+    push_fn: Box<dyn Fn(PushFnParams) -> Result<(), Error> + Send>,
     tick_fn: Box<dyn Fn(TickParams) -> Result<(), Error> + Send>,
     events_binner: Option<Box<dyn TimeBinner>>,
     patch_collect: PatchCollect,
+}
+
+impl fmt::Debug for ConnTimeBin {
+    fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+        fmt.debug_struct("ConnTimeBin")
+            .field("did_setup", &self.did_setup)
+            .field("series", &self.series)
+            .field("acc", &self.acc)
+            // .field("push_fn", &self.push_fn)
+            // .field("tick_fn", &self.tick_fn)
+            .field("events_binner", &self.events_binner)
+            .field("patch_collect", &self.patch_collect)
+            .finish()
+    }
 }
 
 impl ConnTimeBin {
@@ -162,13 +193,19 @@ impl ConnTimeBin {
         Ok(())
     }
 
-    pub fn push(&mut self, ts: u64, value: &CaEventValue) -> Result<(), Error> {
+    pub fn push(&mut self, ts: TsNano, val: &DataValue) -> Result<(), Error> {
         if !self.did_setup {
             //return Err(Error::with_msg_no_trace("ConnTimeBin not yet set up"));
             return Ok(());
         }
         let (f, acc) = (&self.push_fn, &mut self.acc);
-        f(self.series.clone(), acc, ts, value)
+        let params = PushFnParams {
+            sid: self.series.clone(),
+            acc,
+            ts,
+            val,
+        };
+        f(params)
     }
 
     pub fn tick(&mut self, insert_item_queue: &mut VecDeque<QueryItem>) -> Result<(), Error> {
@@ -193,7 +230,7 @@ fn store_patch(series: SeriesId, pc: &mut PatchCollect, iiq: &mut VecDeque<Query
             let ts0 = if let Some(x) = k.ts1s.front() {
                 *x
             } else {
-                return Err(Error::with_msg_no_trace("patch contains no bins"));
+                return Err(Error::PatchWithoutBins);
             };
             let off = ts0 / pc.patch_len().0;
             let off_msp = off / 1000;
@@ -213,32 +250,34 @@ fn store_patch(series: SeriesId, pc: &mut PatchCollect, iiq: &mut VecDeque<Query
             iiq.push_back(item);
         } else {
             error!("unexpected container!");
-            return Err(Error::with_msg_no_trace("timebin store_patch unexpected container"));
+            return Err(Error::PatchUnexpectedContainer);
         }
     }
     Ok(())
 }
 
-fn push<STY>(series: SeriesId, acc: &mut Box<dyn Any + Send>, ts: u64, ev: &CaEventValue) -> Result<(), Error>
+fn push<STY>(params: PushFnParams) -> Result<(), Error>
 where
     STY: ScalarOps,
-    CaDataValue: proto::GetValHelp<STY, ScalTy = STY>,
+    DataValue: GetValHelp<STY, ScalTy = STY>,
 {
-    let v = match proto::GetValHelp::<STY>::get(&ev.data) {
+    let sid = &params.sid;
+    let ts = params.ts;
+    let v = match GetValHelp::<STY>::get(params.val) {
         Ok(x) => x,
         Err(e) => {
             let msg = format!(
                 "GetValHelp mismatch:  series {:?}  STY {}  data {:?}  {e}",
-                series,
+                sid,
                 any::type_name::<STY>(),
-                ev.data
+                params.val
             );
             error!("{msg}");
-            return Err(Error::with_msg_no_trace(msg));
+            return Err(Error::GetValHelpMismatch);
         }
     };
-    if let Some(c) = acc.downcast_mut::<EventsDim0<STY>>() {
-        c.push(ts, 0, v.clone());
+    if let Some(c) = params.acc.downcast_mut::<EventsDim0<STY>>() {
+        c.push(ts.ns(), 0, v.clone());
         Ok(())
     } else {
         // TODO report once and error out
@@ -295,7 +334,7 @@ where
                     Ok(())
                 } else {
                     error!("have bins but none returned");
-                    Err(Error::with_msg_no_trace("have bins but none returned"))
+                    Err(Error::HaveBinsButNoneReturned)
                 }
             } else {
                 Ok(())

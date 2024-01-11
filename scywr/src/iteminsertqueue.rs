@@ -40,6 +40,8 @@ pub enum Error {
     DbUnavailable,
     DbError(#[from] DbError),
     QueryError(#[from] QueryError),
+    GetValHelpTodoWaveform,
+    GetValHelpInnerTypeMismatch,
 }
 
 #[derive(Clone, Debug)]
@@ -68,6 +70,91 @@ pub enum ArrayValue {
 pub enum DataValue {
     Scalar(ScalarValue),
     Array(ArrayValue),
+}
+
+pub trait GetValHelp<T> {
+    type ScalTy: Clone;
+    fn get(&self) -> Result<&Self::ScalTy, Error>;
+}
+
+impl GetValHelp<i8> for DataValue {
+    type ScalTy = i8;
+    fn get(&self) -> Result<&Self::ScalTy, Error> {
+        match self {
+            DataValue::Scalar(v) => match v {
+                ScalarValue::I8(v) => Ok(v),
+                _ => {
+                    //let ty = any::type_name::<Self::ScalTy>();
+                    Err(Error::GetValHelpInnerTypeMismatch)
+                }
+            },
+            _ => Err(Error::GetValHelpTodoWaveform),
+        }
+    }
+}
+
+impl GetValHelp<i16> for DataValue {
+    type ScalTy = i16;
+    fn get(&self) -> Result<&Self::ScalTy, Error> {
+        match self {
+            DataValue::Scalar(v) => match v {
+                ScalarValue::I16(v) => Ok(v),
+                _ => {
+                    //let ty = any::type_name::<Self::ScalTy>();
+                    Err(Error::GetValHelpInnerTypeMismatch)
+                }
+            },
+            _ => Err(Error::GetValHelpTodoWaveform),
+        }
+    }
+}
+
+impl GetValHelp<i32> for DataValue {
+    type ScalTy = i32;
+    fn get(&self) -> Result<&Self::ScalTy, Error> {
+        match self {
+            DataValue::Scalar(v) => match v {
+                ScalarValue::I32(v) => Ok(v),
+                _ => {
+                    //let ty = any::type_name::<Self::ScalTy>();
+                    Err(Error::GetValHelpInnerTypeMismatch)
+                }
+            },
+            _ => Err(Error::GetValHelpTodoWaveform),
+        }
+    }
+}
+
+impl GetValHelp<f32> for DataValue {
+    type ScalTy = f32;
+    fn get(&self) -> Result<&Self::ScalTy, Error> {
+        match self {
+            DataValue::Scalar(v) => match v {
+                ScalarValue::F32(v) => Ok(v),
+                _ => {
+                    //let ty = any::type_name::<Self::ScalTy>();
+                    Err(Error::GetValHelpInnerTypeMismatch)
+                }
+            },
+            _ => Err(Error::GetValHelpTodoWaveform),
+        }
+    }
+}
+
+impl GetValHelp<f64> for DataValue {
+    type ScalTy = f64;
+    fn get(&self) -> Result<&Self::ScalTy, Error> {
+        match self {
+            DataValue::Scalar(v) => match v {
+                ScalarValue::F64(v) => Ok(v),
+                _ => {
+                    //let ty = any::type_name::<Self::ScalTy>();
+                    Err(Error::GetValHelpInnerTypeMismatch)
+                }
+            },
+            _ => Err(Error::GetValHelpTodoWaveform),
+        }
+    }
 }
 
 #[derive(Debug)]

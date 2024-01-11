@@ -67,21 +67,20 @@ async fn has_column(table: &str, column: &str, pgc: &PgClient) -> Result<bool, E
 }
 
 async fn migrate_00(pgc: &PgClient) -> Result<(), Error> {
-    let _ = pgc
-        .execute(
-            "
+    let sql = "
 create table if not exists series_by_channel (
     series bigint not null primary key,
     facility text not null,
     channel text not null,
     scalar_type int not null,
     shape_dims int[] not null,
-    agg_kind int not null
-)
-",
-            &[],
-        )
-        .await;
+    agg_kind int not null,
+    tscreate timestamptz not null default 'now()'
+)";
+    let _ = pgc.execute(sql, &[]).await;
+
+    let sql = "alter table series_by_channel add tscreate timestamptz not null default 'now()'";
+    let _ = pgc.execute(sql, &[]).await;
 
     if !has_table("ioc_by_channel_log", pgc).await? {
         let _ = pgc

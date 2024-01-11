@@ -30,14 +30,13 @@ use futures_util::FutureExt;
 use futures_util::Stream;
 use futures_util::StreamExt;
 use log::*;
-use netpod::Database;
 use scywr::iteminsertqueue::ChannelInfoItem;
-use scywr::iteminsertqueue::ChannelStatus;
 use scywr::iteminsertqueue::ChannelStatusItem;
 use scywr::iteminsertqueue::QueryItem;
 use serde::Serialize;
 use series::series::CHANNEL_STATUS_DUMMY_SCALAR_TYPE;
 use series::ChannelStatusSeriesId;
+use serieswriter::writer::EstablishWorkerJob;
 use statemap::ActiveChannelState;
 use statemap::CaConnStateValue;
 use statemap::ChannelState;
@@ -58,7 +57,6 @@ use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::net::SocketAddrV4;
-use std::pin::pin;
 use std::pin::Pin;
 use std::sync::atomic;
 use std::sync::Arc;
@@ -345,6 +343,7 @@ pub struct CaConnSet {
     local_epics_hostname: String,
     ca_conn_ress: BTreeMap<SocketAddr, CaConnRes>,
     channel_states: ChannelStateMap,
+    channel_by_cssid: HashMap<ChannelStatusSeriesId, Channel>,
     connset_inp_rx: Pin<Box<Receiver<CaConnSetEvent>>>,
     channel_info_query_queue: VecDeque<ChannelInfoQuery>,
     channel_info_query_sender: Pin<Box<SenderPolling<ChannelInfoQuery>>>,
@@ -373,7 +372,7 @@ pub struct CaConnSet {
     ca_proto_stats: Arc<CaProtoStats>,
     rogue_channel_count: u64,
     connect_fail_count: usize,
-    name_by_cssid: HashMap<ChannelStatusSeriesId, String>,
+    establish_worker_tx: async_channel::Sender<EstablishWorkerJob>,
 }
 
 impl CaConnSet {
@@ -387,6 +386,7 @@ impl CaConnSet {
         storage_insert_tx: Sender<VecDeque<QueryItem>>,
         channel_info_query_tx: Sender<ChannelInfoQuery>,
         ingest_opts: CaIngestOpts,
+        establish_worker_tx: async_channel::Sender<EstablishWorkerJob>,
     ) -> CaConnSetCtrl {
         let (ca_conn_res_tx, ca_conn_res_rx) = async_channel::bounded(200);
         let (connset_inp_tx, connset_inp_rx) = async_channel::bounded(200);
@@ -410,6 +410,7 @@ impl CaConnSet {
             local_epics_hostname,
             ca_conn_ress: BTreeMap::new(),
             channel_states: ChannelStateMap::new(),
+            channel_by_cssid: HashMap::new(),
             connset_inp_rx: Box::pin(connset_inp_rx),
             channel_info_query_queue: VecDeque::new(),
             channel_info_query_sender: Box::pin(SenderPolling::new(channel_info_query_tx.clone())),
@@ -439,7 +440,7 @@ impl CaConnSet {
             ca_proto_stats: ca_proto_stats.clone(),
             rogue_channel_count: 0,
             connect_fail_count: 0,
-            name_by_cssid: HashMap::new(),
+            establish_worker_tx,
         };
         // TODO await on jh
         let jh = tokio::spawn(CaConnSet::run(connset));
@@ -558,7 +559,53 @@ impl CaConnSet {
             CaConnEventValue::EndOfStream => self.handle_ca_conn_eos(addr),
             CaConnEventValue::ConnectFail => self.handle_connect_fail(addr),
             CaConnEventValue::ChannelStatus(st) => {
-                error!("TODO handle_ca_conn_event update channel status view");
+                self.apply_ca_conn_health_update(addr, st)?;
+
+                // let sst = &mut self.channel_states;
+                // for (k, v) in st.channel_statuses {
+                //     if let Some(ch) = self.channel_by_cssid.get(&k) {
+                //         // Only when the channel is active we expect to receive status updates.
+                //         if let Some(st) = sst.get_mut(ch) {
+                //             if let ChannelStateValue::Active(st2) = &mut st.value {
+                //                 if let ActiveChannelState::WithStatusSeriesId {
+                //                     status_series_id,
+                //                     state: st3,
+                //                 } = st2
+                //                 {
+                //                     if let WithStatusSeriesIdStateInner::WithAddress { addr, state: st4 } =
+                //                         &mut st3.inner
+                //                     {
+                //                         if let WithAddressState::Assigned(st5) = st4 {
+                //                         } else {
+                //                         }
+                //                     } else {
+                //                     }
+                //                 } else {
+                //                 }
+                //             } else {
+                //             }
+                //             st.value = ChannelStateValue::Active(ActiveChannelState::WithStatusSeriesId {
+                //                 status_series_id: (),
+                //                 state: WithStatusSeriesIdState {
+                //                     addr_find_backoff: todo!(),
+                //                     inner: todo!(),
+                //                 },
+                //             });
+                //         } else {
+                //             // TODO this should be an error.
+                //         }
+                //         match v.channel_connected_info {
+                //             conn::ChannelConnectedInfo::Disconnected => {}
+                //             conn::ChannelConnectedInfo::Connecting => todo!(),
+                //             conn::ChannelConnectedInfo::Connected => todo!(),
+                //             conn::ChannelConnectedInfo::Error => todo!(),
+                //             conn::ChannelConnectedInfo::Ended => todo!(),
+                //         }
+                //     } else {
+                //         warn!("we do not know {:?}", k);
+                //     }
+                // }
+
                 Ok(())
             }
         }
@@ -572,7 +619,8 @@ impl CaConnSet {
         match res {
             Ok(res) => {
                 let cssid = ChannelStatusSeriesId::new(res.series.into_inner().id());
-                self.name_by_cssid.insert(cssid.clone(), res.channel.clone());
+                self.channel_by_cssid
+                    .insert(cssid.clone(), Channel::new(res.channel.clone()));
                 let add = ChannelAddWithStatusId {
                     backend: res.backend,
                     name: res.channel,
@@ -842,12 +890,11 @@ impl CaConnSet {
         let tsnow = SystemTime::now();
         self.rogue_channel_count = 0;
         for (k, v) in res.channel_statuses {
-            let name = if let Some(x) = self.name_by_cssid.get(&v.cssid) {
+            let ch = if let Some(x) = self.channel_by_cssid.get(&k) {
                 x
             } else {
                 return Err(Error::with_msg_no_trace(format!("unknown cssid {:?}", v.cssid)));
             };
-            let ch = Channel::new(name.clone());
             if let Some(st1) = self.channel_states.get_mut(&ch) {
                 if let ChannelStateValue::Active(st2) = &mut st1.value {
                     if let ActiveChannelState::WithStatusSeriesId {
@@ -995,6 +1042,7 @@ impl CaConnSet {
                 .ok_or_else(|| Error::with_msg_no_trace("no more channel_info_query_tx available"))?,
             self.ca_conn_stats.clone(),
             self.ca_proto_stats.clone(),
+            self.establish_worker_tx.clone(),
         );
         let conn_tx = conn.conn_command_tx();
         let conn_stats = conn.stats();
@@ -1466,7 +1514,7 @@ impl CaConnSet {
     }
 
     fn handle_own_ticker_tick(mut self: Pin<&mut Self>, cx: &mut Context) -> Result<(), Error> {
-        debug!("handle_own_ticker_tick  {}", Self::self_name());
+        // debug!("handle_own_ticker_tick  {}", Self::self_name());
         if !self.ready_for_end_of_stream() {
             self.ticker = Self::new_self_ticker();
             let _ = self.ticker.poll_unpin(cx);

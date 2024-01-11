@@ -2,13 +2,10 @@ use super::proto;
 use super::ExtraInsertsConf;
 use crate::senderpolling::SenderPolling;
 use crate::throttletrace::ThrottleTrace;
-use crate::timebin::ConnTimeBin;
 use async_channel::Receiver;
 use async_channel::Sender;
 use core::fmt;
-use dbpg::seriesbychannel::CanSendChannelInfoResult;
 use dbpg::seriesbychannel::ChannelInfoQuery;
-use dbpg::seriesbychannel::ChannelInfoResult;
 use err::Error;
 use futures_util::Future;
 use futures_util::FutureExt;
@@ -43,6 +40,8 @@ use serde::Deserialize;
 use serde::Serialize;
 use series::ChannelStatusSeriesId;
 use series::SeriesId;
+use serieswriter::writer::EstablishWorkerJob;
+use serieswriter::writer::JobId;
 use serieswriter::writer::SeriesWriter;
 use stats::rand_xoshiro::rand_core::RngCore;
 use stats::rand_xoshiro::rand_core::SeedableRng;
@@ -182,26 +181,24 @@ enum ChannelError {
     CreateChanFail(ChannelStatusSeriesId),
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 struct EventedState {
     ts_last: Instant,
     recv_count: u64,
     recv_bytes: u64,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 enum MonitoringState {
     FetchSeriesId,
     AddingEvent(SeriesId),
     Evented(SeriesId, EventedState),
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 struct CreatedState {
     cssid: ChannelStatusSeriesId,
-    #[allow(unused)]
     cid: Cid,
-    #[allow(unused)]
     sid: u32,
     data_type: u16,
     data_count: u32,
@@ -222,7 +219,39 @@ struct CreatedState {
     info_store_msp_last: u32,
 }
 
-#[derive(Clone, Debug)]
+impl Default for CreatedState {
+    fn default() -> Self {
+        Self {
+            cssid: ChannelStatusSeriesId::new(123123),
+            cid: Cid(123123),
+            sid: 123123,
+            data_type: 4242,
+            data_count: 42,
+            scalar_type: ScalarType::U8,
+            shape: Shape::Scalar,
+            ts_created: Instant::now(),
+            ts_alive_last: Instant::now(),
+            state: MonitoringState::FetchSeriesId,
+            ts_msp_last: 4242,
+            ts_msp_grid_last: 4242,
+            inserted_in_ts_msp: 4242,
+            insert_item_ivl_ema: IntervalEma::new(),
+            item_recv_ivl_ema: IntervalEma::new(),
+            insert_recv_ivl_last: Instant::now(),
+            insert_next_earliest: Instant::now(),
+            muted_before: Default::default(),
+            info_store_msp_last: Default::default(),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct WritableState {
+    created: CreatedState,
+    writer: SeriesWriter,
+}
+
+#[derive(Debug)]
 enum ChannelState {
     Init(ChannelStatusSeriesId),
     Creating {
@@ -230,8 +259,8 @@ enum ChannelState {
         cid: Cid,
         ts_beg: Instant,
     },
-    FetchingSeriesId(CreatedState),
-    Created(SeriesId, CreatedState),
+    MakingSeriesWriter(CreatedState),
+    Writable(WritableState),
     Error(ChannelError),
     Ended(ChannelStatusSeriesId),
 }
@@ -241,40 +270,40 @@ impl ChannelState {
         let channel_connected_info = match self {
             ChannelState::Init(..) => ChannelConnectedInfo::Disconnected,
             ChannelState::Creating { .. } => ChannelConnectedInfo::Connecting,
-            ChannelState::FetchingSeriesId(_) => ChannelConnectedInfo::Connecting,
-            ChannelState::Created(..) => ChannelConnectedInfo::Connected,
+            ChannelState::MakingSeriesWriter(_) => ChannelConnectedInfo::Connecting,
+            ChannelState::Writable(..) => ChannelConnectedInfo::Connected,
             ChannelState::Error(_) => ChannelConnectedInfo::Error,
             ChannelState::Ended(_) => ChannelConnectedInfo::Ended,
         };
         let scalar_type = match self {
-            ChannelState::Created(_series, s) => Some(s.scalar_type.clone()),
+            ChannelState::Writable(s) => Some(s.writer.scalar_type().clone()),
             _ => None,
         };
         let shape = match self {
-            ChannelState::Created(_series, s) => Some(s.shape.clone()),
+            ChannelState::Writable(s) => Some(s.writer.shape().clone()),
             _ => None,
         };
         let ts_created = match self {
-            ChannelState::Created(_series, s) => Some(s.ts_created.clone()),
+            ChannelState::Writable(s) => Some(s.created.ts_created.clone()),
             _ => None,
         };
         let ts_event_last = match self {
-            ChannelState::Created(_series, s) => match &s.state {
+            ChannelState::Writable(s) => match &s.created.state {
                 MonitoringState::Evented(_, s) => Some(s.ts_last),
                 _ => None,
             },
             _ => None,
         };
         let recv_count = match self {
-            ChannelState::Created(_series, s) => match &s.state {
+            ChannelState::Writable(s) => match &s.created.state {
                 MonitoringState::Evented(_, s) => Some(s.recv_count),
                 _ => None,
             },
             _ => None,
         };
         let item_recv_ivl_ema = match self {
-            ChannelState::Created(_series, s) => {
-                let ema = s.item_recv_ivl_ema.ema();
+            ChannelState::Writable(s) => {
+                let ema = s.created.item_recv_ivl_ema.ema();
                 if ema.update_count() == 0 {
                     None
                 } else {
@@ -284,7 +313,7 @@ impl ChannelState {
             _ => None,
         };
         let series = match self {
-            ChannelState::Created(series, _) => Some(series.clone()),
+            ChannelState::Writable(s) => Some(s.writer.sid()),
             _ => None,
         };
         let interest_score = 1. / item_recv_ivl_ema.unwrap_or(1e10).max(1e-6).min(1e10);
@@ -307,8 +336,8 @@ impl ChannelState {
         match self {
             ChannelState::Init(cssid) => cssid.clone(),
             ChannelState::Creating { cssid, .. } => cssid.clone(),
-            ChannelState::FetchingSeriesId(st) => st.cssid.clone(),
-            ChannelState::Created(_, st) => st.cssid.clone(),
+            ChannelState::MakingSeriesWriter(st) => st.cssid.clone(),
+            ChannelState::Writable(st) => st.created.cssid.clone(),
             ChannelState::Error(e) => match e {
                 ChannelError::CreateChanFail(cssid) => cssid.clone(),
             },
@@ -427,7 +456,6 @@ pub type CmdResTx = Sender<Result<(), Error>>;
 
 #[derive(Debug)]
 pub enum ConnCommandKind {
-    SeriesLookupResult(Result<ChannelInfoResult, dbpg::seriesbychannel::Error>),
     ChannelAdd(String, ChannelStatusSeriesId),
     ChannelRemove(String),
     Shutdown,
@@ -440,13 +468,6 @@ pub struct ConnCommand {
 }
 
 impl ConnCommand {
-    pub fn series_lookup(qu: Result<ChannelInfoResult, dbpg::seriesbychannel::Error>) -> Self {
-        Self {
-            id: Self::make_id(),
-            kind: ConnCommandKind::SeriesLookupResult(qu),
-        }
-    }
-
     pub fn channel_add(name: String, cssid: ChannelStatusSeriesId) -> Self {
         Self {
             id: Self::make_id(),
@@ -523,21 +544,6 @@ pub struct CaConnEvent {
     pub value: CaConnEventValue,
 }
 
-struct SendSeriesLookup {
-    tx: Sender<ConnCommand>,
-}
-
-impl CanSendChannelInfoResult for SendSeriesLookup {
-    fn make_send(
-        &self,
-        item: Result<ChannelInfoResult, dbpg::seriesbychannel::Error>,
-    ) -> dbpg::seriesbychannel::BoxedSend {
-        let tx = self.tx.clone();
-        let fut = async move { tx.send(ConnCommand::series_lookup(item)).await.map_err(|_| ()) };
-        Box::pin(fut)
-    }
-}
-
 pub struct CaConnOpts {
     insert_queue_max: usize,
     array_truncate: usize,
@@ -572,7 +578,6 @@ pub struct CaConn {
     cid_by_name: BTreeMap<String, Cid>,
     cid_by_subid: HashMap<Subid, Cid>,
     name_by_cid: HashMap<Cid, String>,
-    time_binners: HashMap<Cid, ConnTimeBin>,
     channel_status_emit_last: Instant,
     init_state_count: u64,
     insert_item_queue: VecDeque<QueryItem>,
@@ -592,18 +597,19 @@ pub struct CaConn {
     storage_insert_sender: Pin<Box<SenderPolling<VecDeque<QueryItem>>>>,
     ca_conn_event_out_queue: VecDeque<CaConnEvent>,
     ca_conn_event_out_queue_max: usize,
-    channel_info_query_queue: VecDeque<ChannelInfoQuery>,
-    channel_info_query_sending: Pin<Box<SenderPolling<ChannelInfoQuery>>>,
     thr_msg_poll: ThrottleTrace,
     ca_proto_stats: Arc<CaProtoStats>,
     weird_count: usize,
     rng: Xoshiro128PlusPlus,
+    writer_establish_qu: VecDeque<EstablishWorkerJob>,
+    writer_establish_tx: Pin<Box<SenderPolling<EstablishWorkerJob>>>,
+    writer_tx: Sender<(JobId, Result<SeriesWriter, serieswriter::writer::Error>)>,
+    writer_rx: Pin<Box<Receiver<(JobId, Result<SeriesWriter, serieswriter::writer::Error>)>>>,
 }
 
-#[cfg(DISABLED)]
 impl Drop for CaConn {
     fn drop(&mut self) {
-        debug!("~~~~~~~~~~~~~~~   Drop CaConn {}", self.remote_addr_dbg);
+        debug!("drop CaConn {}", self.remote_addr_dbg);
     }
 }
 
@@ -617,7 +623,9 @@ impl CaConn {
         channel_info_query_tx: Sender<ChannelInfoQuery>,
         stats: Arc<CaConnStats>,
         ca_proto_stats: Arc<CaProtoStats>,
+        writer_establish_tx: Sender<EstablishWorkerJob>,
     ) -> Self {
+        let (writer_tx, writer_rx) = async_channel::bounded(32);
         let (cq_tx, cq_rx) = async_channel::bounded(32);
         let mut rng = stats::xoshiro_from_time();
         Self {
@@ -633,7 +641,6 @@ impl CaConn {
             cid_by_name: BTreeMap::new(),
             cid_by_subid: HashMap::new(),
             name_by_cid: HashMap::new(),
-            time_binners: HashMap::new(),
             channel_status_emit_last: Instant::now(),
             insert_item_queue: VecDeque::new(),
             remote_addr_dbg,
@@ -652,12 +659,14 @@ impl CaConn {
             storage_insert_sender: Box::pin(SenderPolling::new(storage_insert_tx)),
             ca_conn_event_out_queue: VecDeque::new(),
             ca_conn_event_out_queue_max: 2000,
-            channel_info_query_queue: VecDeque::new(),
-            channel_info_query_sending: Box::pin(SenderPolling::new(channel_info_query_tx)),
             thr_msg_poll: ThrottleTrace::new(Duration::from_millis(10000)),
             ca_proto_stats,
             weird_count: 0,
             rng,
+            writer_establish_qu: VecDeque::new(),
+            writer_establish_tx: Box::pin(SenderPolling::new(writer_establish_tx)),
+            writer_tx,
+            writer_rx: Box::pin(writer_rx),
         }
     }
 
@@ -840,53 +849,7 @@ impl CaConn {
         // TODO return the result
     }
 
-    fn handle_series_lookup_result(
-        &mut self,
-        res: Result<ChannelInfoResult, dbpg::seriesbychannel::Error>,
-    ) -> Result<(), Error> {
-        trace2!("handle_series_lookup_result {res:?}");
-        match res {
-            Ok(res) => {
-                if let Some(cid) = self.cid_by_name.get(&res.channel) {
-                    if let Some(chst) = self.channels.get(cid) {
-                        if let ChannelState::FetchingSeriesId(st2) = chst {
-                            let cssid = st2.cssid.clone();
-                            let series = res.series.into_inner();
-                            let item = QueryItem::ChannelStatus(ChannelStatusItem {
-                                ts: SystemTime::now(),
-                                cssid,
-                                status: ChannelStatus::Opened,
-                            });
-                            self.insert_item_queue.push_back(item);
-                            let cid = st2.cid.clone();
-                            let sid = st2.sid;
-                            let data_type = st2.data_type;
-                            let data_count = st2.data_count;
-                            match self.channel_to_evented(cid, sid, data_type, data_count, series) {
-                                Ok(()) => {}
-                                Err(e) => {
-                                    error!("handle_series_lookup_result {e}");
-                                }
-                            }
-                        } else {
-                            warn!("TODO handle_series_lookup_result channel in bad state, reset");
-                        }
-                    } else {
-                        warn!("TODO handle_series_lookup_result channel in bad state, reset");
-                    }
-                } else {
-                    warn!("TODO handle_series_lookup_result channel in bad state, reset");
-                }
-            }
-            Err(e) => {
-                error!("handle_series_lookup_result got error {e}");
-            }
-        }
-        Ok(())
-    }
-
     fn handle_conn_command(&mut self, cx: &mut Context) -> Result<Poll<Option<()>>, Error> {
-        // TODO if this loops for too long time, yield and make sure we get wake up again.
         use Poll::*;
         self.stats.loop3_count.inc();
         if self.is_shutdown() {
@@ -909,18 +872,97 @@ impl CaConn {
                             self.cmd_shutdown();
                             Ok(Ready(Some(())))
                         }
-                        ConnCommandKind::SeriesLookupResult(x) => match self.handle_series_lookup_result(x) {
-                            Ok(()) => Ok(Ready(Some(()))),
-                            Err(e) => Err(e),
-                        },
                     }
                 }
                 Ready(None) => {
-                    error!("Command queue closed");
+                    error!("command queue closed");
                     Ok(Ready(None))
                 }
                 Pending => Ok(Pending),
             }
+        }
+    }
+
+    fn handle_writer_establish_result(&mut self, cx: &mut Context) -> Result<Poll<Option<()>>, Error> {
+        use Poll::*;
+        if self.is_shutdown() {
+            Ok(Ready(None))
+        } else {
+            let rx = self.writer_rx.as_mut();
+            match rx.poll_next(cx) {
+                Ready(Some(res)) => {
+                    debug!("handle_writer_establish_result  recv  {}", self.remote_addr_dbg);
+                    let jobid = res.0;
+                    // by convention:
+                    let cid = Cid(jobid.0 as _);
+                    match res.1 {
+                        Ok(wr) => {
+                            self.handle_writer_establish_inner(cid, wr)?;
+                            Ok(Ready(Some(())))
+                        }
+                        Err(e) => Err(Error::from_string(e.to_string())),
+                    }
+                }
+                Ready(None) => {
+                    error!("writer_establish queue closed");
+                    Ok(Ready(None))
+                }
+                Pending => Ok(Pending),
+            }
+        }
+    }
+
+    fn handle_writer_establish_inner(&mut self, cid: Cid, wr: SeriesWriter) -> Result<(), Error> {
+        debug!("handle_writer_establish_inner  {cid:?}");
+        // At this point we have created the channel and created a writer for that type and sid.
+        // We do not yet monitor.
+        // TODO main objectives now:
+        // Store the writer with the channel state.
+        // Create a monitor for the channel.
+        // NOTE: must store the Writer even if not yet in Evented, we could also transition to Polled!
+        if let Some(chst) = self.channels.get_mut(&cid) {
+            if let ChannelState::MakingSeriesWriter(st2) = chst {
+                self.stats.get_series_id_ok.inc();
+
+                let item = QueryItem::ChannelStatus(ChannelStatusItem {
+                    ts: SystemTime::now(),
+                    cssid: st2.cssid.clone(),
+                    status: ChannelStatus::Opened,
+                });
+                self.insert_item_queue.push_back(item);
+
+                {
+                    let data_type = wr.scalar_type().to_ca_id()?;
+                    if data_type > 6 {
+                        error!("data type of series unexpected  {}  {:?}", data_type, wr.scalar_type());
+                    }
+                    let subid = self.subid_store.next();
+                    self.cid_by_subid.insert(subid, cid);
+                    // TODO convert first to CaDbrType, set to `Time`, then convert to ix:
+                    let data_type_asked = data_type + 14;
+                    debug!("send out EventAdd for {cid:?}");
+                    let ty = CaMsgTy::EventAdd(EventAdd {
+                        sid: st2.sid,
+                        data_type: data_type_asked,
+                        data_count: wr.shape().to_ca_count()? as _,
+                        subid: subid.0,
+                    });
+                    let msg = CaMsg::from_ty_ts(ty, Instant::now());
+                    let proto = self.proto.as_mut().unwrap();
+                    proto.push_out(msg);
+                }
+
+                st2.state = MonitoringState::AddingEvent(wr.sid());
+                let created = std::mem::replace(st2, Default::default());
+                *chst = ChannelState::Writable(WritableState { created, writer: wr });
+                Ok(())
+            } else {
+                warn!("TODO handle_series_lookup_result channel in bad state, reset");
+                Ok(())
+            }
+        } else {
+            warn!("TODO handle_series_lookup_result channel in bad state, reset");
+            Ok(())
         }
     }
 
@@ -954,14 +996,12 @@ impl CaConn {
             &mut self.cid_by_name,
             &mut self.name_by_cid,
             &mut self.cid_store,
-            &mut self.time_binners,
         )
     }
 
     fn channel_remove_by_cid(&mut self, cid: Cid) {
         self.channels.remove(&cid);
         self.name_by_cid.remove(&cid);
-        self.time_binners.remove(&cid);
         self.cid_by_name.retain(|_, v| v == &cid);
     }
 
@@ -971,7 +1011,6 @@ impl CaConn {
         cid_by_name: &mut BTreeMap<String, Cid>,
         name_by_cid: &mut HashMap<Cid, String>,
         cid_store: &mut CidStore,
-        time_binners: &mut HashMap<Cid, ConnTimeBin>,
     ) {
         let cid = Self::cid_by_name_expl(&name, cid_by_name, name_by_cid, cid_store);
         if channels.contains_key(&cid) {
@@ -989,8 +1028,6 @@ impl CaConn {
         }
         channels.remove(&cid);
         name_by_cid.remove(&cid);
-        // TODO emit in-progress before drop?
-        time_binners.remove(&cid);
     }
 
     fn cid_by_name_expl(
@@ -1034,23 +1071,24 @@ impl CaConn {
                 ChannelState::Creating { cssid, .. } => {
                     *chst = ChannelState::Ended(cssid.clone());
                 }
-                ChannelState::FetchingSeriesId(st) => {
+                ChannelState::MakingSeriesWriter(st) => {
                     *chst = ChannelState::Ended(st.cssid.clone());
                 }
-                ChannelState::Created(series, st2) => {
+                ChannelState::Writable(st2) => {
+                    let cssid = st2.created.cssid.clone();
                     let item = QueryItem::ChannelStatus(ChannelStatusItem {
                         ts: SystemTime::now(),
-                        cssid: st2.cssid.clone(),
+                        cssid: cssid.clone(),
                         status: ChannelStatus::Closed(channel_reason.clone()),
                     });
                     self.insert_item_queue.push_back(item);
-                    *chst = ChannelState::Ended(st2.cssid.clone());
+                    *chst = ChannelState::Ended(cssid);
                 }
                 ChannelState::Error(..) => {
                     warn!("TODO emit error status");
                     // *chst = ChannelState::Ended;
                 }
-                ChannelState::Ended(cssid) => {}
+                ChannelState::Ended(_) => {}
             }
         }
     }
@@ -1089,8 +1127,8 @@ impl CaConn {
         let mut not_alive_count = 0;
         for (_, st) in &self.channels {
             match st {
-                ChannelState::Created(_, st) => {
-                    if tsnow.duration_since(st.ts_alive_last) >= Duration::from_millis(10000) {
+                ChannelState::Writable(st) => {
+                    if tsnow.duration_since(st.created.ts_alive_last) >= Duration::from_millis(10000) {
                         not_alive_count += 1;
                     } else {
                         alive_count += 1;
@@ -1119,19 +1157,19 @@ impl CaConn {
                 } => {
                     // TODO need last-save-ts for this state.
                 }
-                ChannelState::FetchingSeriesId(..) => {
+                ChannelState::MakingSeriesWriter(..) => {
                     // TODO ?
                 }
-                ChannelState::Created(series, st) => {
+                ChannelState::Writable(st) => {
+                    let created = &mut st.created;
                     // TODO if we don't wave a series id yet, dont' save? write-ampl.
-
                     let msp = info_store_msp_from_time(timenow.clone());
-                    if msp != st.info_store_msp_last {
-                        st.info_store_msp_last = msp;
+                    if msp != created.info_store_msp_last {
+                        created.info_store_msp_last = msp;
                         let item = QueryItem::ChannelInfo(ChannelInfoItem {
                             ts_msp: msp,
-                            series: series.clone(),
-                            ivl: st.item_recv_ivl_ema.ema().ema(),
+                            series: st.writer.sid(),
+                            ivl: created.item_recv_ivl_ema.ema().ema(),
                             interest: 0.,
                             evsize: 0,
                         });
@@ -1147,213 +1185,7 @@ impl CaConn {
         Ok(())
     }
 
-    fn channel_to_evented(
-        &mut self,
-        cid: Cid,
-        sid: u32,
-        data_type: u16,
-        data_count: u32,
-        series: SeriesId,
-    ) -> Result<(), Error> {
-        let tsnow = Instant::now();
-        let name = self.name_by_cid(cid).unwrap().to_string();
-        // TODO handle error better! Transition channel to Error state?
-        let scalar_type = ScalarType::from_ca_id(data_type)?;
-        let shape = Shape::from_ca_count(data_count)?;
-        trace2!("channel_to_evented {name:?} {scalar_type:?} {shape:?}");
-        self.stats.get_series_id_ok.inc();
-        if series.id() == 0 {
-            warn!("unexpected {series:?}");
-        }
-        if data_type > 6 {
-            error!("data type of series unexpected: {}", data_type);
-        }
-        let mut tb = ConnTimeBin::empty();
-        tb.setup_for(series.clone(), &scalar_type, &shape)?;
-        self.time_binners.insert(cid, tb);
-        let subid = self.subid_store.next();
-        self.cid_by_subid.insert(subid, cid);
-        // TODO convert first to CaDbrType, set to `Time`, then convert to ix:
-        let data_type_asked = data_type + 14;
-        let ty = CaMsgTy::EventAdd(EventAdd {
-            sid,
-            data_type: data_type_asked,
-            data_count: data_count as _,
-            subid: subid.0,
-        });
-        let msg = CaMsg::from_ty_ts(ty, tsnow);
-        let proto = self.proto.as_mut().unwrap();
-        proto.push_out(msg);
-        // TODO handle not-found error:
-        let ch_s = self.channels.get_mut(&cid).unwrap();
-        let cssid = match ch_s {
-            ChannelState::FetchingSeriesId(st2) => st2.cssid.clone(),
-            _ => {
-                let name = self.name_by_cid.get(&cid);
-                let e = Error::with_msg_no_trace(format!("channel_to_evented  bad state  {name:?}  {ch_s:?}"));
-                return Err(e);
-            }
-        };
-        let created_state = CreatedState {
-            cssid,
-            cid,
-            sid,
-            data_type,
-            data_count,
-            scalar_type,
-            shape,
-            ts_created: tsnow,
-            ts_alive_last: tsnow,
-            state: MonitoringState::AddingEvent(series.clone()),
-            ts_msp_last: 0,
-            ts_msp_grid_last: 0,
-            inserted_in_ts_msp: u64::MAX,
-            insert_item_ivl_ema: IntervalEma::new(),
-            item_recv_ivl_ema: IntervalEma::new(),
-            insert_recv_ivl_last: tsnow,
-            insert_next_earliest: tsnow,
-            muted_before: 0,
-            info_store_msp_last: info_store_msp_from_time(SystemTime::now()),
-        };
-        *ch_s = ChannelState::Created(series, created_state);
-        Ok(())
-    }
-
-    fn event_add_insert(
-        st: &mut CreatedState,
-        series: SeriesId,
-        scalar_type: ScalarType,
-        shape: Shape,
-        ts: u64,
-        ts_local: u64,
-        val: DataValue,
-        item_queue: &mut VecDeque<QueryItem>,
-        ts_msp_last: u64,
-        ts_msp_grid: Option<u32>,
-        stats: Arc<CaConnStats>,
-    ) -> Result<(), Error> {
-        // TODO decide on better msp/lsp: random offset!
-        // As long as one writer is active, the msp is arbitrary.
-        let (ts_msp, ts_msp_changed) = if st.inserted_in_ts_msp >= 64000 || st.ts_msp_last + HOUR <= ts {
-            let div = SEC * 10;
-            let ts_msp = ts / div * div;
-            if ts_msp == st.ts_msp_last {
-                (ts_msp, false)
-            } else {
-                st.ts_msp_last = ts_msp;
-                st.inserted_in_ts_msp = 1;
-                (ts_msp, true)
-            }
-        } else {
-            st.inserted_in_ts_msp += 1;
-            (ts_msp_last, false)
-        };
-        let ts_lsp = ts - ts_msp;
-        let item = InsertItem {
-            series: series.into(),
-            ts_msp,
-            ts_lsp,
-            msp_bump: ts_msp_changed,
-            pulse: 0,
-            scalar_type,
-            shape,
-            val,
-            ts_msp_grid,
-            ts_local,
-        };
-        item_queue.push_back(QueryItem::Insert(item));
-
-        // TODO count these events also when using SeriesWriter
-        stats.insert_item_create.inc();
-        Ok(())
-    }
-
-    fn do_event_insert(
-        st: &mut CreatedState,
-        series: SeriesId,
-        scalar_type: ScalarType,
-        shape: Shape,
-        ts: u64,
-        ts_local: u64,
-        ev: proto::EventAddRes,
-        tsnow: Instant,
-        item_queue: &mut VecDeque<QueryItem>,
-        insert_ivl_min_mus: u64,
-        stats: Arc<CaConnStats>,
-        inserts_counter: &mut u64,
-        extra_inserts_conf: &ExtraInsertsConf,
-    ) -> Result<(), Error> {
-        st.muted_before = 0;
-        st.insert_item_ivl_ema.tick(tsnow);
-        let em = st.insert_item_ivl_ema.ema();
-        let ema = em.ema();
-        let ivl_min = (insert_ivl_min_mus as f32) * 1e-6;
-        let dt = (ivl_min - ema).max(0.) / em.k();
-        st.insert_next_earliest = tsnow + Duration::from_micros((dt * 1e6) as u64);
-        let ts_msp_last = st.ts_msp_last;
-
-        // TODO get event timestamp from channel access field
-
-        let ts_msp_grid = (ts / TS_MSP_GRID_UNIT / TS_MSP_GRID_SPACING * TS_MSP_GRID_SPACING) as u32;
-        let ts_msp_grid = if st.ts_msp_grid_last != ts_msp_grid {
-            st.ts_msp_grid_last = ts_msp_grid;
-            Some(ts_msp_grid)
-        } else {
-            None
-        };
-
-        let val: DataValue = ev.value.data.into();
-        for (i, &(m, l)) in extra_inserts_conf.copies.iter().enumerate().rev() {
-            if *inserts_counter % m == l {
-                Self::event_add_insert(
-                    st,
-                    series.clone(),
-                    scalar_type.clone(),
-                    shape.clone(),
-                    ts - 1 - i as u64,
-                    ts_local - 1 - i as u64,
-                    val.clone(),
-                    item_queue,
-                    ts_msp_last,
-                    ts_msp_grid,
-                    stats.clone(),
-                )?;
-            }
-        }
-        Self::event_add_insert(
-            st,
-            series,
-            scalar_type,
-            shape,
-            ts,
-            ts_local,
-            val.clone(),
-            item_queue,
-            ts_msp_last,
-            ts_msp_grid,
-            stats,
-        )?;
-        let writer: &mut SeriesWriter = err::todoval();
-
-        // TODO must give the writer also a &mut Trait where it can append some item.
-        writer.write(TsNano::from_ns(ts), TsNano::from_ns(ts_local), val, item_queue);
-
-        *inserts_counter += 1;
-        Ok(())
-    }
-
     fn handle_event_add_res(&mut self, ev: proto::EventAddRes, tsnow: Instant) -> Result<(), Error> {
-        trace!("got EventAddRes: {ev:?}");
-        self.stats.event_add_res_recv.inc();
-        let res = Self::handle_event_add_res_inner(self, ev, tsnow);
-        let ts2 = Instant::now();
-        self.stats
-            .time_handle_event_add_res
-            .add((ts2.duration_since(tsnow) * MS as u32).as_secs());
-        res
-    }
-
-    fn handle_event_add_res_inner(&mut self, ev: proto::EventAddRes, tsnow: Instant) -> Result<(), Error> {
         let subid = Subid(ev.subid);
         // TODO handle subid-not-found which can also be peer error:
         let cid = if let Some(x) = self.cid_by_subid.get(&subid) {
@@ -1363,15 +1195,11 @@ impl CaConn {
             // return Err(Error::with_msg_no_trace());
             return Ok(());
         };
-        if false {
-            let name = self.name_by_cid(cid);
-            info!("event {name:?} {ev:?}");
-        }
         let ch_s = if let Some(x) = self.channels.get_mut(&cid) {
             x
         } else {
             // TODO return better as error and let caller decide (with more structured errors)
-            warn!("can not find channel for  {cid:?}  {subid:?}");
+            warn!("TODO handle_event_add_res can not find channel for  {cid:?}  {subid:?}");
             // TODO
             // When removing a channel, keep it in "closed" btree for some time because messages can
             // still arrive from all buffers.
@@ -1379,19 +1207,20 @@ impl CaConn {
             // as logic error.
             // Close connection to the IOC. Cout as logic error.
             // return Err(Error::with_msg_no_trace());
-            std::process::exit(1);
             return Ok(());
         };
+        debug!("handle_event_add_res {ev:?}");
         match ch_s {
-            ChannelState::Created(series_0, st) => {
-                st.ts_alive_last = tsnow;
-                st.item_recv_ivl_ema.tick(tsnow);
-                let scalar_type = st.scalar_type.clone();
-                let shape = st.shape.clone();
-                let series = match &mut st.state {
+            ChannelState::Writable(st) => {
+                let created = &mut st.created;
+                created.ts_alive_last = tsnow;
+                created.item_recv_ivl_ema.tick(tsnow);
+                let scalar_type = st.writer.scalar_type().clone();
+                let shape = st.writer.shape().clone();
+                let series = match &mut created.state {
                     MonitoringState::AddingEvent(series) => {
                         let series = series.clone();
-                        st.state = MonitoringState::Evented(
+                        created.state = MonitoringState::Evented(
                             series.clone(),
                             EventedState {
                                 ts_last: tsnow,
@@ -1406,19 +1235,13 @@ impl CaConn {
                         series.clone()
                     }
                     _ => {
-                        let e =
-                            Error::from_string(format!("unexpected state: EventAddRes while having {:?}", st.state));
+                        let e = Error::from_string(format!("unexpected state: EventAddRes while having {:?}", created));
                         error!("{e}");
                         return Err(e);
                     }
                 };
-                if series != *series_0 {
-                    let e = Error::with_msg_no_trace(format!(
-                        "event_add_res series != series_0  {series:?} != {series_0:?}"
-                    ));
-                    return Err(e);
-                }
-                if let MonitoringState::Evented(_, st2) = &mut st.state {
+                // TODO should attach these counters already to Writable state.
+                if let MonitoringState::Evented(_, st2) = &mut created.state {
                     st2.recv_count += 1;
                     st2.recv_bytes += ev.payload_len as u64;
                 }
@@ -1430,17 +1253,16 @@ impl CaConn {
                 let ts = ev.value.ts;
                 let ts_diff = ts.abs_diff(ts_local);
                 self.stats.ca_ts_off().ingest((ts_diff / MS) as u32);
-                if tsnow >= st.insert_next_earliest {
-                    //let channel_state = self.channels.get_mut(&cid).unwrap();
-                    let item_queue = &mut self.insert_item_queue;
-                    let inserts_counter = &mut self.inserts_counter;
-                    let extra_inserts_conf = &self.extra_inserts_conf;
-                    if false {
-                        if let Some(tb) = self.time_binners.get_mut(&cid) {
-                            tb.push(ts, &ev.value)?;
-                        } else {
-                            // TODO count or report error
-                        }
+                if tsnow >= created.insert_next_earliest {
+                    {
+                        created.muted_before = 0;
+                        created.insert_item_ivl_ema.tick(tsnow);
+                        let em = created.insert_item_ivl_ema.ema();
+                        let ema = em.ema();
+                        let ivl_min = (self.insert_ivl_min_mus as f32) * 1e-6;
+                        let dt = (ivl_min - ema).max(0.) / em.k();
+                        created.insert_next_earliest = tsnow + Duration::from_micros((dt * 1e6) as u64);
+                        let ts_msp_last = created.ts_msp_last;
                     }
                     #[cfg(DISABLED)]
                     match &ev.value.data {
@@ -1473,26 +1295,23 @@ impl CaConn {
                         },
                         _ => {}
                     }
-                    Self::do_event_insert(
-                        st,
-                        series,
-                        scalar_type,
-                        shape,
-                        ts,
-                        ts_local,
-                        ev,
-                        tsnow,
-                        item_queue,
-                        self.insert_ivl_min_mus,
-                        self.stats.clone(),
-                        inserts_counter,
-                        extra_inserts_conf,
-                    )?;
+                    {
+                        let val: DataValue = ev.value.data.into();
+                        st.writer
+                            .write(
+                                TsNano::from_ns(ts),
+                                TsNano::from_ns(ts_local),
+                                val,
+                                &mut self.insert_item_queue,
+                            )
+                            .map_err(|e| Error::from_string(e))?;
+                        self.inserts_counter += 1;
+                    }
                 } else {
                     self.stats.channel_fast_item_drop.inc();
-                    if tsnow.duration_since(st.insert_recv_ivl_last) >= Duration::from_millis(10000) {
-                        st.insert_recv_ivl_last = tsnow;
-                        let ema = st.insert_item_ivl_ema.ema();
+                    if tsnow.duration_since(created.insert_recv_ivl_last) >= Duration::from_millis(10000) {
+                        created.insert_recv_ivl_last = tsnow;
+                        let ema = created.insert_item_ivl_ema.ema();
                         let item = IvlItem {
                             series: series.clone(),
                             ts,
@@ -1501,8 +1320,8 @@ impl CaConn {
                         };
                         self.insert_item_queue.push_back(QueryItem::Ivl(item));
                     }
-                    if false && st.muted_before == 0 {
-                        let ema = st.insert_item_ivl_ema.ema();
+                    if false && created.muted_before == 0 {
+                        let ema = created.insert_item_ivl_ema.ema();
                         let item = MuteItem {
                             series: series.clone(),
                             ts,
@@ -1511,7 +1330,7 @@ impl CaConn {
                         };
                         self.insert_item_queue.push_back(QueryItem::Mute(item));
                     }
-                    st.muted_before = 1;
+                    created.muted_before = 1;
                 }
             }
             _ => {
@@ -1646,7 +1465,16 @@ impl CaConn {
                                 self.handle_create_chan_res(k, tsnow)?;
                                 do_wake_again = true;
                             }
-                            CaMsgTy::EventAddRes(k) => self.handle_event_add_res(k, tsnow)?,
+                            CaMsgTy::EventAddRes(ev) => {
+                                trace!("got EventAddRes: {ev:?}");
+                                self.stats.event_add_res_recv.inc();
+                                let res = Self::handle_event_add_res(self, ev, tsnow);
+                                let ts2 = Instant::now();
+                                self.stats
+                                    .time_handle_event_add_res
+                                    .add((ts2.duration_since(tsnow) * MS as u32).as_secs());
+                                res?;
+                            }
                             CaMsgTy::Echo => {
                                 // let addr = &self.remote_addr_dbg;
                                 if let Some(started) = self.ioc_ping_start {
@@ -1778,19 +1606,20 @@ impl CaConn {
             muted_before: 0,
             info_store_msp_last: info_store_msp_from_time(SystemTime::now()),
         };
-        *ch_s = ChannelState::FetchingSeriesId(created_state);
-        // TODO handle error in different way. Should most likely not abort.
-        let tx = SendSeriesLookup {
-            tx: self.conn_command_tx(),
-        };
-        let query = ChannelInfoQuery {
-            backend: self.backend.clone(),
-            channel: name.clone(),
-            scalar_type: scalar_type.to_scylla_i32(),
-            shape_dims: shape.to_scylla_vec(),
-            tx: Box::pin(tx),
-        };
-        self.channel_info_query_queue.push_back(query);
+        *ch_s = ChannelState::MakingSeriesWriter(created_state);
+        let name = self
+            .name_by_cid(cid)
+            .ok_or_else(|| Error::from_string(format!("no name for cid {cid:?}")))?;
+        // info!("MonitoringState::AddingEvent  cssid {cssid:?}  {name:?}  {cid:?}");
+        let job = EstablishWorkerJob::new(
+            JobId(cid.0 as _),
+            self.backend.clone(),
+            name.into(),
+            scalar_type,
+            shape,
+            self.writer_tx.clone(),
+        );
+        self.writer_establish_qu.push_back(job);
         Ok(())
     }
 
@@ -2008,11 +1837,9 @@ impl CaConn {
         if self.channel_status_emit_last + Duration::from_millis(3000) <= tsnow {
             self.emit_channel_status()?;
         }
-        // TODO use safe version
-        let this = unsafe { self.get_unchecked_mut() };
-        match &this.state {
-            CaConnState::Unconnected(since) => {}
-            CaConnState::Connecting(since, _addr, _) => {
+        match &self.state {
+            CaConnState::Unconnected(_) => {}
+            CaConnState::Connecting(since, _, _) => {
                 if *since + CONNECTING_TIMEOUT < tsnow {
                     debug!("CONNECTION TIMEOUT");
                 }
@@ -2023,12 +1850,6 @@ impl CaConn {
             CaConnState::Wait(_) => {}
             CaConnState::Shutdown => {}
             CaConnState::EndOfStream => {}
-        }
-        if false {
-            for (_, tb) in this.time_binners.iter_mut() {
-                let iiq = &mut this.insert_item_queue;
-                tb.tick(iiq)?;
-            }
         }
         Ok(())
     }
@@ -2142,25 +1963,25 @@ impl CaConn {
         )
     }
 
-    fn attempt_flush_channel_info_query(mut self: Pin<&mut Self>, cx: &mut Context) -> Result<Poll<Option<()>>, Error> {
+    fn attempt_flush_writer_establish(mut self: Pin<&mut Self>, cx: &mut Context) -> Result<Poll<Option<()>>, Error> {
         use Poll::*;
         if self.is_shutdown() {
             Ok(Ready(None))
         } else {
-            let sd = self.channel_info_query_sending.as_mut();
+            let sd = self.writer_establish_tx.as_mut();
             if !sd.has_sender() {
                 return Err(Error::with_msg_no_trace(
                     "attempt_flush_channel_info_query  no more sender",
                 ));
             }
             if sd.is_idle() {
-                if let Some(item) = self.channel_info_query_queue.pop_front() {
-                    trace3!("send series query {item:?}");
-                    let sd = self.channel_info_query_sending.as_mut();
+                if let Some(item) = self.writer_establish_qu.pop_front() {
+                    trace3!("send EstablishWorkerJob");
+                    let sd = self.writer_establish_tx.as_mut();
                     sd.send_pin(item);
                 }
             }
-            let sd = &mut self.channel_info_query_sending;
+            let sd = &mut self.writer_establish_tx;
             if sd.is_sending() {
                 match sd.poll_unpin(cx) {
                     Ready(Ok(())) => Ok(Ready(Some(()))),
@@ -2231,7 +2052,7 @@ impl Stream for CaConn {
 
             let lts3 = Instant::now();
 
-            match self.as_mut().attempt_flush_channel_info_query(cx) {
+            match self.as_mut().attempt_flush_writer_establish(cx) {
                 Ok(Ready(Some(()))) => {
                     have_progress = true;
                 }
@@ -2243,6 +2064,17 @@ impl Stream for CaConn {
             }
 
             let lts2 = Instant::now();
+
+            match self.as_mut().handle_writer_establish_result(cx) {
+                Ok(Ready(Some(()))) => {
+                    have_progress = true;
+                }
+                Ok(Ready(None)) => {}
+                Ok(Pending) => {
+                    have_pending = true;
+                }
+                Err(e) => break Ready(Some(Err(e))),
+            }
 
             match self.as_mut().handle_conn_command(cx) {
                 Ok(Ready(Some(()))) => {

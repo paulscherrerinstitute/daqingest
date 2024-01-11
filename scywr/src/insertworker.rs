@@ -64,6 +64,12 @@ fn stats_inc_for_err(stats: &stats::InsertWorkerStats, err: &crate::iteminsertqu
         Error::QueryError(_) => {
             stats.query_error().inc();
         }
+        Error::GetValHelpTodoWaveform => {
+            stats.logic_error().inc();
+        }
+        Error::GetValHelpInnerTypeMismatch => {
+            stats.logic_error().inc();
+        }
     }
 }
 

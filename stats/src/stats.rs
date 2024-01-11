@@ -318,6 +318,7 @@ stats_proc::stats_struct!((
         name(InsertWorkerStats),
         prefix(insert_worker),
         counters(
+            logic_error,
             item_recv,
             inserted_values,
             inserted_connection_status,

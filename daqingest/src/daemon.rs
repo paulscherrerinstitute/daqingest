@@ -97,6 +97,9 @@ impl Daemon {
         // Insert queue hook
         // let query_item_rx = inserthook::active_channel_insert_hook(query_item_rx);
 
+        let (writer_establis_tx,) = serieswriter::writer::start_writer_establish_worker(channel_info_query_tx.clone())
+            .map_err(|e| Error::with_msg_no_trace(e.to_string()))?;
+
         let local_epics_hostname = ingest_linux::net::local_hostname();
         let conn_set_ctrl = CaConnSet::start(
             ingest_opts.backend().into(),
@@ -104,6 +107,7 @@ impl Daemon {
             query_item_tx,
             channel_info_query_tx,
             ingest_opts.clone(),
+            writer_establis_tx,
         );
 
         // TODO remove

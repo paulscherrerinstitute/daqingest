@@ -1,11 +1,12 @@
 use err::Error;
 use items_0::timebin::TimeBinned;
-use netpod::log::*;
+use log::*;
 use netpod::timeunits::SEC;
 use netpod::TsNano;
 use std::collections::VecDeque;
 use std::mem;
 
+#[derive(Debug)]
 pub struct PatchCollect {
     patch_len: TsNano,
     bin_len: TsNano,

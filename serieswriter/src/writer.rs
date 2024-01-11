@@ -1,8 +1,11 @@
+use crate::timebin::ConnTimeBin;
+use async_channel::Receiver;
 use async_channel::Sender;
 use dbpg::seriesbychannel::ChannelInfoQuery;
 use err::thiserror;
 use err::ThisError;
 use log::*;
+use netpod::timeunits::DAY;
 use netpod::timeunits::HOUR;
 use netpod::timeunits::SEC;
 use netpod::Database;
@@ -33,6 +36,7 @@ pub enum Error {
     Scy(#[from] scywr::session::Error),
     ScySchema(#[from] scywr::schema::Error),
     Series(#[from] dbpg::seriesbychannel::Error),
+    Timebin(#[from] crate::timebin::Error),
 }
 
 impl<T> From<async_channel::SendError<T>> for Error {
@@ -52,10 +56,12 @@ pub struct SeriesWriter {
     sid: SeriesId,
     scalar_type: ScalarType,
     shape: Shape,
-    ts_msp_last: TsNano,
+    ts_msp_last: Option<TsNano>,
     inserted_in_current_msp: u32,
     msp_max_entries: u32,
+    // TODO this should be in an Option:
     ts_msp_grid_last: u32,
+    binner: ConnTimeBin,
 }
 
 impl SeriesWriter {
@@ -89,47 +95,81 @@ impl SeriesWriter {
         worker_tx.send(item).await?;
         let res = rx.recv().await?.map_err(|_| Error::SeriesLookupError)?;
         let sid = res.series.into_inner();
+        let mut binner = ConnTimeBin::empty();
+        binner.setup_for(sid.clone(), &scalar_type, &shape)?;
         let res = Self {
             cssid,
             sid,
             scalar_type,
             shape,
-
-            // TODO
-            ts_msp_last: todo!(),
-
+            ts_msp_last: None,
             inserted_in_current_msp: 0,
             msp_max_entries: 64000,
             ts_msp_grid_last: 0,
+            binner,
         };
         Ok(res)
     }
 
-    pub fn write(&mut self, ts: TsNano, ts_local: TsNano, val: DataValue, item_qu: &mut VecDeque<QueryItem>) {
+    pub fn sid(&self) -> SeriesId {
+        self.sid.clone()
+    }
+
+    pub fn scalar_type(&self) -> &ScalarType {
+        &self.scalar_type
+    }
+
+    pub fn shape(&self) -> &Shape {
+        &self.shape
+    }
+
+    pub fn write(
+        &mut self,
+        ts: TsNano,
+        ts_local: TsNano,
+        val: DataValue,
+        item_qu: &mut VecDeque<QueryItem>,
+    ) -> Result<(), Error> {
         // TODO check for compatibility of the given data..
 
         // TODO compute the binned data here as well and flush completed bins if needed.
+        self.binner.push(ts.clone(), &val)?;
 
         // TODO decide on better msp/lsp: random offset!
         // As long as one writer is active, the msp is arbitrary.
-        let (ts_msp, ts_msp_changed) = if self.inserted_in_current_msp >= self.msp_max_entries
-            || TsNano::from_ns(self.ts_msp_last.ns() + HOUR) <= ts
-        {
-            let div = SEC * 10;
-            let ts_msp = TsNano::from_ns(ts.ns() / div * div);
-            if ts_msp == self.ts_msp_last {
-                (ts_msp, false)
-            } else {
-                self.ts_msp_last = ts_msp.clone();
+
+        // TODO need to choose this better?
+        let div = SEC * 10;
+
+        let (ts_msp, ts_msp_changed) = match self.ts_msp_last.clone() {
+            Some(ts_msp_last) => {
+                if self.inserted_in_current_msp >= self.msp_max_entries || ts_msp_last.clone().add_ns(HOUR) <= ts {
+                    let ts_msp = ts.clone().div(div).mul(div);
+                    if ts_msp == ts_msp_last {
+                        (ts_msp, false)
+                    } else {
+                        self.ts_msp_last = Some(ts_msp.clone());
+                        self.inserted_in_current_msp = 1;
+                        (ts_msp, true)
+                    }
+                } else {
+                    self.inserted_in_current_msp += 1;
+                    (ts_msp_last, false)
+                }
+            }
+            None => {
+                let ts_msp = ts.clone().div(div).mul(div);
+                self.ts_msp_last = Some(ts_msp.clone());
                 self.inserted_in_current_msp = 1;
                 (ts_msp, true)
             }
-        } else {
-            self.inserted_in_current_msp += 1;
-            (self.ts_msp_last.clone(), false)
         };
-        let ts_lsp = TsNano::from_ns(ts.ns() - ts_msp.ns());
-        let ts_msp_grid = (ts.ns() / TS_MSP_GRID_UNIT / TS_MSP_GRID_SPACING * TS_MSP_GRID_SPACING) as u32;
+        let ts_lsp = ts.clone().sub(ts_msp.clone());
+        let ts_msp_grid = ts
+            .div(TS_MSP_GRID_UNIT)
+            .div(TS_MSP_GRID_SPACING)
+            .mul(TS_MSP_GRID_SPACING)
+            .ns() as u32;
         let ts_msp_grid = if self.ts_msp_grid_last != ts_msp_grid {
             self.ts_msp_grid_last = ts_msp_grid;
             Some(ts_msp_grid)
@@ -149,7 +189,75 @@ impl SeriesWriter {
             ts_local: ts_local.ns(),
         };
         item_qu.push_back(QueryItem::Insert(item));
+        Ok(())
     }
+}
+
+pub struct JobId(pub u64);
+
+pub struct EstablishWriterWorker {
+    worker_tx: Sender<ChannelInfoQuery>,
+    jobrx: Receiver<EstablishWorkerJob>,
+}
+
+impl EstablishWriterWorker {
+    fn new(worker_tx: Sender<ChannelInfoQuery>, jobrx: Receiver<EstablishWorkerJob>) -> Self {
+        Self { worker_tx, jobrx }
+    }
+
+    async fn work(self) {
+        while let Ok(item) = self.jobrx.recv().await {
+            let res = SeriesWriter::establish(
+                self.worker_tx.clone(),
+                item.backend,
+                item.channel,
+                item.scalar_type,
+                item.shape,
+            )
+            .await;
+            if item.restx.send((item.job_id, res)).await.is_err() {
+                warn!("can not send writer establish result");
+            }
+        }
+    }
+}
+
+pub struct EstablishWorkerJob {
+    job_id: JobId,
+    backend: String,
+    channel: String,
+    scalar_type: ScalarType,
+    shape: Shape,
+    restx: Sender<(JobId, Result<SeriesWriter, Error>)>,
+}
+
+impl EstablishWorkerJob {
+    pub fn new(
+        job_id: JobId,
+        backend: String,
+        channel: String,
+        scalar_type: ScalarType,
+        shape: Shape,
+        restx: Sender<(JobId, Result<SeriesWriter, Error>)>,
+    ) -> Self {
+        Self {
+            job_id,
+            backend,
+            channel,
+            scalar_type,
+            shape,
+            restx,
+        }
+    }
+}
+
+pub fn start_writer_establish_worker(
+    worker_tx: Sender<ChannelInfoQuery>,
+) -> Result<(Sender<EstablishWorkerJob>,), Error> {
+    let (tx, rx) = async_channel::bounded(256);
+    let worker = EstablishWriterWorker::new(worker_tx, rx);
+    taskrun::spawn(worker.work());
+    Ok((tx,))
 }
 
 #[test]
@@ -175,10 +283,19 @@ fn write_00() {
         let (tx, jhs, jh) = dbpg::seriesbychannel::start_lookup_workers(1, dbconf, stats).await?;
         let backend = "bck-test-00";
         let channel = "chn-test-00";
-        let scalar_type = ScalarType::U16;
+        let scalar_type = ScalarType::I16;
         let shape = Shape::Scalar;
-        let writer = SeriesWriter::establish(tx, backend.into(), channel.into(), scalar_type, shape).await?;
+        let mut writer = SeriesWriter::establish(tx, backend.into(), channel.into(), scalar_type, shape).await?;
         eprintln!("{writer:?}");
+        let mut item_queue = VecDeque::new();
+        let item_qu = &mut item_queue;
+        for i in 0..10 {
+            let ts = TsNano::from_ns(DAY + SEC * i);
+            let ts_local = ts.clone();
+            let val = DataValue::Scalar(scywr::iteminsertqueue::ScalarValue::I16(i as _));
+            writer.write(ts, ts_local, val, item_qu)?;
+        }
+        eprintln!("{item_queue:?}");
         Ok::<_, Error>(())
     };
     taskrun::run(fut).unwrap();
