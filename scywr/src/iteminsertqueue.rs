@@ -332,16 +332,15 @@ pub struct ChannelInfoItem {
 }
 
 #[derive(Debug)]
-pub struct TimeBinPatchSimpleF32 {
+pub struct TimeBinSimpleF32 {
     pub series: SeriesId,
-    pub bin_len_sec: u32,
-    pub bin_count: u32,
-    pub off_msp: u32,
-    pub off_lsp: u32,
-    pub counts: Vec<i64>,
-    pub mins: Vec<f32>,
-    pub maxs: Vec<f32>,
-    pub avgs: Vec<f32>,
+    pub bin_len_ms: i32,
+    pub ts_msp: i64,
+    pub off: i32,
+    pub count: i64,
+    pub min: f32,
+    pub max: f32,
+    pub avg: f32,
 }
 
 #[derive(Debug)]
@@ -352,7 +351,7 @@ pub enum QueryItem {
     Mute(MuteItem),
     Ivl(IvlItem),
     ChannelInfo(ChannelInfoItem),
-    TimeBinPatchSimpleF32(TimeBinPatchSimpleF32),
+    TimeBinSimpleF32(TimeBinSimpleF32),
 }
 
 struct InsParCom {

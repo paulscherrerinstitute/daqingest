@@ -9,6 +9,7 @@ use crate::iteminsertqueue::ConnectionStatusItem;
 use crate::iteminsertqueue::InsertFut;
 use crate::iteminsertqueue::InsertItem;
 use crate::iteminsertqueue::QueryItem;
+use crate::iteminsertqueue::TimeBinSimpleF32;
 use crate::store::DataStore;
 use async_channel::Receiver;
 use async_channel::Sender;
@@ -289,34 +290,9 @@ async fn worker(
                     }
                 }
             }
-            QueryItem::TimeBinPatchSimpleF32(item) => {
+            QueryItem::TimeBinSimpleF32(item) => {
                 info!("have time bin patch to insert: {item:?}");
-                let params = (
-                    item.series.id() as i64,
-                    item.bin_len_sec as i32,
-                    item.bin_count as i32,
-                    item.off_msp as i32,
-                    item.off_lsp as i32,
-                    item.counts,
-                    item.mins,
-                    item.maxs,
-                    item.avgs,
-                    ttls.binned.as_secs() as i32,
-                );
-                let qres = data_store
-                    .scy
-                    .execute(&data_store.qu_insert_binned_scalar_f32_v01, params)
-                    .await;
-                match qres {
-                    Ok(_) => {
-                        stats.inserted_binned().inc();
-                        backoff = backoff_0;
-                    }
-                    Err(e) => {
-                        stats_inc_for_err(&stats, &crate::iteminsertqueue::Error::QueryError(e));
-                        back_off_sleep(&mut backoff).await;
-                    }
-                }
+                return Err(Error::with_msg_no_trace("TODO insert item old path"));
             }
         }
     }
@@ -365,8 +341,12 @@ async fn worker_streamed(
                         stats.inserted_channel_status().inc();
                         insert_channel_status_fut(item, &ttls, &data_store, stats.clone())
                     }
+                    QueryItem::TimeBinSimpleF32(item) => {
+                        prepare_timebin_insert_futs(item, &ttls, &data_store, &stats, tsnow_u64)
+                    }
                     _ => {
                         // TODO
+                        debug!("TODO insert item {item:?}");
                         SmallVec::new()
                     }
                 };
@@ -462,6 +442,50 @@ fn prepare_query_insert_futs(
             .await?;
         stats.inserts_msp_grid().inc();
     }
+
+    futs
+}
+
+fn prepare_timebin_insert_futs(
+    item: TimeBinSimpleF32,
+    ttls: &Ttls,
+    data_store: &Arc<DataStore>,
+    stats: &Arc<InsertWorkerStats>,
+    tsnow_u64: u64,
+) -> SmallVec<[InsertFut; 4]> {
+    // debug!("have time bin patch to insert: {item:?}");
+    let params = (
+        item.series.id() as i64,
+        item.bin_len_ms,
+        item.ts_msp,
+        item.off,
+        item.count,
+        item.min,
+        item.max,
+        item.avg,
+        ttls.binned.as_secs() as i32,
+    );
+    // TODO would be better to count inserts only on completed insert
+    stats.inserted_binned().inc();
+    let fut = InsertFut::new(
+        data_store.scy.clone(),
+        data_store.qu_insert_binned_scalar_f32_v02.clone(),
+        params,
+        tsnow_u64,
+        stats.clone(),
+    );
+    let futs = smallvec![fut];
+
+    // TODO match on the query result:
+    // match qres {
+    //     Ok(_) => {
+    //         backoff = backoff_0;
+    //     }
+    //     Err(e) => {
+    //         stats_inc_for_err(&stats, &crate::iteminsertqueue::Error::QueryError(e));
+    //         back_off_sleep(&mut backoff).await;
+    //     }
+    // }
 
     futs
 }

@@ -489,20 +489,19 @@ pub async fn migrate_scylla_data_schema(scyconf: &ScyllaConfig) -> Result<(), Er
     }
     {
         let tab = GenTwcsTab::new(
-            "binned_scalar_f32_v01",
+            "binned_scalar_f32",
             &[
                 ("series", "bigint"),
-                ("bin_len_sec", "int"),
-                ("bin_count", "int"),
-                ("off_msp", "int"),
-                ("off_lsp", "int"),
-                ("counts", "frozen<list<bigint>>"),
-                ("mins", "frozen<list<float>>"),
-                ("maxs", "frozen<list<float>>"),
-                ("avgs", "frozen<list<float>>"),
+                ("bin_len_ms", "int"),
+                ("ts_msp", "bigint"),
+                ("off", "int"),
+                ("count", "bigint"),
+                ("min", "float"),
+                ("max", "float"),
+                ("avg", "float"),
             ],
-            ["series", "bin_len_sec", "bin_count", "off_msp"],
-            ["off_lsp"],
+            ["series", "bin_len_ms", "ts_msp"],
+            ["off"],
             ddays(30),
             ddays(4),
         );

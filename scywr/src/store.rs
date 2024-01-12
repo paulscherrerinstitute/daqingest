@@ -40,7 +40,7 @@ pub struct DataStore {
     pub qu_insert_channel_status: Arc<PreparedStatement>,
     pub qu_insert_channel_status_by_ts_msp: Arc<PreparedStatement>,
     pub qu_insert_channel_ping: Arc<PreparedStatement>,
-    pub qu_insert_binned_scalar_f32_v01: Arc<PreparedStatement>,
+    pub qu_insert_binned_scalar_f32_v02: Arc<PreparedStatement>,
 }
 
 impl DataStore {
@@ -163,12 +163,12 @@ impl DataStore {
         let qu_insert_channel_ping = Arc::new(q);
 
         let cql = concat!(
-            "insert into binned_scalar_f32_v01 (",
-            "series, bin_len_sec, bin_count, off_msp, off_lsp, counts, mins, maxs, avgs)",
-            " values (?, ?, ?, ?, ?, ?, ?, ?, ?) using ttl ?"
+            "insert into binned_scalar_f32 (",
+            "series, bin_len_ms, ts_msp, off, count, min, max, avg)",
+            " values (?, ?, ?, ?, ?, ?, ?, ?) using ttl ?"
         );
         let q = scy.prepare(cql).await?;
-        let qu_insert_binned_scalar_f32_v01 = Arc::new(q);
+        let qu_insert_binned_scalar_f32_v02 = Arc::new(q);
         let ret = Self {
             scy,
             qu_insert_ts_msp,
@@ -194,7 +194,7 @@ impl DataStore {
             qu_insert_channel_status,
             qu_insert_channel_status_by_ts_msp,
             qu_insert_channel_ping,
-            qu_insert_binned_scalar_f32_v01,
+            qu_insert_binned_scalar_f32_v02,
         };
         Ok(ret)
     }

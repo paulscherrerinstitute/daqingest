@@ -5,12 +5,9 @@ use dbpg::seriesbychannel::ChannelInfoQuery;
 use err::thiserror;
 use err::ThisError;
 use log::*;
-use netpod::timeunits::DAY;
 use netpod::timeunits::HOUR;
 use netpod::timeunits::SEC;
-use netpod::Database;
 use netpod::ScalarType;
-use netpod::ScyllaConfig;
 use netpod::Shape;
 use netpod::TsNano;
 use netpod::TS_MSP_GRID_SPACING;
@@ -23,7 +20,7 @@ use series::ChannelStatusSeriesId;
 use series::SeriesId;
 use stats::SeriesByChannelStats;
 use std::collections::VecDeque;
-use std::sync::Arc;
+use std::time::SystemTime;
 
 #[derive(Debug, ThisError)]
 pub enum Error {
@@ -72,6 +69,7 @@ impl SeriesWriter {
         channel: String,
         scalar_type: ScalarType,
         shape: Shape,
+        tsnow: SystemTime,
     ) -> Result<Self, Error> {
         let (tx, rx) = async_channel::bounded(1);
         let item = ChannelInfoQuery {
@@ -95,8 +93,8 @@ impl SeriesWriter {
         worker_tx.send(item).await?;
         let res = rx.recv().await?.map_err(|_| Error::SeriesLookupError)?;
         let sid = res.series.into_inner();
-        let mut binner = ConnTimeBin::empty();
-        binner.setup_for(sid.clone(), &scalar_type, &shape)?;
+        let mut binner = ConnTimeBin::empty(sid.clone(), TsNano::from_ns(SEC * 10));
+        binner.setup_for(&scalar_type, &shape, tsnow)?;
         let res = Self {
             cssid,
             sid,
@@ -130,21 +128,19 @@ impl SeriesWriter {
         val: DataValue,
         item_qu: &mut VecDeque<QueryItem>,
     ) -> Result<(), Error> {
-        // TODO check for compatibility of the given data..
-
         // TODO compute the binned data here as well and flush completed bins if needed.
         self.binner.push(ts.clone(), &val)?;
 
         // TODO decide on better msp/lsp: random offset!
         // As long as one writer is active, the msp is arbitrary.
 
-        // TODO need to choose this better?
-        let div = SEC * 10;
+        // Maximum resolution of the ts msp:
+        let msp_res_max = SEC * 10;
 
         let (ts_msp, ts_msp_changed) = match self.ts_msp_last.clone() {
             Some(ts_msp_last) => {
                 if self.inserted_in_current_msp >= self.msp_max_entries || ts_msp_last.clone().add_ns(HOUR) <= ts {
-                    let ts_msp = ts.clone().div(div).mul(div);
+                    let ts_msp = ts.clone().div(msp_res_max).mul(msp_res_max);
                     if ts_msp == ts_msp_last {
                         (ts_msp, false)
                     } else {
@@ -158,7 +154,7 @@ impl SeriesWriter {
                 }
             }
             None => {
-                let ts_msp = ts.clone().div(div).mul(div);
+                let ts_msp = ts.clone().div(msp_res_max).mul(msp_res_max);
                 self.ts_msp_last = Some(ts_msp.clone());
                 self.inserted_in_current_msp = 1;
                 (ts_msp, true)
@@ -191,6 +187,11 @@ impl SeriesWriter {
         item_qu.push_back(QueryItem::Insert(item));
         Ok(())
     }
+
+    pub fn tick(&mut self, iiq: &mut VecDeque<QueryItem>) -> Result<(), Error> {
+        self.binner.tick(iiq)?;
+        Ok(())
+    }
 }
 
 pub struct JobId(pub u64);
@@ -207,12 +208,15 @@ impl EstablishWriterWorker {
 
     async fn work(self) {
         while let Ok(item) = self.jobrx.recv().await {
+            // TODO
+            debug!("got job");
             let res = SeriesWriter::establish(
                 self.worker_tx.clone(),
                 item.backend,
                 item.channel,
                 item.scalar_type,
                 item.shape,
+                item.tsnow,
             )
             .await;
             if item.restx.send((item.job_id, res)).await.is_err() {
@@ -229,6 +233,7 @@ pub struct EstablishWorkerJob {
     scalar_type: ScalarType,
     shape: Shape,
     restx: Sender<(JobId, Result<SeriesWriter, Error>)>,
+    tsnow: SystemTime,
 }
 
 impl EstablishWorkerJob {
@@ -239,6 +244,7 @@ impl EstablishWorkerJob {
         scalar_type: ScalarType,
         shape: Shape,
         restx: Sender<(JobId, Result<SeriesWriter, Error>)>,
+        tsnow: SystemTime,
     ) -> Self {
         Self {
             job_id,
@@ -247,6 +253,7 @@ impl EstablishWorkerJob {
             scalar_type,
             shape,
             restx,
+            tsnow,
         }
     }
 }
@@ -262,6 +269,9 @@ pub fn start_writer_establish_worker(
 
 #[test]
 fn write_00() {
+    use netpod::Database;
+    use scywr::session::ScyllaConfig;
+    use std::sync::Arc;
     let fut = async {
         let dbconf = &Database {
             name: "daqbuffer".into(),
@@ -285,12 +295,13 @@ fn write_00() {
         let channel = "chn-test-00";
         let scalar_type = ScalarType::I16;
         let shape = Shape::Scalar;
-        let mut writer = SeriesWriter::establish(tx, backend.into(), channel.into(), scalar_type, shape).await?;
+        let tsnow = SystemTime::now();
+        let mut writer = SeriesWriter::establish(tx, backend.into(), channel.into(), scalar_type, shape, tsnow).await?;
         eprintln!("{writer:?}");
         let mut item_queue = VecDeque::new();
         let item_qu = &mut item_queue;
         for i in 0..10 {
-            let ts = TsNano::from_ns(DAY + SEC * i);
+            let ts = TsNano::from_ns(HOUR * 24 + SEC * i);
             let ts_local = ts.clone();
             let val = DataValue::Scalar(scywr::iteminsertqueue::ScalarValue::I16(i as _));
             writer.write(ts, ts_local, val, item_qu)?;
