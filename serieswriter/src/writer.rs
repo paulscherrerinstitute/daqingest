@@ -4,6 +4,9 @@ use async_channel::Sender;
 use dbpg::seriesbychannel::ChannelInfoQuery;
 use err::thiserror;
 use err::ThisError;
+use future::ready;
+use futures_util::future;
+use futures_util::StreamExt;
 use log::*;
 use netpod::timeunits::HOUR;
 use netpod::timeunits::SEC;
@@ -62,7 +65,6 @@ pub struct SeriesWriter {
 }
 
 impl SeriesWriter {
-    // TODO this requires a database
     pub async fn establish(
         worker_tx: Sender<ChannelInfoQuery>,
         backend: String,
@@ -82,6 +84,18 @@ impl SeriesWriter {
         worker_tx.send(item).await?;
         let res = rx.recv().await?.map_err(|_| Error::SeriesLookupError)?;
         let cssid = ChannelStatusSeriesId::new(res.series.into_inner().id());
+        Self::establish_with_cssid(worker_tx, cssid, backend, channel, scalar_type, shape, tsnow).await
+    }
+
+    pub async fn establish_with_cssid(
+        worker_tx: Sender<ChannelInfoQuery>,
+        cssid: ChannelStatusSeriesId,
+        backend: String,
+        channel: String,
+        scalar_type: ScalarType,
+        shape: Shape,
+        tsnow: SystemTime,
+    ) -> Result<Self, Error> {
         let (tx, rx) = async_channel::bounded(1);
         let item = ChannelInfoQuery {
             backend,
@@ -207,22 +221,29 @@ impl EstablishWriterWorker {
     }
 
     async fn work(self) {
-        while let Ok(item) = self.jobrx.recv().await {
-            // TODO
-            debug!("got job");
-            let res = SeriesWriter::establish(
-                self.worker_tx.clone(),
-                item.backend,
-                item.channel,
-                item.scalar_type,
-                item.shape,
-                item.tsnow,
-            )
+        self.jobrx
+            .map(move |item| {
+                let wtx = self.worker_tx.clone();
+                async move {
+                    // TODO
+                    debug!("got job");
+                    let res = SeriesWriter::establish(
+                        wtx.clone(),
+                        item.backend,
+                        item.channel,
+                        item.scalar_type,
+                        item.shape,
+                        item.tsnow,
+                    )
+                    .await;
+                    if item.restx.send((item.job_id, res)).await.is_err() {
+                        warn!("can not send writer establish result");
+                    }
+                }
+            })
+            .buffer_unordered(512)
+            .for_each(|_| future::ready(()))
             .await;
-            if item.restx.send((item.job_id, res)).await.is_err() {
-                warn!("can not send writer establish result");
-            }
-        }
     }
 }
 

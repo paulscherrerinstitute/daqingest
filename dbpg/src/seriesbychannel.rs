@@ -369,9 +369,9 @@ pub async fn start_lookup_workers(
     ),
     Error,
 > {
-    let inp_cap = 128;
+    let inp_cap = 64;
     let batch_out_cap = 4;
-    let timeout = Duration::from_millis(400);
+    let timeout = Duration::from_millis(100);
     let (query_tx, query_rx) = async_channel::bounded(inp_cap);
     let (batch_rx, bjh) = batchtools::batcher::batch(inp_cap, timeout, batch_out_cap, query_rx);
     let mut jhs = Vec::new();

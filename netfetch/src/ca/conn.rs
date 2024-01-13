@@ -184,21 +184,21 @@ enum ChannelError {
     CreateChanFail(ChannelStatusSeriesId),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct EventedState {
     ts_last: Instant,
     recv_count: u64,
     recv_bytes: u64,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 enum MonitoringState {
     FetchSeriesId,
     AddingEvent(SeriesId),
     Evented(SeriesId, EventedState),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct CreatedState {
     cssid: ChannelStatusSeriesId,
     cid: Cid,
@@ -216,28 +216,6 @@ struct CreatedState {
     insert_next_earliest: Instant,
     muted_before: u32,
     info_store_msp_last: u32,
-}
-
-impl Default for CreatedState {
-    fn default() -> Self {
-        Self {
-            cssid: ChannelStatusSeriesId::new(123123),
-            cid: Cid(123123),
-            sid: Sid(123123),
-            ts_created: Instant::now(),
-            ts_alive_last: Instant::now(),
-            state: MonitoringState::FetchSeriesId,
-            ts_msp_last: 4242,
-            ts_msp_grid_last: 4242,
-            inserted_in_ts_msp: 4242,
-            insert_item_ivl_ema: IntervalEma::new(),
-            item_recv_ivl_ema: IntervalEma::new(),
-            insert_recv_ivl_last: Instant::now(),
-            insert_next_earliest: Instant::now(),
-            muted_before: Default::default(),
-            info_store_msp_last: Default::default(),
-        }
-    }
 }
 
 #[derive(Debug)]
@@ -951,10 +929,11 @@ impl CaConn {
                     let proto = self.proto.as_mut().unwrap();
                     proto.push_out(msg);
                 }
-
                 st2.state = MonitoringState::AddingEvent(wr.sid());
-                let created = std::mem::replace(st2, Default::default());
-                *chst = ChannelState::Writable(WritableState { created, writer: wr });
+                *chst = ChannelState::Writable(WritableState {
+                    created: st2.clone(),
+                    writer: wr,
+                });
                 Ok(())
             } else {
                 warn!("TODO handle_series_lookup_result channel in bad state, reset");
@@ -2019,6 +1998,7 @@ impl CaConn {
         qu_to_si: FB,
         loop_max: u32,
         cx: &mut Context,
+        id: &str,
     ) -> Result<Poll<Option<()>>, Error>
     where
         Q: Unpin,
@@ -2033,30 +2013,22 @@ impl CaConn {
                 break;
             }
             if !sp.has_sender() {
-                return Err(Error::with_msg_no_trace("attempt_flush_queue  no sender"));
+                return Err(Error::with_msg_no_trace(format!("flush queue  {id}  no sender")));
             }
             if sp.is_idle() {
                 if let Some(item) = qu_to_si(qu) {
                     sp.as_mut().send_pin(item);
                 } else {
+                    break;
                 }
-                // TODO maybe use a generic function which produces the next
-                // item from a queue: can be a batch!
-                // if let Some(item) = qu.pop_front() {
-                //     // let sd = self.writer_establish_tx.as_mut();
-                //     // sp.as_mut().send_pin(item);
-                // } else {
-                //     // break;
-                // }
             }
-            // let sd = &mut self.writer_establish_tx;
             if sp.is_sending() {
                 match sp.poll_unpin(cx) {
                     Ready(Ok(())) => {
                         have_progress = true;
                     }
                     Ready(Err(e)) => {
-                        let e = Error::with_msg_no_trace(format!("attempt_flush_queue  {e}"));
+                        let e = Error::with_msg_no_trace(format!("flush queue  {id}  {e}"));
                         return Err(e);
                     }
                     Pending => {
@@ -2064,7 +2036,7 @@ impl CaConn {
                     }
                 }
             } else {
-                let e = Error::with_msg_no_trace(format!("attempt_flush_queue  not sending"));
+                let e = Error::with_msg_no_trace(format!("flush queue  {id}  not sending"));
                 return Err(e);
             }
         }
@@ -2132,16 +2104,10 @@ impl Stream for CaConn {
             }
 
             if !self.is_shutdown() {
-                fn abc(
-                    obj: &mut CaConn,
-                ) -> (
-                    &mut VecDeque<QueryItem>,
-                    &mut Pin<Box<SenderPolling<VecDeque<QueryItem>>>>,
-                ) {
-                    (&mut obj.insert_item_queue, &mut obj.storage_insert_sender)
-                }
-                let (qu, sp) = abc(self.as_mut().get_mut());
-                match Self::attempt_flush_queue(qu, sp, Self::send_batched::<32, _>, 32, cx) {
+                let obj = self.as_mut().get_mut();
+                let qu = &mut obj.insert_item_queue;
+                let sp = &mut obj.storage_insert_sender;
+                match Self::attempt_flush_queue(qu, sp, Self::send_batched::<32, _>, 32, cx, "strg") {
                     Ok(Ready(Some(()))) => {
                         have_progress = true;
                     }
@@ -2151,23 +2117,15 @@ impl Stream for CaConn {
                     }
                     Err(e) => break Ready(Some(Err(e))),
                 }
-
-                // match self.as_mut().attempt_flush_storage_queue(cx) {
-                //     Ok(Ready(Some(()))) => {
-                //         have_progress = true;
-                //     }
-                //     Ok(Ready(None)) => {}
-                //     Ok(Pending) => {
-                //         have_pending = true;
-                //     }
-                //     Err(e) => break Ready(Some(Err(e))),
-                // }
             }
 
             let lts3 = Instant::now();
 
             if !self.is_shutdown() {
-                match self.as_mut().attempt_flush_writer_establish(cx) {
+                let obj = self.as_mut().get_mut();
+                let qu = &mut obj.writer_establish_qu;
+                let sp = &mut obj.writer_establish_tx;
+                match Self::attempt_flush_queue(qu, sp, Self::send_individual, 32, cx, "wr-est") {
                     Ok(Ready(Some(()))) => {
                         have_progress = true;
                     }
