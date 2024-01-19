@@ -29,6 +29,13 @@ where
     _pin: PhantomPinned,
 }
 
+fn _require_unpin<T: Unpin>(_: &T) {}
+
+fn _check_unpin() {
+    let _r: &SenderPolling<String> = err::todoval();
+    // _require_unpin(_r);
+}
+
 unsafe impl<T> core::marker::Send for SenderPolling<T> where T: core::marker::Send {}
 
 impl<T> SenderPolling<T> {

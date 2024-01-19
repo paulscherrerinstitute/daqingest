@@ -85,7 +85,7 @@ const MAYBE_WRONG_ADDRESS_STAY: Duration = Duration::from_millis(4000);
 const SEARCH_PENDING_TIMEOUT: Duration = Duration::from_millis(30000);
 const CHANNEL_HEALTH_TIMEOUT: Duration = Duration::from_millis(30000);
 const CHANNEL_UNASSIGNED_TIMEOUT: Duration = Duration::from_millis(0);
-const CHANNEL_MAX_WITHOUT_HEALTH_UPDATE: usize = 10000;
+const CHANNEL_MAX_WITHOUT_HEALTH_UPDATE: usize = 3000000;
 
 #[allow(unused)]
 macro_rules! trace2 {
@@ -1398,7 +1398,7 @@ impl CaConnSet {
         }
         for (addr, ch) in cmd_remove_channel {
             if let Some(g) = self.ca_conn_ress.get_mut(&addr) {
-                let cmd = ConnCommand::channel_remove(ch.id().into());
+                let cmd = ConnCommand::channel_close(ch.id().into());
                 g.cmd_queue.push_back(cmd);
             }
             let cmd = ChannelRemove { name: ch.id().into() };
@@ -1756,13 +1756,7 @@ impl Stream for CaConnSet {
         trace4!("CaConnSet  poll  done");
         let poll_ts2 = Instant::now();
         let dt = poll_ts2.saturating_duration_since(poll_ts1);
-        if dt > Duration::from_millis(80) {
-            warn!("long poll duration {:.0} ms", dt.as_secs_f32() * 1e3)
-        } else if dt > Duration::from_millis(40) {
-            info!("long poll duration {:.0} ms", dt.as_secs_f32() * 1e3)
-        } else if dt > Duration::from_millis(5) {
-            debug!("long poll duration {:.0} ms", dt.as_secs_f32() * 1e3)
-        }
+        self.stats.poll_all_dt().ingest((1e3 * dt.as_secs_f32()) as u32);
         ret
     }
 }

@@ -299,7 +299,7 @@ where
             c.reset();
             let nbins = tb.bins_ready_count();
             if nbins >= 1 {
-                info!("store bins len {}  {:?}", nbins, params.series);
+                trace!("store bins len {}  {:?}", nbins, params.series);
                 store_bins(params.series.clone(), tb, iiq, next)?;
                 // if let Some(mut bins) = tb.bins_ready() {
                 //     //info!("store bins  {bins:?}");
@@ -363,7 +363,7 @@ fn store_bins(
                     }
 
                     // TODO this must depend on the data type: waveforms need smaller batches
-                    let bins_per_msp = 10000;
+                    let bins_per_msp = 82000;
 
                     let ts1ms = ts1 / MS;
                     let ts2ms = ts2 / MS;
@@ -382,15 +382,15 @@ fn store_bins(
                         avg,
                     };
                     let item = QueryItem::TimeBinSimpleF32(item);
-                    debug!("push item B  ts1ms {ts1ms}  bin_len_ms {bin_len_ms}  ts_msp {ts_msp}  off {off}");
+                    trace!("push item B  ts1ms {ts1ms}  bin_len_ms {bin_len_ms}  ts_msp {ts_msp}  off {off}");
                     iiq.push_back(item);
                 }
             }
+            Ok(())
         } else {
             error!("unexpected container!");
-            return Err(Error::PatchUnexpectedContainer);
+            Err(Error::PatchUnexpectedContainer)
         }
-
         // TODO feed also the next patch collector for the next coarse resolution.
         // pc.ingest(bins.as_mut())?;
         // let noutq = pc.outq_len();
@@ -402,8 +402,6 @@ fn store_bins(
         //     warn!("pc outq len zero");
         //     Ok(())
         // }
-
-        Ok(())
     } else {
         error!("have bins but none returned");
         Err(Error::HaveBinsButNoneReturned)

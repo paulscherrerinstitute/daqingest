@@ -21,8 +21,12 @@ use scywr::iteminsertqueue::QueryItem;
 use series::series::CHANNEL_STATUS_DUMMY_SCALAR_TYPE;
 use series::ChannelStatusSeriesId;
 use series::SeriesId;
-use stats::SeriesByChannelStats;
+use stats::SeriesWriterEstablishStats;
 use std::collections::VecDeque;
+use std::sync::atomic;
+use std::sync::atomic::AtomicU64;
+use std::sync::Arc;
+use std::time::Duration;
 use std::time::SystemTime;
 
 #[derive(Debug, ThisError)]
@@ -213,20 +217,42 @@ pub struct JobId(pub u64);
 pub struct EstablishWriterWorker {
     worker_tx: Sender<ChannelInfoQuery>,
     jobrx: Receiver<EstablishWorkerJob>,
+    stats: Arc<SeriesWriterEstablishStats>,
 }
 
 impl EstablishWriterWorker {
-    fn new(worker_tx: Sender<ChannelInfoQuery>, jobrx: Receiver<EstablishWorkerJob>) -> Self {
-        Self { worker_tx, jobrx }
+    fn new(
+        worker_tx: Sender<ChannelInfoQuery>,
+        jobrx: Receiver<EstablishWorkerJob>,
+        stats: Arc<SeriesWriterEstablishStats>,
+    ) -> Self {
+        Self {
+            worker_tx,
+            jobrx,
+            stats,
+        }
     }
 
     async fn work(self) {
+        let cnt = Arc::new(AtomicU64::new(0));
+        taskrun::spawn({
+            let cnt = cnt.clone();
+            async move {
+                if true {
+                    return Ok::<_, Error>(());
+                }
+                loop {
+                    taskrun::tokio::time::sleep(Duration::from_millis(10000)).await;
+                    debug!("EstablishWriterWorker  cnt {}", cnt.load(atomic::Ordering::SeqCst));
+                }
+                Ok::<_, Error>(())
+            }
+        });
         self.jobrx
             .map(move |item| {
                 let wtx = self.worker_tx.clone();
+                let cnt = cnt.clone();
                 async move {
-                    // TODO
-                    debug!("got job");
                     let res = SeriesWriter::establish(
                         wtx.clone(),
                         item.backend,
@@ -236,6 +262,7 @@ impl EstablishWriterWorker {
                         item.tsnow,
                     )
                     .await;
+                    cnt.fetch_add(1, atomic::Ordering::SeqCst);
                     if item.restx.send((item.job_id, res)).await.is_err() {
                         warn!("can not send writer establish result");
                     }
@@ -281,9 +308,10 @@ impl EstablishWorkerJob {
 
 pub fn start_writer_establish_worker(
     worker_tx: Sender<ChannelInfoQuery>,
+    stats: Arc<SeriesWriterEstablishStats>,
 ) -> Result<(Sender<EstablishWorkerJob>,), Error> {
     let (tx, rx) = async_channel::bounded(256);
-    let worker = EstablishWriterWorker::new(worker_tx, rx);
+    let worker = EstablishWriterWorker::new(worker_tx, rx, stats);
     taskrun::spawn(worker.work());
     Ok((tx,))
 }
@@ -292,6 +320,7 @@ pub fn start_writer_establish_worker(
 fn write_00() {
     use netpod::Database;
     use scywr::session::ScyllaConfig;
+    use stats::SeriesByChannelStats;
     use std::sync::Arc;
     let fut = async {
         let dbconf = &Database {

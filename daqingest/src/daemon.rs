@@ -23,6 +23,7 @@ use scywriiq::QueryItem;
 use stats::DaemonStats;
 use stats::InsertWorkerStats;
 use stats::SeriesByChannelStats;
+use stats::SeriesWriterEstablishStats;
 use std::collections::VecDeque;
 use std::sync::atomic;
 use std::sync::atomic::AtomicU64;
@@ -97,8 +98,10 @@ impl Daemon {
         // Insert queue hook
         // let query_item_rx = inserthook::active_channel_insert_hook(query_item_rx);
 
-        let (writer_establis_tx,) = serieswriter::writer::start_writer_establish_worker(channel_info_query_tx.clone())
-            .map_err(|e| Error::with_msg_no_trace(e.to_string()))?;
+        let wrest_stats = Arc::new(SeriesWriterEstablishStats::new());
+        let (writer_establis_tx,) =
+            serieswriter::writer::start_writer_establish_worker(channel_info_query_tx.clone(), wrest_stats.clone())
+                .map_err(|e| Error::with_msg_no_trace(e.to_string()))?;
 
         let local_epics_hostname = ingest_linux::net::local_hostname();
         let conn_set_ctrl = CaConnSet::start(

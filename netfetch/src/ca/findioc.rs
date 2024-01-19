@@ -369,6 +369,7 @@ impl FindIocStream {
             } else {
                 stats.ca_udp_first_msg_not_version().inc();
             }
+            // trace2!("recv  {:?}  {:?}", src_addr, msgs);
             let mut res = Vec::new();
             if good {
                 for msg in &msgs[1..] {
@@ -616,7 +617,7 @@ impl Stream for FindIocStream {
                                 match batch.tgts.pop_front() {
                                     Some(tgtix) => {
                                         Self::serialize_batch(buf1, batch);
-                                        debug!("serialized for search {:?}", batch.channels);
+                                        trace!("serialized for search {:?}", batch.channels);
                                         match self.tgts.get(tgtix) {
                                             Some(tgt) => {
                                                 let tgt = tgt.clone();

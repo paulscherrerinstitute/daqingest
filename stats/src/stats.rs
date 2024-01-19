@@ -306,6 +306,7 @@ stats_proc::stats_struct!((
             channel_assigned_without_health_update,
             channel_rogue,
         ),
+        histolog2s(poll_all_dt,),
     ),
     // agg(name(CaConnSetStatsAgg), parent(CaConnSetStats)),
     // diff(name(CaConnSetStatsDiff), input(CaConnSetStats)),
@@ -366,6 +367,7 @@ stats_proc::stats_struct!((
         ),
         values(db_lookup_workers,)
     ),
+    stats_struct(name(SeriesWriterEstablishStats), prefix(wrest), counters(job_recv,),),
 ));
 
 stats_proc::stats_struct!((
@@ -428,9 +430,6 @@ stats_proc::stats_struct!((
             poll_reloop,
             poll_pending,
             poll_no_progress_no_pending,
-            poll_reloops_8,
-            poll_reloops_64,
-            poll_reloops_512,
             poll_wake_break,
             storage_queue_send,
             storage_queue_pending,
@@ -438,9 +437,18 @@ stats_proc::stats_struct!((
             storage_queue_above_32,
             storage_queue_above_128,
             event_add_res_recv,
+            caget_timeout,
         ),
-        values(inter_ivl_ema),
-        histolog2s(pong_recv_lat, ca_ts_off,),
+        values(inter_ivl_ema, read_ioids_len, proto_out_len,),
+        histolog2s(
+            poll_all_dt,
+            poll_op3_dt,
+            poll_reloops,
+            pong_recv_lat,
+            ca_ts_off,
+            iiq_batch_len,
+            caget_lat,
+        ),
     ),
     agg(name(CaConnStatsAgg), parent(CaConnStats)),
     diff(name(CaConnStatsAggDiff), input(CaConnStatsAgg)),

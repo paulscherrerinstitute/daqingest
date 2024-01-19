@@ -111,6 +111,21 @@ pub struct EventAdd {
     pub subid: u32,
 }
 
+#[derive(Debug)]
+pub struct EventCancel {
+    pub data_type: u16,
+    pub data_count: u16,
+    pub sid: u32,
+    pub subid: u32,
+}
+
+#[derive(Debug)]
+pub struct EventCancelRes {
+    pub data_type: u16,
+    pub sid: u32,
+    pub subid: u32,
+}
+
 // TODO Clone is only used for testing purposes and should get removed later.
 #[derive(Debug, Clone)]
 pub struct EventAddRes {
@@ -118,8 +133,15 @@ pub struct EventAddRes {
     pub data_count: u32,
     pub status: u32,
     pub subid: u32,
-    pub value: CaEventValue,
     pub payload_len: u32,
+    pub value: CaEventValue,
+}
+
+#[derive(Debug, Clone)]
+pub struct EventAddResEmpty {
+    pub data_type: u16,
+    pub sid: u32,
+    pub subid: u32,
 }
 
 #[derive(Debug)]
@@ -136,6 +158,8 @@ pub struct ReadNotifyRes {
     pub data_count: u32,
     pub sid: u32,
     pub ioid: u32,
+    pub payload_len: u32,
+    pub value: CaEventValue,
 }
 
 #[derive(Debug)]
@@ -283,6 +307,9 @@ pub enum CaMsgTy {
     AccessRightsRes(AccessRightsRes),
     EventAdd(EventAdd),
     EventAddRes(EventAddRes),
+    EventAddResEmpty(EventAddResEmpty),
+    EventCancel(EventCancel),
+    EventCancelRes(EventCancelRes),
     ReadNotify(ReadNotify),
     ReadNotifyRes(ReadNotifyRes),
     Echo,
@@ -306,6 +333,11 @@ impl CaMsgTy {
             AccessRightsRes(_) => 0x16,
             EventAdd(_) => 0x01,
             EventAddRes(_) => 0x01,
+            // sic: the response to event-cancel is an event-add:
+            EventAddResEmpty(_) => 0x01,
+            EventCancel(_) => 0x02,
+            // sic: the response to event-cancel is an event-add:
+            EventCancelRes(_) => 0x01,
             ReadNotify(_) => 0x0f,
             ReadNotifyRes(_) => 0x0f,
             Echo => 0x17,
@@ -318,7 +350,6 @@ impl CaMsgTy {
 
     fn payload_len(&self) -> usize {
         use CaMsgTy::*;
-        trace!("payload_len for {self:?}");
         match self {
             Version => 0,
             VersionRes(_) => 0,
@@ -337,6 +368,9 @@ impl CaMsgTy {
                 error!("should not attempt to serialize the response again");
                 panic!();
             }
+            EventAddResEmpty(_) => 0,
+            EventCancel(_) => 0,
+            EventCancelRes(_) => 0,
             ReadNotify(_) => 0,
             ReadNotifyRes(_) => {
                 error!("should not attempt to serialize the response again");
@@ -366,6 +400,9 @@ impl CaMsgTy {
             AccessRightsRes(_) => 0,
             EventAdd(x) => x.data_type,
             EventAddRes(x) => x.data_type,
+            EventAddResEmpty(x) => x.data_type,
+            EventCancel(x) => x.data_type,
+            EventCancelRes(x) => x.data_type,
             ReadNotify(x) => x.data_type,
             ReadNotifyRes(x) => x.data_type,
             Echo => 0,
@@ -395,6 +432,9 @@ impl CaMsgTy {
                 panic!();
                 x.data_count as _
             }
+            EventAddResEmpty(_) => 0,
+            EventCancel(x) => x.data_count,
+            EventCancelRes(x) => 0,
             ReadNotify(x) => x.data_count,
             ReadNotifyRes(x) => {
                 panic!();
@@ -421,6 +461,9 @@ impl CaMsgTy {
             AccessRightsRes(x) => x.cid,
             EventAdd(x) => x.sid,
             EventAddRes(x) => x.status,
+            EventAddResEmpty(x) => x.sid,
+            EventCancel(x) => x.sid,
+            EventCancelRes(x) => x.sid,
             ReadNotify(x) => x.sid,
             ReadNotifyRes(x) => x.sid,
             Echo => 0,
@@ -444,6 +487,9 @@ impl CaMsgTy {
             AccessRightsRes(x) => x.rights,
             EventAdd(x) => x.subid,
             EventAddRes(x) => x.subid,
+            EventAddResEmpty(x) => x.subid,
+            EventCancel(x) => x.subid,
+            EventCancelRes(x) => x.subid,
             ReadNotify(x) => x.ioid,
             ReadNotifyRes(x) => x.ioid,
             Echo => 0,
@@ -508,6 +554,9 @@ impl CaMsgTy {
                 buf.copy_from_slice(&[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x0e, 0, 0]);
             }
             EventAddRes(_) => {}
+            EventAddResEmpty(_) => {}
+            EventCancel(_) => {}
+            EventCancelRes(_) => {}
             ReadNotify(_) => {}
             ReadNotifyRes(_) => {}
             Echo => {}
@@ -704,126 +753,114 @@ impl CaMsg {
                 let ty = CaMsgTy::CreateChanFail(CreateChanFail { cid: hi.param1 });
                 CaMsg::from_ty_ts(ty, tsnow)
             }
-            1 => {
-                use netpod::Shape;
-                let ca_dbr_ty = CaDbrType::from_ca_u16(hi.data_type)?;
-                if let CaDbrMetaType::Time = ca_dbr_ty.meta {
-                } else {
-                    return Err(Error::MismatchDbrTimeType);
-                }
+            0x01 => {
                 if payload.len() < 12 {
-                    return Err(Error::NotEnoughPayloadTimeMetadata(payload.len()));
+                    if payload.len() == 0 {
+                        if hi.data_count() != 0 {
+                            // TODO according to protocol, this should not happen. Count for metrics.
+                        }
+                        let ty = CaMsgTy::EventAddResEmpty(EventAddResEmpty {
+                            data_type: hi.data_type,
+                            sid: hi.param1,
+                            subid: hi.param2,
+                        });
+                        return Ok(CaMsg::from_ty_ts(ty, tsnow));
+                    } else {
+                        error!("EventAddRes but bad header {hi:?}");
+                        return Err(Error::NotEnoughPayloadTimeMetadata(payload.len()));
+                    }
                 }
-                let ca_status = u16::from_be_bytes(payload[0..2].try_into().map_err(|_| Error::BadSlice)?);
-                let ca_severity = u16::from_be_bytes(payload[2..4].try_into().map_err(|_| Error::BadSlice)?);
-                let ca_secs = u32::from_be_bytes(payload[4..8].try_into().map_err(|_| Error::BadSlice)?);
-                let ca_nanos = u32::from_be_bytes(payload[8..12].try_into().map_err(|_| Error::BadSlice)?);
-                let ca_sh = Shape::from_ca_count(hi.data_count() as _).map_err(|_| {
-                    error!("BadCaCount  {hi:?}");
-                    Error::BadCaCount
-                })?;
-                let meta_padding = match ca_dbr_ty.meta {
-                    CaDbrMetaType::Plain => 0,
-                    CaDbrMetaType::Status => match ca_dbr_ty.scalar_type {
-                        CaScalarType::I8 => 1,
-                        CaScalarType::I16 => 0,
-                        CaScalarType::I32 => 0,
-                        CaScalarType::F32 => 0,
-                        CaScalarType::F64 => 4,
-                        CaScalarType::Enum => 0,
-                        CaScalarType::String => 0,
-                    },
-                    CaDbrMetaType::Time => match ca_dbr_ty.scalar_type {
-                        CaScalarType::I8 => 3,
-                        CaScalarType::I16 => 2,
-                        CaScalarType::I32 => 0,
-                        CaScalarType::F32 => 0,
-                        CaScalarType::F64 => 4,
-                        CaScalarType::Enum => 2,
-                        CaScalarType::String => 0,
-                    },
-                };
-                let valbuf = &payload[12 + meta_padding..];
-                let value = match ca_sh {
-                    Shape::Scalar => Self::ca_scalar_value(&ca_dbr_ty.scalar_type, valbuf)?,
-                    Shape::Wave(n) => {
-                        Self::ca_wave_value(&ca_dbr_ty.scalar_type, (n as usize).min(array_truncate), valbuf)?
-                    }
-                    Shape::Image(_, _) => {
-                        error!("Can not handle image from channel access");
-                        err::todoval()
-                    }
-                };
-                let ts = SEC * (ca_secs as u64 + EPICS_EPOCH_OFFSET) + ca_nanos as u64;
-                let value = CaEventValue {
-                    ts,
-                    status: ca_status,
-                    severity: ca_severity,
-                    data: value,
-                };
+                let value = Self::extract_ca_data_value(hi, payload, array_truncate)?;
                 let d = EventAddRes {
                     data_type: hi.data_type,
                     data_count: hi.data_count() as _,
                     status: hi.param1,
                     subid: hi.param2,
-                    value,
                     payload_len: hi.payload_len() as u32,
+                    value,
                 };
-                // TODO quick test only
-                if false {
-                    let nn = 4;
-                    let mut blob = vec![0; nn];
-                    for (i, x) in blob.iter_mut().enumerate() {
-                        *x = i as _;
-                    }
-                    let d = EventAddRes {
-                        // i32 with time and status
-                        data_type: 19,
-                        data_count: nn as u32,
-                        status: hi.param1,
-                        subid: hi.param2,
-                        value: CaEventValue {
-                            ts,
-                            status: ca_status,
-                            severity: ca_severity,
-                            data: CaDataValue::Array(CaDataArrayValue::I32(blob)),
-                        },
-                        payload_len: hi.payload_len() as u32,
-                    };
-                    let ty = CaMsgTy::EventAddRes(d);
-                    return Ok(CaMsg::from_ty_ts(ty, tsnow));
-                }
                 let ty = CaMsgTy::EventAddRes(d);
                 CaMsg::from_ty_ts(ty, tsnow)
             }
-            15 => {
+            0x0f => {
                 if payload.len() == 8 {
                     let v = u64::from_be_bytes(payload.try_into().map_err(|_| Error::BadSlice)?);
-                    info!("Payload as u64: {v}");
+                    debug!("Payload as u64: {v}");
                     let v = i64::from_be_bytes(payload.try_into().map_err(|_| Error::BadSlice)?);
-                    info!("Payload as i64: {v}");
+                    debug!("Payload as i64: {v}");
                     let v = f64::from_be_bytes(payload.try_into().map_err(|_| Error::BadSlice)?);
-                    info!("Payload as f64: {v}");
-                } else {
-                    info!(
-                        "payload string  {:?}  payload {:?}",
-                        String::from_utf8_lossy(&payload[..payload.len().min(12)]),
-                        &payload[..payload.len().min(12)],
-                    );
+                    debug!("Payload as f64: {v}");
                 }
-                // TODO use different structs for request and response:
+                let value = Self::extract_ca_data_value(hi, payload, array_truncate)?;
                 let ty = CaMsgTy::ReadNotifyRes(ReadNotifyRes {
                     data_type: hi.data_type,
                     data_count: hi.data_count() as _,
                     sid: hi.param1,
                     ioid: hi.param2,
+                    payload_len: hi.payload_len() as u32,
+                    value,
                 });
                 CaMsg::from_ty_ts(ty, tsnow)
             }
-            0x17 => CaMsg::from_ty_ts(CaMsgTy::Echo, tsnow),
+            0x11 => CaMsg::from_ty_ts(CaMsgTy::Echo, tsnow),
             x => return Err(Error::CaCommandNotSupported(x)),
         };
         Ok(msg)
+    }
+
+    fn extract_ca_data_value(hi: &HeadInfo, payload: &[u8], array_truncate: usize) -> Result<CaEventValue, Error> {
+        use netpod::Shape;
+        let ca_dbr_ty = CaDbrType::from_ca_u16(hi.data_type)?;
+        if let CaDbrMetaType::Time = ca_dbr_ty.meta {
+        } else {
+            return Err(Error::MismatchDbrTimeType);
+        }
+        let ca_status = u16::from_be_bytes(payload[0..2].try_into().map_err(|_| Error::BadSlice)?);
+        let ca_severity = u16::from_be_bytes(payload[2..4].try_into().map_err(|_| Error::BadSlice)?);
+        let ca_secs = u32::from_be_bytes(payload[4..8].try_into().map_err(|_| Error::BadSlice)?);
+        let ca_nanos = u32::from_be_bytes(payload[8..12].try_into().map_err(|_| Error::BadSlice)?);
+        let ca_sh = Shape::from_ca_count(hi.data_count() as _).map_err(|_| {
+            error!("BadCaCount  {hi:?}");
+            Error::BadCaCount
+        })?;
+        let meta_padding = match ca_dbr_ty.meta {
+            CaDbrMetaType::Plain => 0,
+            CaDbrMetaType::Status => match ca_dbr_ty.scalar_type {
+                CaScalarType::I8 => 1,
+                CaScalarType::I16 => 0,
+                CaScalarType::I32 => 0,
+                CaScalarType::F32 => 0,
+                CaScalarType::F64 => 4,
+                CaScalarType::Enum => 0,
+                CaScalarType::String => 0,
+            },
+            CaDbrMetaType::Time => match ca_dbr_ty.scalar_type {
+                CaScalarType::I8 => 3,
+                CaScalarType::I16 => 2,
+                CaScalarType::I32 => 0,
+                CaScalarType::F32 => 0,
+                CaScalarType::F64 => 4,
+                CaScalarType::Enum => 2,
+                CaScalarType::String => 0,
+            },
+        };
+        let valbuf = &payload[12 + meta_padding..];
+        let value = match ca_sh {
+            Shape::Scalar => Self::ca_scalar_value(&ca_dbr_ty.scalar_type, valbuf)?,
+            Shape::Wave(n) => Self::ca_wave_value(&ca_dbr_ty.scalar_type, (n as usize).min(array_truncate), valbuf)?,
+            Shape::Image(_, _) => {
+                error!("Can not handle image from channel access");
+                err::todoval()
+            }
+        };
+        let ts = SEC * (ca_secs as u64 + EPICS_EPOCH_OFFSET) + ca_nanos as u64;
+        let value = CaEventValue {
+            ts,
+            status: ca_status,
+            severity: ca_severity,
+            data: value,
+        };
+        Ok(value)
     }
 }
 
@@ -831,12 +868,6 @@ impl CaMsg {
 pub enum CaItem {
     Empty,
     Msg(CaMsg),
-}
-
-impl CaItem {
-    fn empty() -> Self {
-        CaItem::Empty
-    }
 }
 
 #[derive(Clone, Debug)]
@@ -951,6 +982,10 @@ impl CaProto {
             stats,
             resqu: VecDeque::with_capacity(256),
         }
+    }
+
+    pub fn proto_out_len(&self) -> usize {
+        self.out.len()
     }
 
     pub fn push_out(&mut self, item: CaMsg) {

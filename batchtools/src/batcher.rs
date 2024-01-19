@@ -51,7 +51,7 @@ async fn run_batcher<T>(rx: Receiver<T>, batch_tx: Sender<Vec<T>>, batch_limit: 
             },
             Err(e) => {
                 let _: Elapsed = e;
-                trace!("--------------------------    batcher timeout  rx len {}", rx.len());
+                // trace!("--------------------------    batcher timeout  rx len {}", rx.len());
                 if all.len() > 0 {
                     do_emit = true;
                 }

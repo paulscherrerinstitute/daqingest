@@ -20,7 +20,6 @@ pub fn local_hostname() -> String {
         let hostname = CStr::from_ptr(&buf[0] as *const _ as _);
         hostname.to_str().unwrap()
     };
-    log::info!("----------------------  found hostname {hostname:?}");
     hostname.into()
 }
 
