@@ -55,6 +55,7 @@ pub enum WithAddressState {
         since: SystemTime,
     },
     Assigned(ConnectionState),
+    Backoff(#[serde(with = "serde_helper::serde_Instant")] Instant),
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -83,6 +84,7 @@ pub enum WithStatusSeriesIdStateInner {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct WithStatusSeriesIdState {
+    pub cssid: ChannelStatusSeriesId,
     pub addr_find_backoff: u32,
     pub inner: WithStatusSeriesIdStateInner,
 }
@@ -97,10 +99,7 @@ pub enum ActiveChannelState {
         #[serde(with = "humantime_serde")]
         since: SystemTime,
     },
-    WithStatusSeriesId {
-        status_series_id: ChannelStatusSeriesId,
-        state: WithStatusSeriesIdState,
-    },
+    WithStatusSeriesId(WithStatusSeriesIdState),
 }
 
 #[derive(Debug, Clone, Serialize)]

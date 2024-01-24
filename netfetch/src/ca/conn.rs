@@ -9,7 +9,8 @@ use async_channel::Receiver;
 use async_channel::Sender;
 use core::fmt;
 use dbpg::seriesbychannel::ChannelInfoQuery;
-use err::Error;
+use err::thiserror;
+use err::ThisError;
 use futures_util::Future;
 use futures_util::FutureExt;
 use futures_util::Stream;
@@ -95,6 +96,30 @@ macro_rules! trace4 {
             trace!($($arg)*);
         }
     };
+}
+
+#[derive(Debug, ThisError)]
+pub enum Error {
+    ConnectFail,
+    NoProto,
+    Protocol(#[from] crate::ca::proto::Error),
+    Writer(#[from] serieswriter::writer::Error),
+    UnknownCid(Cid),
+    NoNameForCid(Cid),
+    CreateChannelBadState,
+    CommonError(#[from] err::Error),
+    LoopInnerLogicError,
+    NoSender,
+    NotSending,
+    ClosedSending,
+    NoProgressNoPending,
+    ShutdownWithQueuesNoProgressNoPending,
+}
+
+impl err::ToErr for Error {
+    fn to_err(self) -> err::Error {
+        err::Error::with_msg_no_trace(self.to_string())
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -415,9 +440,9 @@ enum CaConnState {
     Init,
     Handshake,
     PeerReady,
-    Wait(Pin<Box<dyn Future<Output = ()> + Send>>),
     Shutdown,
     EndOfStream,
+    Error,
 }
 
 impl fmt::Debug for CaConnState {
@@ -428,9 +453,9 @@ impl fmt::Debug for CaConnState {
             Self::Init => write!(fmt, "Init"),
             Self::Handshake => write!(fmt, "Handshake"),
             Self::PeerReady => write!(fmt, "PeerReady"),
-            Self::Wait(_) => fmt.debug_tuple("Wait").finish(),
             Self::Shutdown => write!(fmt, "Shutdown"),
             Self::EndOfStream => write!(fmt, "EndOfStream"),
+            Self::Error => write!(fmt, "Error"),
         }
     }
 }
@@ -600,10 +625,9 @@ pub enum CaConnEventValue {
     EchoTimeout,
     ConnCommandResult(ConnCommandResult),
     ChannelStatus(ChannelStatusPartial),
-    QueryItem(QueryItem),
     ChannelCreateFail(String),
+    Error(Error),
     EndOfStream,
-    ConnectFail,
 }
 
 #[derive(Debug)]
@@ -787,7 +811,7 @@ impl CaConn {
                 debug!("emit status ConnectFail");
                 let item = CaConnEvent {
                     ts: Instant::now(),
-                    value: CaConnEventValue::ConnectFail,
+                    value: CaConnEventValue::Error(Error::ConnectFail),
                 };
                 self.ca_conn_event_out_queue.push_back(item);
             }
@@ -974,13 +998,9 @@ impl CaConn {
                     let jobid = res.0;
                     // by convention:
                     let cid = Cid(jobid.0 as _);
-                    match res.1 {
-                        Ok(wr) => {
-                            self.handle_writer_establish_inner(cid, wr)?;
-                            Ok(Ready(Some(())))
-                        }
-                        Err(e) => Err(Error::from_string(e.to_string())),
-                    }
+                    let wr = res.1?;
+                    self.handle_writer_establish_inner(cid, wr)?;
+                    Ok(Ready(Some(())))
                 }
                 Ready(None) => {
                     error!("writer_establish queue closed");
@@ -1010,41 +1030,57 @@ impl CaConn {
                     });
                     self.insert_item_queue.push_back(item);
                 }
-                let subid = {
-                    let subid = self.subid_store.next();
-                    self.cid_by_subid.insert(subid, cid);
-                    trace!(
-                        "new {:?} for {:?}  chst {:?} {:?}",
-                        subid,
-                        cid,
-                        st2.channel.cid,
-                        st2.channel.sid
-                    );
-                    subid
-                };
-                {
-                    trace!("send out EventAdd for {cid:?}");
-                    let ty = CaMsgTy::EventAdd(EventAdd {
-                        sid: st2.channel.sid.to_u32(),
-                        data_type: st2.channel.ca_dbr_type,
-                        data_count: st2.channel.ca_dbr_count,
-                        subid: subid.to_u32(),
-                    });
-                    let msg = CaMsg::from_ty_ts(ty, self.poll_tsnow);
-                    let proto = self.proto.as_mut().unwrap();
-                    proto.push_out(msg);
-                }
-                let created_state = WritableState {
-                    tsbeg: self.poll_tsnow,
-                    channel: std::mem::replace(&mut st2.channel, CreatedState::dummy()),
-                    writer,
-                    reading: ReadingState::EnableMonitoring(EnableMonitoringState {
+                let name = self.name_by_cid.get(&st2.channel.cid).map(|x| x.as_str()).unwrap_or("");
+                if name.starts_with("TEST:PEAKING:") {
+                    let created_state = WritableState {
                         tsbeg: self.poll_tsnow,
-                        subid,
-                    }),
-                };
-                *chst = ChannelState::Writable(created_state);
-                Ok(())
+                        channel: std::mem::replace(&mut st2.channel, CreatedState::dummy()),
+                        writer,
+                        reading: ReadingState::Polling(PollingState {
+                            tsbeg: self.poll_tsnow,
+                            poll_ivl: Duration::from_millis(1000),
+                            tick: PollTickState::Idle(self.poll_tsnow),
+                        }),
+                    };
+                    *chst = ChannelState::Writable(created_state);
+                    Ok(())
+                } else {
+                    let subid = {
+                        let subid = self.subid_store.next();
+                        self.cid_by_subid.insert(subid, cid);
+                        trace!(
+                            "new {:?} for {:?}  chst {:?} {:?}",
+                            subid,
+                            cid,
+                            st2.channel.cid,
+                            st2.channel.sid
+                        );
+                        subid
+                    };
+                    {
+                        trace!("send out EventAdd for {cid:?}");
+                        let ty = CaMsgTy::EventAdd(EventAdd {
+                            sid: st2.channel.sid.to_u32(),
+                            data_type: st2.channel.ca_dbr_type,
+                            data_count: st2.channel.ca_dbr_count,
+                            subid: subid.to_u32(),
+                        });
+                        let msg = CaMsg::from_ty_ts(ty, self.poll_tsnow);
+                        let proto = self.proto.as_mut().unwrap();
+                        proto.push_out(msg);
+                    }
+                    let created_state = WritableState {
+                        tsbeg: self.poll_tsnow,
+                        channel: std::mem::replace(&mut st2.channel, CreatedState::dummy()),
+                        writer,
+                        reading: ReadingState::EnableMonitoring(EnableMonitoringState {
+                            tsbeg: self.poll_tsnow,
+                            subid,
+                        }),
+                    };
+                    *chst = ChannelState::Writable(created_state);
+                    Ok(())
+                }
             } else {
                 warn!("TODO handle_series_lookup_result channel in bad state, reset");
                 Ok(())
@@ -1249,9 +1285,8 @@ impl CaConn {
         let cid = if let Some(x) = self.cid_by_subid.get(&subid) {
             *x
         } else {
-            let e = Error::with_msg_no_trace("unknown {subid:?}");
-            error!("{e}");
-            return Err(e);
+            self.stats.unknown_subid().inc();
+            return Ok(());
         };
         let ch_s = if let Some(x) = self.channels.get_mut(&cid) {
             x
@@ -1263,9 +1298,7 @@ impl CaConn {
             // If we don't have it in the "closed" btree, then close connection to the IOC and count
             // as logic error.
             // Close connection to the IOC. Cout as logic error.
-            let e = Error::with_msg_no_trace(format!(
-                "TODO handle_event_add_res can not find channel for  {cid:?}  {subid:?}"
-            ));
+            let e = Error::UnknownCid(cid);
             error!("{e}");
             return Err(e);
         };
@@ -1317,7 +1350,7 @@ impl CaConn {
             ChannelState::Writable(st) => {
                 let stnow = self.tmp_ts_poll;
                 let crst = &mut st.channel;
-                let stwin_ts = stnow.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() / 10;
+                let stwin_ts = stnow.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() / 4;
                 if crst.stwin_ts != stwin_ts {
                     crst.stwin_ts = stwin_ts;
                     crst.stwin_count = 0;
@@ -1325,15 +1358,24 @@ impl CaConn {
                 {
                     crst.stwin_count += 1;
                     crst.stwin_bytes += ev.payload_len;
-                    if crst.stwin_count > 5 || crst.stwin_bytes > 1024 * 1024 * 1 {
+                    if crst.stwin_count > 30000 || crst.stwin_bytes > 1024 * 1024 * 500 {
                         let subid = match &mut st.reading {
                             ReadingState::EnableMonitoring(x) => Some(x.subid.clone()),
                             ReadingState::Monitoring(x) => Some(x.subid.clone()),
-                            ReadingState::StopMonitoringForPolling(_) => None,
-                            ReadingState::Polling(_) => None,
+                            ReadingState::StopMonitoringForPolling(_) => {
+                                self.stats.transition_to_polling_bad_state().inc();
+                                None
+                            }
+                            ReadingState::Polling(_) => {
+                                self.stats.transition_to_polling_already_in().inc();
+                                None
+                            }
                         };
                         if let Some(subid) = subid {
+                            self.stats.transition_to_polling().inc();
                             self.transition_to_polling(subid, tsnow)?;
+                        } else {
+                            self.stats.transition_to_polling_bad_state().inc();
                         }
                         return Ok(());
                     }
@@ -1413,7 +1455,7 @@ impl CaConn {
                 ReadingState::StopMonitoringForPolling(..) => {
                     st.reading = ReadingState::Polling(PollingState {
                         tsbeg: tsnow,
-                        poll_ivl: Duration::from_millis(2000),
+                        poll_ivl: Duration::from_millis(1000),
                         tick: PollTickState::Idle(tsnow),
                     });
                 }
@@ -1511,7 +1553,8 @@ impl CaConn {
                 }
             }
         } else {
-            warn!("unknown {ioid:?}");
+            // warn!("unknown {ioid:?}");
+            self.stats.unknown_ioid().inc();
         }
         Ok(())
     }
@@ -1552,35 +1595,36 @@ impl CaConn {
             Self::check_ev_value_data(&value.data, writer.scalar_type())?;
             {
                 let val: DataValue = value.data.into();
-                writer
-                    .write(TsNano::from_ns(ts), TsNano::from_ns(ts_local), val, iiq)
-                    .map_err(|e| Error::from_string(e))?;
+                writer.write(TsNano::from_ns(ts), TsNano::from_ns(ts_local), val, iiq)?;
             }
             Ok(())
         } else {
             stats.channel_fast_item_drop.inc();
-            if tsnow.duration_since(crst.insert_recv_ivl_last) >= Duration::from_millis(10000) {
-                crst.insert_recv_ivl_last = tsnow;
-                let ema = crst.insert_item_ivl_ema.ema();
-                let item = IvlItem {
-                    series: series.clone(),
-                    ts,
-                    ema: ema.ema(),
-                    emd: ema.emv().sqrt(),
-                };
-                iiq.push_back(QueryItem::Ivl(item));
+            // TODO
+            if false {
+                if tsnow.duration_since(crst.insert_recv_ivl_last) >= Duration::from_millis(10000) {
+                    crst.insert_recv_ivl_last = tsnow;
+                    let ema = crst.insert_item_ivl_ema.ema();
+                    let item = IvlItem {
+                        series: series.clone(),
+                        ts,
+                        ema: ema.ema(),
+                        emd: ema.emv().sqrt(),
+                    };
+                    iiq.push_back(QueryItem::Ivl(item));
+                }
+                if false && crst.muted_before == 0 {
+                    let ema = crst.insert_item_ivl_ema.ema();
+                    let item = MuteItem {
+                        series: series.clone(),
+                        ts,
+                        ema: ema.ema(),
+                        emd: ema.emv().sqrt(),
+                    };
+                    iiq.push_back(QueryItem::Mute(item));
+                }
+                crst.muted_before = 1;
             }
-            if false && crst.muted_before == 0 {
-                let ema = crst.insert_item_ivl_ema.ema();
-                let item = MuteItem {
-                    series: series.clone(),
-                    ts,
-                    ema: ema.ema(),
-                    emd: ema.emv().sqrt(),
-                };
-                iiq.push_back(QueryItem::Mute(item));
-            }
-            crst.muted_before = 1;
             Ok(())
         }
     }
@@ -1637,7 +1681,7 @@ impl CaConn {
                     }
                     CaItem::Msg(msg) => match msg.ty {
                         CaMsgTy::VersionRes(n) => {
-                            debug!("see incoming  {:?}  {:?}", self.remote_addr_dbg, msg);
+                            // debug!("see incoming  {:?}  {:?}", self.remote_addr_dbg, msg);
                             if n < 12 || n > 13 {
                                 error!("See some unexpected version {n}  channel search may not work.");
                                 Ready(Some(Ok(())))
@@ -1657,13 +1701,13 @@ impl CaConn {
                 },
                 Err(e) => {
                     error!("got error item from CaProto {e:?}");
-                    Ready(Some(Err(e.to_string().into())))
+                    Ready(Some(Err(e.into())))
                 }
             },
             Ready(None) => {
                 warn!("handle_conn_listen CaProto is done  {:?}", self.remote_addr_dbg);
-                self.state = CaConnState::Wait(wait_fut(self.backoff_next()));
                 self.proto = None;
+                self.state = CaConnState::EndOfStream;
                 Ready(None)
             }
             Pending => Pending,
@@ -1681,9 +1725,7 @@ impl CaConn {
             match self.channels.get(&cid).unwrap() {
                 ChannelState::Init(cssid) => {
                     let cssid = cssid.clone();
-                    let name = self
-                        .name_by_cid(cid)
-                        .ok_or_else(|| Error::with_msg_no_trace("name for cid not known"));
+                    let name = self.name_by_cid(cid).ok_or_else(|| Error::UnknownCid(cid));
                     let name = match name {
                         Ok(k) => k.to_string(),
                         Err(e) => return Err(e),
@@ -1745,6 +1787,7 @@ impl CaConn {
                                 do_wake_again = true;
                                 self.proto.as_mut().unwrap().push_out(msg);
                                 st3.tick = PollTickState::Wait(tsnow, ioid);
+                                self.stats.caget_issued().inc();
                             }
                         }
                         PollTickState::Wait(x, ioid) => {
@@ -1753,6 +1796,7 @@ impl CaConn {
                                 self.stats.caget_timeout().inc();
                                 // warn!("channel caget timeout");
                                 // std::process::exit(1);
+                                st3.tick = PollTickState::Idle(tsnow);
                             }
                         }
                     },
@@ -1783,7 +1827,7 @@ impl CaConn {
         let proto = if let Some(x) = self.proto.as_mut() {
             x
         } else {
-            return Ready(Some(Err(Error::with_msg_no_trace("handle_peer_ready but no proto"))));
+            return Ready(Some(Err(Error::NoProto)));
         };
         let res = match proto.poll_next_unpin(cx) {
             Ready(Some(Ok(k))) => {
@@ -1897,7 +1941,7 @@ impl CaConn {
             }
             Pending => Pending,
         };
-        res.map_err(|e| Error::from(e.to_string()))
+        res.map_err(Into::into)
     }
 
     fn handle_create_chan_res(&mut self, k: proto::CreateChanRes, tsnow: Instant) -> Result<(), Error> {
@@ -1909,7 +1953,7 @@ impl CaConn {
         let name = if let Some(x) = name_by_cid.get(&cid) {
             x.to_string()
         } else {
-            return Err(Error::with_msg_no_trace(format!("no name for {cid:?}")));
+            return Err(Error::NoNameForCid(cid));
         };
         trace!("handle_create_chan_res  {k:?}  {name:?}");
         // TODO handle not-found error:
@@ -1919,7 +1963,7 @@ impl CaConn {
             _ => {
                 // TODO handle in better way:
                 // Remove channel and emit notice that channel is removed with reason.
-                let e = Error::with_msg_no_trace("handle_peer_ready  bad state");
+                let e = Error::CreateChannelBadState;
                 return Err(e);
             }
         };
@@ -1974,8 +2018,8 @@ impl CaConn {
     fn _test_control_flow(&mut self, _cx: &mut Context) -> ControlFlow<Poll<Result<(), Error>>> {
         use ControlFlow::*;
         use Poll::*;
-        let e = Error::with_msg_no_trace(format!("test"));
-        //Err(e)?;
+        let e = Error::CreateChannelBadState;
+        // Err(e)?;
         let _ = e;
         Break(Pending)
     }
@@ -2018,43 +2062,28 @@ impl CaConn {
                                 Ok(Ready(Some(())))
                             }
                             Ok(Err(e)) => {
-                                trace!("error connect to {addr} {e}");
-                                if true {
-                                    let addr = addr.clone();
-                                    self.insert_item_queue.push_back(QueryItem::ConnectionStatus(
-                                        ConnectionStatusItem {
-                                            ts: self.tmp_ts_poll,
-                                            addr,
-                                            status: ConnectionStatus::ConnectError,
-                                        },
-                                    ));
-                                    self.trigger_shutdown(ChannelStatusClosedReason::ConnectFail);
-                                } else {
-                                    // TODO log with exponential backoff
-                                    let dt = self.backoff_next();
-                                    self.state = CaConnState::Wait(wait_fut(dt));
-                                    self.proto = None;
-                                }
+                                debug!("error connect to {addr} {e}");
+                                let addr = addr.clone();
+                                self.insert_item_queue
+                                    .push_back(QueryItem::ConnectionStatus(ConnectionStatusItem {
+                                        ts: self.tmp_ts_poll,
+                                        addr,
+                                        status: ConnectionStatus::ConnectError,
+                                    }));
+                                self.trigger_shutdown(ChannelStatusClosedReason::ConnectFail);
                                 Ok(Ready(Some(())))
                             }
                             Err(e) => {
                                 // TODO log with exponential backoff
-                                trace!("timeout connect to {addr} {e}");
-                                if true {
-                                    let addr = addr.clone();
-                                    self.insert_item_queue.push_back(QueryItem::ConnectionStatus(
-                                        ConnectionStatusItem {
-                                            ts: self.tmp_ts_poll,
-                                            addr,
-                                            status: ConnectionStatus::ConnectTimeout,
-                                        },
-                                    ));
-                                    self.trigger_shutdown(ChannelStatusClosedReason::ConnectFail);
-                                } else {
-                                    let dt = self.backoff_next();
-                                    self.state = CaConnState::Wait(wait_fut(dt));
-                                    self.proto = None;
-                                }
+                                debug!("timeout connect to {addr} {e}");
+                                let addr = addr.clone();
+                                self.insert_item_queue
+                                    .push_back(QueryItem::ConnectionStatus(ConnectionStatusItem {
+                                        ts: self.tmp_ts_poll,
+                                        addr,
+                                        status: ConnectionStatus::ConnectTimeout,
+                                    }));
+                                self.trigger_shutdown(ChannelStatusClosedReason::ConnectFail);
                                 Ok(Ready(Some(())))
                             }
                         }
@@ -2096,25 +2125,9 @@ impl CaConn {
                     Pending => Ok(Pending),
                 }
             }
-            CaConnState::Wait(inst) => {
-                trace4!("Wait");
-                match inst.poll_unpin(cx) {
-                    Ready(_) => {
-                        self.state = CaConnState::Unconnected(Instant::now());
-                        self.proto = None;
-                        Ok(Ready(Some(())))
-                    }
-                    Pending => Ok(Pending),
-                }
-            }
-            CaConnState::Shutdown => {
-                trace4!("Shutdown");
-                Ok(Ready(None))
-            }
-            CaConnState::EndOfStream => {
-                trace4!("EndOfStream");
-                Ok(Ready(None))
-            }
+            CaConnState::Shutdown => Ok(Ready(None)),
+            CaConnState::EndOfStream => Ok(Ready(None)),
+            CaConnState::Error => Ok(Ready(None)),
         }
     }
 
@@ -2137,7 +2150,7 @@ impl CaConn {
                         }
                         Ready(None) => {
                             error!("handle_conn_state yields {x:?}");
-                            return Err(Error::with_msg_no_trace("logic error"));
+                            return Err(Error::LoopInnerLogicError);
                         }
                         Pending => return Ok(Pending),
                     },
@@ -2196,9 +2209,9 @@ impl CaConn {
             CaConnState::Init => {}
             CaConnState::Handshake => {}
             CaConnState::PeerReady => {}
-            CaConnState::Wait(_) => {}
             CaConnState::Shutdown => {}
             CaConnState::EndOfStream => {}
+            CaConnState::Error => {}
         }
         Ok(())
     }
@@ -2231,9 +2244,7 @@ impl CaConn {
     fn tick_writers(&mut self) -> Result<(), Error> {
         for (k, st) in &mut self.channels {
             if let ChannelState::Writable(st2) = st {
-                st2.writer
-                    .tick(&mut self.insert_item_queue)
-                    .map_err(|e| Error::with_msg_no_trace(e.to_string()))?;
+                st2.writer.tick(&mut self.insert_item_queue)?;
             }
         }
         Ok(())
@@ -2244,13 +2255,15 @@ impl CaConn {
     }
 
     fn queues_out_flushed(&self) -> bool {
-        self.queues_async_out_flushed() && self.ca_conn_event_out_queue.is_empty()
-    }
-
-    fn queues_async_out_flushed(&self) -> bool {
-        // self.channel_info_query_queue.is_empty() && self.channel_info_query_sending.is_idle()
-        // TODO re-enable later
-        self.insert_item_queue.is_empty() && self.storage_insert_sender.is_idle()
+        debug!(
+            "async out flushed iiq  {}  {}  caout {}",
+            self.insert_item_queue.is_empty(),
+            self.storage_insert_sender.is_idle(),
+            self.ca_conn_event_out_queue.is_empty()
+        );
+        self.insert_item_queue.is_empty()
+            && self.storage_insert_sender.is_idle()
+            && self.ca_conn_event_out_queue.is_empty()
     }
 
     fn attempt_flush_queue<T, Q, FB, FS>(
@@ -2276,7 +2289,7 @@ impl CaConn {
                 break;
             }
             if !sp.has_sender() {
-                return Err(Error::with_msg_no_trace(format!("flush queue  {id}  no sender")));
+                return Err(Error::NoSender);
             }
             if sp.is_idle() {
                 if let Some(item) = qu_to_si(qu) {
@@ -2292,16 +2305,18 @@ impl CaConn {
                         have_progress = true;
                     }
                     Ready(Err(e)) => {
-                        let e = Error::with_msg_no_trace(format!("flush queue  {id}  {e}"));
-                        return Err(e);
+                        use crate::senderpolling::Error as SpErr;
+                        match e {
+                            SpErr::NoSendInProgress => return Err(Error::NotSending),
+                            SpErr::Closed(_) => return Err(Error::ClosedSending),
+                        }
                     }
                     Pending => {
                         return Ok(Pending);
                     }
                 }
             } else {
-                let e = Error::with_msg_no_trace(format!("flush queue  {id}  not sending"));
-                return Err(e);
+                return Err(Error::NotSending);
             }
         }
         if have_progress {
@@ -2390,22 +2405,11 @@ impl Stream for CaConn {
             }
 
             {
-                // TODO use stats histogram type to test the native prometheus histogram feature
-                let qu = &self.insert_item_queue;
-                let stats = &self.stats;
-                let n = qu.len();
-                if n >= 128 {
-                    stats.storage_queue_above_128().inc();
-                } else if n >= 32 {
-                    stats.storage_queue_above_32().inc();
-                } else if n >= 8 {
-                    stats.storage_queue_above_8().inc();
-                }
+                let iiq = &self.insert_item_queue;
+                self.stats.iiq_len().ingest(iiq.len() as u32);
             }
 
-            let lts3;
-
-            if !self.is_shutdown() {
+            {
                 let stats2 = self.stats.clone();
                 let stats_fn = move |item: &VecDeque<QueryItem>| {
                     stats2.iiq_batch_len().ingest(item.len() as u32);
@@ -2421,8 +2425,11 @@ impl Stream for CaConn {
                     cx,
                     stats_fn
                 );
-                lts3 = Instant::now();
+            }
 
+            let lts3 = Instant::now();
+
+            if !self.is_shutdown() {
                 flush_queue!(
                     self,
                     writer_establish_qu,
@@ -2434,8 +2441,6 @@ impl Stream for CaConn {
                     cx,
                     |_| {}
                 );
-            } else {
-                lts3 = Instant::now();
             }
 
             let lts4 = Instant::now();
@@ -2512,23 +2517,24 @@ impl Stream for CaConn {
 
             break if self.is_shutdown() {
                 if self.queues_out_flushed() {
-                    // debug!("end of stream {}", self.remote_addr_dbg);
+                    debug!("is_shutdown  queues_out_flushed  set EOS  {}", self.remote_addr_dbg);
                     self.state = CaConnState::EndOfStream;
                     Ready(None)
                 } else {
-                    // debug!("queues_out_flushed false");
                     if have_progress {
+                        debug!("is_shutdown  NOT queues_out_flushed  prog  {}", self.remote_addr_dbg);
                         self.stats.poll_reloop().inc();
                         reloops += 1;
                         continue;
                     } else if have_pending {
+                        debug!("is_shutdown  NOT queues_out_flushed  pend  {}", self.remote_addr_dbg);
                         self.stats.poll_pending().inc();
                         Pending
                     } else {
                         // TODO error
                         error!("shutting down, queues not flushed, no progress, no pending");
                         self.stats.logic_error().inc();
-                        let e = Error::with_msg_no_trace("shutting down, queues not flushed, no progress, no pending");
+                        let e = Error::ShutdownWithQueuesNoProgressNoPending;
                         Ready(Some(Err(e)))
                     }
                 }
@@ -2551,7 +2557,7 @@ impl Stream for CaConn {
                     Pending
                 } else {
                     self.stats.poll_no_progress_no_pending().inc();
-                    let e = Error::with_msg_no_trace("no progress no pending");
+                    let e = Error::NoProgressNoPending;
                     Ready(Some(Err(e)))
                 }
             };

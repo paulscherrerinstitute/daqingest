@@ -1,5 +1,5 @@
 #[allow(non_snake_case)]
-mod serde_Instant {
+pub mod serde_Instant {
     use serde::Serializer;
     use std::time::Instant;
 

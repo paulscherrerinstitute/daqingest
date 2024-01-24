@@ -6,12 +6,9 @@ use log::*;
 use netpod::timeunits::*;
 use slidebuf::SlideBuf;
 use stats::CaProtoStats;
-use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::io;
 use std::net::SocketAddrV4;
-use std::num::NonZeroU16;
-use std::num::NonZeroU64;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::Context;
@@ -47,6 +44,7 @@ pub enum Error {
     ExtendedHeaderBadCount,
     NoReadBufferSpace,
     NeitherPendingNorProgress,
+    OutputBufferTooSmall,
 }
 
 const CA_PROTO_VERSION: u16 = 13;
@@ -421,24 +419,24 @@ impl CaMsgTy {
             Search(_) => CA_PROTO_VERSION,
             SearchRes(_) => 0,
             CreateChan(_) => 0,
-            CreateChanRes(x) => {
+            CreateChanRes(..) => {
                 panic!();
-                x.data_count as _
+                // x.data_count as _
             }
             CreateChanFail(_) => 0,
             AccessRightsRes(_) => 0,
             EventAdd(x) => x.data_count,
-            EventAddRes(x) => {
+            EventAddRes(..) => {
                 panic!();
-                x.data_count as _
+                // x.data_count as _
             }
             EventAddResEmpty(_) => 0,
             EventCancel(x) => x.data_count,
-            EventCancelRes(x) => 0,
+            EventCancelRes(..) => 0,
             ReadNotify(x) => x.data_count,
-            ReadNotifyRes(x) => {
+            ReadNotifyRes(..) => {
                 panic!();
-                x.data_count as _
+                // x.data_count as _
             }
             Echo => 0,
         }
@@ -963,7 +961,6 @@ pub struct CaProto {
     outbuf: SlideBuf,
     out: VecDeque<CaMsg>,
     array_truncate: usize,
-    logged_proto_error_for_cid: HashMap<u32, bool>,
     stats: Arc<CaProtoStats>,
     resqu: VecDeque<CaItem>,
 }
@@ -978,7 +975,6 @@ impl CaProto {
             outbuf: SlideBuf::new(1024 * 128),
             out: VecDeque::new(),
             array_truncate,
-            logged_proto_error_for_cid: HashMap::new(),
             stats,
             resqu: VecDeque::with_capacity(256),
         }
@@ -1023,7 +1019,10 @@ impl CaProto {
         match w.poll_write(cx, b) {
             Ready(k) => match k {
                 Ok(k) => match self.outbuf.adv(k) {
-                    Ok(()) => Ready(Ok(k)),
+                    Ok(()) => {
+                        self.stats.out_bytes().add(k as u64);
+                        Ready(Ok(k))
+                    }
                     Err(e) => {
                         error!("advance error {:?}", e);
                         Ready(Err(e.into()))
@@ -1043,16 +1042,22 @@ impl CaProto {
         let mut have_pending = false;
         let mut have_progress = false;
         let tsnow = Instant::now();
+        {
+            let g = self.outbuf.len();
+            self.stats.outbuf_len().ingest(g as u32);
+        }
         'l1: while self.out.len() != 0 {
             while let Some((msg, buf)) = self.out_msg_buf() {
                 let msglen = msg.len();
                 if msglen > buf.len() {
                     error!("got output buffer but too small");
-                    break;
+                    let e = Error::OutputBufferTooSmall;
+                    return Err(e);
                 } else {
                     msg.place_into(&mut buf[..msglen]);
                     self.outbuf.wadv(msglen)?;
                     self.out.pop_front();
+                    self.stats.out_msg_placed().inc();
                 }
             }
             while self.outbuf.len() != 0 {
@@ -1105,14 +1110,15 @@ impl CaProto {
                     Ok(()) => {
                         let nf = rbuf.filled().len();
                         if nf == 0 {
-                            info!(
-                                "EOF  peer  {:?}  {:?}  {:?}",
+                            debug!(
+                                "peer done  {:?}  {:?}  {:?}",
                                 self.tcp.peer_addr(),
                                 self.remote_addr_dbg,
                                 self.state
                             );
                             // TODO may need another state, if not yet done when input is EOF.
                             self.state = CaState::Done;
+                            have_progress = true;
                         } else {
                             if false {
                                 info!("received {} bytes", rbuf.filled().len());
@@ -1166,7 +1172,6 @@ impl CaProto {
             CaState::StdHead => {
                 let hi = HeadInfo::from_netbuf(&mut self.buf)?;
                 if hi.cmdid == 1 || hi.cmdid == 15 {
-                    let sid = hi.param1;
                     if hi.payload_size == 0xffff {
                         if hi.data_count != 0 {
                             warn!("protocol error: {hi:?}");
@@ -1226,7 +1231,7 @@ impl CaProto {
                 let g = self.buf.read_bytes(hi.payload_len())?;
                 let msg = CaMsg::from_proto_infos(hi, g, tsnow, self.array_truncate)?;
                 // data-count is only reasonable for event messages
-                if let CaMsgTy::EventAddRes(e) = &msg.ty {
+                if let CaMsgTy::EventAddRes(..) = &msg.ty {
                     self.stats.data_count().ingest(hi.data_count() as u32);
                 }
                 self.state = CaState::StdHead;

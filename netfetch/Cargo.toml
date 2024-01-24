@@ -39,6 +39,7 @@ serieswriter = { path = "../serieswriter" }
 stats = { path = "../stats" }
 scywr = { path = "../scywr" }
 dbpg = { path = "../dbpg" }
+serde_helper = { path = "../serde_helper" }
 ingest-linux = { path = "../ingest-linux" }
 err = { path = "../../daqbuffer/crates/err" }
 netpod = { path = "../../daqbuffer/crates/netpod" }
