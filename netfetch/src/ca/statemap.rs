@@ -50,12 +50,18 @@ pub struct ConnectionState {
 #[derive(Debug, Clone, Serialize)]
 pub enum WithAddressState {
     Unassigned {
-        //#[serde(with = "serde_Instant")]
         #[serde(with = "humantime_serde")]
         since: SystemTime,
     },
     Assigned(ConnectionState),
-    Backoff(#[serde(with = "serde_helper::serde_Instant")] Instant),
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct UnassignedState {
+    #[serde(with = "humantime_serde")]
+    since: SystemTime,
+    #[serde(with = "serde_helper::serde_Instant")]
+    unused_since_ts: Instant,
 }
 
 #[derive(Debug, Clone, Serialize)]

@@ -1,3 +1,4 @@
+use super::conn::EndOfStreamReason;
 use super::findioc::FindIocRes;
 use crate::ca::conn;
 use crate::ca::statemap;
@@ -84,7 +85,6 @@ const MAYBE_WRONG_ADDRESS_STAY: Duration = Duration::from_millis(4000);
 const SEARCH_PENDING_TIMEOUT: Duration = Duration::from_millis(30000);
 const CHANNEL_HEALTH_TIMEOUT: Duration = Duration::from_millis(30000);
 const CHANNEL_UNASSIGNED_TIMEOUT: Duration = Duration::from_millis(0);
-const CHANNEL_BACKOFF: Duration = Duration::from_millis(10000);
 const CHANNEL_MAX_WITHOUT_HEALTH_UPDATE: usize = 3000000;
 
 #[allow(unused)]
@@ -552,8 +552,7 @@ impl CaConnSet {
             CaConnEventValue::ConnCommandResult(x) => self.handle_conn_command_result(addr, x),
             CaConnEventValue::ChannelCreateFail(x) => self.handle_channel_create_fail(addr, x),
             CaConnEventValue::ChannelStatus(st) => self.apply_ca_conn_health_update(addr, st),
-            CaConnEventValue::Error(e) => self.handle_ca_conn_err(e, addr),
-            CaConnEventValue::EndOfStream => self.handle_ca_conn_eos(addr),
+            CaConnEventValue::EndOfStream(reason) => self.handle_ca_conn_eos(addr, reason),
         }
     }
 
@@ -889,8 +888,8 @@ impl CaConnSet {
         Ok(())
     }
 
-    fn handle_ca_conn_eos(&mut self, addr: SocketAddr) -> Result<(), Error> {
-        debug!("handle_ca_conn_eos {addr}");
+    fn handle_ca_conn_eos(&mut self, addr: SocketAddr, reason: EndOfStreamReason) -> Result<(), Error> {
+        debug!("handle_ca_conn_eos  {addr}  {reason:?}");
         if let Some(e) = self.ca_conn_ress.remove(&addr) {
             self.stats.ca_conn_eos_ok().inc();
             self.await_ca_conn_jhs.push_back((addr, e.jh));
@@ -898,20 +897,23 @@ impl CaConnSet {
             self.stats.ca_conn_eos_unexpected().inc();
             warn!("end-of-stream received for non-existent CaConn {addr}");
         }
+        match reason {
+            EndOfStreamReason::UnspecifiedReason => {
+                warn!("EndOfStreamReason::UnspecifiedReason");
+                self.handle_connect_fail(addr)?
+            }
+            EndOfStreamReason::Error(e) => {
+                warn!("received error  {addr}  {e}");
+                self.handle_connect_fail(addr)?
+            }
+            EndOfStreamReason::ConnectFail => self.handle_connect_fail(addr)?,
+            EndOfStreamReason::OnCommand => {
+                warn!("TODO  make sure no channel is in state which could trigger health timeout")
+            }
+            EndOfStreamReason::RemoteClosed => self.handle_connect_fail(addr)?,
+        }
         // self.remove_channel_status_for_addr(addr)?;
         trace2!("still CaConn left  {}", self.ca_conn_ress.len());
-        Ok(())
-    }
-
-    fn handle_ca_conn_err(&mut self, e: super::conn::Error, addr: SocketAddr) -> Result<(), Error> {
-        use super::conn::Error as E2;
-        error!("received error  {addr}  {e}");
-        match e {
-            E2::ConnectFail => self.handle_connect_fail(addr)?,
-            _ => {
-                // TODO others?
-            }
-        }
         Ok(())
     }
 
@@ -966,11 +968,7 @@ impl CaConnSet {
             match &mut v.value {
                 ChannelStateValue::Active(st2) => match st2 {
                     ActiveChannelState::WithStatusSeriesId(st3) => match &mut st3.inner {
-                        WithStatusSeriesIdStateInner::WithAddress { addr: a2, state: st4 } => {
-                            if SocketAddr::V4(*a2) == addr {
-                                *st4 = WithAddressState::Backoff(Instant::now());
-                            }
-                        }
+                        WithStatusSeriesIdStateInner::WithAddress { addr: a2, state: st4 } => {}
                         _ => {}
                     },
                     _ => {}
@@ -1044,16 +1042,10 @@ impl CaConnSet {
         let ret = Self::ca_conn_item_merge_inner(Box::pin(conn), tx1.clone(), addr, connstats).await;
         trace2!("ca_conn_consumer  ended {}", addr);
         match ret {
-            Ok(()) => {
+            Ok(x) => {
                 debug!("Sending  CaConnEventValue::EndOfStream");
-                tx1.send((
-                    addr,
-                    CaConnEvent {
-                        ts: Instant::now(),
-                        value: CaConnEventValue::EndOfStream,
-                    },
-                ))
-                .await?;
+                tx1.send((addr, CaConnEvent::new_now(CaConnEventValue::EndOfStream(x))))
+                    .await?;
             }
             Err(e) => {
                 error!("ca_conn_item_merge received from inner: {e}");
@@ -1068,39 +1060,37 @@ impl CaConnSet {
         tx1: Sender<(SocketAddr, CaConnEvent)>,
         addr: SocketAddr,
         stats: Arc<CaConnStats>,
-    ) -> Result<(), Error> {
+    ) -> Result<EndOfStreamReason, Error> {
+        let mut eos_reason = None;
         while let Some(item) = conn.next().await {
-            match item {
-                Ok(item) => {
-                    stats.item_count.inc();
-                    match item.value {
-                        CaConnEventValue::None
-                        | CaConnEventValue::EchoTimeout
-                        | CaConnEventValue::ConnCommandResult(..)
-                        | CaConnEventValue::ChannelCreateFail(..)
-                        | CaConnEventValue::ChannelStatus(..)
-                        | CaConnEventValue::Error(..) => {
-                            if let Err(e) = tx1.send((addr, item)).await {
-                                error!("can not deliver error {e}");
-                                return Err(Error::with_msg_no_trace("can not deliver error"));
-                            }
-                        }
-                        CaConnEventValue::EndOfStream => break,
-                    }
-                }
-                Err(e) => {
-                    let item = CaConnEvent {
-                        ts: Instant::now(),
-                        value: CaConnEventValue::Error(e),
-                    };
+            if let Some(x) = eos_reason {
+                let e = Error::with_msg_no_trace(format!("CaConn delivered already eos  {addr}  {x:?}"));
+                error!("{e}");
+                return Err(e);
+            }
+            stats.item_count.inc();
+            match item.value {
+                CaConnEventValue::None
+                | CaConnEventValue::EchoTimeout
+                | CaConnEventValue::ConnCommandResult(..)
+                | CaConnEventValue::ChannelCreateFail(..)
+                | CaConnEventValue::ChannelStatus(..) => {
                     if let Err(e) = tx1.send((addr, item)).await {
                         error!("can not deliver error {e}");
                         return Err(Error::with_msg_no_trace("can not deliver error"));
                     }
                 }
+                CaConnEventValue::EndOfStream(reason) => {
+                    eos_reason = Some(reason);
+                }
             }
         }
-        Ok(())
+        if let Some(x) = eos_reason {
+            Ok(x)
+        } else {
+            let e = Error::with_msg_no_trace(format!("CaConn gave no reason  {addr}"));
+            Err(e)
+        }
     }
 
     fn push_channel_status(&mut self, item: ChannelStatusItem) -> Result<(), Error> {
@@ -1354,11 +1344,6 @@ impl CaConnSet {
                                         }
                                     }
                                 }
-                                Backoff(ts) => {
-                                    if tsnow.saturating_duration_since(*ts) >= CHANNEL_BACKOFF {
-                                        *st4 = Unassigned { since: stnow };
-                                    }
-                                }
                             }
                         }
                         WithStatusSeriesIdStateInner::NoAddress { since } => {
@@ -1454,9 +1439,6 @@ impl CaConnSet {
                                         connected += 1;
                                     }
                                 }
-                            }
-                            WithAddressState::Backoff(ts) => {
-                                backoff += 1;
                             }
                         },
                         WithStatusSeriesIdStateInner::NoAddress { .. } => {
