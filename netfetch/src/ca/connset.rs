@@ -557,11 +557,10 @@ impl CaConnSet {
     }
 
     fn handle_series_lookup_result(&mut self, res: Result<ChannelInfoResult, Error>) -> Result<(), Error> {
-        debug!("handle_series_lookup_result {res:?}");
+        trace!("handle_series_lookup_result {res:?}");
         if self.shutdown_stopping {
             return Ok(());
         }
-        trace3!("handle_series_lookup_result  {res:?}");
         match res {
             Ok(res) => {
                 let cssid = ChannelStatusSeriesId::new(res.series.into_inner().id());
@@ -637,7 +636,7 @@ impl CaConnSet {
         if let Some(chst) = self.channel_states.get_mut(&ch) {
             if let ChannelStateValue::Active(ast) = &mut chst.value {
                 if let ActiveChannelState::WithStatusSeriesId(st3) = ast {
-                    debug!("handle_add_channel_with_addr  INNER  {cmd:?}");
+                    trace!("handle_add_channel_with_addr  INNER  {cmd:?}");
                     self.stats.handle_add_channel_with_addr().inc();
                     let tsnow = SystemTime::now();
                     *st3 = WithStatusSeriesIdState {
@@ -654,9 +653,9 @@ impl CaConnSet {
                     };
                     let addr = cmd.addr;
                     if self.ca_conn_ress.contains_key(&addr) {
-                        debug!("ca_conn_ress has already {addr:?}");
+                        trace!("ca_conn_ress has already {addr:?}");
                     } else {
-                        debug!("ca_conn_ress  NEW  {addr:?}");
+                        trace!("ca_conn_ress  NEW  {addr:?}");
                         let c = self.create_ca_conn(cmd.clone())?;
                         self.ca_conn_ress.insert(addr, c);
                     }
@@ -710,21 +709,21 @@ impl CaConnSet {
     }
 
     fn handle_ioc_query_result(&mut self, results: VecDeque<FindIocRes>) -> Result<(), Error> {
-        debug!("handle_ioc_query_result  {results:?}");
+        trace!("handle_ioc_query_result  {results:?}");
         if self.shutdown_stopping {
             return Ok(());
         }
         for res in results {
             let ch = Channel::new(res.channel.clone());
             if trigger.contains(&ch.id()) {
-                debug!("handle_ioc_query_result  {res:?}");
+                trace!("handle_ioc_query_result  {res:?}");
             }
             if let Some(chst) = self.channel_states.get_mut(&ch) {
                 if let ChannelStateValue::Active(ast) = &mut chst.value {
                     if let ActiveChannelState::WithStatusSeriesId(st2) = ast {
                         if let Some(addr) = res.addr {
                             self.stats.ioc_addr_found().inc();
-                            debug!("ioc found {res:?}");
+                            trace!("ioc found {res:?}");
                             if false {
                                 let since = SystemTime::now();
                                 st2.addr_find_backoff = 0;
@@ -743,7 +742,7 @@ impl CaConnSet {
                             }
                         } else {
                             self.stats.ioc_addr_not_found().inc();
-                            debug!("ioc not found {res:?}");
+                            trace!("ioc not found {res:?}");
                             let since = SystemTime::now();
                             st2.inner = WithStatusSeriesIdStateInner::UnknownAddress { since };
                         }
@@ -880,7 +879,7 @@ impl CaConnSet {
             if let ChannelStateValue::Active(st2) = &mut st1.value {
                 if let ActiveChannelState::WithStatusSeriesId(st3) = st2 {
                     trace!("handle_channel_create_fail {addr} {ch:?}  set to MaybeWrongAddress");
-                    st3.addr_find_backoff += 1;
+                    st3.addr_find_backoff = (st3.addr_find_backoff + 1).min(20);
                     st3.inner = WithStatusSeriesIdStateInner::MaybeWrongAddress { since: tsnow };
                 }
             }
@@ -946,7 +945,7 @@ impl CaConnSet {
                                 if self.connect_fail_count > 400 {
                                     std::process::exit(1);
                                 }
-                                st3.addr_find_backoff += 1;
+                                st3.addr_find_backoff = (st3.addr_find_backoff + 1).min(20);
                                 st3.inner = WithStatusSeriesIdStateInner::MaybeWrongAddress { since: tsnow };
                             }
                         }
@@ -1043,7 +1042,7 @@ impl CaConnSet {
         trace2!("ca_conn_consumer  ended {}", addr);
         match ret {
             Ok(x) => {
-                debug!("Sending  CaConnEventValue::EndOfStream");
+                trace!("Sending  CaConnEventValue::EndOfStream");
                 tx1.send((addr, CaConnEvent::new_now(CaConnEventValue::EndOfStream(x))))
                     .await?;
             }
@@ -1335,7 +1334,7 @@ impl CaConnSet {
                                         let addr = SocketAddr::V4(*addr_v4);
                                         cmd_remove_channel.push((addr, ch.clone()));
                                         if st.health_timeout_count < 3 {
-                                            st3.addr_find_backoff += 1;
+                                            st3.addr_find_backoff = (st3.addr_find_backoff + 1).min(20);
                                             st3.inner =
                                                 WithStatusSeriesIdStateInner::MaybeWrongAddress { since: stnow };
                                             let item =
@@ -1354,7 +1353,7 @@ impl CaConnSet {
                         WithStatusSeriesIdStateInner::MaybeWrongAddress { since } => {
                             if *since + (MAYBE_WRONG_ADDRESS_STAY * st3.addr_find_backoff.max(1).min(10)) < stnow {
                                 if search_pending_count < CURRENT_SEARCH_PENDING_MAX as _ {
-                                    debug!("try again channel after MaybeWrongAddress");
+                                    trace!("try again channel after MaybeWrongAddress");
                                     if trigger.contains(&ch.id()) {
                                         debug!("issue ioc search for {}", ch.id());
                                     }
@@ -1363,8 +1362,6 @@ impl CaConnSet {
                                     let qu = IocAddrQuery::uncached(ch.id().into());
                                     self.find_ioc_query_queue.push_back(qu);
                                     self.stats.ioc_search_start().inc();
-                                } else {
-                                    debug!("try again channel after MaybeWrongAddress  NOT YET");
                                 }
                             }
                         }
@@ -1622,7 +1619,6 @@ impl Stream for CaConnSet {
 
             if self.find_ioc_query_sender.is_idle() {
                 if let Some(item) = self.find_ioc_query_queue.pop_front() {
-                    debug!("push find item {item:?}");
                     self.find_ioc_query_sender.as_mut().send_pin(item);
                 }
             }
