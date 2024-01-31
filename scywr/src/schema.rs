@@ -507,5 +507,22 @@ pub async fn migrate_scylla_data_schema(scyconf: &ScyllaConfig) -> Result<(), Er
         );
         tab.create_if_missing(scy).await?;
     }
+    {
+        let tab = GenTwcsTab::new(
+            "account_00",
+            &[
+                ("part", "int"),
+                ("ts", "bigint"),
+                ("series", "bigint"),
+                ("count", "bigint"),
+                ("bytes", "bigint"),
+            ],
+            ["part", "ts"],
+            ["series"],
+            ddays(30),
+            ddays(4),
+        );
+        tab.create_if_missing(scy).await?;
+    }
     Ok(())
 }

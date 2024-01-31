@@ -3,6 +3,7 @@ use super::findioc::FindIocRes;
 use crate::ca::conn;
 use crate::ca::statemap;
 use crate::ca::statemap::CaConnState;
+use crate::ca::statemap::MaybeWrongAddressState;
 use crate::ca::statemap::WithAddressState;
 use crate::conf::CaIngestOpts;
 use crate::daemon_common::Channel;
@@ -319,6 +320,10 @@ impl IocAddrQuery {
     pub fn use_cache(&self) -> bool {
         self.use_cache
     }
+}
+
+fn bump_backoff(x: &mut u32) {
+    *x = (1 + *x).min(10);
 }
 
 struct SeriesLookupSender {
@@ -724,22 +729,13 @@ impl CaConnSet {
                         if let Some(addr) = res.addr {
                             self.stats.ioc_addr_found().inc();
                             trace!("ioc found {res:?}");
-                            if false {
-                                let since = SystemTime::now();
-                                st2.addr_find_backoff = 0;
-                                st2.inner = WithStatusSeriesIdStateInner::WithAddress {
-                                    addr,
-                                    state: WithAddressState::Unassigned { since },
-                                };
-                            } else {
-                                let cmd = ChannelAddWithAddr {
-                                    backend: self.backend.clone(),
-                                    name: res.channel,
-                                    addr: SocketAddr::V4(addr),
-                                    cssid: st2.cssid.clone(),
-                                };
-                                self.handle_add_channel_with_addr(cmd)?;
-                            }
+                            let cmd = ChannelAddWithAddr {
+                                backend: self.backend.clone(),
+                                name: res.channel,
+                                addr: SocketAddr::V4(addr),
+                                cssid: st2.cssid.clone(),
+                            };
+                            self.handle_add_channel_with_addr(cmd)?;
                         } else {
                             self.stats.ioc_addr_not_found().inc();
                             trace!("ioc not found {res:?}");
@@ -879,8 +875,11 @@ impl CaConnSet {
             if let ChannelStateValue::Active(st2) = &mut st1.value {
                 if let ActiveChannelState::WithStatusSeriesId(st3) = st2 {
                     trace!("handle_channel_create_fail {addr} {ch:?}  set to MaybeWrongAddress");
-                    st3.addr_find_backoff = (st3.addr_find_backoff + 1).min(20);
-                    st3.inner = WithStatusSeriesIdStateInner::MaybeWrongAddress { since: tsnow };
+                    bump_backoff(&mut st3.addr_find_backoff);
+                    st3.inner = WithStatusSeriesIdStateInner::MaybeWrongAddress(MaybeWrongAddressState::new(
+                        tsnow,
+                        st3.addr_find_backoff,
+                    ));
                 }
             }
         }
@@ -917,14 +916,11 @@ impl CaConnSet {
     }
 
     fn handle_connect_fail(&mut self, addr: SocketAddr) -> Result<(), Error> {
-        // TODO ideally should only remove on EOS.
-        self.ca_conn_ress.remove(&addr);
         self.transition_channels_to_maybe_wrong_address(addr)?;
         Ok(())
     }
 
     fn transition_channels_to_maybe_wrong_address(&mut self, addr: SocketAddr) -> Result<(), Error> {
-        trace2!("handle_connect_fail {addr}");
         let tsnow = SystemTime::now();
         for (ch, st1) in self.channel_states.iter_mut() {
             match &mut st1.value {
@@ -945,8 +941,10 @@ impl CaConnSet {
                                 if self.connect_fail_count > 400 {
                                     std::process::exit(1);
                                 }
-                                st3.addr_find_backoff = (st3.addr_find_backoff + 1).min(20);
-                                st3.inner = WithStatusSeriesIdStateInner::MaybeWrongAddress { since: tsnow };
+                                bump_backoff(&mut st3.addr_find_backoff);
+                                st3.inner = WithStatusSeriesIdStateInner::MaybeWrongAddress(
+                                    MaybeWrongAddressState::new(tsnow, st3.addr_find_backoff),
+                                );
                             }
                         }
                     }
@@ -1333,14 +1331,12 @@ impl CaConnSet {
                                         }
                                         let addr = SocketAddr::V4(*addr_v4);
                                         cmd_remove_channel.push((addr, ch.clone()));
-                                        if st.health_timeout_count < 3 {
-                                            st3.addr_find_backoff = (st3.addr_find_backoff + 1).min(20);
-                                            st3.inner =
-                                                WithStatusSeriesIdStateInner::MaybeWrongAddress { since: stnow };
-                                            let item =
-                                                ChannelStatusItem::new_closed_conn_timeout(stnow, st3.cssid.clone());
-                                            channel_status_items.push(item);
-                                        }
+                                        bump_backoff(&mut st3.addr_find_backoff);
+                                        st3.inner = WithStatusSeriesIdStateInner::MaybeWrongAddress(
+                                            MaybeWrongAddressState::new(stnow, st3.addr_find_backoff),
+                                        );
+                                        let item = ChannelStatusItem::new_closed_conn_timeout(stnow, st3.cssid.clone());
+                                        channel_status_items.push(item);
                                     }
                                 }
                             }
@@ -1350,8 +1346,8 @@ impl CaConnSet {
                                 st3.inner = WithStatusSeriesIdStateInner::UnknownAddress { since: stnow };
                             }
                         }
-                        WithStatusSeriesIdStateInner::MaybeWrongAddress { since } => {
-                            if *since + (MAYBE_WRONG_ADDRESS_STAY * st3.addr_find_backoff.max(1).min(10)) < stnow {
+                        WithStatusSeriesIdStateInner::MaybeWrongAddress(st4) => {
+                            if st4.since + st4.backoff_dt < stnow {
                                 if search_pending_count < CURRENT_SEARCH_PENDING_MAX as _ {
                                     trace!("try again channel after MaybeWrongAddress");
                                     if trigger.contains(&ch.id()) {

@@ -252,6 +252,7 @@ impl EstablishWriterWorker {
             .map(move |item| {
                 let wtx = self.worker_tx.clone();
                 let cnt = cnt.clone();
+                let stats = self.stats.clone();
                 async move {
                     let res = SeriesWriter::establish(
                         wtx.clone(),
@@ -264,7 +265,8 @@ impl EstablishWriterWorker {
                     .await;
                     cnt.fetch_add(1, atomic::Ordering::SeqCst);
                     if item.restx.send((item.job_id, res)).await.is_err() {
-                        warn!("can not send writer establish result");
+                        stats.result_send_fail().inc();
+                        trace!("can not send writer establish result");
                     }
                 }
             })

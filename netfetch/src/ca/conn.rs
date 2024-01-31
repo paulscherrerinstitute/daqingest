@@ -20,6 +20,7 @@ use netpod::timeunits::*;
 use netpod::ScalarType;
 use netpod::Shape;
 use netpod::TsNano;
+use netpod::EMIT_ACCOUNTING_SNAP;
 use proto::CaItem;
 use proto::CaMsg;
 use proto::CaMsgTy;
@@ -27,6 +28,7 @@ use proto::CaProto;
 use proto::CreateChan;
 use proto::EventAdd;
 use scywr::iteminsertqueue as scywriiq;
+use scywr::iteminsertqueue::Accounting;
 use scywr::iteminsertqueue::DataValue;
 use scywriiq::ChannelInfoItem;
 use scywriiq::ChannelStatus;
@@ -310,6 +312,9 @@ struct CreatedState {
     stwin_ts: u64,
     stwin_count: u32,
     stwin_bytes: u32,
+    account_emit_last: u64,
+    account_count: u64,
+    account_bytes: u64,
 }
 
 impl CreatedState {
@@ -338,6 +343,9 @@ impl CreatedState {
             stwin_ts: 0,
             stwin_count: 0,
             stwin_bytes: 0,
+            account_emit_last: 0,
+            account_count: 0,
+            account_bytes: 0,
         }
     }
 }
@@ -1621,6 +1629,11 @@ impl CaConn {
         stats.ca_ts_off().ingest((ts_diff / MS) as u32);
         if tsnow >= crst.insert_next_earliest {
             {
+                crst.account_count += 1;
+                // TODO how do we account for bytes? Here, we also add 8 bytes for the timestamp.
+                crst.account_bytes += 8 + payload_len as u64;
+            }
+            {
                 crst.muted_before = 0;
                 crst.insert_item_ivl_ema.tick(tsnow);
                 let em = crst.insert_item_ivl_ema.ema();
@@ -1882,23 +1895,13 @@ impl CaConn {
                                 cx.waker().wake_by_ref();
                             }
                             CaMsgTy::EventAddRes(ev) => {
-                                trace!("got EventAddRes  {:?}  cnt {}", camsg.ts, ev.data_count);
+                                trace2!("got EventAddRes  {:?}  cnt {}", camsg.ts, ev.data_count);
                                 self.stats.event_add_res_recv.inc();
-                                let res = Self::handle_event_add_res(self, ev, tsnow);
-                                let ts2 = Instant::now();
-                                self.stats
-                                    .time_handle_event_add_res
-                                    .add((ts2.duration_since(tsnow) * MS as u32).as_secs());
-                                res?;
+                                Self::handle_event_add_res(self, ev, tsnow)?
                             }
                             CaMsgTy::EventAddResEmpty(ev) => {
-                                trace!("got EventAddResEmpty  {:?}", camsg.ts);
-                                let res = Self::handle_event_add_res_empty(self, ev, tsnow);
-                                let ts2 = Instant::now();
-                                self.stats
-                                    .time_handle_event_add_res
-                                    .add((ts2.duration_since(tsnow) * MS as u32).as_secs());
-                                res?;
+                                trace2!("got EventAddResEmpty  {:?}", camsg.ts);
+                                Self::handle_event_add_res_empty(self, ev, tsnow)?
                             }
                             CaMsgTy::ReadNotifyRes(ev) => Self::handle_read_notify_res(self, ev, tsnow)?,
                             CaMsgTy::Echo => {
@@ -2036,6 +2039,9 @@ impl CaConn {
             stwin_ts: 0,
             stwin_count: 0,
             stwin_bytes: 0,
+            account_emit_last: 0,
+            account_count: 0,
+            account_bytes: 0,
         };
         *ch_s = ChannelState::MakingSeriesWriter(MakingSeriesWriterState { tsbeg: tsnow, channel });
         let job = EstablishWorkerJob::new(
@@ -2230,6 +2236,7 @@ impl CaConn {
         if self.channel_status_emit_last + Duration::from_millis(3000) <= tsnow {
             self.channel_status_emit_last = tsnow;
             self.emit_channel_status()?;
+            self.emit_accounting()?;
         }
         if self.tick_last_writer + Duration::from_millis(2000) <= tsnow {
             self.tick_last_writer = tsnow;
@@ -2272,6 +2279,39 @@ impl CaConn {
             self.stats.out_queue_full().inc();
         } else {
             self.ca_conn_event_out_queue.push_back(item);
+        }
+        Ok(())
+    }
+
+    fn emit_accounting(&mut self) -> Result<(), Error> {
+        let stnow = self.tmp_ts_poll;
+        let ts_sec = stnow.duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs();
+        let ts_sec_snap = ts_sec / EMIT_ACCOUNTING_SNAP * EMIT_ACCOUNTING_SNAP;
+        for (_k, st0) in self.channels.iter_mut() {
+            match st0 {
+                ChannelState::Writable(st1) => {
+                    let ch = &mut st1.channel;
+                    if ts_sec_snap != ch.account_emit_last {
+                        ch.account_emit_last = ts_sec_snap;
+                        if ch.account_count != 0 {
+                            let series_id = ch.cssid.id();
+                            let count = ch.account_count as i64;
+                            let bytes = ch.account_bytes as i64;
+                            ch.account_count = 0;
+                            ch.account_bytes = 0;
+                            let item = QueryItem::Accounting(Accounting {
+                                part: (series_id & 0xff) as i32,
+                                ts: ts_sec_snap as i64,
+                                series: SeriesId::new(series_id),
+                                count,
+                                bytes,
+                            });
+                            self.insert_item_queue.push_back(item);
+                        }
+                    }
+                }
+                _ => {}
+            }
         }
         Ok(())
     }

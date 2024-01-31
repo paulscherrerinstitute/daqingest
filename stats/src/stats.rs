@@ -318,7 +318,6 @@ stats_proc::stats_struct!((
             time_handle_conn_listen,
             time_handle_peer_ready,
             time_check_channels_state_init,
-            time_handle_event_add_res,
             tcp_connected,
             get_series_id_ok,
             item_count,
@@ -494,7 +493,11 @@ stats_proc::stats_struct!((
         ),
         values(db_lookup_workers,)
     ),
-    stats_struct(name(SeriesWriterEstablishStats), prefix(wrest), counters(job_recv,),),
+    stats_struct(
+        name(SeriesWriterEstablishStats),
+        prefix(wrest),
+        counters(job_recv, result_send_fail,),
+    ),
 ));
 
 stats_proc::stats_struct!((

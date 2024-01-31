@@ -352,6 +352,16 @@ pub enum QueryItem {
     Ivl(IvlItem),
     ChannelInfo(ChannelInfoItem),
     TimeBinSimpleF32(TimeBinSimpleF32),
+    Accounting(Accounting),
+}
+
+#[derive(Debug)]
+pub struct Accounting {
+    pub part: i32,
+    pub ts: i64,
+    pub series: SeriesId,
+    pub count: i64,
+    pub bytes: i64,
 }
 
 struct InsParCom {

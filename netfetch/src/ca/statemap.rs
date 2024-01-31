@@ -8,6 +8,7 @@ use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::net::SocketAddrV4;
 use std::ops::RangeBounds;
+use std::time::Duration;
 use std::time::Instant;
 use std::time::SystemTime;
 
@@ -82,10 +83,25 @@ pub enum WithStatusSeriesIdStateInner {
         #[serde(with = "humantime_serde")]
         since: SystemTime,
     },
-    MaybeWrongAddress {
-        #[serde(with = "humantime_serde")]
-        since: SystemTime,
-    },
+    MaybeWrongAddress(MaybeWrongAddressState),
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MaybeWrongAddressState {
+    #[serde(with = "humantime_serde")]
+    pub since: SystemTime,
+    pub backoff_dt: Duration,
+}
+
+impl MaybeWrongAddressState {
+    pub fn new(since: SystemTime, backoff_cnt: u32) -> Self {
+        let f = 1. + 10. * (backoff_cnt as f32 / 4.).tanh();
+        let dtms = 4e3_f32 * f;
+        Self {
+            since,
+            backoff_dt: Duration::from_millis(dtms as u64),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]

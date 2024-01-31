@@ -75,11 +75,11 @@ create table if not exists series_by_channel (
     scalar_type int not null,
     shape_dims int[] not null,
     agg_kind int not null,
-    tscreate timestamptz not null default 'now()'
+    tscreate timestamptz not null default now()
 )";
     let _ = pgc.execute(sql, &[]).await;
 
-    let sql = "alter table series_by_channel add tscreate timestamptz not null default 'now()'";
+    let sql = "alter table series_by_channel add tscreate timestamptz not null default now()";
     let _ = pgc.execute(sql, &[]).await;
 
     if !has_table("ioc_by_channel_log", pgc).await? {

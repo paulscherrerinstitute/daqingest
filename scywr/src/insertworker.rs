@@ -5,6 +5,7 @@ use crate::iteminsertqueue::insert_connection_status_fut;
 use crate::iteminsertqueue::insert_item;
 use crate::iteminsertqueue::insert_item_fut;
 use crate::iteminsertqueue::insert_msp_fut;
+use crate::iteminsertqueue::Accounting;
 use crate::iteminsertqueue::ConnectionStatusItem;
 use crate::iteminsertqueue::InsertFut;
 use crate::iteminsertqueue::InsertItem;
@@ -294,6 +295,7 @@ async fn worker(
                 info!("have time bin patch to insert: {item:?}");
                 return Err(Error::with_msg_no_trace("TODO insert item old path"));
             }
+            QueryItem::Accounting(..) => {}
         }
     }
     stats.worker_finish().inc();
@@ -343,6 +345,9 @@ async fn worker_streamed(
                     }
                     QueryItem::TimeBinSimpleF32(item) => {
                         prepare_timebin_insert_futs(item, &ttls, &data_store, &stats, tsnow_u64)
+                    }
+                    QueryItem::Accounting(item) => {
+                        prepare_accounting_insert_futs(item, &ttls, &data_store, &stats, tsnow_u64)
                     }
                     _ => {
                         // TODO
@@ -487,5 +492,31 @@ fn prepare_timebin_insert_futs(
     //     }
     // }
 
+    futs
+}
+
+fn prepare_accounting_insert_futs(
+    item: Accounting,
+    ttls: &Ttls,
+    data_store: &Arc<DataStore>,
+    stats: &Arc<InsertWorkerStats>,
+    tsnow_u64: u64,
+) -> SmallVec<[InsertFut; 4]> {
+    let params = (
+        item.part,
+        item.ts,
+        item.series.id() as i64,
+        item.count,
+        item.bytes,
+        ttls.binned.as_secs() as i32,
+    );
+    let fut = InsertFut::new(
+        data_store.scy.clone(),
+        data_store.qu_account_00.clone(),
+        params,
+        tsnow_u64,
+        stats.clone(),
+    );
+    let futs = smallvec![fut];
     futs
 }
