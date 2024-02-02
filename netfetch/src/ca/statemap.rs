@@ -133,8 +133,6 @@ pub enum ChannelStateValue {
 #[derive(Debug, Clone, Serialize)]
 pub struct ChannelState {
     pub value: ChannelStateValue,
-    pub running_cmd_id: Option<usize>,
-    pub health_timeout_count: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]

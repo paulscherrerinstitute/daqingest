@@ -529,8 +529,6 @@ impl CaConnSet {
                 value: ChannelStateValue::Active(ActiveChannelState::WaitForStatusSeriesId {
                     since: SystemTime::now(),
                 }),
-                running_cmd_id: None,
-                health_timeout_count: 0,
             };
             self.channel_states.insert(ch.clone(), item);
             self.channel_states.get_mut(&ch).unwrap()

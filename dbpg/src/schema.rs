@@ -148,10 +148,18 @@ async fn migrate_01(pgc: &PgClient) -> Result<(), Error> {
     Ok(())
 }
 
+async fn migrate_02(pgc: &PgClient) -> Result<(), Error> {
+    // TODO after all migrations, should check that the schema is as expected.
+    let sql = "alter table series_by_channel add tscs timestamptz[] default array[now()]";
+    let _ = pgc.execute(sql, &[]).await;
+    Ok(())
+}
+
 pub async fn schema_check(pgc: &PgClient) -> Result<(), Error> {
     pgc.execute("set client_min_messages = 'warning'", &[]).await?;
     migrate_00(&pgc).await?;
     migrate_01(&pgc).await?;
+    migrate_02(&pgc).await?;
     pgc.execute("reset client_min_messages", &[]).await?;
     info!("schema_check done");
     Ok(())

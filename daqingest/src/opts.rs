@@ -8,7 +8,7 @@ pub struct DaqIngestOpts {
     #[arg(long, action(clap::ArgAction::Count))]
     pub verbose: u8,
     #[clap(long)]
-    pub tag: Option<String>,
+    pub label: Option<String>,
     #[command(subcommand)]
     pub subcmd: SubCmd,
     #[arg(long)]
