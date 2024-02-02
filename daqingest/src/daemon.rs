@@ -90,32 +90,6 @@ impl Daemon {
                 .await
                 .map_err(|e| Error::with_msg_no_trace(e.to_string()))?;
 
-        {
-            let (tx, rx) = async_channel::bounded(1);
-            let item = dbpg::seriesbychannel::ChannelInfoQuery {
-                backend: "amd32test".into(),
-                channel: "dummy-0000".into(),
-                scalar_type: netpod::ScalarType::U16.to_scylla_i32(),
-                shape_dims: vec![500],
-                tx: Box::pin(tx),
-            };
-            channel_info_query_tx.send(item).await?;
-            let res = rx.recv().await?;
-            debug!("received A: {res:?}");
-
-            let (tx, rx) = async_channel::bounded(1);
-            let item = dbpg::seriesbychannel::ChannelInfoQuery {
-                backend: "amd32test".into(),
-                channel: "dummy-0000".into(),
-                scalar_type: netpod::ScalarType::U16.to_scylla_i32(),
-                shape_dims: vec![500],
-                tx: Box::pin(tx),
-            };
-            channel_info_query_tx.send(item).await?;
-            let res = rx.recv().await?;
-            debug!("received B: {res:?}");
-        }
-
         let (query_item_tx, query_item_rx) = async_channel::bounded(ingest_opts.insert_item_queue_cap());
         let query_item_tx_weak = query_item_tx.downgrade();
 
