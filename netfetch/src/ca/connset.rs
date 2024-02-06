@@ -566,7 +566,7 @@ impl CaConnSet {
         }
         match res {
             Ok(res) => {
-                let cssid = ChannelStatusSeriesId::new(res.series.into_inner().id());
+                let cssid = ChannelStatusSeriesId::new(res.series.id());
                 self.channel_by_cssid
                     .insert(cssid.clone(), Channel::new(res.channel.clone()));
                 let add = ChannelAddWithStatusId {

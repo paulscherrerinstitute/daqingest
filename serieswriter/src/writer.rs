@@ -87,7 +87,7 @@ impl SeriesWriter {
         };
         worker_tx.send(item).await?;
         let res = rx.recv().await?.map_err(|_| Error::SeriesLookupError)?;
-        let cssid = ChannelStatusSeriesId::new(res.series.into_inner().id());
+        let cssid = ChannelStatusSeriesId::new(res.series.id());
         Self::establish_with_cssid(worker_tx, cssid, backend, channel, scalar_type, shape, tsnow).await
     }
 
@@ -110,7 +110,7 @@ impl SeriesWriter {
         };
         worker_tx.send(item).await?;
         let res = rx.recv().await?.map_err(|_| Error::SeriesLookupError)?;
-        let sid = res.series.into_inner();
+        let sid = res.series;
         let mut binner = ConnTimeBin::empty(sid.clone(), TsNano::from_ns(SEC * 10));
         binner.setup_for(&scalar_type, &shape, tsnow)?;
         let res = Self {
@@ -342,7 +342,9 @@ fn write_00() {
         let scy = scywr::session::create_session(scyconf).await?;
         let stats = SeriesByChannelStats::new();
         let stats = Arc::new(stats);
-        let (tx, jhs, jh) = dbpg::seriesbychannel::start_lookup_workers(1, dbconf, stats).await?;
+        let (tx, jhs, jh) =
+            dbpg::seriesbychannel::start_lookup_workers::<dbpg::seriesbychannel::SalterRandom>(1, dbconf, stats)
+                .await?;
         let backend = "bck-test-00";
         let channel = "chn-test-00";
         let scalar_type = ScalarType::I16;

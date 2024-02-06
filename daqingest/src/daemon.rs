@@ -85,10 +85,11 @@ impl Daemon {
         let insert_worker_stats = Arc::new(InsertWorkerStats::new());
 
         // TODO keep join handles and await later
-        let (channel_info_query_tx, jhs, jh) =
-            dbpg::seriesbychannel::start_lookup_workers(4, &opts.pgconf, series_by_channel_stats.clone())
-                .await
-                .map_err(|e| Error::with_msg_no_trace(e.to_string()))?;
+        let (channel_info_query_tx, jhs, jh) = dbpg::seriesbychannel::start_lookup_workers::<
+            dbpg::seriesbychannel::SalterRandom,
+        >(4, &opts.pgconf, series_by_channel_stats.clone())
+        .await
+        .map_err(|e| Error::with_msg_no_trace(e.to_string()))?;
 
         let (query_item_tx, query_item_rx) = async_channel::bounded(ingest_opts.insert_item_queue_cap());
         let query_item_tx_weak = query_item_tx.downgrade();

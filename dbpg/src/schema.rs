@@ -75,13 +75,14 @@ create table if not exists series_by_channel (
     scalar_type int not null,
     shape_dims int[] not null,
     agg_kind int not null,
-    tscreate timestamptz not null default now()
+    tscs timestamptz[] storage plain default array[now()]
 )";
     let _ = pgc.execute(sql, &[]).await;
 
-    let sql = "alter table series_by_channel add tscreate timestamptz not null default now()";
-    let _ = pgc.execute(sql, &[]).await;
-
+    {
+        let sql = "alter table series_by_channel drop tscreate";
+        let _ = pgc.execute(sql, &[]).await;
+    }
     if !has_table("ioc_by_channel_log", pgc).await? {
         let _ = pgc
             .execute(
@@ -138,11 +139,15 @@ async fn migrate_01(pgc: &PgClient) -> Result<(), Error> {
         .await?;
     }
     {
-        match pgc.execute("alter table series_by_channel add constraint series_by_channel_nondup unique (facility, channel, scalar_type, shape_dims, agg_kind)", &[]).await {
+        let sql = concat!(
+            "alter table series_by_channel add constraint series_by_channel_nondup",
+            " unique (facility, channel, scalar_type, shape_dims, agg_kind)"
+        );
+        match pgc.execute(sql, &[]).await {
             Ok(_) => {
                 info!("constraint added");
             }
-            Err(_)=>{}
+            Err(_) => {}
         }
     }
     Ok(())
@@ -150,8 +155,8 @@ async fn migrate_01(pgc: &PgClient) -> Result<(), Error> {
 
 async fn migrate_02(pgc: &PgClient) -> Result<(), Error> {
     // TODO after all migrations, should check that the schema is as expected.
-    let sql = "alter table series_by_channel add tscs timestamptz[] default array[now()]";
-    let _ = pgc.execute(sql, &[]).await;
+    let sql = "alter table series_by_channel add if not exists tscs timestamptz[] storage plain default array[now()]";
+    let _ = pgc.execute(sql, &[]).await?;
     Ok(())
 }
 
