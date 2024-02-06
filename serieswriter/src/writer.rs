@@ -87,7 +87,7 @@ impl SeriesWriter {
         };
         worker_tx.send(item).await?;
         let res = rx.recv().await?.map_err(|_| Error::SeriesLookupError)?;
-        let cssid = ChannelStatusSeriesId::new(res.series.id());
+        let cssid = ChannelStatusSeriesId::new(res.series.to_series().id());
         Self::establish_with_cssid(worker_tx, cssid, backend, channel, scalar_type, shape, tsnow).await
     }
 
@@ -110,7 +110,7 @@ impl SeriesWriter {
         };
         worker_tx.send(item).await?;
         let res = rx.recv().await?.map_err(|_| Error::SeriesLookupError)?;
-        let sid = res.series;
+        let sid = res.series.to_series();
         let mut binner = ConnTimeBin::empty(sid.clone(), TsNano::from_ns(SEC * 10));
         binner.setup_for(&scalar_type, &shape, tsnow)?;
         let res = Self {
