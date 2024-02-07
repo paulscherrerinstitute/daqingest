@@ -12,6 +12,7 @@ use log::*;
 use md5::Digest;
 use netpod::Database;
 use netpod::ScalarType;
+use netpod::SeriesKind;
 use netpod::Shape;
 use series::series::Existence;
 use series::SeriesId;
@@ -81,6 +82,7 @@ impl CanSendChannelInfoResult for async_channel::Sender<Result<ChannelInfoResult
 pub struct ChannelInfoQuery {
     pub backend: String,
     pub channel: String,
+    pub kind: SeriesKind,
     pub scalar_type: i32,
     pub shape_dims: Vec<i32>,
     pub tx: Pin<Box<dyn CanSendChannelInfoResult + Send>>,
@@ -91,6 +93,7 @@ impl fmt::Debug for ChannelInfoQuery {
         fmt.debug_struct("ChannelInfoQuery")
             .field("backend", &self.backend)
             .field("channel", &self.channel)
+            .field("kind", &self.kind)
             .field("scalar_type", &self.scalar_type)
             .field("shape_dims", &self.shape_dims)
             .finish()
@@ -152,24 +155,28 @@ impl Worker {
         let (pg, pg_client_jh) = crate::conn::make_pg_client(db).await?;
         let sql = concat!(
             "with q1 as (",
-            " select * from unnest($1, $2, $3)",
-            " as inp (rid, backend, channel)",
+            " select * from unnest($1, $2, $3, $4)",
+            " as inp (rid, backend, channel, kind)",
             ")",
-            " select q1.rid, t.series, t.scalar_type, t.shape_dims, t.tscs from q1",
+            " select q1.rid, t.series, t.scalar_type, t.shape_dims, t.tscs, t.kind from q1",
             " join series_by_channel t on t.facility = q1.backend and t.channel = q1.channel",
             " and t.agg_kind = 0",
             " order by q1.rid",
         );
         let qu_select = pg
-            .prepare_typed(sql, &[Type::INT4_ARRAY, Type::TEXT_ARRAY, Type::TEXT_ARRAY])
+            .prepare_typed(
+                sql,
+                &[Type::INT4_ARRAY, Type::TEXT_ARRAY, Type::TEXT_ARRAY, Type::INT2_ARRAY],
+            )
             .await?;
+
         let sql = concat!(
             "with q1 as (",
-            " select * from unnest($1, $2, $3, $4, $5)",
-            " as inp (backend, channel, scalar_type, shape_dims, series)",
+            " select * from unnest($1, $2, $3, $4, $5, $6)",
+            " as inp (backend, channel, scalar_type, shape_dims, series, kind)",
             ")",
-            " insert into series_by_channel (series, facility, channel, scalar_type, shape_dims, agg_kind)",
-            " select series, backend, channel, scalar_type,",
+            " insert into series_by_channel (series, facility, channel, kind, scalar_type, shape_dims, agg_kind)",
+            " select series, backend, channel, kind, scalar_type,",
             " array(select e::int from jsonb_array_elements(shape_dims) as e) as shape_dims,",
             " 0 from q1",
             " on conflict do nothing"
@@ -183,6 +190,7 @@ impl Worker {
                     Type::INT4_ARRAY,
                     Type::JSONB_ARRAY,
                     Type::INT8_ARRAY,
+                    Type::INT2_ARRAY,
                 ],
             )
             .await?;
@@ -301,25 +309,33 @@ impl Worker {
     }
 
     async fn select(&self, batch: Vec<ChannelInfoQuery>) -> Result<Vec<FoundResult>, Error> {
-        let (rids, backends, channels, jobs) = batch
+        let (rids, backends, channels, kinds, jobs) = batch
             .into_iter()
             .enumerate()
             .map(|(i, e)| {
                 let rid = i as i32;
                 let backend = e.backend.clone();
                 let channel = e.channel.clone();
+                let kind = e.kind.to_db_i16();
                 let job = e;
-                (rid, backend, channel, job)
+                (rid, backend, channel, kind, job)
             })
-            .fold((Vec::new(), Vec::new(), Vec::new(), Vec::new()), |mut a, v| {
-                a.0.push(v.0);
-                a.1.push(v.1);
-                a.2.push(v.2);
-                a.3.push(v.3);
-                a
-            });
+            .fold(
+                (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new()),
+                |mut a, v| {
+                    a.0.push(v.0);
+                    a.1.push(v.1);
+                    a.2.push(v.2);
+                    a.3.push(v.3);
+                    a.4.push(v.4);
+                    a
+                },
+            );
         // debug!("select worker start batch of {}  {:?}", channels.len(), channels);
-        let rows = self.pg.query(&self.qu_select, &[&rids, &backends, &channels]).await?;
+        let rows = self
+            .pg
+            .query(&self.qu_select, &[&rids, &backends, &channels, &kinds])
+            .await?;
         let mut row_it = rows.into_iter();
         let mut row_opt = row_it.next();
         let mut acc = Vec::new();
@@ -333,10 +349,12 @@ impl Worker {
                         let shape_dims = Shape::from_scylla_shape_dims(row.get::<_, Vec<i32>>(3).as_slice())
                             .map_err(|_| Error::Shape)?;
                         let tscs: Vec<DateTime<Utc>> = row.get(4);
+                        let kind: i16 = row.get(5);
+                        let kind = SeriesKind::from_db_i16(kind).map_err(|_| Error::ScalarType)?;
                         if false {
                             debug!(
-                                "select worker found in database  {:?}  {:?}  {:?}  {:?}  {:?}",
-                                rid, series, scalar_type, shape_dims, tscs
+                                "select worker found in database  {:?}  {:?}  {:?}  {:?}  {:?}  {:?}",
+                                rid, series, scalar_type, shape_dims, tscs, kind
                             );
                         }
                         acc.push((rid, series, scalar_type, shape_dims, tscs));
@@ -433,11 +451,12 @@ impl Worker {
 
     async fn insert_missing<FR: HashSalter>(&self, batch: &Vec<ChannelInfoQuery>) -> Result<(), Error> {
         // debug!("insert_missing  len {}", batch.len());
-        let (backends, channels, scalar_types, shape_dimss, mut hashers) = batch
+        let (backends, channels, kinds, scalar_types, shape_dimss, mut hashers) = batch
             .iter()
             .map(|job| {
                 let backend = &job.backend;
                 let channel = &job.channel;
+                let kind = job.kind.to_db_i16();
                 let scalar_type = &job.scalar_type;
                 let shape = &job.shape_dims;
                 let hasher = {
@@ -448,16 +467,17 @@ impl Worker {
                     h.update(format!("{:?}", job.shape_dims).as_bytes());
                     h
                 };
-                (backend, channel, scalar_type, shape, hasher)
+                (backend, channel, kind, scalar_type, shape, hasher)
             })
             .fold(
-                (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new()),
+                (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new()),
                 |mut a, x| {
                     a.0.push(x.0);
                     a.1.push(x.1);
                     a.2.push(x.2);
                     a.3.push(x.3);
                     a.4.push(x.4);
+                    a.5.push(x.5);
                     a
                 },
             );
@@ -502,7 +522,14 @@ impl Worker {
                 .pg
                 .execute(
                     &self.qu_insert,
-                    &[&backends, &channels, &scalar_types, &shape_dims_jss, &series_ids],
+                    &[
+                        &backends,
+                        &channels,
+                        &scalar_types,
+                        &shape_dims_jss,
+                        &series_ids,
+                        &kinds,
+                    ],
                 )
                 .await
                 .unwrap();
@@ -674,8 +701,8 @@ fn test_series_by_channel_01() {
             // Block the id
             let id1: i64 = 5609172854884670524;
             let sql = concat!(
-                "insert into series_by_channel (series, facility, channel, scalar_type, shape_dims, agg_kind)",
-                " values ($1, $2, $3, $4, array[]::int4[], 0)"
+                "insert into series_by_channel (series, facility, channel, kind, scalar_type, shape_dims, agg_kind)",
+                " values ($1, $2, $3, 2, $4, array[]::int4[], 0)"
             );
             pg.execute(sql, &[&id1, &backend, &"test-block-00", &1i32]).await?;
 
@@ -684,15 +711,15 @@ fn test_series_by_channel_01() {
                 let id: i64 = 4802468414253815536;
                 let sql = concat!(
                     "insert into series_by_channel",
-                    " (series, facility, channel, scalar_type, shape_dims, agg_kind, tscs)",
-                    " values ($1, $2, $3, 5, array[64]::int4[], 0, array['2000-10-10T08:00:00Z'::timestamptz])"
+                    " (series, facility, channel, kind, scalar_type, shape_dims, agg_kind, tscs)",
+                    " values ($1, $2, $3, 2, 5, array[64]::int4[], 0, array['2000-10-10T08:00:00Z'::timestamptz])"
                 );
                 pg.execute(sql, &[&id, &backend, &channel_02]).await?;
                 let id: i64 = 6409375609862757444;
                 let sql = concat!(
                     "insert into series_by_channel",
-                    " (series, facility, channel, scalar_type, shape_dims, agg_kind, tscs)",
-                    " values ($1, $2, $3, 8, array[64]::int4[], 0, array['2001-10-10T08:00:00Z'::timestamptz])"
+                    " (series, facility, channel, kind, scalar_type, shape_dims, agg_kind, tscs)",
+                    " values ($1, $2, $3, 2, 8, array[64]::int4[], 0, array['2001-10-10T08:00:00Z'::timestamptz])"
                 );
                 pg.execute(sql, &[&id, &backend, &channel_02]).await?;
             }
@@ -708,6 +735,7 @@ fn test_series_by_channel_01() {
             let item = dbpg::seriesbychannel::ChannelInfoQuery {
                 backend: backend.into(),
                 channel: channel.into(),
+                kind: SeriesKind::ChannelData,
                 scalar_type: netpod::ScalarType::U16.to_scylla_i32(),
                 shape_dims: vec![64],
                 tx: Box::pin(tx),
@@ -722,6 +750,7 @@ fn test_series_by_channel_01() {
             let item = dbpg::seriesbychannel::ChannelInfoQuery {
                 backend: backend.into(),
                 channel: channel_01.into(),
+                kind: SeriesKind::ChannelData,
                 scalar_type: netpod::ScalarType::U16.to_scylla_i32(),
                 shape_dims: vec![64],
                 tx: Box::pin(tx),
@@ -736,6 +765,7 @@ fn test_series_by_channel_01() {
             let item = dbpg::seriesbychannel::ChannelInfoQuery {
                 backend: backend.into(),
                 channel: channel_02.into(),
+                kind: SeriesKind::ChannelData,
                 scalar_type: netpod::ScalarType::U16.to_scylla_i32(),
                 shape_dims: vec![64],
                 tx: Box::pin(tx),
@@ -764,6 +794,7 @@ fn test_series_by_channel_01() {
         let item = dbpg::seriesbychannel::ChannelInfoQuery {
             backend: backend.into(),
             channel: channel.into(),
+            kind: SeriesKind::ChannelData,
             scalar_type: netpod::ScalarType::U16.to_scylla_i32(),
             shape_dims: vec![64],
             tx: Box::pin(tx),
@@ -776,7 +807,7 @@ fn test_series_by_channel_01() {
             let rows = pg
                 .query(
                     concat!(
-                        "select series, channel, scalar_type, shape_dims",
+                        "select series, channel, kind, scalar_type, shape_dims",
                         " from series_by_channel where facility = $1",
                         " and channel not like 'test-block%'",
                         " order by channel, scalar_type, shape_dims",
@@ -788,8 +819,8 @@ fn test_series_by_channel_01() {
             for row in rows {
                 let series: i64 = row.get(0);
                 let channel: String = row.get(1);
-                let scalar_type: i32 = row.get(2);
-                let shape_dims: Vec<i32> = row.get(3);
+                let scalar_type: i32 = row.get(3);
+                let shape_dims: Vec<i32> = row.get(4);
                 all.push((series, channel, scalar_type, shape_dims));
             }
             let exp: Vec<(i64, String, i32, Vec<i32>)> = vec![

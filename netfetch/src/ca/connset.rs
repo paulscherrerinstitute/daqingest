@@ -32,6 +32,7 @@ use futures_util::Stream;
 use futures_util::StreamExt;
 use hashbrown::HashMap;
 use log::*;
+use netpod::SeriesKind;
 use scywr::iteminsertqueue::ChannelInfoItem;
 use scywr::iteminsertqueue::ChannelStatusItem;
 use scywr::iteminsertqueue::QueryItem;
@@ -537,6 +538,7 @@ impl CaConnSet {
         let item = ChannelInfoQuery {
             backend: cmd.backend,
             channel: cmd.name,
+            kind: SeriesKind::ChannelStatus,
             scalar_type: CHANNEL_STATUS_DUMMY_SCALAR_TYPE,
             shape_dims: Vec::new(),
             tx: Box::pin(SeriesLookupSender { tx }),

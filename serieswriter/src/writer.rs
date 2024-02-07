@@ -11,6 +11,7 @@ use log::*;
 use netpod::timeunits::HOUR;
 use netpod::timeunits::SEC;
 use netpod::ScalarType;
+use netpod::SeriesKind;
 use netpod::Shape;
 use netpod::TsNano;
 use netpod::TS_MSP_GRID_SPACING;
@@ -81,6 +82,7 @@ impl SeriesWriter {
         let item = ChannelInfoQuery {
             backend: backend.clone(),
             channel: channel.clone(),
+            kind: SeriesKind::ChannelStatus,
             scalar_type: CHANNEL_STATUS_DUMMY_SCALAR_TYPE,
             shape_dims: shape.to_scylla_vec(),
             tx: Box::pin(tx),
@@ -104,6 +106,7 @@ impl SeriesWriter {
         let item = ChannelInfoQuery {
             backend,
             channel,
+            kind: SeriesKind::ChannelData,
             scalar_type: scalar_type.to_scylla_i32(),
             shape_dims: shape.to_scylla_vec(),
             tx: Box::pin(tx),

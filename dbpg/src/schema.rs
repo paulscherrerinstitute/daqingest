@@ -72,6 +72,7 @@ create table if not exists series_by_channel (
     series bigint not null primary key,
     facility text not null,
     channel text not null,
+    kind int2 not null,
     scalar_type int not null,
     shape_dims int[] storage plain not null,
     agg_kind int not null,
@@ -79,14 +80,11 @@ create table if not exists series_by_channel (
 )";
     let _ = pgc.execute(sql, &[]).await;
 
-    {
-        let sql = "alter table series_by_channel drop tscreate";
-        let _ = pgc.execute(sql, &[]).await;
-    }
+    let sql = "alter table series_by_channel drop tscreate";
+    let _ = pgc.execute(sql, &[]).await;
+
     if !has_table("ioc_by_channel_log", pgc).await? {
-        let _ = pgc
-            .execute(
-                "
+        let sql = "
 create table if not exists ioc_by_channel_log (
     facility text not null,
     channel text not null,
@@ -96,22 +94,15 @@ create table if not exists ioc_by_channel_log (
     queryaddr text,
     responseaddr text,
     addr text
-)
-",
-                &[],
-            )
-            .await;
-        let _ = pgc
-            .execute(
-                "
+)";
+        let _ = pgc.execute(sql, &[]).await;
+        let sql = "
 create index if not exists ioc_by_channel_log_channel on ioc_by_channel_log (
     facility,
     channel
 )
-",
-                &[],
-            )
-            .await;
+";
+        let _ = pgc.execute(sql, &[]).await;
     }
     Ok(())
 }
@@ -138,18 +129,6 @@ async fn migrate_01(pgc: &PgClient) -> Result<(), Error> {
         )
         .await?;
     }
-    {
-        let sql = concat!(
-            "alter table series_by_channel add constraint series_by_channel_nondup",
-            " unique (facility, channel, scalar_type, shape_dims, agg_kind)"
-        );
-        match pgc.execute(sql, &[]).await {
-            Ok(_) => {
-                info!("constraint added");
-            }
-            Err(_) => {}
-        }
-    }
     Ok(())
 }
 
@@ -159,6 +138,24 @@ async fn migrate_02(pgc: &PgClient) -> Result<(), Error> {
     let _ = pgc.execute(sql, &[]).await?;
     let sql = "alter table series_by_channel alter tscs set storage plain";
     let _ = pgc.execute(sql, &[]).await?;
+
+    let sql = concat!("alter table series_by_channel drop constraint if exists series_by_channel_nondup");
+    let _ = pgc.execute(sql, &[]).await?;
+    let sql = "alter table series_by_channel add if not exists kind int2 not null default 0";
+    let _ = pgc.execute(sql, &[]).await?;
+    let sql = "alter table series_by_channel alter kind drop default";
+    let _ = pgc.execute(sql, &[]).await?;
+    let sql = "update series_by_channel set kind = 1 where kind = 0 and scalar_type = 14";
+    let _ = pgc.execute(sql, &[]).await?;
+    let sql = "update series_by_channel set kind = 2 where kind = 0 and scalar_type >= 0 and scalar_type <= 13";
+    let _ = pgc.execute(sql, &[]).await?;
+
+    // TODO this can fail if exists, but must verify that it exists in proper form
+    let sql = concat!(
+        "alter table series_by_channel add constraint series_by_channel_nondup_02",
+        " unique (facility, channel, kind, scalar_type, shape_dims, agg_kind)"
+    );
+    let _ = pgc.execute(sql, &[]).await;
     Ok(())
 }
 
