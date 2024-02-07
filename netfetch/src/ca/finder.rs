@@ -11,10 +11,10 @@ use dbpg::iocindex::IocItem;
 use dbpg::iocindex::IocSearchIndexWorker;
 use dbpg::postgres::Row as PgRow;
 use err::Error;
+use hashbrown::HashMap;
 use log::*;
 use netpod::Database;
 use stats::IocFinderStats;
-use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Duration;
@@ -188,17 +188,19 @@ async fn finder_worker_single(
                         let nbatch = batch.len();
                         trace_batch!("received results {}  resdiff {}", rows.len(), resdiff);
                         let items = transform_pgres(rows);
-                        let names: HashMap<_, _> = items.iter().map(|x| (&x.channel, true)).collect();
                         let mut to_add = Vec::new();
-                        for e in batch {
-                            if !names.contains_key(e.name_string()) {
-                                let item = FindIocRes {
-                                    channel: e.name().into(),
-                                    response_addr: None,
-                                    addr: None,
-                                    dt: Duration::from_millis(0),
-                                };
-                                to_add.push(item);
+                        {
+                            let names: HashMap<_, _> = items.iter().map(|x| (&x.channel, true)).collect();
+                            for e in batch {
+                                if !names.contains_key(e.name_string()) {
+                                    let item = FindIocRes {
+                                        channel: e.name().into(),
+                                        response_addr: None,
+                                        addr: None,
+                                        dt: Duration::from_millis(0),
+                                    };
+                                    to_add.push(item);
+                                }
                             }
                         }
                         let mut items = items;

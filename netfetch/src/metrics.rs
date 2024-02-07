@@ -1,3 +1,5 @@
+pub mod status;
+
 use crate::ca::conn::ChannelStateInfo;
 use crate::ca::connset::CaConnSetEvent;
 use crate::ca::connset::ChannelStatusesRequest;
@@ -187,7 +189,7 @@ async fn channel_remove(params: HashMap<String, String>, dcom: Arc<DaemonComm>) 
 
 // ChannelStatusesResponse
 // BTreeMap<String, ChannelState>
-async fn channel_states(
+async fn private_channel_states(
     params: HashMap<String, String>,
     tx: Sender<CaConnSetEvent>,
 ) -> axum::Json<BTreeMap<String, ChannelState>> {
@@ -316,7 +318,14 @@ fn make_routes(dcom: Arc<DaemonComm>, connset_cmd_tx: Sender<CaConnSetEvent>, st
             "/daqingest/channel/states",
             get({
                 let tx = connset_cmd_tx.clone();
-                |Query(params): Query<HashMap<String, String>>| channel_states(params, tx)
+                |Query(params): Query<HashMap<String, String>>| status::channel_states(params, tx)
+            }),
+        )
+        .route(
+            "/daqingest/private/channel/states",
+            get({
+                let tx = connset_cmd_tx.clone();
+                |Query(params): Query<HashMap<String, String>>| private_channel_states(params, tx)
             }),
         )
         .route(

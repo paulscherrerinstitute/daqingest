@@ -116,7 +116,7 @@ enum MatchingSeries {
     Latest(SeriesId),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum RegisteredSeries {
     Created(SeriesId),
     Updated(SeriesId),
@@ -745,9 +745,19 @@ fn test_series_by_channel_01() {
         };
         rxs.push(rx);
 
+        let mut series_ids = Vec::new();
         for rx in rxs {
             let res = rx.recv().await.unwrap();
             debug!("received A: {res:?}");
+            series_ids.push(res.unwrap().series);
+        }
+        {
+            let exp = vec![
+                RegisteredSeries::Created(SeriesId::new(5191776216635917420)),
+                RegisteredSeries::Created(SeriesId::new(5025677968516078602)),
+                RegisteredSeries::Updated(SeriesId::new(4802468414253815536)),
+            ];
+            assert_eq!(series_ids, exp);
         }
 
         let (tx, rx) = async_channel::bounded(1);

@@ -67,10 +67,6 @@ pub struct UnassignedState {
 
 #[derive(Debug, Clone, Serialize)]
 pub enum WithStatusSeriesIdStateInner {
-    UnknownAddress {
-        #[serde(with = "humantime_serde")]
-        since: SystemTime,
-    },
     AddrSearchPending {
         #[serde(with = "humantime_serde")]
         since: SystemTime,
@@ -78,6 +74,10 @@ pub enum WithStatusSeriesIdStateInner {
     WithAddress {
         addr: SocketAddrV4,
         state: WithAddressState,
+    },
+    UnknownAddress {
+        #[serde(with = "humantime_serde")]
+        since: SystemTime,
     },
     NoAddress {
         #[serde(with = "humantime_serde")]

@@ -33,6 +33,7 @@ lazy_static = "1"
 libc = "0.2"
 slidebuf = "0.0.1"
 dashmap = "5.5.3"
+hashbrown = "0.14.3"
 log = { path = "../log" }
 series = { path = "../series" }
 serieswriter = { path = "../serieswriter" }

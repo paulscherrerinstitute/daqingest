@@ -15,6 +15,8 @@ use futures_util::Future;
 use futures_util::FutureExt;
 use futures_util::Stream;
 use futures_util::StreamExt;
+use hashbrown::HashMap;
+use hashbrown::HashSet;
 use log::*;
 use netpod::timeunits::*;
 use netpod::ScalarType;
@@ -53,8 +55,6 @@ use stats::CaConnStats;
 use stats::CaProtoStats;
 use stats::IntervalEma;
 use std::collections::BTreeMap;
-use std::collections::HashMap;
-use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::net::SocketAddrV4;
 use std::ops::ControlFlow;
@@ -1531,7 +1531,7 @@ impl CaConn {
         let sid_ev = Sid(ev.sid);
         let ioid = Ioid(ev.ioid);
         if let Some(cid) = self.read_ioids.get(&ioid) {
-            let ch_s = if let Some(x) = self.channels.get_mut(&cid) {
+            let ch_s = if let Some(x) = self.channels.get_mut(cid) {
                 x
             } else {
                 warn!("handle_read_notify_res can not find channel for  {cid:?}  {ioid:?}");

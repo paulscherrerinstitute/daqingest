@@ -30,6 +30,7 @@ use err::Error;
 use futures_util::FutureExt;
 use futures_util::Stream;
 use futures_util::StreamExt;
+use hashbrown::HashMap;
 use log::*;
 use scywr::iteminsertqueue::ChannelInfoItem;
 use scywr::iteminsertqueue::ChannelStatusItem;
@@ -54,7 +55,6 @@ use stats::CaConnStats;
 use stats::CaProtoStats;
 use stats::IocFinderStats;
 use std::collections::BTreeMap;
-use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::net::SocketAddrV4;
@@ -346,7 +346,7 @@ pub struct CaConnSet {
     ticker: Pin<Box<tokio::time::Sleep>>,
     backend: String,
     local_epics_hostname: String,
-    ca_conn_ress: BTreeMap<SocketAddr, CaConnRes>,
+    ca_conn_ress: HashMap<SocketAddr, CaConnRes>,
     channel_states: ChannelStateMap,
     channel_by_cssid: HashMap<ChannelStatusSeriesId, Channel>,
     connset_inp_rx: Pin<Box<Receiver<CaConnSetEvent>>>,
@@ -413,7 +413,7 @@ impl CaConnSet {
             ticker: Self::new_self_ticker(),
             backend,
             local_epics_hostname,
-            ca_conn_ress: BTreeMap::new(),
+            ca_conn_ress: HashMap::new(),
             channel_states: ChannelStateMap::new(),
             channel_by_cssid: HashMap::new(),
             connset_inp_rx: Box::pin(connset_inp_rx),
