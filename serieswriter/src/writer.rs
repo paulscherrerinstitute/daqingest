@@ -4,7 +4,6 @@ use async_channel::Sender;
 use dbpg::seriesbychannel::ChannelInfoQuery;
 use err::thiserror;
 use err::ThisError;
-use future::ready;
 use futures_util::future;
 use futures_util::StreamExt;
 use log::*;
@@ -19,7 +18,6 @@ use netpod::TS_MSP_GRID_UNIT;
 use scywr::iteminsertqueue::DataValue;
 use scywr::iteminsertqueue::InsertItem;
 use scywr::iteminsertqueue::QueryItem;
-use series::series::CHANNEL_STATUS_DUMMY_SCALAR_TYPE;
 use series::ChannelStatusSeriesId;
 use series::SeriesId;
 use stats::SeriesWriterEstablishStats;
@@ -83,8 +81,8 @@ impl SeriesWriter {
             backend: backend.clone(),
             channel: channel.clone(),
             kind: SeriesKind::ChannelStatus,
-            scalar_type: CHANNEL_STATUS_DUMMY_SCALAR_TYPE,
-            shape_dims: shape.to_scylla_vec(),
+            scalar_type: ScalarType::ChannelStatus,
+            shape: Shape::Scalar,
             tx: Box::pin(tx),
         };
         worker_tx.send(item).await?;
@@ -107,8 +105,8 @@ impl SeriesWriter {
             backend,
             channel,
             kind: SeriesKind::ChannelData,
-            scalar_type: scalar_type.to_scylla_i32(),
-            shape_dims: shape.to_scylla_vec(),
+            scalar_type: scalar_type.clone(),
+            shape: shape.clone(),
             tx: Box::pin(tx),
         };
         worker_tx.send(item).await?;

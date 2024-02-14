@@ -32,12 +32,13 @@ use futures_util::Stream;
 use futures_util::StreamExt;
 use hashbrown::HashMap;
 use log::*;
+use netpod::ScalarType;
 use netpod::SeriesKind;
+use netpod::Shape;
 use scywr::iteminsertqueue::ChannelInfoItem;
 use scywr::iteminsertqueue::ChannelStatusItem;
 use scywr::iteminsertqueue::QueryItem;
 use serde::Serialize;
-use series::series::CHANNEL_STATUS_DUMMY_SCALAR_TYPE;
 use series::ChannelStatusSeriesId;
 use serieswriter::writer::EstablishWorkerJob;
 use statemap::ActiveChannelState;
@@ -379,6 +380,7 @@ pub struct CaConnSet {
     rogue_channel_count: u64,
     connect_fail_count: usize,
     establish_worker_tx: async_channel::Sender<EstablishWorkerJob>,
+    cssid_latency_max: Duration,
 }
 
 impl CaConnSet {
@@ -447,6 +449,7 @@ impl CaConnSet {
             rogue_channel_count: 0,
             connect_fail_count: 0,
             establish_worker_tx,
+            cssid_latency_max: Duration::from_millis(2000),
         };
         // TODO await on jh
         let jh = tokio::spawn(CaConnSet::run(connset));
@@ -539,8 +542,8 @@ impl CaConnSet {
             backend: cmd.backend,
             channel: cmd.name,
             kind: SeriesKind::ChannelStatus,
-            scalar_type: CHANNEL_STATUS_DUMMY_SCALAR_TYPE,
-            shape_dims: Vec::new(),
+            scalar_type: ScalarType::ChannelStatus,
+            shape: Shape::Scalar,
             tx: Box::pin(SeriesLookupSender { tx }),
         };
         self.channel_info_query_queue.push_back(item);
@@ -598,7 +601,12 @@ impl CaConnSet {
         let ch = Channel::new(cmd.name.clone());
         if let Some(chst) = self.channel_states.get_mut(&ch) {
             if let ChannelStateValue::Active(chst2) = &mut chst.value {
-                if let ActiveChannelState::WaitForStatusSeriesId { .. } = chst2 {
+                if let ActiveChannelState::WaitForStatusSeriesId { since } = chst2 {
+                    let dt = since.elapsed().unwrap();
+                    if dt > self.cssid_latency_max {
+                        self.cssid_latency_max = dt + Duration::from_millis(2000);
+                        debug!("slow cssid fetch  dt {:.0} ms  {:?}", 1e3 * dt.as_secs_f32(), cmd);
+                    }
                     *chst2 = ActiveChannelState::WithStatusSeriesId(WithStatusSeriesIdState {
                         cssid: cmd.cssid,
                         addr_find_backoff: 0,
@@ -1257,7 +1265,7 @@ impl CaConnSet {
                     }
                     ActiveChannelState::WaitForStatusSeriesId { since } => {
                         let dt = stnow.duration_since(*since).unwrap_or(Duration::ZERO);
-                        if dt > Duration::from_millis(5000) {
+                        if dt > Duration::from_millis(20000) {
                             warn!("timeout can not get status series id for {ch:?}");
                             *st2 = ActiveChannelState::Init { since: stnow };
                         } else {

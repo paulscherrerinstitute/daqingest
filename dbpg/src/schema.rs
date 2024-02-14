@@ -76,7 +76,7 @@ create table if not exists series_by_channel (
     scalar_type int not null,
     shape_dims int[] storage plain not null,
     agg_kind int not null,
-    tscs timestamptz[] storage plain default array[now()]
+    tscs timestamptz[] storage plain not null default array[now()]
 )";
     let _ = pgc.execute(sql, &[]).await;
 
@@ -134,9 +134,14 @@ async fn migrate_01(pgc: &PgClient) -> Result<(), Error> {
 
 async fn migrate_02(pgc: &PgClient) -> Result<(), Error> {
     // TODO after all migrations, should check that the schema is as expected.
-    let sql = "alter table series_by_channel add if not exists tscs timestamptz[] storage plain default array[now()]";
+    let sql = "alter table series_by_channel alter shape_dims set storage plain";
+    let _ = pgc.execute(sql, &[]).await?;
+
+    let sql = "alter table series_by_channel add if not exists tscs timestamptz[] storage plain not null default array[now()]";
     let _ = pgc.execute(sql, &[]).await?;
     let sql = "alter table series_by_channel alter tscs set storage plain";
+    let _ = pgc.execute(sql, &[]).await?;
+    let sql = "alter table series_by_channel alter tscs set not null";
     let _ = pgc.execute(sql, &[]).await?;
 
     let sql = concat!("alter table series_by_channel drop constraint if exists series_by_channel_nondup");

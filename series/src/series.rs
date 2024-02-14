@@ -1,8 +1,6 @@
 use serde::Deserialize;
 use serde::Serialize;
 
-pub const CHANNEL_STATUS_DUMMY_SCALAR_TYPE: i32 = 14;
-
 #[derive(Clone, Debug)]
 pub enum Existence<T> {
     Created(T),
