@@ -10,6 +10,8 @@ use netfetch::ca::connset::CaConnSet;
 use netfetch::ca::connset::CaConnSetCtrl;
 use netfetch::ca::connset::CaConnSetItem;
 use netfetch::conf::CaIngestOpts;
+use netfetch::conf::ChannelConfig;
+use netfetch::conf::ChannelsConfig;
 use netfetch::daemon_common::Channel;
 use netfetch::daemon_common::DaemonEvent;
 use netfetch::metrics::StatsSet;
@@ -276,9 +278,13 @@ impl Daemon {
         }
         self.stats.handle_timer_tick_count.inc();
         let tsnow = SystemTime::now();
-        if SIGINT.load(atomic::Ordering::Acquire) == 1 {
-            warn!("Received SIGINT");
-            SIGINT.store(2, atomic::Ordering::Release);
+        {
+            let n = SIGINT.load(atomic::Ordering::Acquire);
+            let m = SIGINT_CONFIRM.load(atomic::Ordering::Acquire);
+            if m != n {
+                warn!("Received SIGINT");
+                SIGINT_CONFIRM.store(n, atomic::Ordering::Release);
+            }
         }
         if SIGTERM.load(atomic::Ordering::Acquire) == 1 {
             warn!("Received SIGTERM");
@@ -306,16 +312,20 @@ impl Daemon {
         Ok(())
     }
 
-    async fn handle_channel_add(&mut self, ch: Channel, restx: netfetch::ca::conn::CmdResTx) -> Result<(), Error> {
+    async fn handle_channel_add(
+        &mut self,
+        ch_cfg: ChannelConfig,
+        restx: netfetch::ca::conn::CmdResTx,
+    ) -> Result<(), Error> {
         // debug!("handle_channel_add {ch:?}");
         self.connset_ctrl
-            .add_channel(self.ingest_opts.backend().into(), ch.id().into(), restx)
+            .add_channel(self.ingest_opts.backend().into(), ch_cfg, restx)
             .await?;
         Ok(())
     }
 
     async fn handle_channel_remove(&mut self, ch: Channel) -> Result<(), Error> {
-        self.connset_ctrl.remove_channel(ch.id().into()).await?;
+        self.connset_ctrl.remove_channel(ch.name().into()).await?;
         Ok(())
     }
 
@@ -445,7 +455,7 @@ impl Daemon {
         };
         let dt = ts1.elapsed();
         if dt > Duration::from_millis(200) {
-            warn!("handle_event  slow  {}ms  {}", dt.as_secs_f32() * 1e3, item_summary);
+            warn!("handle_event  slow  {} ms  {}", dt.as_secs_f32() * 1e3, item_summary);
         }
         ret
     }
@@ -531,13 +541,16 @@ impl Daemon {
 }
 
 static SIGINT: AtomicUsize = AtomicUsize::new(0);
+static SIGINT_CONFIRM: AtomicUsize = AtomicUsize::new(0);
 static SIGTERM: AtomicUsize = AtomicUsize::new(0);
 static SHUTDOWN_SENT: AtomicUsize = AtomicUsize::new(0);
 
 fn handler_sigint(_a: libc::c_int, _b: *const libc::siginfo_t, _c: *const libc::c_void) {
-    std::process::exit(13);
-    SIGINT.store(1, atomic::Ordering::Release);
-    let _ = ingest_linux::signal::unset_signal_handler(libc::SIGINT);
+    let n = SIGINT.fetch_add(1, atomic::Ordering::AcqRel);
+    if n >= 2 {
+        let _ = ingest_linux::signal::unset_signal_handler(libc::SIGINT);
+        std::process::exit(13);
+    }
 }
 
 fn handler_sigterm(_a: libc::c_int, _b: *const libc::siginfo_t, _c: *const libc::c_void) {
@@ -545,8 +558,9 @@ fn handler_sigterm(_a: libc::c_int, _b: *const libc::siginfo_t, _c: *const libc:
     let _ = ingest_linux::signal::unset_signal_handler(libc::SIGTERM);
 }
 
-pub async fn run(opts: CaIngestOpts, channels: Option<Vec<String>>) -> Result<(), Error> {
+pub async fn run(opts: CaIngestOpts, channels_config: Option<ChannelsConfig>) -> Result<(), Error> {
     info!("start up {opts:?}");
+    debug!("channels_config {channels_config:?}");
     ingest_linux::signal::set_signal_handler(libc::SIGINT, handler_sigint).map_err(Error::from_string)?;
     ingest_linux::signal::set_signal_handler(libc::SIGTERM, handler_sigterm).map_err(Error::from_string)?;
 
@@ -567,10 +581,11 @@ pub async fn run(opts: CaIngestOpts, channels: Option<Vec<String>>) -> Result<()
     //let metrics_agg_fut = metrics_agg_task(ingest_commons.clone(), local_stats.clone(), store_stats.clone());
     //let metrics_agg_jh = tokio::spawn(metrics_agg_fut);
 
-    let mut channels = channels;
-    if opts.test_bsread_addr.is_some() {
-        channels = None;
-    }
+    let channels_config = if opts.test_bsread_addr.is_some() {
+        None
+    } else {
+        channels_config
+    };
 
     let insert_frac = Arc::new(AtomicU64::new(opts.insert_frac()));
     let store_workers_rate = Arc::new(AtomicU64::new(opts.store_workers_rate()));
@@ -616,13 +631,15 @@ pub async fn run(opts: CaIngestOpts, channels: Option<Vec<String>>) -> Result<()
 
     let daemon_jh = taskrun::spawn(daemon.daemon());
 
-    if let Some(channels) = channels {
-        debug!("will configure {} channels", channels.len());
+    if let Some(channels_config) = channels_config {
+        debug!("will configure {} channels", channels_config.len());
         let mut thr_msg = ThrottleTrace::new(Duration::from_millis(1000));
         let mut i = 0;
-        for s in &channels {
-            let ch = Channel::new(s.into());
-            match tx.send(DaemonEvent::ChannelAdd(ch, async_channel::bounded(1).0)).await {
+        for ch_cfg in channels_config.channels() {
+            match tx
+                .send(DaemonEvent::ChannelAdd(ch_cfg.clone(), async_channel::bounded(1).0))
+                .await
+            {
                 Ok(()) => {}
                 Err(e) => {
                     error!("{e}");
@@ -632,7 +649,7 @@ pub async fn run(opts: CaIngestOpts, channels: Option<Vec<String>>) -> Result<()
             thr_msg.trigger("daemon sent ChannelAdd", &[&i as &_]);
             i += 1;
         }
-        debug!("{} configured channels applied", channels.len());
+        debug!("{} configured channels applied", channels_config.len());
     }
     daemon_jh.await.map_err(|e| Error::with_msg_no_trace(e.to_string()))??;
     info!("Daemon joined.");

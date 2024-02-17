@@ -188,7 +188,7 @@ pub async fn parse_config(config: PathBuf) -> Result<(CaIngestOpts, Option<Chann
     let mut file = OpenOptions::new().read(true).open(config).await?;
     let mut buf = Vec::new();
     file.read_to_end(&mut buf).await?;
-    let conf: CaIngestOpts = serde_yaml::from_slice(&buf).map_err(|e| Error::with_msg_no_trace(format!("{:?}", e)))?;
+    let conf: CaIngestOpts = serde_yaml::from_slice(&buf).map_err(Error::from_string)?;
     drop(file);
     let re_p = regex::Regex::new(&conf.whitelist.clone().unwrap_or("--nothing-ur9nc23ur98c--".into()))?;
     let re_n = regex::Regex::new(&conf.blacklist.clone().unwrap_or("--nothing-ksm2u98rcm28--".into()))?;
@@ -223,10 +223,16 @@ async fn parse_config_dir(dir: &Path) -> Result<ChannelsConfig, Error> {
         } else {
             break;
         };
-
-        // TODO parse the yml file at this path and compile a merged configuration
-        e.path();
-        todo!();
+        let fnp = e.path();
+        let fns = fnp.to_str().unwrap();
+        if fns.ends_with(".yml") || fns.ends_with(".yaml") {
+            let buf = tokio::fs::read(e.path()).await?;
+            let conf: BTreeMap<String, ChannelConfigParse> =
+                serde_yaml::from_slice(&buf).map_err(Error::from_string)?;
+            ret.push_from_parsed(&conf);
+        } else {
+            debug!("ignore channel config file {:?}", e.path());
+        }
     }
     Ok(ret)
 }
@@ -271,22 +277,38 @@ pub struct ChannelConfigParse {
     archiving_configuration: IngestConfigArchiving,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IngestConfigArchiving {
-    #[serde(default, with = "serde_replication_bool")]
+    #[serde(default, skip_serializing_if = "bool_is_false")]
+    #[serde(with = "serde_replication_bool")]
     replication: bool,
-    #[serde(default, with = "serde_option_channel_read_config")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(with = "serde_option_channel_read_config")]
     short_term: Option<ChannelReadConfig>,
-    #[serde(default, with = "serde_option_channel_read_config")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(with = "serde_option_channel_read_config")]
     medium_term: Option<ChannelReadConfig>,
-    #[serde(default, with = "serde_option_channel_read_config")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(with = "serde_option_channel_read_config")]
     long_term: Option<ChannelReadConfig>,
+}
+
+fn bool_is_false(x: &bool) -> bool {
+    *x == false
 }
 
 mod serde_replication_bool {
     use serde::de;
     use serde::Deserializer;
+    use serde::Serializer;
     use std::fmt;
+
+    pub fn serialize<S>(v: &bool, ser: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        ser.serialize_bool(*v)
+    }
 
     pub fn deserialize<'de, D>(de: D) -> Result<bool, D::Error>
     where
@@ -333,8 +355,22 @@ mod serde_option_channel_read_config {
     use super::ChannelReadConfig;
     use serde::de;
     use serde::Deserializer;
+    use serde::Serializer;
     use std::fmt;
     use std::time::Duration;
+
+    pub fn serialize<S>(v: &Option<ChannelReadConfig>, ser: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match v {
+            Some(x) => match x {
+                ChannelReadConfig::Monitor => ser.serialize_str("Monitor"),
+                ChannelReadConfig::Poll(n) => ser.serialize_u32(n.as_secs() as u32),
+            },
+            None => ser.serialize_none(),
+        }
+    }
 
     pub fn deserialize<'de, D>(de: D) -> Result<Option<ChannelReadConfig>, D::Error>
     where
@@ -391,7 +427,7 @@ mod serde_option_channel_read_config {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ChannelReadConfig {
     Monitor,
     Poll(Duration),
@@ -421,6 +457,7 @@ CH-03:
     let x: BTreeMap<String, ChannelConfigParse> = serde_yaml::from_str(inp).unwrap();
 }
 
+#[derive(Debug)]
 pub struct ChannelsConfig {
     channels: Vec<ChannelConfig>,
 }
@@ -428,6 +465,24 @@ pub struct ChannelsConfig {
 impl ChannelsConfig {
     fn new() -> Self {
         Self { channels: Vec::new() }
+    }
+
+    pub fn len(&self) -> usize {
+        self.channels.len()
+    }
+
+    pub fn channels(&self) -> &Vec<ChannelConfig> {
+        &self.channels
+    }
+
+    fn push_from_parsed(&mut self, rhs: &BTreeMap<String, ChannelConfigParse>) {
+        for (k, v) in rhs.iter() {
+            let item = ChannelConfig {
+                name: k.into(),
+                arch: v.archiving_configuration.clone(),
+            };
+            self.channels.push(item);
+        }
     }
 }
 
@@ -444,7 +499,26 @@ impl From<BTreeMap<String, ChannelConfigParse>> for ChannelsConfig {
     }
 }
 
+#[derive(Debug, Clone, Serialize)]
 pub struct ChannelConfig {
     name: String,
     arch: IngestConfigArchiving,
+}
+
+impl ChannelConfig {
+    pub fn st_monitor<S: Into<String>>(name: S) -> Self {
+        Self {
+            name: name.into(),
+            arch: IngestConfigArchiving {
+                replication: true,
+                short_term: Some(ChannelReadConfig::Monitor),
+                medium_term: None,
+                long_term: None,
+            },
+        }
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
 }

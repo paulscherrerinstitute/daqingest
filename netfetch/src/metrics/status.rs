@@ -1,6 +1,7 @@
 use crate::ca::connset::CaConnSetEvent;
 use crate::ca::connset::ChannelStatusesRequest;
 use crate::ca::connset::ConnSetCmd;
+use crate::conf::ChannelConfig;
 use async_channel::Sender;
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -16,7 +17,7 @@ pub struct ChannelStates {
 struct ChannelState {
     ioc_address: Option<SocketAddr>,
     connection: ConnectionState,
-    archive_settings: ArchiveSettings,
+    archiving_configuration: ChannelConfig,
 }
 
 #[derive(Debug, Serialize)]
@@ -26,23 +27,6 @@ enum ConnectionState {
     Disconnected,
     Connected,
     Error,
-}
-
-#[derive(Debug, Serialize)]
-struct ArchiveSettings {
-    short_term: Option<String>,
-    medium_term: Option<String>,
-    long_term: Option<String>,
-}
-
-impl ArchiveSettings {
-    fn dummy() -> Self {
-        Self {
-            short_term: None,
-            medium_term: None,
-            long_term: None,
-        }
-    }
 }
 
 // ChannelStatusesResponse
@@ -73,7 +57,7 @@ pub async fn channel_states(params: HashMap<String, String>, tx: Sender<CaConnSe
                         let chst = ChannelState {
                             ioc_address: None,
                             connection: ConnectionState::Connecting,
-                            archive_settings: ArchiveSettings::dummy(),
+                            archiving_configuration: st1.config,
                         };
                         states.channels.insert(k, chst);
                     }
@@ -81,7 +65,7 @@ pub async fn channel_states(params: HashMap<String, String>, tx: Sender<CaConnSe
                         let chst = ChannelState {
                             ioc_address: None,
                             connection: ConnectionState::Connecting,
-                            archive_settings: ArchiveSettings::dummy(),
+                            archiving_configuration: st1.config,
                         };
                         states.channels.insert(k, chst);
                     }
@@ -92,7 +76,7 @@ pub async fn channel_states(params: HashMap<String, String>, tx: Sender<CaConnSe
                                 let chst = ChannelState {
                                     ioc_address: None,
                                     connection: ConnectionState::Connecting,
-                                    archive_settings: ArchiveSettings::dummy(),
+                                    archiving_configuration: st1.config,
                                 };
                                 states.channels.insert(k, chst);
                             }
@@ -103,7 +87,7 @@ pub async fn channel_states(params: HashMap<String, String>, tx: Sender<CaConnSe
                                         let chst = ChannelState {
                                             ioc_address: Some(SocketAddr::V4(addr)),
                                             connection: ConnectionState::Connecting,
-                                            archive_settings: ArchiveSettings::dummy(),
+                                            archiving_configuration: st1.config,
                                         };
                                         states.channels.insert(k, chst);
                                     }
@@ -114,7 +98,7 @@ pub async fn channel_states(params: HashMap<String, String>, tx: Sender<CaConnSe
                                                 let chst = ChannelState {
                                                     ioc_address: Some(SocketAddr::V4(addr)),
                                                     connection: ConnectionState::Connecting,
-                                                    archive_settings: ArchiveSettings::dummy(),
+                                                    archiving_configuration: st1.config,
                                                 };
                                                 states.channels.insert(k, chst);
                                             }
@@ -125,7 +109,9 @@ pub async fn channel_states(params: HashMap<String, String>, tx: Sender<CaConnSe
                                                         let chst = ChannelState {
                                                             ioc_address: Some(SocketAddr::V4(addr)),
                                                             connection: ConnectionState::Disconnected,
-                                                            archive_settings: ArchiveSettings::dummy(),
+                                                            // TODO config is stored in two places
+                                                            // conf: st6.conf,
+                                                            archiving_configuration: st1.config,
                                                         };
                                                         states.channels.insert(k, chst);
                                                     }
@@ -133,7 +119,7 @@ pub async fn channel_states(params: HashMap<String, String>, tx: Sender<CaConnSe
                                                         let chst = ChannelState {
                                                             ioc_address: Some(SocketAddr::V4(addr)),
                                                             connection: ConnectionState::Connecting,
-                                                            archive_settings: ArchiveSettings::dummy(),
+                                                            archiving_configuration: st1.config,
                                                         };
                                                         states.channels.insert(k, chst);
                                                     }
@@ -141,7 +127,7 @@ pub async fn channel_states(params: HashMap<String, String>, tx: Sender<CaConnSe
                                                         let chst = ChannelState {
                                                             ioc_address: Some(SocketAddr::V4(addr)),
                                                             connection: ConnectionState::Connected,
-                                                            archive_settings: ArchiveSettings::dummy(),
+                                                            archiving_configuration: st1.config,
                                                         };
                                                         states.channels.insert(k, chst);
                                                     }
@@ -149,7 +135,7 @@ pub async fn channel_states(params: HashMap<String, String>, tx: Sender<CaConnSe
                                                         let chst = ChannelState {
                                                             ioc_address: Some(SocketAddr::V4(addr)),
                                                             connection: ConnectionState::Error,
-                                                            archive_settings: ArchiveSettings::dummy(),
+                                                            archiving_configuration: st1.config,
                                                         };
                                                         states.channels.insert(k, chst);
                                                     }
@@ -163,7 +149,7 @@ pub async fn channel_states(params: HashMap<String, String>, tx: Sender<CaConnSe
                                 let chst = ChannelState {
                                     ioc_address: None,
                                     connection: ConnectionState::Connecting,
-                                    archive_settings: ArchiveSettings::dummy(),
+                                    archiving_configuration: st1.config,
                                 };
                                 states.channels.insert(k, chst);
                             }
@@ -171,7 +157,7 @@ pub async fn channel_states(params: HashMap<String, String>, tx: Sender<CaConnSe
                                 let chst = ChannelState {
                                     ioc_address: None,
                                     connection: ConnectionState::Unreachable,
-                                    archive_settings: ArchiveSettings::dummy(),
+                                    archiving_configuration: st1.config,
                                 };
                                 states.channels.insert(k, chst);
                             }
@@ -179,7 +165,7 @@ pub async fn channel_states(params: HashMap<String, String>, tx: Sender<CaConnSe
                                 let chst = ChannelState {
                                     ioc_address: None,
                                     connection: ConnectionState::Unreachable,
-                                    archive_settings: ArchiveSettings::dummy(),
+                                    archiving_configuration: st1.config,
                                 };
                                 states.channels.insert(k, chst);
                             }

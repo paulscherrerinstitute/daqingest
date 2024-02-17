@@ -6,6 +6,7 @@ use crate::ca::connset::ChannelStatusesRequest;
 use crate::ca::connset::ChannelStatusesResponse;
 use crate::ca::connset::ConnSetCmd;
 use crate::ca::statemap::ChannelState;
+use crate::conf::ChannelConfig;
 use crate::daemon_common::DaemonEvent;
 use async_channel::Receiver;
 use async_channel::Sender;
@@ -140,9 +141,10 @@ async fn find_channel(
 
 async fn channel_add_inner(params: HashMap<String, String>, dcom: Arc<DaemonComm>) -> Result<(), Error> {
     if let Some(name) = params.get("name") {
-        let ch = crate::daemon_common::Channel::new(name.into());
+        // let ch = crate::daemon_common::Channel::new(name.into());
+        let ch_cfg = ChannelConfig::st_monitor(name);
         let (tx, rx) = async_channel::bounded(1);
-        let ev = DaemonEvent::ChannelAdd(ch, tx);
+        let ev = DaemonEvent::ChannelAdd(ch_cfg, tx);
         dcom.tx.send(ev).await?;
         match rx.recv().await {
             Ok(Ok(())) => Ok(()),

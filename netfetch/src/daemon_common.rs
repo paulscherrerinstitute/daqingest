@@ -1,26 +1,27 @@
 use crate::ca::connset::CaConnSetItem;
+use crate::conf::ChannelConfig;
 use async_channel::Sender;
 use serde::Serialize;
 
 #[derive(Clone, Debug, Serialize, PartialEq, PartialOrd, Eq, Ord, Hash)]
 pub struct Channel {
-    id: String,
+    name: String,
 }
 
 impl Channel {
-    pub fn new(id: String) -> Self {
-        Self { id }
+    pub fn new(name: String) -> Self {
+        Self { name }
     }
 
-    pub fn id(&self) -> &str {
-        &self.id
+    pub fn name(&self) -> &str {
+        &self.name
     }
 }
 
 #[derive(Debug, Clone)]
 pub enum DaemonEvent {
     TimerTick(u32, Sender<u32>),
-    ChannelAdd(Channel, crate::ca::conn::CmdResTx),
+    ChannelAdd(ChannelConfig, crate::ca::conn::CmdResTx),
     ChannelRemove(Channel),
     CaConnSetItem(CaConnSetItem),
     Shutdown,

@@ -1,4 +1,5 @@
 use crate::ca::conn::ChannelStateInfo;
+use crate::conf::ChannelConfig;
 use crate::daemon_common::Channel;
 use dashmap::DashMap;
 use serde::Serialize;
@@ -133,6 +134,7 @@ pub enum ChannelStateValue {
 #[derive(Debug, Clone, Serialize)]
 pub struct ChannelState {
     pub value: ChannelStateValue,
+    pub config: ChannelConfig,
 }
 
 #[derive(Debug, Clone, Serialize)]
