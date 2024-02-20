@@ -45,7 +45,6 @@ async fn run_batcher<T>(rx: Receiver<T>, batch_tx: Sender<Vec<T>>, batch_limit: 
                     }
                 }
                 Err(e) => {
-                    error!("------------------------------------------   error in batcher, no more input {e}");
                     break;
                 }
             },
@@ -58,5 +57,5 @@ async fn run_batcher<T>(rx: Receiver<T>, batch_tx: Sender<Vec<T>>, batch_limit: 
             }
         }
     }
-    warn!("--------   batcher is done   --------------");
+    debug!("--------   batcher is done   --------------");
 }

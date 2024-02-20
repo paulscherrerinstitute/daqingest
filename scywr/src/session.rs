@@ -1,7 +1,7 @@
-pub use netpod::ScyllaConfig;
 pub use scylla::Session;
 pub use Session as ScySession;
 
+use crate::config::ScyllaIngestConfig;
 use err::thiserror;
 use err::ThisError;
 use scylla::execution_profile::ExecutionProfileBuilder;
@@ -21,7 +21,7 @@ impl From<NewSessionError> for Error {
     }
 }
 
-pub async fn create_session_no_ks(scyconf: &ScyllaConfig) -> Result<Arc<Session>, Error> {
+pub async fn create_session_no_ks(scyconf: &ScyllaIngestConfig) -> Result<Arc<Session>, Error> {
     let profile = ExecutionProfileBuilder::default()
         .consistency(Consistency::LocalOne)
         .build()
@@ -30,7 +30,7 @@ pub async fn create_session_no_ks(scyconf: &ScyllaConfig) -> Result<Arc<Session>
         .pool_size(scylla::transport::session::PoolSize::PerShard(
             NonZeroUsize::new(1).unwrap(),
         ))
-        .known_nodes(&scyconf.hosts)
+        .known_nodes(scyconf.hosts())
         .default_execution_profile_handle(profile)
         .write_coalescing(true)
         .build()
@@ -39,9 +39,9 @@ pub async fn create_session_no_ks(scyconf: &ScyllaConfig) -> Result<Arc<Session>
     Ok(scy)
 }
 
-pub async fn create_session(scyconf: &ScyllaConfig) -> Result<Arc<Session>, Error> {
+pub async fn create_session(scyconf: &ScyllaIngestConfig) -> Result<Arc<Session>, Error> {
     let scy = create_session_no_ks(scyconf).await?;
-    scy.use_keyspace(&scyconf.keyspace, true)
+    scy.use_keyspace(scyconf.keyspace(), true)
         .await
         .map_err(|e| Error::NewSession(e.to_string()))?;
     Ok(scy)

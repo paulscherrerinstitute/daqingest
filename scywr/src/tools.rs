@@ -1,6 +1,6 @@
+use crate::config::ScyllaIngestConfig;
 use crate::session::create_session;
 use log::*;
-use netpod::ScyllaConfig;
 use scylla::transport::errors::NewSessionError;
 use scylla::transport::errors::QueryError;
 
@@ -24,7 +24,7 @@ impl From<QueryError> for Error {
     }
 }
 
-pub async fn list_pkey(scylla_conf: &ScyllaConfig) -> Result<(), Error> {
+pub async fn list_pkey(scylla_conf: &ScyllaIngestConfig) -> Result<(), Error> {
     let scy = create_session(scylla_conf)
         .await
         .map_err(|e| Error(err::Error::with_msg_no_trace(e.to_string())))?;
@@ -62,7 +62,7 @@ pub async fn list_pkey(scylla_conf: &ScyllaConfig) -> Result<(), Error> {
     Ok(())
 }
 
-pub async fn list_pulses(scylla_conf: &ScyllaConfig) -> Result<(), Error> {
+pub async fn list_pulses(scylla_conf: &ScyllaIngestConfig) -> Result<(), Error> {
     let scy = create_session(scylla_conf)
         .await
         .map_err(|e| Error(err::Error::with_msg_no_trace(e.to_string())))?;
@@ -99,7 +99,7 @@ pub async fn list_pulses(scylla_conf: &ScyllaConfig) -> Result<(), Error> {
     Ok(())
 }
 
-pub async fn fetch_events(backend: &str, channel: &str, scylla_conf: &ScyllaConfig) -> Result<(), Error> {
+pub async fn fetch_events(backend: &str, channel: &str, scylla_conf: &ScyllaIngestConfig) -> Result<(), Error> {
     // TODO use the keyspace from commandline.
     err::todo();
     let scy = create_session(scylla_conf)

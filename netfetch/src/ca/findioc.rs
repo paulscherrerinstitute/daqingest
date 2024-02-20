@@ -104,7 +104,8 @@ pub struct FindIocStream {
     bids_timed_out: BTreeMap<BatchId, ()>,
     sids_done: BTreeMap<SearchId, ()>,
     result_for_done_sid_count: u64,
-    sleeper: Pin<Box<dyn Future<Output = ()> + Send>>,
+    sleep_count: u8,
+    sleeper: Option<Pin<Box<dyn Future<Output = ()> + Send>>>,
     #[allow(unused)]
     thr_msg_0: ThrottleTrace,
     #[allow(unused)]
@@ -145,7 +146,8 @@ impl FindIocStream {
             in_flight_max,
             channels_per_batch: batch_size,
             batch_run_max,
-            sleeper: Box::pin(tokio::time::sleep(Duration::from_millis(500))),
+            sleep_count: 0,
+            sleeper: Some(Box::pin(tokio::time::sleep(Duration::from_millis(500)))),
             thr_msg_0: ThrottleTrace::new(Duration::from_millis(1000)),
             thr_msg_1: ThrottleTrace::new(Duration::from_millis(1000)),
             thr_msg_2: ThrottleTrace::new(Duration::from_millis(1000)),
@@ -155,7 +157,8 @@ impl FindIocStream {
 
     pub fn quick_state(&self) -> String {
         format!(
-            "channels_input {}  in_flight {}  bid_by_sid {}  out_queue {}  result_for_done_sid_count {}  bids_timed_out {}",
+            "channels_input {} {}  in_flight {}  bid_by_sid {}  out_queue {}  result_for_done_sid_count {}  bids_timed_out {}",
+            self.channels_input.is_closed(),
             self.channels_input.len(),
             self.in_flight.len(),
             self.bid_by_sid.len(),
@@ -562,7 +565,10 @@ impl FindIocStream {
     }
 
     fn ready_for_end_of_stream(&self) -> bool {
-        self.channels_input.is_closed() && self.in_flight.is_empty() && self.out_queue.is_empty()
+        self.channels_input.is_closed()
+            && self.channels_input.is_empty()
+            && self.in_flight.is_empty()
+            && self.out_queue.is_empty()
     }
 }
 
@@ -571,6 +577,9 @@ impl Stream for FindIocStream {
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
         use Poll::*;
+        if self.channels_input.is_closed() {
+            debug!("{}", self.quick_state());
+        }
         // self.thr_msg_0.trigger("FindIocStream::poll_next", &[]);
         match self.ping.poll_unpin(cx) {
             Ready(_) => {
@@ -582,7 +591,7 @@ impl Stream for FindIocStream {
         self.clear_timed_out();
         loop {
             let mut have_progress = false;
-            if self.out_queue.is_empty() == false {
+            if !self.out_queue.is_empty() {
                 let ret = std::mem::replace(&mut self.out_queue, VecDeque::new());
                 break Ready(Some(Ok(ret)));
             }
@@ -675,39 +684,69 @@ impl Stream for FindIocStream {
                     }
                 }
             }
+            if self.ready_for_end_of_stream() {
+                // debug!("ready_for_end_of_stream  but in late part");
+            }
             break match self.afd.poll_read_ready(cx) {
-                Ready(Ok(mut g)) => match unsafe { Self::try_read(self.sock.0, &self.stats) } {
-                    Ready(Ok((src, res))) => {
-                        self.handle_result(src, res);
-                        continue;
+                Ready(Ok(mut g)) => {
+                    debug!("BLOCK AA");
+                    match unsafe { Self::try_read(self.sock.0, &self.stats) } {
+                        Ready(Ok((src, res))) => {
+                            self.handle_result(src, res);
+                            if self.ready_for_end_of_stream() {
+                                debug!("ready_for_end_of_stream  continue after handle_result");
+                            }
+                            continue;
+                        }
+                        Ready(Err(e)) => {
+                            error!("Error from try_read {e:?}");
+                            Ready(Some(Err(e)))
+                        }
+                        Pending => {
+                            g.clear_ready();
+                            if self.ready_for_end_of_stream() {
+                                debug!("ready_for_end_of_stream  continue after clear_ready");
+                            }
+                            continue;
+                        }
                     }
-                    Ready(Err(e)) => {
-                        error!("Error from try_read {e:?}");
-                        Ready(Some(Err(e)))
-                    }
-                    Pending => {
-                        g.clear_ready();
-                        continue;
-                    }
-                },
+                }
                 Ready(Err(e)) => {
                     let e = Error::with_msg_no_trace(format!("{e:?}"));
                     error!("poll_read_ready {e:?}");
                     Ready(Some(Err(e)))
                 }
                 Pending => {
+                    // debug!("BLOCK BB");
                     if have_progress {
+                        if self.ready_for_end_of_stream() {
+                            debug!("ready_for_end_of_stream  continue after progress");
+                        }
                         continue;
                     } else {
+                        // debug!("BLOCK BC");
                         if self.ready_for_end_of_stream() {
-                            match self.sleeper.poll_unpin(cx) {
-                                Ready(_) => {
-                                    self.sleeper = Box::pin(tokio::time::sleep(Duration::from_millis(500)));
-                                    continue;
+                            // debug!("BLOCK BD");
+                            if let Some(fut) = self.sleeper.as_mut() {
+                                match fut.poll_unpin(cx) {
+                                    Ready(()) => {
+                                        if self.sleep_count < 0 {
+                                            self.sleeper =
+                                                Some(Box::pin(tokio::time::sleep(Duration::from_millis(100))));
+                                            self.sleep_count += 1;
+                                        } else {
+                                            self.sleeper = None;
+                                        }
+                                        continue;
+                                    }
+                                    Pending => Pending,
                                 }
-                                Pending => Pending,
+                            } else {
+                                // debug!("BLOCK DONE");
+                                Ready(None)
                             }
                         } else {
+                            // debug!("BLOCK BE");
                             Pending
                         }
                     }

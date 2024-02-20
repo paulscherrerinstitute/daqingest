@@ -179,7 +179,6 @@ pub async fn ca_search_workers_start(
         Sender<String>,
         Receiver<Result<VecDeque<FindIocRes>, Error>>,
         JoinHandle<Result<(), Error>>,
-        Vec<JoinHandle<Result<(), Error>>>,
     ),
     Error,
 > {
@@ -189,8 +188,7 @@ pub async fn ca_search_workers_start(
     let (out_tx, out_rx) = async_channel::bounded(256);
     let finder = FindIocStream::new(inp_rx, search_tgts, blacklist, batch_run_max, 20, 16, stats);
     let jh = taskrun::spawn(finder_run(finder, out_tx));
-    let jhs = Vec::new();
-    Ok((inp_tx, out_rx, jh, jhs))
+    Ok((inp_tx, out_rx, jh))
 }
 
 async fn search_tgts_from_opts(opts: &CaIngestOpts) -> Result<(Vec<SocketAddrV4>, Vec<SocketAddrV4>), Error> {
@@ -245,6 +243,6 @@ async fn finder_run(finder: FindIocStream, tx: Sender<Result<VecDeque<FindIocRes
             break;
         }
     }
-    debug!("finder_run done");
+    trace!("finder_run done");
     Ok(())
 }

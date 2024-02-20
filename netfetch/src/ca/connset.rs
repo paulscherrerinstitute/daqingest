@@ -478,7 +478,7 @@ impl CaConnSet {
     }
 
     async fn run(mut this: CaConnSet) -> Result<(), Error> {
-        debug!("CaConnSet  run begin");
+        trace!("CaConnSet  run begin");
         loop {
             let x = this.next().await;
             match x {
@@ -486,19 +486,14 @@ impl CaConnSet {
                 None => break,
             }
         }
-        // debug!(
-        //     "search_tx  sender {}  receiver {}",
-        //     this.find_ioc_query_tx.sender_count(),
-        //     this.find_ioc_query_tx.receiver_count()
-        // );
-        debug!("CaConnSet EndOfStream");
-        debug!("join ioc_finder_jh A  {:?}", this.find_ioc_query_sender.len());
+        trace!("CaConnSet EndOfStream");
+        trace!("join ioc_finder_jh A  {:?}", this.find_ioc_query_sender.len());
         this.find_ioc_query_sender.as_mut().drop();
-        debug!("join ioc_finder_jh B  {:?}", this.find_ioc_query_sender.len());
+        trace!("join ioc_finder_jh B  {:?}", this.find_ioc_query_sender.len());
         this.ioc_finder_jh
             .await
             .map_err(|e| Error::with_msg_no_trace(e.to_string()))??;
-        debug!("joined ioc_finder_jh");
+        trace!("joined ioc_finder_jh");
         this.connset_out_tx.close();
         this.connset_inp_rx.close();
         this.shutdown_done = true;

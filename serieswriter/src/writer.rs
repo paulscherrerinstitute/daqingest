@@ -322,7 +322,7 @@ pub fn start_writer_establish_worker(
 #[test]
 fn write_00() {
     use netpod::Database;
-    use scywr::session::ScyllaConfig;
+    use scywr::config::ScyllaIngestConfig;
     use stats::SeriesByChannelStats;
     use std::sync::Arc;
     let fut = async {
@@ -333,13 +333,10 @@ fn write_00() {
             user: "daqbuffer".into(),
             pass: "daqbuffer".into(),
         };
-        let scyconf = &ScyllaConfig {
-            hosts: vec!["127.0.0.1:19042".into()],
-            keyspace: "daqingest_test_00".into(),
-        };
+        let scyconf = &ScyllaIngestConfig::new(["127.0.0.1:19042"], "daqingest_test_00");
         let (pgc, pg_jh) = dbpg::conn::make_pg_client(dbconf).await?;
         dbpg::schema::schema_check(&pgc).await?;
-        scywr::schema::migrate_scylla_data_schema(scyconf).await?;
+        scywr::schema::migrate_scylla_data_schema(scyconf, netpod::ttl::RetentionTime::Short).await?;
         let scy = scywr::session::create_session(scyconf).await?;
         let stats = SeriesByChannelStats::new();
         let stats = Arc::new(stats);

@@ -241,7 +241,7 @@ impl Worker {
                 }
             };
         }
-        debug!("Worker2 done");
+        trace!("Worker2 done");
         Ok(())
     }
 

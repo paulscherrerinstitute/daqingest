@@ -5,7 +5,6 @@ use async_channel::Sender;
 use async_channel::WeakSender;
 use err::Error;
 use log::*;
-use netfetch::ca::conn;
 use netfetch::ca::connset::CaConnSet;
 use netfetch::ca::connset::CaConnSetCtrl;
 use netfetch::ca::connset::CaConnSetItem;
@@ -16,8 +15,9 @@ use netfetch::daemon_common::Channel;
 use netfetch::daemon_common::DaemonEvent;
 use netfetch::metrics::StatsSet;
 use netfetch::throttletrace::ThrottleTrace;
+use netpod::ttl::RetentionTime;
 use netpod::Database;
-use netpod::ScyllaConfig;
+use scywr::config::ScyllaIngestConfig;
 use scywr::insertworker::InsertWorkerOpts;
 use scywr::insertworker::Ttls;
 use scywr::iteminsertqueue as scywriiq;
@@ -45,7 +45,7 @@ const CHECK_CHANNEL_SLOW_WARN: Duration = Duration::from_millis(500);
 
 pub struct DaemonOpts {
     pgconf: Database,
-    scyconf: ScyllaConfig,
+    scyconf: ScyllaIngestConfig,
     ttls: Ttls,
     #[allow(unused)]
     test_bsread_addr: Option<String>,
@@ -160,7 +160,6 @@ impl Daemon {
             rx
         };
 
-        let ttls = opts.ttls.clone();
         let insert_worker_opts = InsertWorkerOpts {
             store_workers_rate: opts.store_workers_rate.clone(),
             insert_workers_running: Arc::new(AtomicU64::new(0)),
@@ -177,7 +176,6 @@ impl Daemon {
             insert_worker_opts,
             insert_worker_stats.clone(),
             ingest_opts.use_rate_limit_queue(),
-            ttls,
         )
         .await?;
         let stats = Arc::new(DaemonStats::new());
@@ -560,7 +558,6 @@ fn handler_sigterm(_a: libc::c_int, _b: *const libc::siginfo_t, _c: *const libc:
 
 pub async fn run(opts: CaIngestOpts, channels_config: Option<ChannelsConfig>) -> Result<(), Error> {
     info!("start up {opts:?}");
-    debug!("channels_config {channels_config:?}");
     ingest_linux::signal::set_signal_handler(libc::SIGINT, handler_sigint).map_err(Error::from_string)?;
     ingest_linux::signal::set_signal_handler(libc::SIGTERM, handler_sigterm).map_err(Error::from_string)?;
 
@@ -569,8 +566,9 @@ pub async fn run(opts: CaIngestOpts, channels_config: Option<ChannelsConfig>) ->
         .map_err(Error::from_string)?;
     dbpg::schema::schema_check(&pg).await.map_err(Error::from_string)?;
     drop(pg);
+    jh.await?.map_err(Error::from_string)?;
 
-    scywr::schema::migrate_scylla_data_schema(opts.scylla_config())
+    scywr::schema::migrate_scylla_data_schema(opts.scylla_config(), RetentionTime::Short)
         .await
         .map_err(Error::from_string)?;
 

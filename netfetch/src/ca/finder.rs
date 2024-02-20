@@ -96,7 +96,10 @@ async fn finder_full(
     ));
     let jh2 = taskrun::spawn(finder_network_if_not_found(rx1, tx, opts.clone(), stats));
     jh1.await??;
+    trace!("finder::finder_full  awaited A");
     jh2.await??;
+    trace!("finder::finder_full  awaited B");
+    trace!("finder::finder_full  done");
     Ok(())
 }
 
@@ -108,21 +111,28 @@ async fn finder_worker(
     stats: Arc<IocFinderStats>,
 ) -> Result<(), Error> {
     // TODO do something with join handle
-    let (batch_rx, jh) = batchtools::batcher::batch(
+    let (batch_rx, jh_batch) = batchtools::batcher::batch(
         SEARCH_BATCH_MAX,
         Duration::from_millis(200),
         SEARCH_DB_PIPELINE_LEN,
         qrx,
     );
+    let mut jhs = Vec::new();
     for _ in 0..SEARCH_DB_PIPELINE_LEN {
-        // TODO use join handle
-        tokio::spawn(finder_worker_single(
+        let jh = tokio::spawn(finder_worker_single(
             batch_rx.clone(),
             tx.clone(),
             backend.clone(),
             db.clone(),
             stats.clone(),
         ));
+        jhs.push(jh);
+    }
+    jh_batch.await?;
+    trace!("finder_worker  jh_batch awaited");
+    for (i, jh) in jhs.into_iter().enumerate() {
+        jh.await??;
+        trace!("finder_worker  single {i} awaited");
     }
     Ok(())
 }
@@ -165,17 +175,7 @@ async fn finder_worker_single(
                     dt.as_secs_f32() * 1e3
                 );
                 if dt > Duration::from_millis(5000) {
-                    let mut out = String::from("[");
-                    for e in &batch {
-                        if out.len() > 1 {
-                            out.push_str(", ");
-                        }
-                        out.push('\'');
-                        out.push_str(e.name());
-                        out.push('\'');
-                    }
-                    out.push(']');
-                    trace!("very slow query\n{out}");
+                    warn!("very slow query");
                 }
                 match qres {
                     Ok(rows) => {
@@ -237,8 +237,9 @@ async fn finder_worker_single(
             Err(_e) => break,
         }
     }
-    debug!("finder_worker_single done");
+    drop(pg);
     jh.await?.map_err(|e| Error::from_string(e))?;
+    trace!("finder_worker_single done");
     Ok(())
 }
 
@@ -248,13 +249,14 @@ async fn finder_network_if_not_found(
     opts: CaIngestOpts,
     stats: Arc<IocFinderStats>,
 ) -> Result<(), Error> {
-    let (net_tx, net_rx, jh, jhs) = ca_search_workers_start(&opts, stats.clone()).await.unwrap();
+    let self_name = "finder_network_if_not_found";
+    let (net_tx, net_rx, jh_ca_search) = ca_search_workers_start(&opts, stats.clone()).await?;
     let jh2 = taskrun::spawn(process_net_result(net_rx, tx.clone(), opts.clone()));
     'outer: while let Ok(item) = rx.recv().await {
         let mut res = VecDeque::new();
         let mut net = VecDeque::new();
         for e in item {
-            trace!("finder_network_if_not_found sees {e:?}");
+            trace!("{self_name}  sees {e:?}");
             if e.addr.is_none() {
                 net.push_back(e.channel);
             } else {
@@ -262,20 +264,22 @@ async fn finder_network_if_not_found(
             }
         }
         if let Err(_) = tx.send(res).await {
+            debug!("{self_name}  res send error, break");
             break;
         }
         for ch in net {
             if let Err(_) = net_tx.send(ch).await {
+                debug!("{self_name}  net ch send error, break");
                 break 'outer;
             }
         }
     }
-    for jh in jhs {
-        jh.await??;
-    }
-    jh.await??;
+    drop(net_tx);
+    trace!("{self_name}  loop end");
+    jh_ca_search.await??;
+    trace!("{self_name}  jh_ca_search  awaited");
     jh2.await??;
-    debug!("finder_network_if_not_found done");
+    trace!("{self_name}  process_net_result  awaited");
     Ok(())
 }
 
@@ -290,9 +294,13 @@ async fn process_net_result(
     let mut index_worker_pg_jh = Vec::new();
     for _ in 0..IOC_SEARCH_INDEX_WORKER_COUNT {
         let backend = opts.backend().into();
-        let (pg, jh) = dbpg::conn::make_pg_client(opts.postgresql_config()).await.unwrap();
+        let (pg, jh) = dbpg::conn::make_pg_client(opts.postgresql_config())
+            .await
+            .map_err(Error::from_string)?;
         index_worker_pg_jh.push(jh);
-        let worker = IocSearchIndexWorker::prepare(dbrx.clone(), backend, pg).await.unwrap();
+        let worker = IocSearchIndexWorker::prepare(dbrx.clone(), backend, pg)
+            .await
+            .map_err(Error::from_string)?;
         let jh = tokio::spawn(async move { worker.worker().await });
         ioc_search_index_worker_jhs.push(jh);
     }
@@ -316,6 +324,13 @@ async fn process_net_result(
                 break;
             }
         }
+    }
+    trace!("process_net_result  break loop");
+    dbtx.close();
+    trace!("process_net_result  dbtx closed");
+    for (i, jh) in ioc_search_index_worker_jhs.into_iter().enumerate() {
+        jh.await?;
+        trace!("process_net_result  search index worker {i} awaited");
     }
     Ok(())
 }

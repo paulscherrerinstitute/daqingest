@@ -1,8 +1,8 @@
 use err::Error;
 use netpod::log::*;
 use netpod::Database;
-use netpod::ScyllaConfig;
 use regex::Regex;
+use scywr::config::ScyllaIngestConfig;
 use serde::Deserialize;
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -13,7 +13,7 @@ use taskrun::tokio;
 use tokio::fs::OpenOptions;
 use tokio::io::AsyncReadExt;
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 pub struct CaIngestOpts {
     backend: String,
     channels: Option<PathBuf>,
@@ -23,11 +23,15 @@ pub struct CaIngestOpts {
     search_blacklist: Vec<String>,
     whitelist: Option<String>,
     blacklist: Option<String>,
-    max_simul: Option<usize>,
+    #[allow(unused)]
     #[serde(default, with = "humantime_serde")]
     timeout: Option<Duration>,
     postgresql: Database,
-    scylla: ScyllaConfig,
+    scylla: ScyllaIngestConfig,
+    #[serde(default)]
+    scylla_mt: Option<ScyllaIngestConfig>,
+    #[serde(default)]
+    scylla_lt: Option<ScyllaIngestConfig>,
     array_truncate: Option<u64>,
     insert_worker_count: Option<usize>,
     insert_worker_concurrency: Option<usize>,
@@ -60,8 +64,16 @@ impl CaIngestOpts {
         &self.postgresql
     }
 
-    pub fn scylla_config(&self) -> &ScyllaConfig {
+    pub fn scylla_config(&self) -> &ScyllaIngestConfig {
         &self.scylla
+    }
+
+    pub fn scylla_config_mt(&self) -> Option<&ScyllaIngestConfig> {
+        self.scylla_mt.as_ref()
+    }
+
+    pub fn scylla_config_lt(&self) -> Option<&ScyllaIngestConfig> {
+        self.scylla_lt.as_ref()
     }
 
     pub fn search(&self) -> &Vec<String> {
@@ -76,28 +88,28 @@ impl CaIngestOpts {
         Duration::from_millis(1200)
     }
 
+    pub fn insert_scylla_sessions(&self) -> usize {
+        self.insert_scylla_sessions.unwrap_or(1)
+    }
+
     pub fn insert_worker_count(&self) -> usize {
-        self.insert_worker_count.unwrap_or(4)
+        self.insert_worker_count.unwrap_or(8)
     }
 
     pub fn insert_worker_concurrency(&self) -> usize {
         self.insert_worker_concurrency.unwrap_or(32)
     }
 
-    pub fn insert_scylla_sessions(&self) -> usize {
-        self.insert_scylla_sessions.unwrap_or(1)
-    }
-
     pub fn array_truncate(&self) -> u64 {
-        self.array_truncate.unwrap_or(512)
+        self.array_truncate.unwrap_or(1024 * 64)
     }
 
     pub fn insert_item_queue_cap(&self) -> usize {
-        self.insert_item_queue_cap.unwrap_or(80000)
+        self.insert_item_queue_cap.unwrap_or(1000 * 1000)
     }
 
     pub fn store_workers_rate(&self) -> u64 {
-        self.store_workers_rate.unwrap_or(5000)
+        self.store_workers_rate.unwrap_or(1000 * 500)
     }
 
     pub fn insert_frac(&self) -> u64 {
@@ -111,17 +123,19 @@ impl CaIngestOpts {
     pub fn ttl_index(&self) -> Duration {
         self.ttl_index
             .clone()
-            .unwrap_or_else(|| Duration::from_secs(60 * 60 * 24 * 3))
+            .unwrap_or_else(|| Duration::from_secs(60 * 60 * 24 * 50))
     }
 
     pub fn ttl_d0(&self) -> Duration {
         self.ttl_d0
             .clone()
-            .unwrap_or_else(|| Duration::from_secs(60 * 60 * 24 * 1))
+            .unwrap_or_else(|| Duration::from_secs(60 * 60 * 24 * 40))
     }
 
     pub fn ttl_d1(&self) -> Duration {
-        self.ttl_d1.clone().unwrap_or_else(|| Duration::from_secs(60 * 60 * 12))
+        self.ttl_d1
+            .clone()
+            .unwrap_or_else(|| Duration::from_secs(60 * 60 * 24 * 10))
     }
 
     pub fn ttl_binned(&self) -> Duration {
@@ -158,7 +172,7 @@ scylla:
     assert_eq!(conf.channels, Some(PathBuf::from("/some/path/file.txt")));
     assert_eq!(&conf.api_bind, "0.0.0.0:3011");
     assert_eq!(conf.search.get(0), Some(&"172.26.0.255".to_string()));
-    assert_eq!(conf.scylla.hosts.get(1), Some(&"sf-nube-12:19042".to_string()));
+    assert_eq!(conf.scylla.hosts().get(1), Some(&"sf-nube-12:19042".to_string()));
     assert_eq!(conf.ttl_d1, Some(Duration::from_millis(1000 * (60 * 10 + 3) + 45)));
     assert_eq!(conf.ttl_binned, None);
 }
@@ -427,7 +441,7 @@ mod serde_option_channel_read_config {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ChannelReadConfig {
     Monitor,
     Poll(Duration),
@@ -455,6 +469,10 @@ CH-03:
   archiving_configuration:
 "###;
     let x: BTreeMap<String, ChannelConfigParse> = serde_yaml::from_str(inp).unwrap();
+    assert_eq!(
+        x.get("CH-00").as_ref().unwrap().archiving_configuration.medium_term,
+        Some(ChannelReadConfig::Poll(Duration::from_millis(1000 * 60)))
+    );
 }
 
 #[derive(Debug)]

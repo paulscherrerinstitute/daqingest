@@ -1,3 +1,4 @@
+use crate::config::ScyllaIngestConfig;
 use crate::iteminsertqueue::insert_channel_status;
 use crate::iteminsertqueue::insert_channel_status_fut;
 use crate::iteminsertqueue::insert_connection_status;
@@ -6,26 +7,20 @@ use crate::iteminsertqueue::insert_item;
 use crate::iteminsertqueue::insert_item_fut;
 use crate::iteminsertqueue::insert_msp_fut;
 use crate::iteminsertqueue::Accounting;
-use crate::iteminsertqueue::ConnectionStatusItem;
 use crate::iteminsertqueue::InsertFut;
 use crate::iteminsertqueue::InsertItem;
 use crate::iteminsertqueue::QueryItem;
 use crate::iteminsertqueue::TimeBinSimpleF32;
 use crate::store::DataStore;
 use async_channel::Receiver;
-use async_channel::Sender;
 use err::Error;
-use futures_util::Future;
-use futures_util::TryFutureExt;
 use log::*;
 use netpod::timeunits::MS;
 use netpod::timeunits::SEC;
-use netpod::ScyllaConfig;
 use smallvec::smallvec;
 use smallvec::SmallVec;
 use stats::InsertWorkerStats;
 use std::collections::VecDeque;
-use std::pin::Pin;
 use std::sync::atomic;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
@@ -104,7 +99,7 @@ pub struct InsertWorkerOpts {
 }
 
 pub async fn spawn_scylla_insert_workers(
-    scyconf: ScyllaConfig,
+    scyconf: ScyllaIngestConfig,
     insert_scylla_sessions: usize,
     insert_worker_count: usize,
     insert_worker_concurrency: usize,
@@ -112,7 +107,6 @@ pub async fn spawn_scylla_insert_workers(
     insert_worker_opts: Arc<InsertWorkerOpts>,
     store_stats: Arc<stats::InsertWorkerStats>,
     use_rate_limit_queue: bool,
-    ttls: Ttls,
 ) -> Result<Vec<JoinHandle<Result<(), Error>>>, Error> {
     let item_inp = if use_rate_limit_queue {
         crate::ratelimit::rate_limiter(insert_worker_opts.store_workers_rate.clone(), item_inp)
@@ -140,7 +134,6 @@ pub async fn spawn_scylla_insert_workers(
             worker_ix,
             insert_worker_concurrency,
             item_inp.clone(),
-            ttls.clone(),
             insert_worker_opts.clone(),
             data_store,
             store_stats.clone(),
@@ -233,7 +226,8 @@ async fn worker(
                     item.emd,
                     ttls.index.as_secs() as i32,
                 );
-                let qres = data_store.scy.execute(&data_store.qu_insert_muted, values).await;
+                let qu = err::todoval();
+                let qres = data_store.scy.execute(&qu, values).await;
                 match qres {
                     Ok(_) => {
                         stats.inserted_mute().inc();
@@ -254,10 +248,8 @@ async fn worker(
                     item.emd,
                     ttls.index.as_secs() as i32,
                 );
-                let qres = data_store
-                    .scy
-                    .execute(&data_store.qu_insert_item_recv_ivl, values)
-                    .await;
+                let qu = err::todoval();
+                let qres = data_store.scy.execute(&qu, values).await;
                 match qres {
                     Ok(_) => {
                         stats.inserted_interval().inc();
@@ -279,7 +271,8 @@ async fn worker(
                     item.evsize as i32,
                     ttls.index.as_secs() as i32,
                 );
-                let qres = data_store.scy.execute(&data_store.qu_insert_channel_ping, params).await;
+                let qu = err::todoval();
+                let qres = data_store.scy.execute(&qu, params).await;
                 match qres {
                     Ok(_) => {
                         stats.inserted_channel_info().inc();
@@ -310,7 +303,6 @@ async fn worker_streamed(
     worker_ix: usize,
     concurrency: usize,
     item_inp: Receiver<VecDeque<QueryItem>>,
-    ttls: Ttls,
     insert_worker_opts: Arc<InsertWorkerOpts>,
     data_store: Arc<DataStore>,
     stats: Arc<InsertWorkerStats>,
@@ -333,22 +325,20 @@ async fn worker_streamed(
             let mut res = Vec::with_capacity(32);
             for item in batch {
                 let futs = match item {
-                    QueryItem::Insert(item) => prepare_query_insert_futs(item, &ttls, &data_store, &stats, tsnow_u64),
+                    QueryItem::Insert(item) => prepare_query_insert_futs(item, &data_store, &stats, tsnow_u64),
                     QueryItem::ConnectionStatus(item) => {
                         stats.inserted_connection_status().inc();
-                        let fut = insert_connection_status_fut(item, &ttls, &data_store, stats.clone());
+                        let fut = insert_connection_status_fut(item, &data_store, stats.clone());
                         smallvec![fut]
                     }
                     QueryItem::ChannelStatus(item) => {
                         stats.inserted_channel_status().inc();
-                        insert_channel_status_fut(item, &ttls, &data_store, stats.clone())
+                        insert_channel_status_fut(item, &data_store, stats.clone())
                     }
                     QueryItem::TimeBinSimpleF32(item) => {
-                        prepare_timebin_insert_futs(item, &ttls, &data_store, &stats, tsnow_u64)
+                        prepare_timebin_insert_futs(item, &data_store, &stats, tsnow_u64)
                     }
-                    QueryItem::Accounting(item) => {
-                        prepare_accounting_insert_futs(item, &ttls, &data_store, &stats, tsnow_u64)
-                    }
+                    QueryItem::Accounting(item) => prepare_accounting_insert_futs(item, &data_store, &stats, tsnow_u64),
                     _ => {
                         // TODO
                         debug!("TODO insert item {item:?}");
@@ -397,7 +387,6 @@ async fn worker_streamed(
 
 fn prepare_query_insert_futs(
     item: InsertItem,
-    ttls: &Ttls,
     data_store: &Arc<DataStore>,
     stats: &Arc<InsertWorkerStats>,
     tsnow_u64: u64,
@@ -414,7 +403,7 @@ fn prepare_query_insert_futs(
 
     // TODO
     if true || item_ts_local & 0x3f00000 < 0x0600000 {
-        let fut = insert_item_fut(item, &ttls, &data_store, do_insert, stats);
+        let fut = insert_item_fut(item, &data_store, do_insert, stats);
         futs.push(fut);
         if msp_bump {
             stats.inserts_msp().inc();
@@ -422,7 +411,6 @@ fn prepare_query_insert_futs(
                 series,
                 ts_msp,
                 item_ts_local,
-                ttls,
                 data_store.scy.clone(),
                 data_store.qu_insert_ts_msp.clone(),
                 stats.clone(),
@@ -453,7 +441,6 @@ fn prepare_query_insert_futs(
 
 fn prepare_timebin_insert_futs(
     item: TimeBinSimpleF32,
-    ttls: &Ttls,
     data_store: &Arc<DataStore>,
     stats: &Arc<InsertWorkerStats>,
     tsnow_u64: u64,
@@ -468,7 +455,6 @@ fn prepare_timebin_insert_futs(
         item.min,
         item.max,
         item.avg,
-        ttls.binned.as_secs() as i32,
     );
     // TODO would be better to count inserts only on completed insert
     stats.inserted_binned().inc();
@@ -497,19 +483,11 @@ fn prepare_timebin_insert_futs(
 
 fn prepare_accounting_insert_futs(
     item: Accounting,
-    ttls: &Ttls,
     data_store: &Arc<DataStore>,
     stats: &Arc<InsertWorkerStats>,
     tsnow_u64: u64,
 ) -> SmallVec<[InsertFut; 4]> {
-    let params = (
-        item.part,
-        item.ts,
-        item.series.id() as i64,
-        item.count,
-        item.bytes,
-        ttls.binned.as_secs() as i32,
-    );
+    let params = (item.part, item.ts, item.series.id() as i64, item.count, item.bytes);
     let fut = InsertFut::new(
         data_store.scy.clone(),
         data_store.qu_account_00.clone(),

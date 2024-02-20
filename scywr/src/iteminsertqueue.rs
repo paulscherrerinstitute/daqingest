@@ -370,7 +370,6 @@ struct InsParCom {
     ts_lsp: u64,
     ts_local: u64,
     pulse: u64,
-    ttl: u32,
     do_insert: bool,
     stats: Arc<InsertWorkerStats>,
 }
@@ -385,7 +384,6 @@ where
         par.ts_lsp as i64,
         par.pulse as i64,
         val,
-        par.ttl as i32,
     );
     InsertFut::new(scy, qu, params, par.ts_local, par.stats)
 }
@@ -400,7 +398,6 @@ where
         par.ts_lsp as i64,
         par.pulse as i64,
         val,
-        par.ttl as i32,
     );
     InsertFut::new(scy, qu, params, par.ts_local, par.stats)
 }
@@ -470,7 +467,6 @@ where
         par.ts_lsp as i64,
         par.pulse as i64,
         val,
-        par.ttl as i32,
     );
     if par.do_insert {
         let y = data_store.scy.execute(qu, params).await;
@@ -507,7 +503,6 @@ where
             par.ts_lsp as i64,
             par.pulse as i64,
             val,
-            par.ttl as i32,
         );
         let y = data_store.scy.execute(qu, params).await;
         match y {
@@ -563,7 +558,6 @@ pub async fn insert_item(
                 ts_lsp: item.ts_lsp,
                 ts_local: item.ts_local,
                 pulse: item.pulse,
-                ttl: ttls.d0.as_secs() as _,
                 do_insert,
                 stats: stats.clone(),
             };
@@ -586,7 +580,6 @@ pub async fn insert_item(
                 ts_lsp: item.ts_lsp,
                 ts_local: item.ts_local,
                 pulse: item.pulse,
-                ttl: ttls.d1.as_secs() as _,
                 do_insert,
                 stats: stats.clone(),
             };
@@ -610,18 +603,16 @@ pub fn insert_msp_fut(
     ts_msp: u64,
     // for stats, the timestamp when we received that data
     tsnet: u64,
-    ttls: &Ttls,
     scy: Arc<ScySession>,
     qu: Arc<PreparedStatement>,
     stats: Arc<InsertWorkerStats>,
 ) -> InsertFut {
-    let params = (series.id() as i64, ts_msp as i64, ttls.index.as_secs() as i32);
+    let params = (series.id() as i64, ts_msp as i64);
     InsertFut::new(scy, qu, params, tsnet, stats)
 }
 
 pub fn insert_item_fut(
     item: InsertItem,
-    ttls: &Ttls,
     data_store: &DataStore,
     do_insert: bool,
     stats: &Arc<InsertWorkerStats>,
@@ -636,7 +627,6 @@ pub fn insert_item_fut(
                 ts_lsp: item.ts_lsp,
                 ts_local: item.ts_local,
                 pulse: item.pulse,
-                ttl: ttls.d0.as_secs() as _,
                 do_insert,
                 stats: stats.clone(),
             };
@@ -659,7 +649,6 @@ pub fn insert_item_fut(
                 ts_lsp: item.ts_lsp,
                 ts_local: item.ts_local,
                 pulse: item.pulse,
-                ttl: ttls.d1.as_secs() as _,
                 do_insert,
                 stats: stats.clone(),
             };
@@ -678,7 +667,6 @@ pub fn insert_item_fut(
 
 pub fn insert_connection_status_fut(
     item: ConnectionStatusItem,
-    ttls: &Ttls,
     data_store: &DataStore,
     stats: Arc<InsertWorkerStats>,
 ) -> InsertFut {
@@ -692,13 +680,7 @@ pub fn insert_connection_status_fut(
     let tsnet = ts;
     let kind = item.status.to_kind();
     let addr = format!("{}", item.addr);
-    let params = (
-        ts_msp as i64,
-        ts_lsp as i64,
-        kind as i32,
-        addr,
-        ttls.index.as_secs() as i32,
-    );
+    let params = (ts_msp as i64, ts_lsp as i64, kind as i32, addr);
     InsertFut::new(
         data_store.scy.clone(),
         data_store.qu_insert_connection_status.clone(),
@@ -710,7 +692,6 @@ pub fn insert_connection_status_fut(
 
 pub fn insert_channel_status_fut(
     item: ChannelStatusItem,
-    ttls: &Ttls,
     data_store: &DataStore,
     stats: Arc<InsertWorkerStats>,
 ) -> SmallVec<[InsertFut; 4]> {
@@ -723,13 +704,7 @@ pub fn insert_channel_status_fut(
     let tsnet = ts;
     let kind = item.status.to_kind();
     let cssid = item.cssid.id();
-    let params = (
-        cssid as i64,
-        ts_msp as i64,
-        ts_lsp as i64,
-        kind as i32,
-        ttls.index.as_secs() as i32,
-    );
+    let params = (cssid as i64, ts_msp as i64, ts_lsp as i64, kind as i32);
     let fut1 = InsertFut::new(
         data_store.scy.clone(),
         data_store.qu_insert_channel_status.clone(),
@@ -737,13 +712,7 @@ pub fn insert_channel_status_fut(
         tsnet,
         stats.clone(),
     );
-    let params = (
-        ts_msp as i64,
-        ts_lsp as i64,
-        cssid as i64,
-        kind as i32,
-        ttls.index.as_secs() as i32,
-    );
+    let params = (ts_msp as i64, ts_lsp as i64, cssid as i64, kind as i32);
     let fut2 = InsertFut::new(
         data_store.scy.clone(),
         data_store.qu_insert_channel_status_by_ts_msp.clone(),
