@@ -3,6 +3,8 @@ use daqingest::opts::DaqIngestOpts;
 use err::Error;
 use log::*;
 use netfetch::conf::parse_config;
+use netpod::Database;
+use scywr::config::ScyllaIngestConfig;
 use taskrun::TracingMode;
 
 pub fn main() -> Result<(), Error> {
@@ -45,6 +47,22 @@ async fn main_run_inner(opts: DaqIngestOpts) -> Result<(), Error> {
             // TODO must take scylla config from CLI
             let scylla_conf = err::todoval();
             scywr::tools::fetch_events(&k.backend, &k.channel, &scylla_conf).await?
+        }
+        SubCmd::Db(k) => {
+            use daqingest::opts::DbSub;
+            let pgconf = Database {
+                host: k.pg_host,
+                port: k.pg_port,
+                user: k.pg_user,
+                pass: k.pg_pass,
+                name: k.pg_name,
+            };
+            let scyconf = ScyllaIngestConfig::new([k.scylla_host], k.scylla_keyspace);
+            match k.sub {
+                DbSub::RemoveOlder(j) => {
+                    info!("RemoveOlder  {:?}  {:?}", pgconf, scyconf);
+                }
+            }
         }
         SubCmd::ChannelAccess(k) => match k {
             #[cfg(DISABLED)]

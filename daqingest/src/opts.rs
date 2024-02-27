@@ -22,6 +22,7 @@ pub enum SubCmd {
     ListPkey,
     ListPulses,
     FetchEvents(FetchEvents),
+    Db(Db),
     #[command(subcommand)]
     ChannelAccess(ChannelAccess),
     #[cfg(feature = "bsread")]
@@ -91,4 +92,36 @@ pub struct CaSearch {
 #[derive(Debug, clap::Parser)]
 pub struct CaConfig {
     pub config: String,
+}
+
+#[derive(Debug, clap::Parser)]
+pub struct Db {
+    #[arg(long)]
+    pub scylla_host: String,
+    #[arg(long)]
+    pub scylla_keyspace: String,
+    #[arg(long)]
+    pub pg_host: String,
+    #[arg(long)]
+    #[clap(default_value = "5432")]
+    pub pg_port: u16,
+    #[arg(long)]
+    pub pg_user: String,
+    #[arg(long)]
+    pub pg_pass: String,
+    #[arg(long)]
+    pub pg_name: String,
+    #[command(subcommand)]
+    pub sub: DbSub,
+}
+
+#[derive(Debug, clap::Parser)]
+pub enum DbSub {
+    RemoveOlder(RemoveOlder),
+}
+
+#[derive(Debug, clap::Parser)]
+pub struct RemoveOlder {
+    #[arg(long)]
+    date: String,
 }

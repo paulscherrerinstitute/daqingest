@@ -689,7 +689,7 @@ impl Stream for FindIocStream {
             }
             break match self.afd.poll_read_ready(cx) {
                 Ready(Ok(mut g)) => {
-                    debug!("BLOCK AA");
+                    // debug!("BLOCK AA");
                     match unsafe { Self::try_read(self.sock.0, &self.stats) } {
                         Ready(Ok((src, res))) => {
                             self.handle_result(src, res);
