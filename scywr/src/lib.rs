@@ -13,3 +13,5 @@ pub mod schema;
 pub mod session;
 pub mod store;
 pub mod tools;
+
+pub use scylla;

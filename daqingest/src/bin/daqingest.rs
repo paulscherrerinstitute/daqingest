@@ -59,8 +59,16 @@ async fn main_run_inner(opts: DaqIngestOpts) -> Result<(), Error> {
             };
             let scyconf = ScyllaIngestConfig::new([k.scylla_host], k.scylla_keyspace);
             match k.sub {
-                DbSub::RemoveOlder(j) => {
-                    info!("RemoveOlder  {:?}  {:?}", pgconf, scyconf);
+                DbSub::Data(u) => {
+                    use daqingest::opts::DbDataSub;
+                    match u.sub {
+                        DbDataSub::RemoveOlder(params) => {
+                            info!("RemoveOlder  {:?}  {:?}", pgconf, scyconf);
+                            daqingest::tools::remove_older(u.backend, params, &pgconf, &scyconf)
+                                .await
+                                .map_err(Error::from_string)?;
+                        }
+                    }
                 }
             }
         }

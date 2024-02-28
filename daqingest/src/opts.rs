@@ -102,8 +102,7 @@ pub struct Db {
     pub scylla_keyspace: String,
     #[arg(long)]
     pub pg_host: String,
-    #[arg(long)]
-    #[clap(default_value = "5432")]
+    #[arg(long, default_value = "5432")]
     pub pg_port: u16,
     #[arg(long)]
     pub pg_user: String,
@@ -117,11 +116,24 @@ pub struct Db {
 
 #[derive(Debug, clap::Parser)]
 pub enum DbSub {
+    Data(DbData),
+}
+
+#[derive(Debug, clap::Parser)]
+pub struct DbData {
+    #[arg(long)]
+    pub backend: String,
+    #[command(subcommand)]
+    pub sub: DbDataSub,
+}
+
+#[derive(Debug, clap::Parser)]
+pub enum DbDataSub {
     RemoveOlder(RemoveOlder),
 }
 
 #[derive(Debug, clap::Parser)]
 pub struct RemoveOlder {
     #[arg(long)]
-    date: String,
+    pub date: String,
 }

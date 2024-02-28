@@ -133,3 +133,13 @@ pub async fn fetch_events(backend: &str, channel: &str, scylla_conf: &ScyllaInge
     }
     Ok(())
 }
+
+/*
+select * from ts_msp where token(series) >= 1500000000000000000 and token(series) < 1600000000000000000 and ts_msp < 1709112680000000000 allow filtering;
+
+Can also simply:
+scan the channel postgres database.
+iterate over the series ids.
+fetch all msp lower than.
+delete them individually.
+*/
