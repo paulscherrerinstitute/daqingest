@@ -415,6 +415,18 @@ pub async fn migrate_scylla_data_schema(scyconf: &ScyllaIngestConfig, rett: Rete
     {
         let tab = GenTwcsTab::new(
             rett.table_prefix(),
+            "ts_msp_ms",
+            &[("series", "bigint"), ("ts_msp_ms", "bigint")],
+            ["series"],
+            ["ts_msp_ms"],
+            rett.ttl_ts_msp() / 40,
+            rett.ttl_ts_msp(),
+        );
+        tab.create_if_missing(scy).await?;
+    }
+    {
+        let tab = GenTwcsTab::new(
+            rett.table_prefix(),
             "series_by_ts_msp",
             &[
                 ("part", "int"),
