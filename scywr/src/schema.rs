@@ -8,6 +8,8 @@ use log::*;
 use netpod::ttl::RetentionTime;
 use scylla::transport::errors::DbError;
 use scylla::transport::errors::QueryError;
+use scylla::transport::iterator::NextRowError;
+use std::collections::BTreeMap;
 use std::fmt;
 use std::time::Duration;
 
@@ -17,6 +19,8 @@ pub enum Error {
     Fmt(#[from] fmt::Error),
     Query(#[from] QueryError),
     NewSession(String),
+    ScyllaNextRow(#[from] NextRowError),
+    MissingData,
 }
 
 impl From<crate::session::Error> for Error {
@@ -111,6 +115,7 @@ struct GenTwcsTab {
     cluster_keys: Vec<String>,
     default_time_to_live: Duration,
     compaction_window_size: Duration,
+    gc_grace: Duration,
 }
 
 impl GenTwcsTab {
@@ -125,7 +130,6 @@ impl GenTwcsTab {
         partition_keys: I2,
         cluster_keys: I3,
         default_time_to_live: Duration,
-        compaction_window_size: Duration,
     ) -> Self
     where
         PRE: AsRef<str>,
@@ -146,7 +150,7 @@ impl GenTwcsTab {
             partition_keys,
             cluster_keys,
             default_time_to_live,
-            compaction_window_size,
+            default_time_to_live / 40,
         )
     }
 
@@ -182,11 +186,28 @@ impl GenTwcsTab {
             cluster_keys: cluster_keys.into_iter().map(Into::into).collect(),
             default_time_to_live,
             compaction_window_size,
+            gc_grace: Duration::from_secs(60 * 60 * 12),
         }
     }
 
     fn name(&self) -> &str {
         &self.name
+    }
+
+    async fn setup(&self, scy: &ScySession) -> Result<(), Error> {
+        self.create_if_missing(scy).await?;
+        self.check_table_options(scy).await?;
+        Ok(())
+    }
+
+    async fn create_if_missing(&self, scy: &ScySession) -> Result<(), Error> {
+        // TODO check for more details (all columns, correct types, correct kinds, etc)
+        if !has_table(self.name(), scy).await? {
+            let cql = self.cql();
+            info!("scylla create table {}  {}", self.name(), cql);
+            scy.query(cql, ()).await?;
+        }
+        Ok(())
     }
 
     fn cql(&self) -> String {
@@ -219,24 +240,81 @@ impl GenTwcsTab {
             self.default_time_to_live.as_secs()
         )
         .unwrap();
-        s.write_str(" and compaction = { 'class': 'TimeWindowCompactionStrategy', 'compaction_window_unit': 'HOURS'")
-            .unwrap();
+        s.write_str(" and compaction = { ").unwrap();
         write!(
             s,
-            ", 'compaction_window_size': {}",
-            self.compaction_window_size.as_secs() / 60 / 60
+            concat!(
+                "'class': 'TimeWindowCompactionStrategy'",
+                ", 'compaction_window_unit': 'MINUTES'",
+                ", 'compaction_window_size': {}",
+            ),
+            self.compaction_window_size.as_secs() / 60
         )
         .unwrap();
         s.write_str(" }").unwrap();
         s
     }
 
-    async fn create_if_missing(&self, scy: &ScySession) -> Result<(), Error> {
-        // TODO check for more details (all columns, correct types, correct kinds, etc)
-        if !has_table(self.name(), scy).await? {
-            let cql = self.cql();
-            info!("scylla create table {}  {}", self.name(), cql);
-            scy.query(cql, ()).await?;
+    fn compaction_options(&self) -> BTreeMap<String, String> {
+        let win_mins = self.compaction_window_size.as_secs() / 60;
+        let mut map = BTreeMap::new();
+        map.insert("class".into(), "TimeWindowCompactionStrategy".into());
+        map.insert("compaction_window_unit".into(), "MINUTES".into());
+        map.insert("compaction_window_size".into(), win_mins.to_string());
+        map
+    }
+
+    async fn check_table_options(&self, scy: &ScySession) -> Result<(), Error> {
+        let cql = concat!(
+            "select default_time_to_live, gc_grace_seconds, compaction",
+            " from system_schema.tables where keyspace_name = ? and table_name = ?"
+        );
+        let x = scy
+            .query_iter(cql, (scy.get_keyspace().unwrap().as_ref(), &self.name()))
+            .await?;
+        let mut it = x.into_typed::<(i32, i32, BTreeMap<String, String>)>();
+        let mut rows = Vec::new();
+        while let Some(u) = it.next().await {
+            let row = u?;
+            rows.push((row.0 as u64, row.1 as u64, row.2));
+        }
+        if let Some(row) = rows.get(0) {
+            if row.0 != self.default_time_to_live.as_secs() {
+                let cql = format!(
+                    concat!("alter table {} with default_time_to_live = {}"),
+                    self.name(),
+                    self.default_time_to_live.as_secs()
+                );
+                debug!("{cql}");
+                scy.query(cql, ()).await?;
+            }
+            if row.1 != self.gc_grace.as_secs() {
+                let cql = format!(
+                    concat!("alter table {} with gc_grace_seconds = {}"),
+                    self.name(),
+                    self.gc_grace.as_secs()
+                );
+                debug!("{cql}");
+                scy.query(cql, ()).await?;
+            }
+            if row.2 != self.compaction_options() {
+                let params: Vec<_> = self
+                    .compaction_options()
+                    .iter()
+                    .map(|(k, v)| format!("'{k}': '{v}'"))
+                    .collect();
+                let params = params.join(", ");
+                let cql = format!(
+                    concat!("alter table {} with compaction = {{ {} }}"),
+                    self.name(),
+                    params
+                );
+                debug!("{cql}");
+                scy.query(cql, ()).await?;
+            }
+        } else {
+            let e = Error::MissingData;
+            return Err(e);
         }
         Ok(())
     }
@@ -404,14 +482,19 @@ pub async fn migrate_scylla_data_schema(scyconf: &ScyllaIngestConfig, rett: Rete
 
     scy.use_keyspace(scyconf.keyspace(), true).await?;
 
-    {
-        let table_name = format!("{}ts_msp", rett.table_prefix());
-        if !has_table(&table_name, &scy).await? {
-            create_table_ts_msp(&table_name, scy).await?;
-        }
-    }
     check_event_tables(rett.clone(), scy).await?;
 
+    {
+        let tab = GenTwcsTab::new(
+            rett.table_prefix(),
+            "ts_msp",
+            &[("series", "bigint"), ("ts_msp", "bigint")],
+            ["series"],
+            ["ts_msp_ms"],
+            rett.ttl_ts_msp(),
+        );
+        tab.setup(scy).await?;
+    }
     {
         let tab = GenTwcsTab::new(
             rett.table_prefix(),
@@ -419,10 +502,9 @@ pub async fn migrate_scylla_data_schema(scyconf: &ScyllaIngestConfig, rett: Rete
             &[("series", "bigint"), ("ts_msp_ms", "bigint")],
             ["series"],
             ["ts_msp_ms"],
-            rett.ttl_ts_msp() / 40,
             rett.ttl_ts_msp(),
         );
-        tab.create_if_missing(scy).await?;
+        tab.setup(scy).await?;
     }
     {
         let tab = GenTwcsTab::new(
@@ -438,9 +520,8 @@ pub async fn migrate_scylla_data_schema(scyconf: &ScyllaIngestConfig, rett: Rete
             ["part", "ts_msp", "shape_kind", "scalar_type"],
             ["series"],
             dhours(5),
-            ddays(4),
         );
-        tab.create_if_missing(scy).await?;
+        tab.setup(scy).await?;
     }
     {
         let tab = GenTwcsTab::new(
@@ -454,10 +535,9 @@ pub async fn migrate_scylla_data_schema(scyconf: &ScyllaIngestConfig, rett: Rete
             ],
             ["ts_msp"],
             ["ts_lsp"],
-            dhours(1),
-            ddays(4),
+            rett.ttl_channel_status(),
         );
-        tab.create_if_missing(scy).await?;
+        tab.setup(scy).await?;
     }
     {
         let tab = GenTwcsTab::new(
@@ -471,10 +551,9 @@ pub async fn migrate_scylla_data_schema(scyconf: &ScyllaIngestConfig, rett: Rete
             ],
             ["series", "ts_msp"],
             ["ts_lsp"],
-            dhours(1),
-            ddays(4),
+            rett.ttl_channel_status(),
         );
-        tab.create_if_missing(scy).await?;
+        tab.setup(scy).await?;
     }
     {
         let tab = GenTwcsTab::new(
@@ -488,10 +567,9 @@ pub async fn migrate_scylla_data_schema(scyconf: &ScyllaIngestConfig, rett: Rete
             ],
             ["ts_msp"],
             ["ts_lsp"],
-            dhours(1),
-            ddays(4),
+            rett.ttl_channel_status(),
         );
-        tab.create_if_missing(scy).await?;
+        tab.setup(scy).await?;
     }
     {
         let tab = GenTwcsTab::new(
@@ -509,10 +587,9 @@ pub async fn migrate_scylla_data_schema(scyconf: &ScyllaIngestConfig, rett: Rete
             ],
             ["series", "bin_len_ms", "ts_msp"],
             ["off"],
-            ddays(30),
-            ddays(4),
+            rett.ttl_binned(),
         );
-        tab.create_if_missing(scy).await?;
+        tab.setup(scy).await?;
     }
     {
         let tab = GenTwcsTab::new(
@@ -527,10 +604,9 @@ pub async fn migrate_scylla_data_schema(scyconf: &ScyllaIngestConfig, rett: Rete
             ],
             ["part", "ts"],
             ["series"],
-            ddays(30),
-            ddays(4),
+            rett.ttl_channel_status(),
         );
-        tab.create_if_missing(scy).await?;
+        tab.setup(scy).await?;
     }
     Ok(())
 }

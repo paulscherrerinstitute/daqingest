@@ -19,7 +19,6 @@ use netpod::ttl::RetentionTime;
 use netpod::Database;
 use scywr::config::ScyllaIngestConfig;
 use scywr::insertworker::InsertWorkerOpts;
-use scywr::insertworker::Ttls;
 use scywr::iteminsertqueue as scywriiq;
 use scywriiq::QueryItem;
 use stats::DaemonStats;
@@ -46,7 +45,6 @@ const CHECK_CHANNEL_SLOW_WARN: Duration = Duration::from_millis(500);
 pub struct DaemonOpts {
     pgconf: Database,
     scyconf: ScyllaIngestConfig,
-    ttls: Ttls,
     #[allow(unused)]
     test_bsread_addr: Option<String>,
     insert_frac: Arc<AtomicU64>,
@@ -591,12 +589,6 @@ pub async fn run(opts: CaIngestOpts, channels_config: Option<ChannelsConfig>) ->
     let opts2 = DaemonOpts {
         pgconf: opts.postgresql_config().clone(),
         scyconf: opts.scylla_config().clone(),
-        ttls: Ttls {
-            index: opts.ttl_index(),
-            d0: opts.ttl_d0(),
-            d1: opts.ttl_d1(),
-            binned: opts.ttl_binned(),
-        },
         test_bsread_addr: opts.test_bsread_addr.clone(),
         insert_frac: insert_frac.clone(),
         store_workers_rate,

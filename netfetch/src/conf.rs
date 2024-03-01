@@ -40,14 +40,6 @@ pub struct CaIngestOpts {
     store_workers_rate: Option<u64>,
     insert_frac: Option<u64>,
     use_rate_limit_queue: Option<bool>,
-    #[serde(default, with = "humantime_serde")]
-    ttl_index: Option<Duration>,
-    #[serde(default, with = "humantime_serde")]
-    ttl_d0: Option<Duration>,
-    #[serde(default, with = "humantime_serde")]
-    ttl_d1: Option<Duration>,
-    #[serde(default, with = "humantime_serde")]
-    ttl_binned: Option<Duration>,
     pub test_bsread_addr: Option<String>,
 }
 
@@ -119,37 +111,13 @@ impl CaIngestOpts {
     pub fn use_rate_limit_queue(&self) -> bool {
         self.use_rate_limit_queue.unwrap_or(false)
     }
-
-    pub fn ttl_index(&self) -> Duration {
-        self.ttl_index
-            .clone()
-            .unwrap_or_else(|| Duration::from_secs(60 * 60 * 24 * 50))
-    }
-
-    pub fn ttl_d0(&self) -> Duration {
-        self.ttl_d0
-            .clone()
-            .unwrap_or_else(|| Duration::from_secs(60 * 60 * 24 * 40))
-    }
-
-    pub fn ttl_d1(&self) -> Duration {
-        self.ttl_d1
-            .clone()
-            .unwrap_or_else(|| Duration::from_secs(60 * 60 * 24 * 10))
-    }
-
-    pub fn ttl_binned(&self) -> Duration {
-        self.ttl_binned
-            .clone()
-            .unwrap_or_else(|| Duration::from_secs(60 * 60 * 24 * 40))
-    }
 }
 
 #[test]
 fn parse_config_minimal() {
     let conf = r###"
 backend: scylla
-ttl_d1: 10m 3s 45ms
+timeout: 10m 3s 45ms
 api_bind: "0.0.0.0:3011"
 channels: /some/path/file.txt
 search:
@@ -173,8 +141,7 @@ scylla:
     assert_eq!(&conf.api_bind, "0.0.0.0:3011");
     assert_eq!(conf.search.get(0), Some(&"172.26.0.255".to_string()));
     assert_eq!(conf.scylla.hosts().get(1), Some(&"sf-nube-12:19042".to_string()));
-    assert_eq!(conf.ttl_d1, Some(Duration::from_millis(1000 * (60 * 10 + 3) + 45)));
-    assert_eq!(conf.ttl_binned, None);
+    assert_eq!(conf.timeout, Some(Duration::from_millis(1000 * (60 * 10 + 3) + 45)));
 }
 
 #[test]

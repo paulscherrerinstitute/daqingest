@@ -1,6 +1,5 @@
 pub use netpod::CONNECTION_STATUS_DIV;
 
-use crate::insertworker::Ttls;
 use crate::session::ScySession;
 use crate::store::DataStore;
 use err::thiserror;
@@ -522,15 +521,15 @@ where
     }
 }
 
+// TODO ncurrently not in use, anything to merge?
 pub async fn insert_item(
     item: InsertItem,
-    ttls: &Ttls,
     data_store: &DataStore,
     do_insert: bool,
     stats: &Arc<InsertWorkerStats>,
 ) -> Result<(), Error> {
     if item.msp_bump {
-        let params = (item.series.id() as i64, item.ts_msp as i64, ttls.index.as_secs() as i32);
+        let params = (item.series.id() as i64, item.ts_msp as i64);
         data_store.scy.execute(&data_store.qu_insert_ts_msp, params).await?;
         stats.inserts_msp().inc();
     }
@@ -541,7 +540,6 @@ pub async fn insert_item(
             if item.shape.to_scylla_vec().is_empty() { 0 } else { 1 } as i32,
             item.scalar_type.to_scylla_i32(),
             item.series.id() as i64,
-            ttls.index.as_secs() as i32,
         );
         data_store
             .scy
@@ -723,11 +721,7 @@ pub fn insert_channel_status_fut(
     smallvec![fut1, fut2]
 }
 
-pub async fn insert_connection_status(
-    item: ConnectionStatusItem,
-    ttl: Duration,
-    data_store: &DataStore,
-) -> Result<(), Error> {
+pub async fn insert_connection_status(item: ConnectionStatusItem, data_store: &DataStore) -> Result<(), Error> {
     let tsunix = item.ts.duration_since(UNIX_EPOCH).unwrap_or(Duration::ZERO);
     let secs = tsunix.as_secs() * SEC;
     let nanos = tsunix.subsec_nanos() as u64;
@@ -736,7 +730,7 @@ pub async fn insert_connection_status(
     let ts_lsp = ts - ts_msp;
     let kind = item.status.to_kind();
     let addr = format!("{}", item.addr);
-    let params = (ts_msp as i64, ts_lsp as i64, kind as i32, addr, ttl.as_secs() as i32);
+    let params = (ts_msp as i64, ts_lsp as i64, kind as i32, addr);
     data_store
         .scy
         .execute(&data_store.qu_insert_connection_status, params)
@@ -744,11 +738,7 @@ pub async fn insert_connection_status(
     Ok(())
 }
 
-pub async fn insert_channel_status(
-    item: ChannelStatusItem,
-    ttl: Duration,
-    data_store: &DataStore,
-) -> Result<(), Error> {
+pub async fn insert_channel_status(item: ChannelStatusItem, data_store: &DataStore) -> Result<(), Error> {
     let tsunix = item.ts.duration_since(UNIX_EPOCH).unwrap_or(Duration::ZERO);
     let secs = tsunix.as_secs() * SEC;
     let nanos = tsunix.subsec_nanos() as u64;
@@ -757,44 +747,17 @@ pub async fn insert_channel_status(
     let ts_lsp = ts - ts_msp;
     let kind = item.status.to_kind();
     let cssid = item.cssid.id();
-    let params = (
-        cssid as i64,
-        ts_msp as i64,
-        ts_lsp as i64,
-        kind as i32,
-        ttl.as_secs() as i32,
-    );
+    let params = (cssid as i64, ts_msp as i64, ts_lsp as i64, kind as i32);
     data_store
         .scy
         .execute(&data_store.qu_insert_channel_status, params)
         .await?;
-    let params = (
-        ts_msp as i64,
-        ts_lsp as i64,
-        cssid as i64,
-        kind as i32,
-        ttl.as_secs() as i32,
-    );
+    let params = (ts_msp as i64, ts_lsp as i64, cssid as i64, kind as i32);
     data_store
         .scy
         .execute(&data_store.qu_insert_channel_status_by_ts_msp, params)
         .await?;
     Ok(())
-}
-
-pub struct InsertFut2 {
-    data_store: Arc<DataStore>,
-    stats: Arc<InsertWorkerStats>,
-    kind: InsertFutKind,
-}
-
-impl Future for InsertFut2 {
-    type Output = Result<(), Error>;
-
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
-        use Poll::*;
-        todo!()
-    }
 }
 
 pub enum InsertFutKind {

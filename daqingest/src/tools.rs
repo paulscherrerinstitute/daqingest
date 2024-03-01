@@ -34,7 +34,6 @@ pub async fn remove_older(
     pgconf: &Database,
     scyconf: &ScyllaIngestConfig,
 ) -> Result<(), Error> {
-    scywr::schema::migrate_scylla_data_schema(scyconf, netpod::ttl::RetentionTime::Short).await?;
     let date_cut = parse_date_str(&params.date)?;
     let ts_cut = date_to_ts_ns(date_cut);
     debug!("chosen date is  {:?}  {}", date_cut, ts_cut);

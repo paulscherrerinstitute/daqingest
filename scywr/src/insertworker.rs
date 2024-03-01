@@ -83,14 +83,6 @@ async fn back_off_sleep(backoff_dt: &mut Duration) {
     tokio::time::sleep(*backoff_dt).await;
 }
 
-#[derive(Debug, Clone)]
-pub struct Ttls {
-    pub index: Duration,
-    pub d0: Duration,
-    pub d1: Duration,
-    pub binned: Duration,
-}
-
 pub struct InsertWorkerOpts {
     pub store_workers_rate: Arc<AtomicU64>,
     pub insert_workers_running: Arc<AtomicU64>,
@@ -125,7 +117,6 @@ pub async fn spawn_scylla_insert_workers(
         let jh = tokio::spawn(worker(
             worker_ix,
             item_inp.clone(),
-            ttls.clone(),
             insert_worker_opts.clone(),
             data_store,
             store_stats.clone(),
@@ -147,7 +138,6 @@ pub async fn spawn_scylla_insert_workers(
 async fn worker(
     worker_ix: usize,
     item_inp: Receiver<QueryItem>,
-    ttls: Ttls,
     insert_worker_opts: Arc<InsertWorkerOpts>,
     data_store: Arc<DataStore>,
     stats: Arc<InsertWorkerStats>,
@@ -167,7 +157,7 @@ async fn worker(
             break;
         };
         match item {
-            QueryItem::ConnectionStatus(item) => match insert_connection_status(item, ttls.index, &data_store).await {
+            QueryItem::ConnectionStatus(item) => match insert_connection_status(item, &data_store).await {
                 Ok(_) => {
                     stats.inserted_connection_status().inc();
                     backoff = backoff_0;
@@ -177,7 +167,7 @@ async fn worker(
                     back_off_sleep(&mut backoff).await;
                 }
             },
-            QueryItem::ChannelStatus(item) => match insert_channel_status(item, ttls.index, &data_store).await {
+            QueryItem::ChannelStatus(item) => match insert_channel_status(item, &data_store).await {
                 Ok(_) => {
                     stats.inserted_channel_status().inc();
                     backoff = backoff_0;
@@ -198,7 +188,7 @@ async fn worker(
                 stats.item_lat_net_worker().ingest(dt);
                 let insert_frac = insert_worker_opts.insert_frac.load(Ordering::Acquire);
                 let do_insert = i1 % 1000 < insert_frac;
-                match insert_item(item, &ttls, &data_store, do_insert, &stats).await {
+                match insert_item(item, &data_store, do_insert, &stats).await {
                     Ok(_) => {
                         stats.inserted_values().inc();
                         let tsnow = {
@@ -224,7 +214,6 @@ async fn worker(
                     item.ts as i64,
                     item.ema,
                     item.emd,
-                    ttls.index.as_secs() as i32,
                 );
                 let qu = err::todoval();
                 let qres = data_store.scy.execute(&qu, values).await;
@@ -246,7 +235,6 @@ async fn worker(
                     item.ts as i64,
                     item.ema,
                     item.emd,
-                    ttls.index.as_secs() as i32,
                 );
                 let qu = err::todoval();
                 let qres = data_store.scy.execute(&qu, values).await;
@@ -269,7 +257,6 @@ async fn worker(
                     item.ivl,
                     item.interest,
                     item.evsize as i32,
-                    ttls.index.as_secs() as i32,
                 );
                 let qu = err::todoval();
                 let qres = data_store.scy.execute(&qu, params).await;
@@ -427,7 +414,6 @@ fn prepare_query_insert_futs(
             if item.shape.to_scylla_vec().is_empty() { 0 } else { 1 } as i32,
             item.scalar_type.to_scylla_i32(),
             item.series.id() as i64,
-            ttls.index.as_secs() as i32,
         );
         data_store
             .scy
