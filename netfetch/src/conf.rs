@@ -93,7 +93,7 @@ impl CaIngestOpts {
     }
 
     pub fn array_truncate(&self) -> u64 {
-        self.array_truncate.unwrap_or(1024 * 64)
+        self.array_truncate.unwrap_or(1024 * 200)
     }
 
     pub fn insert_item_queue_cap(&self) -> usize {

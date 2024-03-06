@@ -99,10 +99,12 @@ pub async fn create_table_ts_msp(table_name: &str, scy: &ScySession) -> Result<(
     Ok(())
 }
 
+#[allow(unused)]
 fn dhours(x: u64) -> Duration {
     Duration::from_secs(60 * 60 * x)
 }
 
+#[allow(unused)]
 fn ddays(x: u64) -> Duration {
     Duration::from_secs(60 * 60 * 24 * x)
 }
@@ -320,89 +322,6 @@ impl GenTwcsTab {
     }
 }
 
-fn table_param_compaction(compaction_window_size: Duration) -> String {
-    table_param_compaction_twcs(compaction_window_size)
-}
-
-#[allow(unused)]
-fn table_param_compaction_stcs() -> String {
-    format!(concat!(
-        "{{ 'class': 'SizeTieredCompactionStrategy'",
-        // ", 'min_sstable_size': 200",
-        // ", 'max_threshold': 10",
-        " }}"
-    ))
-}
-
-#[allow(unused)]
-fn table_param_compaction_twcs(compaction_window_size: Duration) -> String {
-    format!(
-        concat!(
-            "{{ 'class': 'TimeWindowCompactionStrategy'",
-            ", 'compaction_window_unit': 'HOURS'",
-            ", 'compaction_window_size': {}",
-            " }}"
-        ),
-        compaction_window_size.as_secs() / 60 / 60
-    )
-}
-
-struct EvTabDim0 {
-    pre: String,
-    sty: String,
-    cqlsty: String,
-    // SCYLLA_TTL_EVENTS_DIM0
-    default_time_to_live: Duration,
-    // TWCS_WINDOW_0D
-    compaction_window_size: Duration,
-}
-
-impl EvTabDim0 {
-    fn name(&self) -> String {
-        format!("{}events_scalar_{}", self.pre, self.sty)
-    }
-
-    fn cql_create(&self) -> String {
-        use std::fmt::Write;
-        let ttl = self.default_time_to_live.as_secs();
-        let compaction = table_param_compaction(self.compaction_window_size);
-        let mut s = String::new();
-        write!(s, "create table {}", self.name()).unwrap();
-        write!(s, " (series bigint, ts_msp bigint, ts_lsp bigint, pulse bigint, value {}, primary key ((series, ts_msp), ts_lsp))", self.cqlsty).unwrap();
-        write!(s, " with default_time_to_live = {}", ttl).unwrap();
-        write!(s, " and compaction = {}", compaction).unwrap();
-        s
-    }
-}
-
-struct EvTabDim1 {
-    pre: String,
-    sty: String,
-    cqlsty: String,
-    // SCYLLA_TTL_EVENTS_DIM1
-    default_time_to_live: Duration,
-    // TWCS_WINDOW_1D
-    compaction_window_size: Duration,
-}
-
-impl EvTabDim1 {
-    fn name(&self) -> String {
-        format!("{}events_array_{}", self.pre, self.sty)
-    }
-
-    fn cql_create(&self) -> String {
-        use std::fmt::Write;
-        let mut s = String::new();
-        let ttl = self.default_time_to_live.as_secs();
-        let compaction = table_param_compaction(self.compaction_window_size);
-        write!(s, "create table {}", self.name()).unwrap();
-        write!(s, " (series bigint, ts_msp bigint, ts_lsp bigint, pulse bigint, value {}, primary key ((series, ts_msp), ts_lsp))", self.cqlsty).unwrap();
-        write!(s, " with default_time_to_live = {}", ttl).unwrap();
-        write!(s, " and compaction = {}", compaction).unwrap();
-        s
-    }
-}
-
 #[allow(unused)]
 async fn get_columns(keyspace: &str, table: &str, scy: &ScySession) -> Result<Vec<String>, Error> {
     let mut ret = Vec::new();
@@ -430,29 +349,39 @@ async fn check_event_tables(rett: RetentionTime, scy: &ScySession) -> Result<(),
         "text",
     ];
     for (sty, cqlsty) in stys.into_iter().zip(cqlstys) {
-        let desc = EvTabDim0 {
-            pre: rett.table_prefix().into(),
-            sty: sty.into(),
-            cqlsty: cqlsty.into(),
-            // ttl is set in actual data inserts
-            default_time_to_live: dhours(1),
-            compaction_window_size: dhours(48),
-        };
-        if !has_table(&desc.name(), scy).await? {
-            info!("scylla create table {}", desc.name());
-            scy.query(desc.cql_create(), ()).await?;
+        {
+            let tab = GenTwcsTab::new(
+                rett.table_prefix(),
+                format!("events_scalar_{}", sty),
+                &[
+                    ("series", "bigint"),
+                    ("ts_msp", "bigint"),
+                    ("ts_lsp", "bigint"),
+                    ("pulse", "bigint"),
+                    ("value", cqlsty),
+                ],
+                ["series", "ts_msp"],
+                ["ts_lsp"],
+                rett.ttl_events_d0(),
+            );
+            tab.setup(scy).await?;
         }
-        let desc = EvTabDim1 {
-            pre: rett.table_prefix().into(),
-            sty: sty.into(),
-            cqlsty: format!("frozen<list<{}>>", cqlsty),
-            // ttl is set in actual data inserts
-            default_time_to_live: dhours(1),
-            compaction_window_size: dhours(12),
-        };
-        if !has_table(&desc.name(), scy).await? {
-            info!("scylla create table {}", desc.name());
-            scy.query(desc.cql_create(), ()).await?;
+        {
+            let tab = GenTwcsTab::new(
+                rett.table_prefix(),
+                format!("events_array_{}", sty),
+                &[
+                    ("series", "bigint"),
+                    ("ts_msp", "bigint"),
+                    ("ts_lsp", "bigint"),
+                    ("pulse", "bigint"),
+                    ("value", &format!("frozen<list<{}>>", cqlsty)),
+                ],
+                ["series", "ts_msp"],
+                ["ts_lsp"],
+                rett.ttl_events_d1(),
+            );
+            tab.setup(scy).await?;
         }
     }
     Ok(())

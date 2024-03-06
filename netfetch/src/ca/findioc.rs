@@ -342,16 +342,16 @@ impl FindIocStream {
                 } else {
                     info!("cmdid {}  payload {}", hi.cmdid(), hi.payload_len());
                 }
-                if nb.data().len() < hi.payload_len() {
+                if nb.data().len() < hi.payload_len() as usize {
                     error!("incomplete message, missing payload");
                     break;
                 }
                 let msg = CaMsg::from_proto_infos(&hi, nb.data(), tsnow, 32).map_err(|e| e.to_string())?;
-                nb.adv(hi.payload_len()).map_err(|e| e.to_string())?;
+                nb.adv(hi.payload_len() as usize).map_err(|e| e.to_string())?;
                 msgs.push(msg);
                 accounted += 16 + hi.payload_len();
             }
-            if accounted != ec as usize {
+            if accounted != ec as u32 {
                 stats.ca_udp_unaccounted_data().inc();
                 debug!("unaccounted data  ec {}  accounted {}", ec, accounted);
             }

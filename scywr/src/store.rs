@@ -2,6 +2,7 @@ use crate::config::ScyllaIngestConfig;
 use crate::session::create_session;
 use err::thiserror;
 use err::ThisError;
+use netpod::ttl::RetentionTime;
 use scylla::prepared_statement::PreparedStatement;
 use scylla::transport::errors::NewSessionError;
 use scylla::transport::errors::QueryError;
@@ -16,6 +17,7 @@ pub enum Error {
 }
 
 pub struct DataStore {
+    pub rett: RetentionTime,
     pub scy: Arc<ScySession>,
     pub qu_insert_ts_msp: Arc<PreparedStatement>,
     pub qu_insert_series_by_ts_msp: Arc<PreparedStatement>,
@@ -41,49 +43,54 @@ pub struct DataStore {
     pub qu_account_00: Arc<PreparedStatement>,
 }
 
+macro_rules! prep_qu_ins_a {
+    ($id1:expr, $rett:expr, $scy:expr) => {{
+        let cql = format!(
+            concat!(
+                "insert into {}{} (series, ts_msp, ts_lsp, pulse, value)",
+                " values (?, ?, ?, ?, ?)"
+            ),
+            $rett.table_prefix(),
+            $id1
+        );
+        let q = $scy.prepare(cql).await?;
+        Arc::new(q)
+    }};
+}
+
 impl DataStore {
-    pub async fn new(scyconf: &ScyllaIngestConfig) -> Result<Self, Error> {
+    pub async fn new(scyconf: &ScyllaIngestConfig, rett: RetentionTime) -> Result<Self, Error> {
         let scy = create_session(scyconf).await.map_err(|_| Error::NewSession)?;
 
-        let q = scy.prepare("insert into ts_msp (series, ts_msp) values (?, ?)").await?;
+        let q = scy
+            .prepare(format!(
+                concat!("insert into {}{} (series, ts_msp) values (?, ?)"),
+                rett.table_prefix(),
+                "ts_msp"
+            ))
+            .await?;
         let qu_insert_ts_msp = Arc::new(q);
 
-        let cql = "insert into series_by_ts_msp (part, ts_msp, shape_kind, scalar_type, series) values (?, ?, ?, ?, ?)";
+        let cql = format!(
+            concat!(
+                "insert into {}{}",
+                " (part, ts_msp, shape_kind, scalar_type, series)",
+                " values (?, ?, ?, ?, ?)"
+            ),
+            rett.table_prefix(),
+            "series_by_ts_msp"
+        );
         let q = scy.prepare(cql).await?;
         let qu_insert_series_by_ts_msp = Arc::new(q);
 
-        // scalar:
-        let cql = "insert into events_scalar_i8 (series, ts_msp, ts_lsp, pulse, value) values (?, ?, ?, ?, ?)";
-        let q = scy.prepare(cql).await?;
-        let qu_insert_scalar_i8 = Arc::new(q);
-
-        let cql = "insert into events_scalar_i16 (series, ts_msp, ts_lsp, pulse, value) values (?, ?, ?, ?, ?)";
-        let q = scy.prepare(cql).await?;
-        let qu_insert_scalar_i16 = Arc::new(q);
-
-        let cql = "insert into events_scalar_i32 (series, ts_msp, ts_lsp, pulse, value) values (?, ?, ?, ?, ?)";
-        let q = scy.prepare(cql).await?;
-        let qu_insert_scalar_i32 = Arc::new(q);
-
-        let cql = "insert into events_scalar_i64 (series, ts_msp, ts_lsp, pulse, value) values (?, ?, ?, ?, ?)";
-        let q = scy.prepare(cql).await?;
-        let qu_insert_scalar_i64 = Arc::new(q);
-
-        let cql = "insert into events_scalar_f32 (series, ts_msp, ts_lsp, pulse, value) values (?, ?, ?, ?, ?)";
-        let q = scy.prepare(cql).await?;
-        let qu_insert_scalar_f32 = Arc::new(q);
-
-        let cql = "insert into events_scalar_f64 (series, ts_msp, ts_lsp, pulse, value) values (?, ?, ?, ?, ?)";
-        let q = scy.prepare(cql).await?;
-        let qu_insert_scalar_f64 = Arc::new(q);
-
-        let cql = "insert into events_scalar_bool (series, ts_msp, ts_lsp, pulse, value) values (?, ?, ?, ?, ?)";
-        let q = scy.prepare(cql).await?;
-        let qu_insert_scalar_bool = Arc::new(q);
-
-        let cql = "insert into events_scalar_string (series, ts_msp, ts_lsp, pulse, value) values (?, ?, ?, ?, ?)";
-        let q = scy.prepare(cql).await?;
-        let qu_insert_scalar_string = Arc::new(q);
+        let qu_insert_scalar_i8 = prep_qu_ins_a!("events_scalar_i8", rett, scy);
+        let qu_insert_scalar_i16 = prep_qu_ins_a!("events_scalar_i16", rett, scy);
+        let qu_insert_scalar_i32 = prep_qu_ins_a!("events_scalar_i32", rett, scy);
+        let qu_insert_scalar_i64 = prep_qu_ins_a!("events_scalar_i64", rett, scy);
+        let qu_insert_scalar_f32 = prep_qu_ins_a!("events_scalar_f32", rett, scy);
+        let qu_insert_scalar_f64 = prep_qu_ins_a!("events_scalar_f64", rett, scy);
+        let qu_insert_scalar_bool = prep_qu_ins_a!("events_scalar_bool", rett, scy);
+        let qu_insert_scalar_string = prep_qu_ins_a!("events_scalar_string", rett, scy);
 
         // array
         let cql = "insert into events_array_i8 (series, ts_msp, ts_lsp, pulse, value) values (?, ?, ?, ?, ?)";
@@ -144,6 +151,7 @@ impl DataStore {
         let qu_account_00 = Arc::new(q);
 
         let ret = Self {
+            rett,
             scy,
             qu_insert_ts_msp,
             qu_insert_series_by_ts_msp,

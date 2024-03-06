@@ -165,7 +165,13 @@ impl Daemon {
             array_truncate: Arc::new(AtomicU64::new(ingest_opts.array_truncate())),
         };
         let insert_worker_opts = Arc::new(insert_worker_opts);
+
+        debug!("TODO RetentionTime");
+
+        let rett = RetentionTime::Short;
+
         let insert_workers_jh = scywr::insertworker::spawn_scylla_insert_workers(
+            rett,
             opts.scyconf.clone(),
             ingest_opts.insert_scylla_sessions(),
             ingest_opts.insert_worker_count(),

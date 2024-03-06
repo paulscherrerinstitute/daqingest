@@ -17,6 +17,7 @@ use err::Error;
 use log::*;
 use netpod::timeunits::MS;
 use netpod::timeunits::SEC;
+use netpod::ttl::RetentionTime;
 use smallvec::smallvec;
 use smallvec::SmallVec;
 use stats::InsertWorkerStats;
@@ -91,6 +92,7 @@ pub struct InsertWorkerOpts {
 }
 
 pub async fn spawn_scylla_insert_workers(
+    rett: RetentionTime,
     scyconf: ScyllaIngestConfig,
     insert_scylla_sessions: usize,
     insert_worker_count: usize,
@@ -108,7 +110,11 @@ pub async fn spawn_scylla_insert_workers(
     let mut jhs = Vec::new();
     let mut data_stores = Vec::new();
     for _ in 0..insert_scylla_sessions {
-        let data_store = Arc::new(DataStore::new(&scyconf).await.map_err(|e| Error::from(e.to_string()))?);
+        let data_store = Arc::new(
+            DataStore::new(&scyconf, rett.clone())
+                .await
+                .map_err(|e| Error::from(e.to_string()))?,
+        );
         data_stores.push(data_store);
     }
     for worker_ix in 0..insert_worker_count {
@@ -387,41 +393,20 @@ fn prepare_query_insert_futs(
     let ts_msp = item.ts_msp;
     let do_insert = true;
     let mut futs = smallvec![];
-
-    // TODO
-    if true || item_ts_local & 0x3f00000 < 0x0600000 {
-        let fut = insert_item_fut(item, &data_store, do_insert, stats);
-        futs.push(fut);
-        if msp_bump {
-            stats.inserts_msp().inc();
-            let fut = insert_msp_fut(
-                series,
-                ts_msp,
-                item_ts_local,
-                data_store.scy.clone(),
-                data_store.qu_insert_ts_msp.clone(),
-                stats.clone(),
-            );
-            futs.push(fut);
-        }
-    }
-
-    #[cfg(DISABLED)]
-    if let Some(ts_msp_grid) = item.ts_msp_grid {
-        let params = (
-            (item.series.id() as i32) & 0xff,
-            ts_msp_grid as i32,
-            if item.shape.to_scylla_vec().is_empty() { 0 } else { 1 } as i32,
-            item.scalar_type.to_scylla_i32(),
-            item.series.id() as i64,
+    let fut = insert_item_fut(item, &data_store, do_insert, stats);
+    futs.push(fut);
+    if msp_bump {
+        stats.inserts_msp().inc();
+        let fut = insert_msp_fut(
+            series,
+            ts_msp,
+            item_ts_local,
+            data_store.scy.clone(),
+            data_store.qu_insert_ts_msp.clone(),
+            stats.clone(),
         );
-        data_store
-            .scy
-            .execute(&data_store.qu_insert_series_by_ts_msp, params)
-            .await?;
-        stats.inserts_msp_grid().inc();
+        futs.push(fut);
     }
-
     futs
 }
 

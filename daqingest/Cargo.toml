@@ -1,6 +1,6 @@
 [package]
 name = "daqingest"
-version = "0.2.0-alpha.1"
+version = "0.2.0-aa.2"
 authors = ["Dominik Werder <dominik.werder@gmail.com>"]
 edition = "2021"
 
@@ -10,11 +10,11 @@ default = []
 bsread = []
 
 [dependencies]
-clap = { version = "4.4.4", features = ["derive", "cargo"] }
+clap = { version = "4.5.1", features = ["derive", "cargo"] }
 tracing = "0.1"
 serde = { version = "1.0", features = ["derive"] }
 tokio-postgres = "0.7.10"
-async-channel = "2.0.0"
+async-channel = "2.2.0"
 futures-util = "0.3"
 chrono = "0.4"
 bytes = "1.5.0"

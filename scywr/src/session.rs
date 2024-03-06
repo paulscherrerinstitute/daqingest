@@ -33,6 +33,7 @@ pub async fn create_session_no_ks(scyconf: &ScyllaIngestConfig) -> Result<Arc<Se
         .known_nodes(scyconf.hosts())
         .default_execution_profile_handle(profile)
         .write_coalescing(true)
+        .compression(None)
         .build()
         .await?;
     let scy = Arc::new(scy);

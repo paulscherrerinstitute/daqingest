@@ -1,7 +1,6 @@
 use super::proto;
 use super::proto::CaEventValue;
 use super::proto::ReadNotify;
-use super::ExtraInsertsConf;
 use crate::ca::proto::EventCancel;
 use crate::conf::ChannelConfig;
 use crate::senderpolling::SenderPolling;
@@ -42,7 +41,6 @@ use scywriiq::ConnectionStatusItem;
 use scywriiq::IvlItem;
 use scywriiq::MuteItem;
 use scywriiq::QueryItem;
-use serde::Deserialize;
 use serde::Serialize;
 use series::ChannelStatusSeriesId;
 use series::SeriesId;
@@ -296,7 +294,7 @@ struct CreatedState {
     cid: Cid,
     sid: Sid,
     ca_dbr_type: u16,
-    ca_dbr_count: u16,
+    ca_dbr_count: u32,
     ts_created: Instant,
     ts_alive_last: Instant,
     ts_msp_last: u64,
@@ -694,7 +692,7 @@ impl Default for CaConnOpts {
     fn default() -> Self {
         Self {
             insert_queue_max: 20000,
-            array_truncate: 2000,
+            array_truncate: 2000000,
         }
     }
 }
@@ -1350,6 +1348,10 @@ impl CaConn {
         // debug!("handle_event_add_res {ev:?}");
         match ch_s {
             ChannelState::Writable(st) => {
+                // debug!(
+                //     "CaConn sees  data_count {}  payload_len {}",
+                //     ev.data_count, ev.payload_len
+                // );
                 let stnow = self.tmp_ts_poll;
                 let crst = &mut st.channel;
                 let stwin_ts = stnow.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() / 4;
@@ -1571,6 +1573,7 @@ impl CaConn {
         stnow: SystemTime,
         stats: &CaConnStats,
     ) -> Result<(), Error> {
+        // debug!("event_add_ingest  payload_len {}  value {:?}", payload_len, value);
         crst.ts_alive_last = tsnow;
         crst.item_recv_ivl_ema.tick(tsnow);
         crst.recv_count += 1;
@@ -1977,8 +1980,7 @@ impl CaConn {
             cid,
             sid,
             ca_dbr_type,
-            // TODO for extended epics messages, can be u32!
-            ca_dbr_count: k.data_count as u16,
+            ca_dbr_count: k.data_count,
             ts_created: tsnow,
             ts_alive_last: tsnow,
             ts_msp_last: 0,
