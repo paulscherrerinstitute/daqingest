@@ -19,6 +19,7 @@ use netpod::BinnedRange;
 use netpod::BinnedRangeEnum;
 use netpod::ScalarType;
 use netpod::Shape;
+use netpod::TsMs;
 use netpod::TsNano;
 use scywr::iteminsertqueue::DataValue;
 use scywr::iteminsertqueue::GetValHelp;
@@ -374,7 +375,7 @@ fn store_bins(
                     let item = TimeBinSimpleF32 {
                         series: series.clone(),
                         bin_len_ms: bin_len_ms as i32,
-                        ts_msp: ts_msp as i64,
+                        ts_msp: TsMs::from_ms_u64(ts_msp),
                         off: off as i32,
                         count: count as i64,
                         min,

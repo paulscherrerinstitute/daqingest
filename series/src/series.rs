@@ -17,7 +17,7 @@ impl<T> Existence<T> {
     }
 }
 
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Serialize, Deserialize)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct SeriesId(u64);
 
 impl SeriesId {
@@ -28,9 +28,13 @@ impl SeriesId {
     pub fn id(&self) -> u64 {
         self.0
     }
+
+    pub fn to_i64(&self) -> i64 {
+        self.0 as i64
+    }
 }
 
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Hash, Serialize, Deserialize)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct ChannelStatusSeriesId(u64);
 
 impl ChannelStatusSeriesId {
@@ -40,5 +44,9 @@ impl ChannelStatusSeriesId {
 
     pub fn id(&self) -> u64 {
         self.0
+    }
+
+    pub fn to_i64(&self) -> i64 {
+        self.0 as i64
     }
 }

@@ -10,6 +10,7 @@ use log::*;
 use netpod::Database;
 use netpod::ScalarType;
 use netpod::Shape;
+use netpod::TsMs;
 use scywr::config::ScyllaIngestConfig;
 use scywr::scylla::prepared_statement::PreparedStatement;
 use scywr::scylla::transport::errors::QueryError;
@@ -35,8 +36,8 @@ pub async fn remove_older(
     scyconf: &ScyllaIngestConfig,
 ) -> Result<(), Error> {
     let date_cut = parse_date_str(&params.date)?;
-    let ts_cut = date_to_ts_ns(date_cut);
-    debug!("chosen date is  {:?}  {}", date_cut, ts_cut);
+    let ts_cut = TsMs::from_ns_u64(date_to_ts_ns(date_cut));
+    debug!("chosen date is  {:?}  {:?}", date_cut, ts_cut);
     let (pg, _) = dbpg::conn::make_pg_client(pgconf).await?;
     let scy = scywr::session::create_session(scyconf).await?;
     let sql = concat!(
@@ -63,7 +64,7 @@ async fn remove_older_series(
     series: u64,
     scalar_type: &ScalarType,
     shape: &Shape,
-    ts_cut: u64,
+    ts_cut: TsMs,
     _pg: &PgClient,
     scy: &ScySession,
 ) -> Result<(), Error> {
@@ -73,16 +74,16 @@ async fn remove_older_series(
     let it = scy
         .query_iter(
             "select ts_msp from ts_msp where series = ? and ts_msp < ?",
-            (series as i64, ts_cut as i64),
+            (series as i64, ts_cut.to_i64()),
         )
         .await?;
     type RowType = (i64,);
     let mut it = it.into_typed::<RowType>();
     while let Some(e) = it.next().await {
         let row = e?;
-        let ts_msp = row.0 as u64;
+        let ts_msp = row.0;
         debug!("remove ts_msp {}", ts_msp);
-        let res = scy.execute(&qu_delete, (series as i64, ts_msp as i64)).await?;
+        let res = scy.execute(&qu_delete, (series as i64, ts_msp)).await?;
         {
             // informative
             if let Some(rows) = res.rows {
@@ -105,9 +106,9 @@ pub async fn find_older_msp(
     scyconf: &ScyllaIngestConfig,
 ) -> Result<(), Error> {
     let date_cut = parse_date_str(&params.date)?;
-    let ts_cut = date_to_ts_ns(date_cut);
-    debug!("chosen date is  {:?}  {}", date_cut, ts_cut);
-    let (pg, _) = dbpg::conn::make_pg_client(pgconf).await?;
+    let ts_cut = TsMs::from_ns_u64(date_to_ts_ns(date_cut));
+    debug!("chosen date is  {:?}  {:?}", date_cut, ts_cut);
+    let (_pg, _jh) = dbpg::conn::make_pg_client(pgconf).await?;
     let scy = scywr::session::create_session(scyconf).await?;
     let table_name = &params.table_name;
     let cql = format!(

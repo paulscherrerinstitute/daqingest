@@ -64,11 +64,25 @@ pub async fn active_channel_insert_hook_worker(rx: Receiver<QueryItem>, tx: Send
             all.sort_unstable();
             info!("Active scalar");
             for (c, sid, msp, lsp, pulse, _shape_kind) in all.iter().filter(|x| x.5 == 0).take(6) {
-                info!("{:10}  {:20}  {:14}  {:20}  {:?}", usize::MAX - c, msp, lsp, pulse, sid);
+                info!(
+                    "{:10}  {:20}  {:14}  {:20}  {:?}",
+                    usize::MAX - c,
+                    msp.to_u64(),
+                    lsp.ns(),
+                    pulse,
+                    sid
+                );
             }
             info!("Active wave");
             for (c, sid, msp, lsp, pulse, _shape_kind) in all.iter().filter(|x| x.5 == 1).take(6) {
-                info!("{:10}  {:20}  {:14}  {:20}  {:?}", usize::MAX - c, msp, lsp, pulse, sid);
+                info!(
+                    "{:10}  {:20}  {:14}  {:20}  {:?}",
+                    usize::MAX - c,
+                    msp.to_u64(),
+                    lsp.ns(),
+                    pulse,
+                    sid
+                );
             }
             histo.clear();
         }

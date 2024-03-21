@@ -36,7 +36,6 @@ use log::*;
 use netpod::ScalarType;
 use netpod::SeriesKind;
 use netpod::Shape;
-use scywr::iteminsertqueue::ChannelInfoItem;
 use scywr::iteminsertqueue::ChannelStatusItem;
 use scywr::iteminsertqueue::QueryItem;
 use serde::Serialize;
@@ -1111,15 +1110,6 @@ impl CaConnSet {
     }
 
     fn push_channel_status(&mut self, item: ChannelStatusItem) -> Result<(), Error> {
-        if false {
-            let _ = ChannelInfoItem {
-                ts_msp: todo!(),
-                series: todo!(),
-                ivl: todo!(),
-                interest: todo!(),
-                evsize: todo!(),
-            };
-        }
         let item = QueryItem::ChannelStatus(item);
         let mut v = VecDeque::new();
         v.push_back(item);

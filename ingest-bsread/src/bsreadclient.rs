@@ -17,10 +17,10 @@ use futures_util::StreamExt;
 use netpod::log::*;
 use netpod::timeunits::HOUR;
 use netpod::timeunits::SEC;
+use netpod::DtNano;
 use netpod::ScalarType;
 use netpod::Shape;
-use netpod::TS_MSP_GRID_SPACING;
-use netpod::TS_MSP_GRID_UNIT;
+use netpod::TsMs;
 use scywr::iteminsertqueue::ArrayValue;
 use scywr::iteminsertqueue::DataValue;
 use scywr::iteminsertqueue::InsertItem;
@@ -171,8 +171,12 @@ impl BsreadClient {
                             self.inserted_in_ts_msp_count += 1;
                             (self.ts_msp_last, false)
                         };
+                    if true {
+                        todo!("rework grid handling");
+                    }
                     let ts_lsp = ts - ts_msp;
-                    let ts_msp_grid = (ts / TS_MSP_GRID_UNIT / TS_MSP_GRID_SPACING * TS_MSP_GRID_SPACING) as u32;
+                    let ts_msp_grid = 0;
+                    // let ts_msp_grid = (ts / TS_MSP_GRID_UNIT / TS_MSP_GRID_SPACING * TS_MSP_GRID_SPACING) as u32;
                     let ts_msp_grid = if self.ts_msp_grid_last != ts_msp_grid {
                         self.ts_msp_grid_last = ts_msp_grid;
                         Some(ts_msp_grid)
@@ -181,15 +185,14 @@ impl BsreadClient {
                     };
                     let item = InsertItem {
                         series: series.into(),
-                        ts_msp,
-                        ts_lsp,
+                        ts_msp: TsMs::from_ns_u64(ts_msp),
+                        ts_lsp: DtNano::from_ns(ts_lsp),
                         msp_bump: ts_msp_changed,
-                        ts_msp_grid,
                         pulse,
                         scalar_type,
                         shape,
                         val: DataValue::Array(ArrayValue::Bool(evtset)),
-                        ts_local: ts,
+                        ts_local: err::todoval(),
                     };
                     let item = QueryItem::Insert(item);
                     match self.insqtx.send(item).await {

@@ -58,9 +58,9 @@ async fn main_run_inner(opts: DaqIngestOpts) -> Result<(), Error> {
                 name: k.pg_name,
             };
             let scyconf = ScyllaIngestConfig::new([k.scylla_host], k.scylla_keyspace);
-            scywr::schema::migrate_scylla_data_schema(&scyconf, netpod::ttl::RetentionTime::Short)
-                .await
-                .map_err(Error::from_string)?;
+            // scywr::schema::migrate_scylla_data_schema(&scyconf, netpod::ttl::RetentionTime::Short)
+            //     .await
+            //     .map_err(Error::from_string)?;
             match k.sub {
                 DbSub::Data(u) => {
                     use daqingest::opts::DbDataSub;

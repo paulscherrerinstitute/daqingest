@@ -13,8 +13,6 @@ use netpod::ScalarType;
 use netpod::SeriesKind;
 use netpod::Shape;
 use netpod::TsNano;
-use netpod::TS_MSP_GRID_SPACING;
-use netpod::TS_MSP_GRID_UNIT;
 use scywr::iteminsertqueue::DataValue;
 use scywr::iteminsertqueue::InsertItem;
 use scywr::iteminsertqueue::QueryItem;
@@ -61,7 +59,9 @@ pub struct SeriesWriter {
     shape: Shape,
     ts_msp_last: Option<TsNano>,
     inserted_in_current_msp: u32,
+    bytes_in_current_msp: u32,
     msp_max_entries: u32,
+    msp_max_bytes: u32,
     // TODO this should be in an Option:
     ts_msp_grid_last: u32,
     binner: ConnTimeBin,
@@ -121,7 +121,9 @@ impl SeriesWriter {
             shape,
             ts_msp_last: None,
             inserted_in_current_msp: 0,
+            bytes_in_current_msp: 0,
             msp_max_entries: 64000,
+            msp_max_bytes: 1024 * 1024 * 20,
             ts_msp_grid_last: 0,
             binner,
         };
@@ -154,54 +156,48 @@ impl SeriesWriter {
         // As long as one writer is active, the msp is arbitrary.
 
         // Maximum resolution of the ts msp:
-        let msp_res_max = SEC * 10;
+        let msp_res_max = SEC * 2;
 
-        let (ts_msp, ts_msp_changed) = match self.ts_msp_last.clone() {
+        let (ts_msp, ts_msp_changed) = match self.ts_msp_last {
             Some(ts_msp_last) => {
-                if self.inserted_in_current_msp >= self.msp_max_entries || ts_msp_last.clone().add_ns(HOUR) <= ts {
-                    let ts_msp = ts.clone().div(msp_res_max).mul(msp_res_max);
+                if self.inserted_in_current_msp >= self.msp_max_entries
+                    || self.bytes_in_current_msp >= self.msp_max_bytes
+                    || ts_msp_last.add_ns(HOUR) <= ts
+                {
+                    let ts_msp = ts.div(msp_res_max).mul(msp_res_max);
                     if ts_msp == ts_msp_last {
                         (ts_msp, false)
                     } else {
-                        self.ts_msp_last = Some(ts_msp.clone());
+                        self.ts_msp_last = Some(ts_msp);
                         self.inserted_in_current_msp = 1;
+                        self.bytes_in_current_msp = val.byte_size();
                         (ts_msp, true)
                     }
                 } else {
                     self.inserted_in_current_msp += 1;
+                    self.bytes_in_current_msp += val.byte_size();
                     (ts_msp_last, false)
                 }
             }
             None => {
-                let ts_msp = ts.clone().div(msp_res_max).mul(msp_res_max);
-                self.ts_msp_last = Some(ts_msp.clone());
+                let ts_msp = ts.div(msp_res_max).mul(msp_res_max);
+                self.ts_msp_last = Some(ts_msp);
                 self.inserted_in_current_msp = 1;
+                self.bytes_in_current_msp = val.byte_size();
                 (ts_msp, true)
             }
         };
-        let ts_lsp = ts.clone().sub(ts_msp.clone());
-        let ts_msp_grid = ts
-            .div(TS_MSP_GRID_UNIT)
-            .div(TS_MSP_GRID_SPACING)
-            .mul(TS_MSP_GRID_SPACING)
-            .ns() as u32;
-        let ts_msp_grid = if self.ts_msp_grid_last != ts_msp_grid {
-            self.ts_msp_grid_last = ts_msp_grid;
-            Some(ts_msp_grid)
-        } else {
-            None
-        };
+        let ts_lsp = ts.delta(ts_msp);
         let item = InsertItem {
             series: self.sid.clone(),
-            ts_msp: ts_msp.ns(),
-            ts_lsp: ts_lsp.ns(),
+            ts_msp: ts_msp.to_ts_ms(),
+            ts_lsp: ts_lsp,
             msp_bump: ts_msp_changed,
             pulse: 0,
             scalar_type: self.scalar_type.clone(),
             shape: self.shape.clone(),
             val,
-            ts_msp_grid,
-            ts_local: ts_local.ns(),
+            ts_local: ts_local.to_ts_ms(),
         };
         item_qu.push_back(QueryItem::Insert(item));
         Ok(())
@@ -336,7 +332,7 @@ fn write_00() {
         let scyconf = &ScyllaIngestConfig::new(["127.0.0.1:19042"], "daqingest_test_00");
         let (pgc, pg_jh) = dbpg::conn::make_pg_client(dbconf).await?;
         dbpg::schema::schema_check(&pgc).await?;
-        scywr::schema::migrate_scylla_data_schema(scyconf, netpod::ttl::RetentionTime::Short).await?;
+        scywr::schema::migrate_scylla_data_schema(scyconf, 1, true, netpod::ttl::RetentionTime::Short).await?;
         let scy = scywr::session::create_session(scyconf).await?;
         let stats = SeriesByChannelStats::new();
         let stats = Arc::new(stats);

@@ -572,7 +572,7 @@ pub async fn run(opts: CaIngestOpts, channels_config: Option<ChannelsConfig>) ->
     drop(pg);
     jh.await?.map_err(Error::from_string)?;
 
-    scywr::schema::migrate_scylla_data_schema(opts.scylla_config(), RetentionTime::Short)
+    scywr::schema::migrate_scylla_data_schema(opts.scylla_config(), 1, true, RetentionTime::Short)
         .await
         .map_err(Error::from_string)?;
 

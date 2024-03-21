@@ -21,6 +21,7 @@ use log::*;
 use netpod::timeunits::*;
 use netpod::ScalarType;
 use netpod::Shape;
+use netpod::TsMs;
 use netpod::TsNano;
 use netpod::EMIT_ACCOUNTING_SNAP;
 use proto::CaItem;
@@ -32,15 +33,12 @@ use proto::EventAdd;
 use scywr::iteminsertqueue as scywriiq;
 use scywr::iteminsertqueue::Accounting;
 use scywr::iteminsertqueue::DataValue;
-use scywriiq::ChannelInfoItem;
+use scywr::iteminsertqueue::QueryItem;
 use scywriiq::ChannelStatus;
 use scywriiq::ChannelStatusClosedReason;
 use scywriiq::ChannelStatusItem;
 use scywriiq::ConnectionStatus;
 use scywriiq::ConnectionStatusItem;
-use scywriiq::IvlItem;
-use scywriiq::MuteItem;
-use scywriiq::QueryItem;
 use serde::Serialize;
 use series::ChannelStatusSeriesId;
 use series::SeriesId;
@@ -71,6 +69,7 @@ use tokio::net::TcpStream;
 
 const CONNECTING_TIMEOUT: Duration = Duration::from_millis(6000);
 const IOC_PING_IVL: Duration = Duration::from_millis(80000);
+const DO_RATE_CHECK: bool = false;
 
 #[allow(unused)]
 macro_rules! trace2 {
@@ -303,16 +302,14 @@ struct CreatedState {
     insert_item_ivl_ema: IntervalEma,
     item_recv_ivl_ema: IntervalEma,
     insert_recv_ivl_last: Instant,
-    insert_next_earliest: Instant,
     muted_before: u32,
-    insert_ivl_min_mus: u32,
     info_store_msp_last: u32,
     recv_count: u64,
     recv_bytes: u64,
     stwin_ts: u64,
     stwin_count: u32,
     stwin_bytes: u32,
-    account_emit_last: u64,
+    account_emit_last: TsMs,
     account_count: u64,
     account_bytes: u64,
 }
@@ -334,16 +331,14 @@ impl CreatedState {
             insert_item_ivl_ema: IntervalEma::new(),
             item_recv_ivl_ema: IntervalEma::new(),
             insert_recv_ivl_last: tsnow,
-            insert_next_earliest: tsnow,
             muted_before: 0,
-            insert_ivl_min_mus: 0,
             info_store_msp_last: 0,
             recv_count: 0,
             recv_bytes: 0,
             stwin_ts: 0,
             stwin_count: 0,
             stwin_bytes: 0,
-            account_emit_last: 0,
+            account_emit_last: TsMs(0),
             account_count: 0,
             account_bytes: 0,
         }
@@ -717,7 +712,6 @@ pub struct CaConn {
     remote_addr_dbg: SocketAddrV4,
     local_epics_hostname: String,
     stats: Arc<CaConnStats>,
-    insert_ivl_min_mus: u32,
     conn_command_tx: Pin<Box<Sender<ConnCommand>>>,
     conn_command_rx: Pin<Box<Receiver<ConnCommand>>>,
     conn_backoff: f32,
@@ -784,7 +778,6 @@ impl CaConn {
             remote_addr_dbg,
             local_epics_hostname,
             stats,
-            insert_ivl_min_mus: 1000 * 4,
             conn_command_tx: Box::pin(cq_tx),
             conn_command_rx: Box::pin(cq_rx),
             conn_backoff: 0.02,
@@ -1262,14 +1255,6 @@ impl CaConn {
                     let msp = info_store_msp_from_time(timenow.clone());
                     if msp != crst.info_store_msp_last {
                         crst.info_store_msp_last = msp;
-                        let item = QueryItem::ChannelInfo(ChannelInfoItem {
-                            ts_msp: msp,
-                            series: st.writer.sid(),
-                            ivl: crst.item_recv_ivl_ema.ema().ema(),
-                            interest: 0.,
-                            evsize: 0,
-                        });
-                        self.insert_item_queue.push_back(item);
                     }
                 }
                 ChannelState::Error(_) => {
@@ -1359,7 +1344,7 @@ impl CaConn {
                     crst.stwin_ts = stwin_ts;
                     crst.stwin_count = 0;
                 }
-                {
+                if DO_RATE_CHECK {
                     crst.stwin_count += 1;
                     crst.stwin_bytes += ev.payload_len;
                     if crst.stwin_count > 30000 || crst.stwin_bytes > 1024 * 1024 * 500 {
@@ -1587,56 +1572,33 @@ impl CaConn {
         let ts = value.ts;
         let ts_diff = ts.abs_diff(ts_local);
         stats.ca_ts_off().ingest((ts_diff / MS) as u32);
-        if tsnow >= crst.insert_next_earliest {
+        {
             {
                 crst.account_count += 1;
                 // TODO how do we account for bytes? Here, we also add 8 bytes for the timestamp.
                 crst.account_bytes += 8 + payload_len as u64;
-            }
-            {
                 crst.muted_before = 0;
                 crst.insert_item_ivl_ema.tick(tsnow);
-                let em = crst.insert_item_ivl_ema.ema();
-                let ema = em.ema();
-                let ivl_min = (crst.insert_ivl_min_mus as f32) * 1e-6;
-                let dt = (ivl_min - ema).max(0.) / em.k();
-                crst.insert_next_earliest = tsnow + Duration::from_micros((dt * 1e6) as u64);
             }
             Self::check_ev_value_data(&value.data, writer.scalar_type())?;
             {
                 let val: DataValue = value.data.into();
                 writer.write(TsNano::from_ns(ts), TsNano::from_ns(ts_local), val, iiq)?;
             }
-            Ok(())
-        } else {
+        }
+        if false {
+            // TODO record stats on drop with the new filter
             stats.channel_fast_item_drop.inc();
-            // TODO
-            if false {
+            {
                 if tsnow.duration_since(crst.insert_recv_ivl_last) >= Duration::from_millis(10000) {
                     crst.insert_recv_ivl_last = tsnow;
                     let ema = crst.insert_item_ivl_ema.ema();
-                    let item = IvlItem {
-                        series: series.clone(),
-                        ts,
-                        ema: ema.ema(),
-                        emd: ema.emv().sqrt(),
-                    };
-                    iiq.push_back(QueryItem::Ivl(item));
                 }
-                if false && crst.muted_before == 0 {
-                    let ema = crst.insert_item_ivl_ema.ema();
-                    let item = MuteItem {
-                        series: series.clone(),
-                        ts,
-                        ema: ema.ema(),
-                        emd: ema.emv().sqrt(),
-                    };
-                    iiq.push_back(QueryItem::Mute(item));
-                }
+                if crst.muted_before == 0 {}
                 crst.muted_before = 1;
             }
-            Ok(())
         }
+        Ok(())
     }
 
     fn check_ev_value_data(data: &proto::CaDataValue, scalar_type: &ScalarType) -> Result<(), Error> {
@@ -1989,16 +1951,14 @@ impl CaConn {
             insert_item_ivl_ema: IntervalEma::new(),
             item_recv_ivl_ema: IntervalEma::new(),
             insert_recv_ivl_last: tsnow,
-            insert_next_earliest: tsnow,
             muted_before: 0,
-            insert_ivl_min_mus: self.insert_ivl_min_mus,
             info_store_msp_last: info_store_msp_from_time(self.tmp_ts_poll),
             recv_count: 0,
             recv_bytes: 0,
             stwin_ts: 0,
             stwin_count: 0,
             stwin_bytes: 0,
-            account_emit_last: 0,
+            account_emit_last: TsMs::from_ms_u64(0),
             account_count: 0,
             account_bytes: 0,
         };
@@ -2244,15 +2204,15 @@ impl CaConn {
 
     fn emit_accounting(&mut self) -> Result<(), Error> {
         let stnow = self.tmp_ts_poll;
-        let ts_sec = stnow.duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs();
-        let ts_sec_snap = ts_sec / EMIT_ACCOUNTING_SNAP * EMIT_ACCOUNTING_SNAP;
+        let ts = TsMs::from_system_time(stnow);
+        let (msp, lsp) = ts.to_grid_02(EMIT_ACCOUNTING_SNAP);
         for (_k, chconf) in self.channels.iter_mut() {
             let st0 = &mut chconf.state;
             match st0 {
                 ChannelState::Writable(st1) => {
                     let ch = &mut st1.channel;
-                    if ts_sec_snap != ch.account_emit_last {
-                        ch.account_emit_last = ts_sec_snap;
+                    if ch.account_emit_last != msp {
+                        ch.account_emit_last = msp;
                         if ch.account_count != 0 {
                             let series_id = ch.cssid.id();
                             let count = ch.account_count as i64;
@@ -2261,7 +2221,7 @@ impl CaConn {
                             ch.account_bytes = 0;
                             let item = QueryItem::Accounting(Accounting {
                                 part: (series_id & 0xff) as i32,
-                                ts: ts_sec_snap as i64,
+                                ts: msp,
                                 series: SeriesId::new(series_id),
                                 count,
                                 bytes,

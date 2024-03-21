@@ -13,7 +13,6 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::Context;
 use std::task::Poll;
-use std::time::Duration;
 use std::time::Instant;
 use taskrun::tokio;
 use tokio::io::AsyncRead;

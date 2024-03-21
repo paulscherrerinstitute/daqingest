@@ -13,24 +13,22 @@ use crate::iteminsertqueue::QueryItem;
 use crate::iteminsertqueue::TimeBinSimpleF32;
 use crate::store::DataStore;
 use async_channel::Receiver;
+use atomic::AtomicU64;
+use atomic::Ordering;
 use err::Error;
 use log::*;
-use netpod::timeunits::MS;
-use netpod::timeunits::SEC;
 use netpod::ttl::RetentionTime;
+use netpod::TsMs;
 use smallvec::smallvec;
 use smallvec::SmallVec;
 use stats::InsertWorkerStats;
 use std::collections::VecDeque;
 use std::sync::atomic;
-use std::sync::atomic::AtomicU64;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
-use std::time::Instant;
 use std::time::SystemTime;
 use taskrun::tokio;
-use taskrun::tokio::task::JoinHandle;
+use tokio::task::JoinHandle;
 
 #[allow(unused)]
 macro_rules! trace2 {
@@ -53,9 +51,9 @@ fn stats_inc_for_err(stats: &stats::InsertWorkerStats, err: &crate::iteminsertqu
         Error::DbUnavailable => {
             stats.db_unavailable().inc();
         }
-        Error::DbError(e) => {
-            if false {
-                warn!("db error {e}");
+        Error::DbError(_) => {
+            if true {
+                warn!("db error {err}");
             }
             stats.db_error().inc();
         }
@@ -184,25 +182,17 @@ async fn worker(
                 }
             },
             QueryItem::Insert(item) => {
-                let item_ts_local = item.ts_local.clone();
-                let tsnow = {
-                    let ts = SystemTime::now();
-                    let epoch = ts.duration_since(std::time::UNIX_EPOCH).unwrap();
-                    epoch.as_secs() * SEC + epoch.subsec_nanos() as u64
-                };
-                let dt = ((tsnow / 1000000) as u32).saturating_sub((item_ts_local / 1000000) as u32);
+                let item_ts_local = item.ts_local;
+                let tsnow = TsMs::from_system_time(SystemTime::now());
+                let dt = tsnow.to_u64().saturating_sub(item_ts_local.to_u64()) as u32;
                 stats.item_lat_net_worker().ingest(dt);
                 let insert_frac = insert_worker_opts.insert_frac.load(Ordering::Acquire);
                 let do_insert = i1 % 1000 < insert_frac;
                 match insert_item(item, &data_store, do_insert, &stats).await {
                     Ok(_) => {
                         stats.inserted_values().inc();
-                        let tsnow = {
-                            let ts = SystemTime::now();
-                            let epoch = ts.duration_since(std::time::UNIX_EPOCH).unwrap();
-                            epoch.as_secs() * SEC + epoch.subsec_nanos() as u64
-                        };
-                        let dt = ((tsnow / 1000000) as u32).saturating_sub((item_ts_local / 1000000) as u32);
+                        let tsnow = TsMs::from_system_time(SystemTime::now());
+                        let dt = tsnow.to_u64().saturating_sub(item_ts_local.to_u64()) as u32;
                         stats.item_lat_net_store().ingest(dt);
                         backoff = backoff_0;
                     }
@@ -212,70 +202,6 @@ async fn worker(
                     }
                 }
                 i1 += 1;
-            }
-            QueryItem::Mute(item) => {
-                let values = (
-                    (item.series.id() & 0xff) as i32,
-                    item.series.id() as i64,
-                    item.ts as i64,
-                    item.ema,
-                    item.emd,
-                );
-                let qu = err::todoval();
-                let qres = data_store.scy.execute(&qu, values).await;
-                match qres {
-                    Ok(_) => {
-                        stats.inserted_mute().inc();
-                        backoff = backoff_0;
-                    }
-                    Err(e) => {
-                        stats_inc_for_err(&stats, &crate::iteminsertqueue::Error::QueryError(e));
-                        back_off_sleep(&mut backoff).await;
-                    }
-                }
-            }
-            QueryItem::Ivl(item) => {
-                let values = (
-                    (item.series.id() & 0xff) as i32,
-                    item.series.id() as i64,
-                    item.ts as i64,
-                    item.ema,
-                    item.emd,
-                );
-                let qu = err::todoval();
-                let qres = data_store.scy.execute(&qu, values).await;
-                match qres {
-                    Ok(_) => {
-                        stats.inserted_interval().inc();
-                        backoff = backoff_0;
-                    }
-                    Err(e) => {
-                        stats_inc_for_err(&stats, &crate::iteminsertqueue::Error::QueryError(e));
-                        back_off_sleep(&mut backoff).await;
-                    }
-                }
-            }
-            QueryItem::ChannelInfo(item) => {
-                let params = (
-                    (item.series.id() & 0xff) as i32,
-                    item.ts_msp as i32,
-                    item.series.id() as i64,
-                    item.ivl,
-                    item.interest,
-                    item.evsize as i32,
-                );
-                let qu = err::todoval();
-                let qres = data_store.scy.execute(&qu, params).await;
-                match qres {
-                    Ok(_) => {
-                        stats.inserted_channel_info().inc();
-                        backoff = backoff_0;
-                    }
-                    Err(e) => {
-                        stats_inc_for_err(&stats, &crate::iteminsertqueue::Error::QueryError(e));
-                        back_off_sleep(&mut backoff).await;
-                    }
-                }
             }
             QueryItem::TimeBinSimpleF32(item) => {
                 info!("have time bin patch to insert: {item:?}");
@@ -310,15 +236,35 @@ async fn worker_streamed(
     let mut stream = item_inp
         .map(|batch| {
             stats.item_recv.inc();
-            let tsnow_u64 = {
-                let ts = SystemTime::now();
-                let epoch = ts.duration_since(std::time::UNIX_EPOCH).unwrap();
-                epoch.as_secs() * SEC + epoch.subsec_nanos() as u64
-            };
+            let tsnow = TsMs::from_system_time(SystemTime::now());
             let mut res = Vec::with_capacity(32);
             for item in batch {
+                if false {
+                    match &item {
+                        QueryItem::ConnectionStatus(_) => {
+                            debug!("execute  ConnectionStatus");
+                        }
+                        QueryItem::ChannelStatus(_) => {
+                            debug!("execute  ChannelStatus");
+                        }
+                        QueryItem::Insert(item) => {
+                            debug!(
+                                "execute  Insert  {:?}  {:?}  {:?}",
+                                item.series,
+                                item.ts_msp,
+                                item.val.shape()
+                            );
+                        }
+                        QueryItem::TimeBinSimpleF32(_) => {
+                            debug!("execute  TimeBinSimpleF32");
+                        }
+                        QueryItem::Accounting(_) => {
+                            debug!("execute  Accounting");
+                        }
+                    }
+                }
                 let futs = match item {
-                    QueryItem::Insert(item) => prepare_query_insert_futs(item, &data_store, &stats, tsnow_u64),
+                    QueryItem::Insert(item) => prepare_query_insert_futs(item, &data_store, &stats, tsnow),
                     QueryItem::ConnectionStatus(item) => {
                         stats.inserted_connection_status().inc();
                         let fut = insert_connection_status_fut(item, &data_store, stats.clone());
@@ -328,15 +274,8 @@ async fn worker_streamed(
                         stats.inserted_channel_status().inc();
                         insert_channel_status_fut(item, &data_store, stats.clone())
                     }
-                    QueryItem::TimeBinSimpleF32(item) => {
-                        prepare_timebin_insert_futs(item, &data_store, &stats, tsnow_u64)
-                    }
-                    QueryItem::Accounting(item) => prepare_accounting_insert_futs(item, &data_store, &stats, tsnow_u64),
-                    _ => {
-                        // TODO
-                        debug!("TODO insert item {item:?}");
-                        SmallVec::new()
-                    }
+                    QueryItem::TimeBinSimpleF32(item) => prepare_timebin_insert_futs(item, &data_store, &stats, tsnow),
+                    QueryItem::Accounting(item) => prepare_accounting_insert_futs(item, &data_store, &stats, tsnow),
                 };
                 res.extend(futs.into_iter());
             }
@@ -382,11 +321,11 @@ fn prepare_query_insert_futs(
     item: InsertItem,
     data_store: &Arc<DataStore>,
     stats: &Arc<InsertWorkerStats>,
-    tsnow_u64: u64,
+    tsnow: TsMs,
 ) -> SmallVec<[InsertFut; 4]> {
     stats.inserts_value().inc();
     let item_ts_local = item.ts_local;
-    let dt = ((tsnow_u64 / 1000000) as u32).saturating_sub((item_ts_local / 1000000) as u32);
+    let dt = tsnow.to_u64().saturating_sub(item_ts_local.to_u64()) as u32;
     stats.item_lat_net_worker().ingest(dt);
     let msp_bump = item.msp_bump;
     let series = item.series.clone();
@@ -396,6 +335,7 @@ fn prepare_query_insert_futs(
     let fut = insert_item_fut(item, &data_store, do_insert, stats);
     futs.push(fut);
     if msp_bump {
+        // debug!("execute  MSP bump");
         stats.inserts_msp().inc();
         let fut = insert_msp_fut(
             series,
@@ -414,13 +354,13 @@ fn prepare_timebin_insert_futs(
     item: TimeBinSimpleF32,
     data_store: &Arc<DataStore>,
     stats: &Arc<InsertWorkerStats>,
-    tsnow_u64: u64,
+    tsnow: TsMs,
 ) -> SmallVec<[InsertFut; 4]> {
     // debug!("have time bin patch to insert: {item:?}");
     let params = (
         item.series.id() as i64,
         item.bin_len_ms,
-        item.ts_msp,
+        item.ts_msp.to_i64(),
         item.off,
         item.count,
         item.min,
@@ -433,7 +373,7 @@ fn prepare_timebin_insert_futs(
         data_store.scy.clone(),
         data_store.qu_insert_binned_scalar_f32_v02.clone(),
         params,
-        tsnow_u64,
+        tsnow,
         stats.clone(),
     );
     let futs = smallvec![fut];
@@ -456,14 +396,20 @@ fn prepare_accounting_insert_futs(
     item: Accounting,
     data_store: &Arc<DataStore>,
     stats: &Arc<InsertWorkerStats>,
-    tsnow_u64: u64,
+    tsnow: TsMs,
 ) -> SmallVec<[InsertFut; 4]> {
-    let params = (item.part, item.ts, item.series.id() as i64, item.count, item.bytes);
+    let params = (
+        item.part,
+        item.ts.to_i64(),
+        item.series.id() as i64,
+        item.count,
+        item.bytes,
+    );
     let fut = InsertFut::new(
         data_store.scy.clone(),
         data_store.qu_account_00.clone(),
         params,
-        tsnow_u64,
+        tsnow,
         stats.clone(),
     );
     let futs = smallvec![fut];

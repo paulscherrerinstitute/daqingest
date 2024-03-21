@@ -21,6 +21,7 @@ pub enum Error {
     NewSession(String),
     ScyllaNextRow(#[from] NextRowError),
     MissingData,
+    AddColumnImpossible,
 }
 
 impl From<crate::session::Error> for Error {
@@ -110,6 +111,7 @@ fn ddays(x: u64) -> Duration {
 }
 
 struct GenTwcsTab {
+    keyspace: String,
     name: String,
     col_names: Vec<String>,
     col_types: Vec<String>,
@@ -121,11 +123,8 @@ struct GenTwcsTab {
 }
 
 impl GenTwcsTab {
-    // name: "series_by_ts_msp".into(),
-    // cql: "(part int, ts_msp int, shape_kind int, scalar_type int, series bigint, primary key ((part, ts_msp, shape_kind, scalar_type), series))".into(),
-    // default_time_to_live: 60 * 60 * 5,
-    // compaction_window_size: 24 * 4,
-    pub fn new<'a, PRE, N, CI, A, B, I2, I2A, I3, I3A>(
+    pub fn new<'a, KS, PRE, N, CI, A, B, I2, I2A, I3, I3A>(
+        keyspace: KS,
         pre: PRE,
         name: N,
         cols: CI,
@@ -134,6 +133,7 @@ impl GenTwcsTab {
         default_time_to_live: Duration,
     ) -> Self
     where
+        KS: Into<String>,
         PRE: AsRef<str>,
         N: AsRef<str>,
         CI: IntoIterator<Item = &'a (A, B)>,
@@ -146,6 +146,7 @@ impl GenTwcsTab {
         I3A: Into<String>,
     {
         Self::new_inner(
+            keyspace.into(),
             pre.as_ref(),
             name.as_ref(),
             cols,
@@ -157,6 +158,7 @@ impl GenTwcsTab {
     }
 
     fn new_inner<'a, CI, A, B, I2, I2A, I3, I3A>(
+        keyspace: String,
         pre: &str,
         name: &str,
         cols: CI,
@@ -181,6 +183,7 @@ impl GenTwcsTab {
             col_types.push(b.as_ref().into());
         });
         Self {
+            keyspace,
             name: format!("{}{}", pre, name),
             col_names,
             col_types,
@@ -192,6 +195,10 @@ impl GenTwcsTab {
         }
     }
 
+    fn keyspace(&self) -> &str {
+        &self.keyspace
+    }
+
     fn name(&self) -> &str {
         &self.name
     }
@@ -199,6 +206,7 @@ impl GenTwcsTab {
     async fn setup(&self, scy: &ScySession) -> Result<(), Error> {
         self.create_if_missing(scy).await?;
         self.check_table_options(scy).await?;
+        self.check_columns(scy).await?;
         Ok(())
     }
 
@@ -271,9 +279,7 @@ impl GenTwcsTab {
             "select default_time_to_live, gc_grace_seconds, compaction",
             " from system_schema.tables where keyspace_name = ? and table_name = ?"
         );
-        let x = scy
-            .query_iter(cql, (scy.get_keyspace().unwrap().as_ref(), &self.name()))
-            .await?;
+        let x = scy.query_iter(cql, (self.keyspace(), self.name())).await?;
         let mut it = x.into_typed::<(i32, i32, BTreeMap<String, String>)>();
         let mut rows = Vec::new();
         while let Some(u) = it.next().await {
@@ -281,23 +287,15 @@ impl GenTwcsTab {
             rows.push((row.0 as u64, row.1 as u64, row.2));
         }
         if let Some(row) = rows.get(0) {
+            let mut set_opts = Vec::new();
             if row.0 != self.default_time_to_live.as_secs() {
-                let cql = format!(
-                    concat!("alter table {} with default_time_to_live = {}"),
-                    self.name(),
+                set_opts.push(format!(
+                    "default_time_to_live = {}",
                     self.default_time_to_live.as_secs()
-                );
-                debug!("{cql}");
-                scy.query(cql, ()).await?;
+                ));
             }
             if row.1 != self.gc_grace.as_secs() {
-                let cql = format!(
-                    concat!("alter table {} with gc_grace_seconds = {}"),
-                    self.name(),
-                    self.gc_grace.as_secs()
-                );
-                debug!("{cql}");
-                scy.query(cql, ()).await?;
+                set_opts.push(format!("gc_grace_seconds = {}", self.gc_grace.as_secs()));
             }
             if row.2 != self.compaction_options() {
                 let params: Vec<_> = self
@@ -306,11 +304,10 @@ impl GenTwcsTab {
                     .map(|(k, v)| format!("'{k}': '{v}'"))
                     .collect();
                 let params = params.join(", ");
-                let cql = format!(
-                    concat!("alter table {} with compaction = {{ {} }}"),
-                    self.name(),
-                    params
-                );
+                set_opts.push(format!("compaction = {{ {} }}", params));
+            }
+            if set_opts.len() != 0 {
+                let cql = format!(concat!("alter table {} with {}"), self.name(), set_opts.join(" and "));
                 debug!("{cql}");
                 scy.query(cql, ()).await?;
             }
@@ -320,27 +317,87 @@ impl GenTwcsTab {
         }
         Ok(())
     }
+
+    async fn check_columns(&self, scy: &ScySession) -> Result<(), Error> {
+        let cql = concat!(
+            "select column_name, type from system_schema.columns",
+            " where keyspace_name = ?",
+            " and table_name = ?",
+        );
+        let mut it = scy
+            .query_iter(cql, (self.keyspace(), self.name()))
+            .await?
+            .into_typed::<(String, String)>();
+        let mut names_exist = Vec::new();
+        let mut types_exist = Vec::new();
+        while let Some(x) = it.next().await {
+            let row = x?;
+            names_exist.push(row.0);
+            types_exist.push(row.1);
+        }
+        debug!("names_exist {:?}  types_exist {:?}", names_exist, types_exist);
+        for (cn, ct) in self.col_names.iter().zip(self.col_types.iter()) {
+            if names_exist.contains(cn) {
+                let i = names_exist.binary_search(cn).unwrap();
+                let ty2 = types_exist.get(i).unwrap();
+                if ct != ty2 {
+                    error!(
+                        "type mismatch for existing column  {}  {}  {}  {}",
+                        self.name(),
+                        cn,
+                        ct,
+                        ty2
+                    );
+                    return Err(Error::AddColumnImpossible);
+                }
+            } else {
+                if self.partition_keys.contains(cn) {
+                    error!("pk {} {}", cn, ct);
+                    return Err(Error::AddColumnImpossible);
+                }
+                if self.cluster_keys.contains(cn) {
+                    error!("ck {} {}", cn, ct);
+                    return Err(Error::AddColumnImpossible);
+                }
+                self.add_column(cn, ct, scy).await?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn add_column(&self, name: &str, ty: &str, scy: &ScySession) -> Result<(), Error> {
+        let cql = format!(concat!("alter table {} add {} {}"), self.name(), name, ty);
+        debug!("NOTE  add_column  CQL {}", cql);
+        scy.query(cql, ()).await?;
+        Ok(())
+    }
 }
 
 #[allow(unused)]
 async fn get_columns(keyspace: &str, table: &str, scy: &ScySession) -> Result<Vec<String>, Error> {
     let mut ret = Vec::new();
-    let cql = "select column_name, kind, type from system_schema.columns where keyspace_name = ? and table_name = ?";
-    let params = (keyspace, table);
-    let mut res = scy.query_iter(cql, params).await?;
-    while let Some(row) = res.next().await {
+    // kind (text) can be one of: "regular", "clustering", "partition_key".
+    // clustering_order (text) can be one of: "NONE", "ASC", "DESC".
+    // type (text) examples: "bigint", "frozen<list<float>>", etc.
+    let cql = concat!(
+        "select column_name, clustering_order, kind, position, type",
+        " from system_schema.columns where keyspace_name = ? and table_name = ?"
+    );
+    let mut it = scy
+        .query_iter(cql, (keyspace, table))
+        .await?
+        .into_typed::<(String, String, String, i32, String)>();
+    while let Some(x) = it.next().await {
+        let row = x?;
         // columns:
-        // kind (text): regular, clustering, partition_key.
         // column_name (text)
         // type (text): text, blob, int, ...
-        let row = row?;
-        let name = row.columns[0].as_ref().unwrap().as_text().unwrap();
-        ret.push(name.into());
+        ret.push(row.0);
     }
     Ok(ret)
 }
 
-async fn check_event_tables(rett: RetentionTime, scy: &ScySession) -> Result<(), Error> {
+async fn check_event_tables(keyspace: &str, rett: RetentionTime, scy: &ScySession) -> Result<(), Error> {
     let stys = [
         "u8", "u16", "u32", "u64", "i8", "i16", "i32", "i64", "f32", "f64", "bool", "string",
     ];
@@ -351,6 +408,7 @@ async fn check_event_tables(rett: RetentionTime, scy: &ScySession) -> Result<(),
     for (sty, cqlsty) in stys.into_iter().zip(cqlstys) {
         {
             let tab = GenTwcsTab::new(
+                keyspace,
                 rett.table_prefix(),
                 format!("events_scalar_{}", sty),
                 &[
@@ -368,6 +426,7 @@ async fn check_event_tables(rett: RetentionTime, scy: &ScySession) -> Result<(),
         }
         {
             let tab = GenTwcsTab::new(
+                keyspace,
                 rett.table_prefix(),
                 format!("events_array_{}", sty),
                 &[
@@ -376,6 +435,7 @@ async fn check_event_tables(rett: RetentionTime, scy: &ScySession) -> Result<(),
                     ("ts_lsp", "bigint"),
                     ("pulse", "bigint"),
                     ("value", &format!("frozen<list<{}>>", cqlsty)),
+                    ("valueblob", "blob"),
                 ],
                 ["series", "ts_msp"],
                 ["ts_lsp"],
@@ -387,13 +447,16 @@ async fn check_event_tables(rett: RetentionTime, scy: &ScySession) -> Result<(),
     Ok(())
 }
 
-pub async fn migrate_scylla_data_schema(scyconf: &ScyllaIngestConfig, rett: RetentionTime) -> Result<(), Error> {
+pub async fn migrate_scylla_data_schema(
+    scyconf: &ScyllaIngestConfig,
+    replication: u32,
+    durable: bool,
+    rett: RetentionTime,
+) -> Result<(), Error> {
     let scy2 = create_session_no_ks(scyconf).await?;
     let scy = &scy2;
 
     if !has_keyspace(scyconf.keyspace(), scy).await? {
-        let replication = 3;
-        let durable = false;
         let cql = format!(
             concat!(
                 "create keyspace {}",
@@ -409,51 +472,27 @@ pub async fn migrate_scylla_data_schema(scyconf: &ScyllaIngestConfig, rett: Rete
         info!("keyspace created");
     }
 
-    scy.use_keyspace(scyconf.keyspace(), true).await?;
+    let ks = scyconf.keyspace();
 
-    check_event_tables(rett.clone(), scy).await?;
+    scy.use_keyspace(ks, true).await?;
+
+    check_event_tables(ks, rett.clone(), scy).await?;
 
     {
         let tab = GenTwcsTab::new(
+            ks,
             rett.table_prefix(),
             "ts_msp",
             &[("series", "bigint"), ("ts_msp", "bigint")],
             ["series"],
-            ["ts_msp_ms"],
+            ["ts_msp"],
             rett.ttl_ts_msp(),
         );
         tab.setup(scy).await?;
     }
     {
         let tab = GenTwcsTab::new(
-            rett.table_prefix(),
-            "ts_msp_ms",
-            &[("series", "bigint"), ("ts_msp_ms", "bigint")],
-            ["series"],
-            ["ts_msp_ms"],
-            rett.ttl_ts_msp(),
-        );
-        tab.setup(scy).await?;
-    }
-    {
-        let tab = GenTwcsTab::new(
-            rett.table_prefix(),
-            "series_by_ts_msp",
-            &[
-                ("part", "int"),
-                ("ts_msp", "int"),
-                ("shape_kind", "int"),
-                ("scalar_type", "int"),
-                ("series", "bigint"),
-            ],
-            ["part", "ts_msp", "shape_kind", "scalar_type"],
-            ["series"],
-            dhours(5),
-        );
-        tab.setup(scy).await?;
-    }
-    {
-        let tab = GenTwcsTab::new(
+            ks,
             rett.table_prefix(),
             "connection_status",
             &[
@@ -470,6 +509,7 @@ pub async fn migrate_scylla_data_schema(scyconf: &ScyllaIngestConfig, rett: Rete
     }
     {
         let tab = GenTwcsTab::new(
+            ks,
             rett.table_prefix(),
             "channel_status",
             &[
@@ -486,6 +526,7 @@ pub async fn migrate_scylla_data_schema(scyconf: &ScyllaIngestConfig, rett: Rete
     }
     {
         let tab = GenTwcsTab::new(
+            ks,
             rett.table_prefix(),
             "channel_status_by_ts_msp",
             &[
@@ -502,6 +543,7 @@ pub async fn migrate_scylla_data_schema(scyconf: &ScyllaIngestConfig, rett: Rete
     }
     {
         let tab = GenTwcsTab::new(
+            ks,
             rett.table_prefix(),
             "binned_scalar_f32",
             &[
@@ -522,6 +564,7 @@ pub async fn migrate_scylla_data_schema(scyconf: &ScyllaIngestConfig, rett: Rete
     }
     {
         let tab = GenTwcsTab::new(
+            ks,
             rett.table_prefix(),
             "account_00",
             &[
