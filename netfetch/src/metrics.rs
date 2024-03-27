@@ -1,3 +1,4 @@
+pub mod postingest;
 pub mod status;
 
 use crate::ca::conn::ChannelStateInfo;

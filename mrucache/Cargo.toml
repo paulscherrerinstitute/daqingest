@@ -1,0 +1,9 @@
+[package]
+name = "mrucache"
+version = "0.0.1"
+edition = "2021"
+authors = ["Dominik Werder <dominik.werder@gmail.com>"]
+
+[dependencies]
+hashbrown = "0.14"
+log = { path = "../log" }

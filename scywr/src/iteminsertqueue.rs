@@ -193,6 +193,29 @@ impl DataValue {
         }
     }
 
+    pub fn scalar_type(&self) -> ScalarType {
+        match self {
+            DataValue::Scalar(x) => match x {
+                ScalarValue::I8(_) => ScalarType::I8,
+                ScalarValue::I16(_) => ScalarType::I16,
+                ScalarValue::I32(_) => ScalarType::I32,
+                ScalarValue::F32(_) => ScalarType::F32,
+                ScalarValue::F64(_) => ScalarType::F64,
+                ScalarValue::Enum(_) => ScalarType::U16,
+                ScalarValue::String(_) => ScalarType::STRING,
+                ScalarValue::Bool(_) => ScalarType::BOOL,
+            },
+            DataValue::Array(x) => match x {
+                ArrayValue::I8(_) => ScalarType::I8,
+                ArrayValue::I16(_) => ScalarType::I16,
+                ArrayValue::I32(_) => ScalarType::I32,
+                ArrayValue::F32(_) => ScalarType::F32,
+                ArrayValue::F64(_) => ScalarType::F64,
+                ArrayValue::Bool(_) => ScalarType::BOOL,
+            },
+        }
+    }
+
     pub fn shape(&self) -> Shape {
         match self {
             DataValue::Scalar(_) => Shape::Scalar,

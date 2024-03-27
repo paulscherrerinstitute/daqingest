@@ -19,4 +19,4 @@ series = { path = "../series" }
 err = { path = "../../daqbuffer/crates/err" }
 netpod = { path = "../../daqbuffer/crates/netpod" }
 taskrun = { path = "../../daqbuffer/crates/taskrun" }
-bitshuffle = { path = "../../daqbuffer/crates/bitshuffle" }
+#bitshuffle = { path = "../../daqbuffer/crates/bitshuffle" }
