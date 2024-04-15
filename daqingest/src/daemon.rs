@@ -3,6 +3,7 @@ pub mod inserthook;
 use async_channel::Receiver;
 use async_channel::Sender;
 use async_channel::WeakSender;
+use dbpg::seriesbychannel::ChannelInfoQuery;
 use err::Error;
 use log::*;
 use netfetch::ca::connset::CaConnSet;
@@ -75,6 +76,10 @@ pub struct Daemon {
     insert_workers_running: AtomicU64,
     query_item_tx_weak: WeakSender<VecDeque<QueryItem>>,
     connset_health_lat_ema: f32,
+    metrics_shutdown_tx: Sender<u32>,
+    metrics_shutdown_rx: Receiver<u32>,
+    metrics_jh: Option<JoinHandle<Result<(), Error>>>,
+    channel_info_query_tx: Sender<ChannelInfoQuery>,
 }
 
 impl Daemon {
@@ -109,7 +114,7 @@ impl Daemon {
             ingest_opts.backend().into(),
             local_epics_hostname,
             query_item_tx,
-            channel_info_query_tx,
+            channel_info_query_tx.clone(),
             ingest_opts.clone(),
             writer_establis_tx,
         );
@@ -170,6 +175,7 @@ impl Daemon {
 
         let rett = RetentionTime::Short;
 
+        #[cfg(DISABLED)]
         let insert_workers_jh = scywr::insertworker::spawn_scylla_insert_workers(
             rett,
             opts.scyconf.clone(),
@@ -180,6 +186,14 @@ impl Daemon {
             insert_worker_opts,
             insert_worker_stats.clone(),
             ingest_opts.use_rate_limit_queue(),
+        )
+        .await?;
+        let insert_workers_jh = scywr::insertworker::spawn_scylla_insert_workers_dummy(
+            ingest_opts.insert_worker_count(),
+            ingest_opts.insert_worker_concurrency(),
+            query_item_rx,
+            insert_worker_opts,
+            insert_worker_stats.clone(),
         )
         .await?;
         let stats = Arc::new(DaemonStats::new());
@@ -218,6 +232,8 @@ impl Daemon {
             //jh.await.map_err(|e| e.to_string()).map_err(Error::from)??;
         }
 
+        let (metrics_shutdown_tx, metrics_shutdown_rx) = async_channel::bounded(8);
+
         let ret = Self {
             opts,
             ingest_opts,
@@ -241,6 +257,10 @@ impl Daemon {
             insert_workers_running: AtomicU64::new(0),
             query_item_tx_weak,
             connset_health_lat_ema: 0.,
+            metrics_shutdown_tx,
+            metrics_shutdown_rx,
+            metrics_jh: None,
+            channel_info_query_tx,
         };
         Ok(ret)
     }
@@ -499,7 +519,47 @@ impl Daemon {
         taskrun::spawn(ticker);
     }
 
+    pub async fn spawn_metrics(&mut self) -> Result<(), Error> {
+        let tx = self.tx.clone();
+        let daemon_stats = self.stats().clone();
+        let connset_cmd_tx = self.connset_ctrl.sender().clone();
+        let ca_conn_stats = self.connset_ctrl.ca_conn_stats().clone();
+        let dcom = Arc::new(netfetch::metrics::DaemonComm::new(tx.clone()));
+        let metrics_jh = {
+            let conn_set_stats = self.connset_ctrl.stats().clone();
+            let stats_set = StatsSet::new(
+                daemon_stats,
+                conn_set_stats,
+                ca_conn_stats,
+                self.connset_ctrl.ca_proto_stats().clone(),
+                self.insert_worker_stats.clone(),
+                self.series_by_channel_stats.clone(),
+                self.connset_ctrl.ioc_finder_stats().clone(),
+                self.opts.insert_frac.clone(),
+            );
+            let fut = netfetch::metrics::metrics_service(
+                self.ingest_opts.api_bind(),
+                dcom,
+                connset_cmd_tx,
+                stats_set,
+                self.metrics_shutdown_rx.clone(),
+            );
+            tokio::task::spawn(fut)
+        };
+        self.metrics_jh = Some(metrics_jh);
+        Ok(())
+    }
+
     pub async fn daemon(mut self) -> Result<(), Error> {
+        {
+            let backend = String::new();
+            let (item_tx, item_rx) = async_channel::bounded(256);
+            let info_worker_tx = self.channel_info_query_tx.clone();
+            let iiq_tx = self.query_item_tx_weak.upgrade().unwrap();
+            let worker_fut =
+                netfetch::metrics::postingest::process_api_query_items(backend, item_rx, info_worker_tx, iiq_tx);
+            let worker_jh = taskrun::spawn(worker_fut);
+        }
         Self::spawn_ticker(self.tx.clone(), self.stats.clone());
         loop {
             if self.shutting_down {
@@ -537,7 +597,12 @@ impl Daemon {
                 }
             }
         }
-        info!("daemon done");
+        info!("Wait for metrics handler");
+        self.metrics_shutdown_tx.send(1).await?;
+        if let Some(jh) = self.metrics_jh.take() {
+            jh.await??;
+        }
+        info!("Joined metrics handler");
         Ok(())
     }
 }
@@ -572,9 +637,15 @@ pub async fn run(opts: CaIngestOpts, channels_config: Option<ChannelsConfig>) ->
     drop(pg);
     jh.await?.map_err(Error::from_string)?;
 
-    scywr::schema::migrate_scylla_data_schema(opts.scylla_config(), 1, true, RetentionTime::Short)
+    scywr::schema::migrate_scylla_data_schema(opts.scylla_config(), RetentionTime::Short)
         .await
         .map_err(Error::from_string)?;
+
+    if let Some(scyconf) = opts.scylla_config_lt() {
+        scywr::schema::migrate_scylla_data_schema(scyconf, RetentionTime::Long)
+            .await
+            .map_err(Error::from_string)?;
+    }
 
     info!("database check done");
 
@@ -600,39 +671,14 @@ pub async fn run(opts: CaIngestOpts, channels_config: Option<ChannelsConfig>) ->
         store_workers_rate,
     };
     let daemon = Daemon::new(opts2, opts.clone()).await?;
-    let tx = daemon.tx.clone();
-    let daemon_stats = daemon.stats().clone();
-    let connset_cmd_tx = daemon.connset_ctrl.sender().clone();
-    let ca_conn_stats = daemon.connset_ctrl.ca_conn_stats().clone();
-
-    let (metrics_shutdown_tx, metrics_shutdown_rx) = async_channel::bounded(8);
-
-    let dcom = Arc::new(netfetch::metrics::DaemonComm::new(tx.clone()));
-    let metrics_jh = {
-        let conn_set_stats = daemon.connset_ctrl.stats().clone();
-        let stats_set = StatsSet::new(
-            daemon_stats,
-            conn_set_stats,
-            ca_conn_stats,
-            daemon.connset_ctrl.ca_proto_stats().clone(),
-            daemon.insert_worker_stats.clone(),
-            daemon.series_by_channel_stats.clone(),
-            daemon.connset_ctrl.ioc_finder_stats().clone(),
-            insert_frac,
-        );
-        let fut =
-            netfetch::metrics::metrics_service(opts.api_bind(), dcom, connset_cmd_tx, stats_set, metrics_shutdown_rx);
-        tokio::task::spawn(fut)
-    };
-
+    let daemon_tx = daemon.tx.clone();
     let daemon_jh = taskrun::spawn(daemon.daemon());
-
     if let Some(channels_config) = channels_config {
         debug!("will configure {} channels", channels_config.len());
         let mut thr_msg = ThrottleTrace::new(Duration::from_millis(1000));
         let mut i = 0;
         for ch_cfg in channels_config.channels() {
-            match tx
+            match daemon_tx
                 .send(DaemonEvent::ChannelAdd(ch_cfg.clone(), async_channel::bounded(1).0))
                 .await
             {
@@ -648,9 +694,6 @@ pub async fn run(opts: CaIngestOpts, channels_config: Option<ChannelsConfig>) ->
         debug!("{} configured channels applied", channels_config.len());
     }
     daemon_jh.await.map_err(|e| Error::with_msg_no_trace(e.to_string()))??;
-    info!("Daemon joined.");
-    metrics_shutdown_tx.send(1).await?;
-    metrics_jh.await.unwrap();
-    info!("Metrics joined.");
+    info!("Joined daemon");
     Ok(())
 }

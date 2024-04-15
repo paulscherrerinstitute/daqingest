@@ -174,19 +174,19 @@ pub async fn parse_config(config: PathBuf) -> Result<(CaIngestOpts, Option<Chann
     let re_p = regex::Regex::new(&conf.whitelist.clone().unwrap_or("--nothing-ur9nc23ur98c--".into()))?;
     let re_n = regex::Regex::new(&conf.blacklist.clone().unwrap_or("--nothing-ksm2u98rcm28--".into()))?;
     let channels = if let Some(fname) = conf.channels.as_ref() {
-        if fname.ends_with(".txt") {
-            Some(parse_channel_config_txt(fname, re_p, re_n).await?)
-        } else if fname.ends_with(".yml") {
-            let e = Error::with_msg_no_trace("unsupported channe config file");
-            return Err(e);
-        } else {
-            let meta = tokio::fs::metadata(fname).await?;
-            if meta.is_dir() {
-                Some(parse_config_dir(&fname).await?)
+        let meta = tokio::fs::metadata(fname).await?;
+        if meta.is_file() {
+            if fname.ends_with(".txt") {
+                Some(parse_channel_config_txt(fname, re_p, re_n).await?)
             } else {
-                let e = Error::with_msg_no_trace("unsupported channe config file");
+                let e = Error::with_msg_no_trace(format!("unsupported channel config file {:?}", fname));
                 return Err(e);
             }
+        } else if meta.is_dir() {
+            Some(parse_config_dir(&fname).await?)
+        } else {
+            let e = Error::with_msg_no_trace(format!("unsupported channel config input {:?}", fname));
+            return Err(e);
         }
     } else {
         None
@@ -210,6 +210,7 @@ async fn parse_config_dir(dir: &Path) -> Result<ChannelsConfig, Error> {
             let buf = tokio::fs::read(e.path()).await?;
             let conf: BTreeMap<String, ChannelConfigParse> =
                 serde_yaml::from_slice(&buf).map_err(Error::from_string)?;
+            info!("parsed {} channels from {}", conf.len(), fns);
             ret.push_from_parsed(&conf);
         } else {
             debug!("ignore channel config file {:?}", e.path());

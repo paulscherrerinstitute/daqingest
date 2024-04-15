@@ -74,7 +74,7 @@ const DO_RATE_CHECK: bool = false;
 #[allow(unused)]
 macro_rules! trace2 {
     ($($arg:tt)*) => {
-        if false {
+        if true {
             trace!($($arg)*);
         }
     };
@@ -83,7 +83,7 @@ macro_rules! trace2 {
 #[allow(unused)]
 macro_rules! trace3 {
     ($($arg:tt)*) => {
-        if false {
+        if true {
             trace!($($arg)*);
         }
     };
@@ -92,7 +92,7 @@ macro_rules! trace3 {
 #[allow(unused)]
 macro_rules! trace4 {
     ($($arg:tt)*) => {
-        if false {
+        if true {
             trace!($($arg)*);
         }
     };
@@ -2277,6 +2277,7 @@ impl CaConn {
         FS: Fn(&Q),
     {
         use Poll::*;
+        trace3!("attempt_flush_queue  id {}  len {}", id, qu.len());
         let mut have_progress = false;
         let mut i = 0;
         loop {
@@ -2298,6 +2299,7 @@ impl CaConn {
             if sp.is_sending() {
                 match sp.poll_unpin(cx) {
                     Ready(Ok(())) => {
+                        trace3!("attempt_flush_queue  id {}  send done", id);
                         have_progress = true;
                     }
                     Ready(Err(e)) => {

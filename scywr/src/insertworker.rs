@@ -16,6 +16,9 @@ use async_channel::Receiver;
 use atomic::AtomicU64;
 use atomic::Ordering;
 use err::Error;
+use futures_util::Future;
+use futures_util::Stream;
+use futures_util::StreamExt;
 use log::*;
 use netpod::ttl::RetentionTime;
 use netpod::TsMs;
@@ -130,6 +133,29 @@ pub async fn spawn_scylla_insert_workers(
             insert_worker_concurrency,
             item_inp.clone(),
             insert_worker_opts.clone(),
+            Some(data_store),
+            store_stats.clone(),
+        ));
+        jhs.push(jh);
+    }
+    Ok(jhs)
+}
+
+pub async fn spawn_scylla_insert_workers_dummy(
+    insert_worker_count: usize,
+    insert_worker_concurrency: usize,
+    item_inp: Receiver<VecDeque<QueryItem>>,
+    insert_worker_opts: Arc<InsertWorkerOpts>,
+    store_stats: Arc<stats::InsertWorkerStats>,
+) -> Result<Vec<JoinHandle<Result<(), Error>>>, Error> {
+    let mut jhs = Vec::new();
+    for worker_ix in 0..insert_worker_count {
+        let data_store = None;
+        let jh = tokio::spawn(worker_streamed(
+            worker_ix,
+            insert_worker_concurrency,
+            item_inp.clone(),
+            insert_worker_opts.clone(),
             data_store,
             store_stats.clone(),
         ));
@@ -223,98 +249,130 @@ async fn worker_streamed(
     concurrency: usize,
     item_inp: Receiver<VecDeque<QueryItem>>,
     insert_worker_opts: Arc<InsertWorkerOpts>,
-    data_store: Arc<DataStore>,
+    data_store: Option<Arc<DataStore>>,
     stats: Arc<InsertWorkerStats>,
 ) -> Result<(), Error> {
-    use futures_util::StreamExt;
+    trace!("worker_streamed  begin");
     stats.worker_start().inc();
     insert_worker_opts
         .insert_workers_running
         .fetch_add(1, atomic::Ordering::AcqRel);
-    // TODO possible without box?
-    let item_inp = Box::pin(item_inp);
-    let mut stream = item_inp
-        .map(|batch| {
-            stats.item_recv.inc();
-            let tsnow = TsMs::from_system_time(SystemTime::now());
-            let mut res = Vec::with_capacity(32);
-            for item in batch {
-                if false {
-                    match &item {
-                        QueryItem::ConnectionStatus(_) => {
-                            debug!("execute  ConnectionStatus");
-                        }
-                        QueryItem::ChannelStatus(_) => {
-                            debug!("execute  ChannelStatus");
-                        }
-                        QueryItem::Insert(item) => {
-                            debug!(
-                                "execute  Insert  {:?}  {:?}  {:?}",
-                                item.series,
-                                item.ts_msp,
-                                item.val.shape()
-                            );
-                        }
-                        QueryItem::TimeBinSimpleF32(_) => {
-                            debug!("execute  TimeBinSimpleF32");
-                        }
-                        QueryItem::Accounting(_) => {
-                            debug!("execute  Accounting");
-                        }
-                    }
+    let stream = item_inp;
+    let stream = inspect_items(stream);
+    if let Some(data_store) = data_store {
+        let stream = transform_to_db_futures(stream, data_store, stats.clone());
+        let stream = stream
+            .map(|x| futures_util::stream::iter(x))
+            .flatten_unordered(Some(1))
+            // .map(|x| async move {
+            //     drop(x);
+            //     Ok(())
+            // })
+            .buffer_unordered(concurrency);
+        let mut stream = Box::pin(stream);
+        while let Some(item) = stream.next().await {
+            match item {
+                Ok(_) => {
+                    stats.inserted_values().inc();
+                    // TODO compute the insert latency bin and count.
                 }
-                let futs = match item {
-                    QueryItem::Insert(item) => prepare_query_insert_futs(item, &data_store, &stats, tsnow),
-                    QueryItem::ConnectionStatus(item) => {
-                        stats.inserted_connection_status().inc();
-                        let fut = insert_connection_status_fut(item, &data_store, stats.clone());
-                        smallvec![fut]
-                    }
-                    QueryItem::ChannelStatus(item) => {
-                        stats.inserted_channel_status().inc();
-                        insert_channel_status_fut(item, &data_store, stats.clone())
-                    }
-                    QueryItem::TimeBinSimpleF32(item) => prepare_timebin_insert_futs(item, &data_store, &stats, tsnow),
-                    QueryItem::Accounting(item) => prepare_accounting_insert_futs(item, &data_store, &stats, tsnow),
-                };
-                res.extend(futs.into_iter());
-            }
-            res
-        })
-        .map(|x| futures_util::stream::iter(x))
-        .flatten_unordered(Some(1))
-        // .map(|x| async move {
-        //     drop(x);
-        //     Ok(())
-        // })
-        .buffer_unordered(concurrency);
-    while let Some(item) = stream.next().await {
-        match item {
-            Ok(_) => {
-                stats.inserted_values().inc();
-                // TODO compute the insert latency bin and count.
-            }
-            Err(e) => {
-                use scylla::transport::errors::QueryError;
-                let e = match e {
-                    QueryError::TimeoutError => crate::iteminsertqueue::Error::DbTimeout,
-                    // TODO use `msg`
-                    QueryError::DbError(e, _msg) => match e {
-                        scylla::transport::errors::DbError::Overloaded => crate::iteminsertqueue::Error::DbOverload,
+                Err(e) => {
+                    use scylla::transport::errors::QueryError;
+                    let e = match e {
+                        QueryError::TimeoutError => crate::iteminsertqueue::Error::DbTimeout,
+                        // TODO use `msg`
+                        QueryError::DbError(e, _msg) => match e {
+                            scylla::transport::errors::DbError::Overloaded => crate::iteminsertqueue::Error::DbOverload,
+                            _ => e.into(),
+                        },
                         _ => e.into(),
-                    },
-                    _ => e.into(),
-                };
-                stats_inc_for_err(&stats, &e);
+                    };
+                    stats_inc_for_err(&stats, &e);
+                }
             }
         }
-    }
+    } else {
+        let mut stream = Box::pin(stream);
+        while let Some(item) = stream.next().await {
+            drop(item);
+        }
+    };
     stats.worker_finish().inc();
     insert_worker_opts
         .insert_workers_running
         .fetch_sub(1, atomic::Ordering::AcqRel);
     trace2!("insert worker {worker_ix} done");
     Ok(())
+}
+
+fn transform_to_db_futures<S>(
+    item_inp: S,
+    data_store: Arc<DataStore>,
+    stats: Arc<InsertWorkerStats>,
+) -> impl Stream<Item = Vec<InsertFut>>
+where
+    S: Stream<Item = VecDeque<QueryItem>>,
+{
+    trace!("transform_to_db_futures  begin");
+    // TODO possible without box?
+    // let item_inp = Box::pin(item_inp);
+    item_inp.map(move |batch| {
+        stats.item_recv.inc();
+        trace!("transform_to_db_futures  have batch  len {}", batch.len());
+        let tsnow = TsMs::from_system_time(SystemTime::now());
+        let mut res = Vec::with_capacity(32);
+        for item in batch {
+            let futs = match item {
+                QueryItem::Insert(item) => prepare_query_insert_futs(item, &data_store, &stats, tsnow),
+                QueryItem::ConnectionStatus(item) => {
+                    stats.inserted_connection_status().inc();
+                    let fut = insert_connection_status_fut(item, &data_store, stats.clone());
+                    smallvec![fut]
+                }
+                QueryItem::ChannelStatus(item) => {
+                    stats.inserted_channel_status().inc();
+                    insert_channel_status_fut(item, &data_store, stats.clone())
+                }
+                QueryItem::TimeBinSimpleF32(item) => prepare_timebin_insert_futs(item, &data_store, &stats, tsnow),
+                QueryItem::Accounting(item) => prepare_accounting_insert_futs(item, &data_store, &stats, tsnow),
+            };
+            trace!("prepared futs  len {}", futs.len());
+            res.extend(futs.into_iter());
+        }
+        res
+    })
+}
+
+fn inspect_items(item_inp: Receiver<VecDeque<QueryItem>>) -> impl Stream<Item = VecDeque<QueryItem>> {
+    trace!("transform_to_db_futures  begin");
+    // TODO possible without box?
+    // let item_inp = Box::pin(item_inp);
+    item_inp.inspect(move |batch| {
+        for item in batch {
+            match &item {
+                QueryItem::ConnectionStatus(_) => {
+                    debug!("execute  ConnectionStatus");
+                }
+                QueryItem::ChannelStatus(_) => {
+                    debug!("execute  ChannelStatus");
+                }
+                QueryItem::Insert(item) => {
+                    debug!(
+                        "execute  Insert  {:?}  {:?}  {:?}",
+                        item.series,
+                        item.ts_msp,
+                        item.val.shape()
+                    );
+                }
+                QueryItem::TimeBinSimpleF32(_) => {
+                    debug!("execute  TimeBinSimpleF32");
+                }
+                QueryItem::Accounting(_) => {
+                    debug!("execute  Accounting");
+                }
+            }
+        }
+    })
 }
 
 fn prepare_query_insert_futs(

@@ -3,6 +3,7 @@ use async_channel::Sender;
 use dbpg::seriesbychannel::ChannelInfoQuery;
 use err::thiserror;
 use err::ThisError;
+use mrucache::mucache::MuCache;
 use netpod::ScalarType;
 use netpod::Shape;
 use netpod::TsNano;
@@ -22,8 +23,8 @@ pub enum Error {
     SendError,
 }
 
-impl From<async_channel::SendError<QueryItem>> for Error {
-    fn from(value: async_channel::SendError<QueryItem>) -> Self {
+impl From<async_channel::SendError<VecDeque<QueryItem>>> for Error {
+    fn from(value: async_channel::SendError<VecDeque<QueryItem>>) -> Self {
         Error::SendError
     }
 }
@@ -35,12 +36,18 @@ pub struct EventValueItem {
     val: DataValue,
 }
 
-async fn process_api_query_items(
+struct SeriesWriterIngredients {
+    writer: SeriesWriter,
+}
+
+pub async fn process_api_query_items(
     backend: String,
     item_rx: Receiver<EventValueItem>,
     info_worker_tx: Sender<ChannelInfoQuery>,
-    iiq_tx: Sender<QueryItem>,
+    iiq_tx: Sender<VecDeque<QueryItem>>,
 ) -> Result<(), Error> {
+    // TODO so far arbitrary upper limit on the number of ad-hoc channels:
+    let mut mucache: MuCache<String, SeriesWriter> = MuCache::new(2000);
     let mut item_qu = VecDeque::new();
     let mut sw_tick_last = Instant::now();
 
@@ -49,7 +56,7 @@ async fn process_api_query_items(
         let tsnow = Instant::now();
         if tsnow.saturating_duration_since(sw_tick_last) >= Duration::from_millis(5000) {
             sw_tick_last = tsnow;
-            tick_writers(&mut item_qu)?;
+            tick_writers(mucache.all_ref_mut(), &mut item_qu)?;
         }
         let item = match item {
             Ok(Ok(item)) => item,
@@ -77,21 +84,23 @@ async fn process_api_query_items(
 
         let sw = &mut sw;
         sw.write(item.ts, item.ts, item.val, &mut item_qu)?;
-
-        for e in item_qu.drain(..).into_iter() {
-            iiq_tx.send(e).await?;
-        }
+        let item = core::mem::replace(&mut item_qu, VecDeque::new());
+        iiq_tx.send(item).await?;
     }
-    // let scalar_type = ScalarType::F32;
-    // let shape = Shape::Scalar;
-
-    // TODO SeriesWriter need to get ticked.
-
+    finish_writers(mucache.all_ref_mut(), &mut item_qu)?;
     Ok(())
 }
 
-fn tick_writers(iiq: &mut VecDeque<QueryItem>) -> Result<(), Error> {
-    let sw: &mut SeriesWriter = err::todoval();
-    sw.tick(iiq)?;
+fn tick_writers(sws: Vec<&mut SeriesWriter>, iiq: &mut VecDeque<QueryItem>) -> Result<(), Error> {
+    for sw in sws {
+        sw.tick(iiq)?;
+    }
+    Ok(())
+}
+
+fn finish_writers(sws: Vec<&mut SeriesWriter>, iiq: &mut VecDeque<QueryItem>) -> Result<(), Error> {
+    for sw in sws {
+        sw.tick(iiq)?;
+    }
     Ok(())
 }

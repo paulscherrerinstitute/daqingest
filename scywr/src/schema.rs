@@ -447,16 +447,14 @@ async fn check_event_tables(keyspace: &str, rett: RetentionTime, scy: &ScySessio
     Ok(())
 }
 
-pub async fn migrate_scylla_data_schema(
-    scyconf: &ScyllaIngestConfig,
-    replication: u32,
-    durable: bool,
-    rett: RetentionTime,
-) -> Result<(), Error> {
+pub async fn migrate_scylla_data_schema(scyconf: &ScyllaIngestConfig, rett: RetentionTime) -> Result<(), Error> {
     let scy2 = create_session_no_ks(scyconf).await?;
     let scy = &scy2;
+    let durable = true;
 
     if !has_keyspace(scyconf.keyspace(), scy).await? {
+        // TODO
+        let replication = 3;
         let cql = format!(
             concat!(
                 "create keyspace {}",
@@ -470,6 +468,25 @@ pub async fn migrate_scylla_data_schema(
         info!("scylla create keyspace  {cql}");
         scy.query_iter(cql, ()).await?;
         info!("keyspace created");
+    }
+
+    if let Some(ks) = scyconf.keyspace_rf1() {
+        if !has_keyspace(ks, scy).await? {
+            let replication = 1;
+            let cql = format!(
+                concat!(
+                    "create keyspace {}",
+                    " with replication = {{ 'class': 'SimpleStrategy', 'replication_factor': {} }}",
+                    " and durable_writes = {};"
+                ),
+                scyconf.keyspace(),
+                replication,
+                durable
+            );
+            info!("scylla create keyspace  {cql}");
+            scy.query_iter(cql, ()).await?;
+            info!("keyspace created");
+        }
     }
 
     let ks = scyconf.keyspace();

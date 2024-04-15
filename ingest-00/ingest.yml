@@ -1,0 +1,15 @@
+api_bind: 0.0.0.0:2380
+backend: test
+channels: channels
+search:
+  - 127.0.0.1
+postgresql:
+  host: 127.0.0.1
+  port: 5432
+  user: daqbuffer
+  pass: daqbuffer
+  name: daqbuffer
+scylla:
+  hosts:
+    - 127.0.0.1:19042
+  keyspace: ks_dummy_st

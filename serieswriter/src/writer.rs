@@ -329,10 +329,10 @@ fn write_00() {
             user: "daqbuffer".into(),
             pass: "daqbuffer".into(),
         };
-        let scyconf = &ScyllaIngestConfig::new(["127.0.0.1:19042"], "daqingest_test_00");
+        let scyconf = &ScyllaIngestConfig::new(["127.0.0.1:19042"], "daqingest_test_00_rf3", "daqingest_test_00_rf1");
         let (pgc, pg_jh) = dbpg::conn::make_pg_client(dbconf).await?;
         dbpg::schema::schema_check(&pgc).await?;
-        scywr::schema::migrate_scylla_data_schema(scyconf, 1, true, netpod::ttl::RetentionTime::Short).await?;
+        scywr::schema::migrate_scylla_data_schema(scyconf, netpod::ttl::RetentionTime::Short).await?;
         let scy = scywr::session::create_session(scyconf).await?;
         let stats = SeriesByChannelStats::new();
         let stats = Arc::new(stats);

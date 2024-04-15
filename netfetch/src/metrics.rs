@@ -395,8 +395,8 @@ pub async fn metrics_service(
     connset_cmd_tx: Sender<CaConnSetEvent>,
     stats_set: StatsSet,
     shutdown_signal: Receiver<u32>,
-) {
-    let addr = bind_to.parse().unwrap();
+) -> Result<(), Error> {
+    let addr = bind_to.parse().map_err(Error::from_string)?;
     let router = make_routes(dcom, connset_cmd_tx, stats_set).into_make_service();
     axum::Server::bind(&addr)
         .serve(router)
@@ -404,7 +404,8 @@ pub async fn metrics_service(
             let _ = shutdown_signal.recv().await;
         })
         .await
-        .unwrap()
+        .map_err(Error::from_string)?;
+    Ok(())
 }
 
 pub async fn metrics_agg_task(local_stats: Arc<CaConnStats>, store_stats: Arc<CaConnStats>) -> Result<(), Error> {

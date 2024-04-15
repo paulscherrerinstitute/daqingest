@@ -57,7 +57,7 @@ async fn main_run_inner(opts: DaqIngestOpts) -> Result<(), Error> {
                 pass: k.pg_pass,
                 name: k.pg_name,
             };
-            let scyconf = ScyllaIngestConfig::new([k.scylla_host], k.scylla_keyspace);
+            let scyconf = ScyllaIngestConfig::new([k.scylla_host], k.scylla_keyspace, "DUMMY");
             // scywr::schema::migrate_scylla_data_schema(&scyconf, netpod::ttl::RetentionTime::Short)
             //     .await
             //     .map_err(Error::from_string)?;
