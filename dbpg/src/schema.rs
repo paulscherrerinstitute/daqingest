@@ -74,14 +74,14 @@ create table if not exists series_by_channel (
     channel text not null,
     kind int2 not null,
     scalar_type int not null,
-    shape_dims int[] storage plain not null,
+    shape_dims int[] not null,
     agg_kind int not null,
-    tscs timestamptz[] storage plain not null default array[now()]
+    tscs timestamptz[] not null default array[now()]
 )";
-    let _ = pgc.execute(sql, &[]).await;
+    pgc.execute(sql, &[]).await?;
 
-    let sql = "alter table series_by_channel drop tscreate";
-    let _ = pgc.execute(sql, &[]).await;
+    let sql = "alter table series_by_channel drop if exists tscreate";
+    pgc.execute(sql, &[]).await?;
 
     if !has_table("ioc_by_channel_log", pgc).await? {
         let sql = "
@@ -135,14 +135,13 @@ async fn migrate_01(pgc: &PgClient) -> Result<(), Error> {
 async fn migrate_02(pgc: &PgClient) -> Result<(), Error> {
     // TODO after all migrations, should check that the schema is as expected.
     let sql = "alter table series_by_channel alter shape_dims set storage plain";
-    let _ = pgc.execute(sql, &[]).await?;
-
-    let sql = "alter table series_by_channel add if not exists tscs timestamptz[] storage plain not null default array[now()]";
-    let _ = pgc.execute(sql, &[]).await?;
+    pgc.execute(sql, &[]).await?;
+    let sql = "alter table series_by_channel add if not exists tscs timestamptz[] not null default array[now()]";
+    pgc.execute(sql, &[]).await?;
     let sql = "alter table series_by_channel alter tscs set storage plain";
-    let _ = pgc.execute(sql, &[]).await?;
+    pgc.execute(sql, &[]).await?;
     let sql = "alter table series_by_channel alter tscs set not null";
-    let _ = pgc.execute(sql, &[]).await?;
+    pgc.execute(sql, &[]).await?;
 
     let sql = concat!("alter table series_by_channel drop constraint if exists series_by_channel_nondup");
     let _ = pgc.execute(sql, &[]).await?;
@@ -172,4 +171,18 @@ pub async fn schema_check(pgc: &PgClient) -> Result<(), Error> {
     pgc.execute("reset client_min_messages", &[]).await?;
     info!("schema_check done");
     Ok(())
+}
+
+fn ignore_does_not_exist<T>(x: Result<T, tokio_postgres::Error>) -> Result<(), tokio_postgres::Error> {
+    match x {
+        Ok(_) => Ok(()),
+        // STYLE is there a better way instead of string comparison?
+        Err(e) => {
+            if e.to_string().contains("does not exist") {
+                Ok(())
+            } else {
+                Err(e)
+            }
+        }
+    }
 }
