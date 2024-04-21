@@ -16,7 +16,6 @@ use async_channel::Receiver;
 use atomic::AtomicU64;
 use atomic::Ordering;
 use err::Error;
-use futures_util::Future;
 use futures_util::Stream;
 use futures_util::StreamExt;
 use log::*;
@@ -36,7 +35,16 @@ use tokio::task::JoinHandle;
 #[allow(unused)]
 macro_rules! trace2 {
     ($($arg:tt)*) => {
-        if false {
+        if true {
+            trace!($($arg)*);
+        }
+    };
+}
+
+#[allow(unused)]
+macro_rules! trace3 {
+    ($($arg:tt)*) => {
+        if true {
             trace!($($arg)*);
         }
     };
@@ -351,13 +359,13 @@ fn inspect_items(item_inp: Receiver<VecDeque<QueryItem>>) -> impl Stream<Item = 
         for item in batch {
             match &item {
                 QueryItem::ConnectionStatus(_) => {
-                    debug!("execute  ConnectionStatus");
+                    trace2!("execute  ConnectionStatus  {item:?}");
                 }
                 QueryItem::ChannelStatus(_) => {
-                    debug!("execute  ChannelStatus");
+                    trace2!("execute  ChannelStatus  {item:?}");
                 }
                 QueryItem::Insert(item) => {
-                    debug!(
+                    trace3!(
                         "execute  Insert  {:?}  {:?}  {:?}",
                         item.series,
                         item.ts_msp,
@@ -365,10 +373,10 @@ fn inspect_items(item_inp: Receiver<VecDeque<QueryItem>>) -> impl Stream<Item = 
                     );
                 }
                 QueryItem::TimeBinSimpleF32(_) => {
-                    debug!("execute  TimeBinSimpleF32");
+                    trace2!("execute  TimeBinSimpleF32");
                 }
                 QueryItem::Accounting(_) => {
-                    debug!("execute  Accounting");
+                    trace2!("execute  Accounting  {item:?}");
                 }
             }
         }
@@ -393,7 +401,7 @@ fn prepare_query_insert_futs(
     let fut = insert_item_fut(item, &data_store, do_insert, stats);
     futs.push(fut);
     if msp_bump {
-        // debug!("execute  MSP bump");
+        trace2!("execute  MSP bump");
         stats.inserts_msp().inc();
         let fut = insert_msp_fut(
             series,
@@ -414,7 +422,7 @@ fn prepare_timebin_insert_futs(
     stats: &Arc<InsertWorkerStats>,
     tsnow: TsMs,
 ) -> SmallVec<[InsertFut; 4]> {
-    // debug!("have time bin patch to insert: {item:?}");
+    trace!("have time bin patch to insert: {item:?}");
     let params = (
         item.series.id() as i64,
         item.bin_len_ms,
