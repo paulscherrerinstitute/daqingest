@@ -53,6 +53,12 @@ const EPICS_EPOCH_OFFSET: u64 = 631152000;
 const PAYLOAD_LEN_MAX: u32 = 1024 * 1024 * 32;
 const PROTO_INPUT_BUF_CAP: u32 = 1024 * 1024 * 40;
 
+const TESTING_UNRESPONSIVE_TODO_REMOVE: bool = true;
+const TESTING_EVENT_ADD_RES_MAX: u32 = 3;
+
+const TESTING_PROTOCOL_ERROR_TODO_REMOVE: bool = true;
+const TESTING_PROTOCOL_ERROR_AFTER_BYTES: u32 = 400;
+
 #[derive(Debug)]
 pub struct Search {
     pub id: u32,
@@ -161,6 +167,24 @@ pub struct ReadNotifyRes {
     pub ioid: u32,
     pub payload_len: u32,
     pub value: CaEventValue,
+}
+
+#[derive(Debug)]
+pub struct ChannelClose {
+    pub sid: u32,
+    pub cid: u32,
+}
+
+#[derive(Debug)]
+pub struct ChannelCloseRes {
+    pub sid: u32,
+    pub cid: u32,
+}
+
+// This message is only sent from server to client, on server's initiative.
+#[derive(Debug)]
+pub struct ChannelDisconnect {
+    pub cid: u32,
 }
 
 #[derive(Debug)]
@@ -313,6 +337,9 @@ pub enum CaMsgTy {
     EventCancelRes(EventCancelRes),
     ReadNotify(ReadNotify),
     ReadNotifyRes(ReadNotifyRes),
+    ChannelClose(ChannelClose),
+    ChannelCloseRes(ChannelCloseRes),
+    ChannelDisconnect(ChannelDisconnect),
     Echo,
 }
 
@@ -341,6 +368,9 @@ impl CaMsgTy {
             EventCancelRes(_) => 0x01,
             ReadNotify(_) => 0x0f,
             ReadNotifyRes(_) => 0x0f,
+            ChannelClose(_) => 0x0c,
+            ChannelCloseRes(_) => 0x0c,
+            ChannelDisconnect(_) => 0x1b,
             Echo => 0x17,
         }
     }
@@ -381,6 +411,9 @@ impl CaMsgTy {
                 error!("should not attempt to serialize the response again");
                 panic!();
             }
+            ChannelClose(_) => 0,
+            ChannelCloseRes(_) => 0,
+            ChannelDisconnect(_) => 0,
             Echo => 0,
         }
     }
@@ -410,6 +443,9 @@ impl CaMsgTy {
             EventCancelRes(x) => x.data_type,
             ReadNotify(x) => x.data_type,
             ReadNotifyRes(x) => x.data_type,
+            ChannelClose(_) => 0,
+            ChannelCloseRes(_) => 0,
+            ChannelDisconnect(_) => 0,
             Echo => 0,
         }
     }
@@ -445,6 +481,9 @@ impl CaMsgTy {
                 panic!();
                 // x.data_count as _
             }
+            ChannelClose(_) => 0,
+            ChannelCloseRes(_) => 0,
+            ChannelDisconnect(_) => 0,
             Echo => 0,
         }
     }
@@ -471,6 +510,9 @@ impl CaMsgTy {
             EventCancelRes(x) => x.sid,
             ReadNotify(x) => x.sid,
             ReadNotifyRes(x) => x.sid,
+            ChannelClose(x) => x.sid,
+            ChannelCloseRes(x) => x.sid,
+            ChannelDisconnect(x) => x.cid,
             Echo => 0,
         }
     }
@@ -497,6 +539,9 @@ impl CaMsgTy {
             EventCancelRes(x) => x.subid,
             ReadNotify(x) => x.ioid,
             ReadNotifyRes(x) => x.ioid,
+            ChannelClose(x) => x.cid,
+            ChannelCloseRes(x) => x.cid,
+            ChannelDisconnect(_) => 0,
             Echo => 0,
         }
     }
@@ -564,6 +609,9 @@ impl CaMsgTy {
             EventCancelRes(_) => {}
             ReadNotify(_) => {}
             ReadNotifyRes(_) => {}
+            ChannelClose(_) => {}
+            ChannelCloseRes(_) => {}
+            ChannelDisconnect(_) => {}
             Echo => {}
         }
     }
@@ -994,6 +1042,8 @@ pub struct CaProto {
     array_truncate: usize,
     stats: Arc<CaProtoStats>,
     resqu: VecDeque<CaItem>,
+    event_add_res_cnt: u32,
+    bytes_recv_testing: u32,
 }
 
 impl CaProto {
@@ -1009,6 +1059,8 @@ impl CaProto {
             array_truncate,
             stats,
             resqu: VecDeque::with_capacity(256),
+            event_add_res_cnt: 0,
+            bytes_recv_testing: 0,
         }
     }
 
@@ -1133,18 +1185,23 @@ impl CaProto {
                                 let t = rbuf.filled().len().min(32);
                                 debug!("received data  {:?}", &rbuf.filled()[0..t]);
                             }
-                            match self.buf.wadv(nf) {
-                                Ok(()) => {
-                                    have_progress = true;
-                                    self.stats.tcp_recv_bytes().add(nf as _);
-                                    self.stats.tcp_recv_count().inc();
-                                    continue;
-                                }
-                                Err(e) => {
-                                    error!("netbuf wadv fail  nf {nf}  {e}");
-                                    return Err(e.into());
+                            if TESTING_PROTOCOL_ERROR_TODO_REMOVE {
+                                self.bytes_recv_testing = self.bytes_recv_testing.saturating_add(nf as u32);
+                                if self.bytes_recv_testing <= TESTING_PROTOCOL_ERROR_AFTER_BYTES {
+                                    self.buf.wadv(nf)?;
+                                } else {
+                                    let nr =
+                                        (self.bytes_recv_testing - TESTING_PROTOCOL_ERROR_AFTER_BYTES).min(nf as u32);
+                                    self.buf.wadv(nf - nr as usize)?;
+                                    for _ in 0..nr {
+                                        self.buf.put_u8(0x55)?;
+                                    }
                                 }
                             }
+                            have_progress = true;
+                            self.stats.tcp_recv_bytes().add(nf as _);
+                            self.stats.tcp_recv_count().inc();
+                            continue;
                         }
                     }
                     Err(e) => {
@@ -1236,11 +1293,20 @@ impl CaProto {
                 let g = self.buf.read_bytes(hi.payload_len() as usize)?;
                 let msg = CaMsg::from_proto_infos(hi, g, tsnow, self.array_truncate)?;
                 // data-count is only reasonable for event messages
-                if let CaMsgTy::EventAddRes(..) = &msg.ty {
-                    self.stats.data_count().ingest(hi.data_count() as u32);
-                }
+                let ret = match &msg.ty {
+                    CaMsgTy::EventAddRes(..) => {
+                        self.stats.data_count().ingest(hi.data_count() as u32);
+                        if TESTING_UNRESPONSIVE_TODO_REMOVE && self.event_add_res_cnt < TESTING_EVENT_ADD_RES_MAX {
+                            self.event_add_res_cnt += 1;
+                            Ok(Some(CaItem::Msg(msg)))
+                        } else {
+                            Ok(None)
+                        }
+                    }
+                    _ => Ok(Some(CaItem::Msg(msg))),
+                };
                 self.state = CaState::StdHead;
-                Ok(Some(CaItem::Msg(msg)))
+                ret
             }
             CaState::Done => Err(Error::ParseAttemptInDoneState),
         }

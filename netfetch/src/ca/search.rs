@@ -3,9 +3,6 @@ use crate::ca::findioc::FindIocStream;
 use crate::conf::CaIngestOpts;
 use async_channel::Receiver;
 use async_channel::Sender;
-use dbpg::conn::PgClient;
-use dbpg::iocindex::IocItem;
-use dbpg::iocindex::IocSearchIndexWorker;
 use err::Error;
 use futures_util::StreamExt;
 use log::*;
@@ -40,13 +37,11 @@ async fn resolve_address(addr_str: &str) -> Result<SocketAddr, Error> {
                     };
                     let host = format!("{}:{}", hostname.clone(), port);
                     match tokio::net::lookup_host(host.clone()).await {
-                        Ok(mut k) => {
-                            if let Some(k) = k.next() {
-                                k
-                            } else {
-                                return Err(Error::with_msg_no_trace(format!("can not lookup host {host}")));
-                            }
-                        }
+                        Ok(k) => k
+                            .into_iter()
+                            .filter(|addr| if let SocketAddr::V4(_) = addr { true } else { false })
+                            .next()
+                            .ok_or_else(|| Error::with_msg_no_trace(format!("can not lookup host {host}")))?,
                         Err(e) => return Err(e.into()),
                     }
                 }
@@ -54,121 +49,6 @@ async fn resolve_address(addr_str: &str) -> Result<SocketAddr, Error> {
         }
     };
     Ok(ac)
-}
-
-struct DbUpdateWorker {
-    jh: JoinHandle<()>,
-}
-
-impl DbUpdateWorker {
-    async fn new(rx: Receiver<IocItem>, backend: String, pg: PgClient) -> Result<Self, Error> {
-        let worker = IocSearchIndexWorker::prepare(rx, backend, pg)
-            .await
-            .map_err(|e| Error::with_msg_no_trace(e.to_string()))?;
-        let jh = tokio::spawn(async move { worker.worker().await });
-        Ok(Self { jh })
-    }
-}
-
-#[cfg(DISABLED)]
-pub async fn ca_search(opts: CaIngestOpts, channels: &Vec<String>) -> Result<(), Error> {
-    info!("ca_search begin");
-    let (pg, jh) = dbpg::conn::make_pg_client(opts.postgresql_config())
-        .await
-        .map_err(|e| Error::with_msg_no_trace(e.to_string()))?;
-    dbpg::schema::schema_check(&pg)
-        .await
-        .map_err(|e| Error::with_msg_no_trace(e.to_string()))?;
-
-    let (search_tgts, blacklist) = search_tgts_from_opts(&opts).await?;
-
-    // let mut finder = FindIocStream::new(search_tgts, Duration::from_millis(800), 20, 16);
-    // finder.set_stop_on_empty_queue();
-    // for ch in channels.iter() {
-    //     finder.push(ch.into());
-    // }
-
-    const DB_WORKER_COUNT: usize = 1;
-    let (dbtx, dbrx) = async_channel::bounded(64);
-    let mut dbworkers = Vec::new();
-    for _ in 0..DB_WORKER_COUNT {
-        let (pg, jh) = dbpg::conn::make_pg_client(opts.postgresql_config())
-            .await
-            .map_err(|e| Error::with_msg_no_trace(e.to_string()))?;
-        let w = DbUpdateWorker::new(dbrx.clone(), opts.backend().into(), pg).await?;
-        dbworkers.push(w);
-    }
-    drop(dbrx);
-    let dbtx: Sender<_> = dbtx;
-
-    let mut ts_last = Instant::now();
-    'outer: loop {
-        let ts_now = Instant::now();
-        if ts_now.duration_since(ts_last) >= Duration::from_millis(2000) {
-            ts_last = ts_now;
-            info!("{}", finder.quick_state());
-        }
-        let k = tokio::time::timeout(Duration::from_millis(1500), finder.next()).await;
-        let item = match k {
-            Ok(Some(k)) => k,
-            Ok(None) => {
-                info!("Search stream exhausted");
-                break;
-            }
-            Err(_) => {
-                continue;
-            }
-        };
-        let item = match item {
-            Ok(k) => k,
-            Err(e) => {
-                error!("ca_search {e:?}");
-                continue;
-            }
-        };
-        for item in item {
-            let mut do_block = false;
-            for a2 in &gw_addrs {
-                if let Some(response_addr) = &item.response_addr {
-                    if &SocketAddr::V4(*response_addr) == a2 {
-                        do_block = true;
-                        warn!("gateways responded to search");
-                    }
-                }
-            }
-            if let Some(a1) = item.addr.as_ref() {
-                for a2 in &gw_addrs {
-                    if &SocketAddr::V4(*a1) == a2 {
-                        do_block = true;
-                        warn!("do not use gateways as ioc address");
-                    }
-                }
-            }
-            if do_block {
-                info!("blacklisting {item:?}");
-            } else {
-                let item = IocItem::new(item.channel, item.response_addr, item.addr, item.dt);
-                match dbtx.send(item).await {
-                    Ok(_) => {}
-                    Err(_) => {
-                        error!("dbtx broken");
-                        break 'outer;
-                    }
-                }
-            }
-        }
-    }
-    drop(dbtx);
-    for w in dbworkers {
-        match w.jh.await {
-            Ok(_) => {}
-            Err(e) => {
-                error!("see error while join on db worker: {e}");
-            }
-        }
-    }
-    info!("all done");
-    Ok(())
 }
 
 pub async fn ca_search_workers_start(

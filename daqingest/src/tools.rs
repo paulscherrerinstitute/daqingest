@@ -100,7 +100,7 @@ async fn remove_older_series(
 }
 
 pub async fn find_older_msp(
-    backend: String,
+    _backend: String,
     params: FindOlder,
     pgconf: &Database,
     scyconf: &ScyllaIngestConfig,

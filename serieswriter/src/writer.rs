@@ -65,6 +65,7 @@ pub struct SeriesWriter {
     // TODO this should be in an Option:
     ts_msp_grid_last: u32,
     binner: ConnTimeBin,
+    written_last: Option<DataValue>,
 }
 
 impl SeriesWriter {
@@ -126,6 +127,7 @@ impl SeriesWriter {
             msp_max_bytes: 1024 * 1024 * 20,
             ts_msp_grid_last: 0,
             binner,
+            written_last: None,
         };
         Ok(res)
     }

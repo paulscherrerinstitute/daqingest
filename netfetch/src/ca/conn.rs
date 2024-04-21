@@ -1,6 +1,7 @@
 use super::proto;
 use super::proto::CaEventValue;
 use super::proto::ReadNotify;
+use crate::ca::proto::ChannelClose;
 use crate::ca::proto::EventCancel;
 use crate::conf::ChannelConfig;
 use crate::senderpolling::SenderPolling;
@@ -34,6 +35,7 @@ use scywr::iteminsertqueue as scywriiq;
 use scywr::iteminsertqueue::Accounting;
 use scywr::iteminsertqueue::DataValue;
 use scywr::iteminsertqueue::QueryItem;
+use scywr::iteminsertqueue::ShutdownReason;
 use scywriiq::ChannelStatus;
 use scywriiq::ChannelStatusClosedReason;
 use scywriiq::ChannelStatusItem;
@@ -70,6 +72,8 @@ use tokio::net::TcpStream;
 const CONNECTING_TIMEOUT: Duration = Duration::from_millis(6000);
 const IOC_PING_IVL: Duration = Duration::from_millis(80000);
 const DO_RATE_CHECK: bool = false;
+const MONITOR_POLL_TIMEOUT: Duration = Duration::from_millis(3000);
+const TIMEOUT_CHANNEL_CLOSING: Duration = Duration::from_millis(3000);
 
 #[allow(unused)]
 macro_rules! trace2 {
@@ -116,6 +120,7 @@ pub enum Error {
     NoProgressNoPending,
     ShutdownWithQueuesNoProgressNoPending,
     Error,
+    DurationOutOfBounds,
 }
 
 impl err::ToErr for Error {
@@ -170,13 +175,17 @@ mod ser_instant {
                 let tsnow = Instant::now();
                 let t1 = if tsnow >= *val {
                     let dur = tsnow.duration_since(*val);
-                    let dur2 = chrono::Duration::seconds(dur.as_secs() as i64)
+                    let dur2 = chrono::Duration::try_seconds(dur.as_secs() as i64)
+                        .ok_or(Error::DurationOutOfBounds)
+                        .unwrap()
                         .checked_add(&chrono::Duration::microseconds(dur.subsec_micros() as i64))
                         .unwrap();
                     now.checked_sub_signed(dur2).unwrap()
                 } else {
                     let dur = (*val).duration_since(tsnow);
-                    let dur2 = chrono::Duration::seconds(dur.as_secs() as i64)
+                    let dur2 = chrono::Duration::try_seconds(dur.as_secs() as i64)
+                        .ok_or(Error::DurationOutOfBounds)
+                        .unwrap()
                         .checked_sub(&chrono::Duration::microseconds(dur.subsec_micros() as i64))
                         .unwrap();
                     now.checked_add_signed(dur2).unwrap()
@@ -190,7 +199,7 @@ mod ser_instant {
         }
     }
 
-    pub fn deserialize<'de, D>(de: D) -> Result<Option<Instant>, D::Error>
+    pub fn deserialize<'de, D>(_de: D) -> Result<Option<Instant>, D::Error>
     where
         D: Deserializer<'de>,
     {
@@ -248,9 +257,21 @@ struct EnableMonitoringState {
 }
 
 #[derive(Debug, Clone)]
+struct ReadPendingState {
+    tsbeg: Instant,
+}
+
+#[derive(Debug, Clone)]
+enum Monitoring2State {
+    Passive,
+    ReadPending(Ioid, Instant),
+}
+
+#[derive(Debug, Clone)]
 struct MonitoringState {
     tsbeg: Instant,
     subid: Subid,
+    mon2state: Monitoring2State,
 }
 
 #[derive(Debug, Clone)]
@@ -351,8 +372,15 @@ enum ChannelState {
     Creating(CreatingState),
     MakingSeriesWriter(MakingSeriesWriterState),
     Writable(WritableState),
+    Closing(ClosingState),
     Error(ChannelError),
     Ended(ChannelStatusSeriesId),
+}
+
+#[derive(Debug)]
+struct ClosingState {
+    tsbeg: Instant,
+    cssid: ChannelStatusSeriesId,
 }
 
 #[derive(Debug)]
@@ -370,6 +398,7 @@ impl ChannelState {
             ChannelState::Writable(_) => ChannelConnectedInfo::Connected,
             ChannelState::Error(_) => ChannelConnectedInfo::Error,
             ChannelState::Ended(_) => ChannelConnectedInfo::Disconnected,
+            ChannelState::Closing(_) => ChannelConnectedInfo::Disconnected,
         };
         let scalar_type = match self {
             ChannelState::Writable(s) => Some(s.writer.scalar_type().clone()),
@@ -438,6 +467,7 @@ impl ChannelState {
                 ChannelError::CreateChanFail(cssid) => cssid.clone(),
             },
             ChannelState::Ended(cssid) => cssid.clone(),
+            ChannelState::Closing(st) => st.cssid.clone(),
         }
     }
 }
@@ -669,6 +699,8 @@ pub enum EndOfStreamReason {
     ConnectFail,
     OnCommand,
     RemoteClosed,
+    IocTimeout,
+    IoError,
 }
 
 pub struct CaConnOpts {
@@ -823,40 +855,37 @@ impl CaConn {
         }
     }
 
-    fn trigger_shutdown(&mut self, channel_reason: ChannelStatusClosedReason) {
-        self.proto = None;
-        match &channel_reason {
-            ChannelStatusClosedReason::ConnectFail => {
+    fn trigger_shutdown(&mut self, reason: ShutdownReason) {
+        let channel_reason = match &reason {
+            ShutdownReason::ConnectFail => {
                 self.state = CaConnState::Shutdown(EndOfStreamReason::ConnectFail);
+                ChannelStatusClosedReason::ConnectFail
             }
-            ChannelStatusClosedReason::ShutdownCommand => {
+            ShutdownReason::IoError => {
+                self.state = CaConnState::Shutdown(EndOfStreamReason::IoError);
+                ChannelStatusClosedReason::IoError
+            }
+            ShutdownReason::ShutdownCommand => {
                 self.state = CaConnState::Shutdown(EndOfStreamReason::OnCommand);
+                ChannelStatusClosedReason::ShutdownCommand
             }
-            ChannelStatusClosedReason::ChannelRemove => {
-                self.state = CaConnState::Shutdown(EndOfStreamReason::ConnectFail);
-            }
-            ChannelStatusClosedReason::ProtocolError => {
-                self.state = CaConnState::Shutdown(EndOfStreamReason::Error(Error::ProtocolError));
-            }
-            ChannelStatusClosedReason::FrequencyQuota => {
-                self.state = CaConnState::Shutdown(EndOfStreamReason::Error(Error::IocIssue));
-            }
-            ChannelStatusClosedReason::BandwidthQuota => {
-                self.state = CaConnState::Shutdown(EndOfStreamReason::Error(Error::IocIssue));
-            }
-            ChannelStatusClosedReason::InternalError => {
+            ShutdownReason::InternalError => {
                 self.state = CaConnState::Shutdown(EndOfStreamReason::Error(Error::Error));
+                ChannelStatusClosedReason::InternalError
             }
-            ChannelStatusClosedReason::IocTimeout => {
-                self.state = CaConnState::Shutdown(EndOfStreamReason::Error(Error::IocIssue));
+            ShutdownReason::Protocol => {
+                self.state = CaConnState::Shutdown(EndOfStreamReason::Error(Error::ProtocolError));
+                ChannelStatusClosedReason::ProtocolError
             }
-            ChannelStatusClosedReason::NoProtocol => {
-                self.state = CaConnState::Shutdown(EndOfStreamReason::Error(Error::NoProtocol));
+            ShutdownReason::ProtocolMissing => {
+                self.state = CaConnState::Shutdown(EndOfStreamReason::Error(Error::ProtocolError));
+                ChannelStatusClosedReason::ProtocolError
             }
-            ChannelStatusClosedReason::ProtocolDone => {
-                self.state = CaConnState::Shutdown(EndOfStreamReason::RemoteClosed);
+            ShutdownReason::IocTimeout => {
+                self.state = CaConnState::Shutdown(EndOfStreamReason::IoError);
+                ChannelStatusClosedReason::IocTimeout
             }
-        }
+        };
         self.channel_state_on_shutdown(channel_reason);
         let addr = self.remote_addr_dbg.clone();
         self.insert_item_queue
@@ -866,6 +895,7 @@ impl CaConn {
                 // TODO map to appropriate status
                 status: ConnectionStatus::Closing,
             }));
+        self.proto = None;
     }
 
     fn cmd_check_health(&mut self) {
@@ -883,7 +913,7 @@ impl CaConn {
             Ok(_) => {}
             Err(e) => {
                 error!("{e}");
-                self.trigger_shutdown(ChannelStatusClosedReason::InternalError);
+                self.trigger_shutdown(ShutdownReason::InternalError);
             }
         }
 
@@ -936,7 +966,7 @@ impl CaConn {
 
     fn cmd_shutdown(&mut self) {
         debug!("cmd_shutdown {}", self.remote_addr_dbg);
-        self.trigger_shutdown(ChannelStatusClosedReason::ShutdownCommand);
+        self.trigger_shutdown(ShutdownReason::ShutdownCommand);
     }
 
     fn handle_conn_command(&mut self, cx: &mut Context) -> Result<Poll<Option<()>>, Error> {
@@ -1179,6 +1209,7 @@ impl CaConn {
                     // *chst = ChannelState::Ended;
                 }
                 ChannelState::Ended(_) => {}
+                ChannelState::Closing(_) => {}
             }
         }
     }
@@ -1196,7 +1227,7 @@ impl CaConn {
                     value: CaConnEventValue::EchoTimeout,
                 };
                 self.ca_conn_event_out_queue.push_back(item);
-                self.trigger_shutdown(ChannelStatusClosedReason::IocTimeout);
+                self.trigger_shutdown(ShutdownReason::IocTimeout);
             }
         } else {
             if self.ioc_ping_next < tsnow {
@@ -1209,7 +1240,7 @@ impl CaConn {
                 } else {
                     self.stats.ping_no_proto().inc();
                     warn!("can not ping {}  no proto", self.remote_addr_dbg);
-                    self.trigger_shutdown(ChannelStatusClosedReason::NoProtocol);
+                    self.trigger_shutdown(ShutdownReason::Protocol);
                 }
             }
         }
@@ -1261,6 +1292,7 @@ impl CaConn {
                     // TODO need last-save-ts for this state.
                 }
                 ChannelState::Ended(_) => {}
+                ChannelState::Closing(_) => {}
             }
         }
         Ok(())
@@ -1350,7 +1382,14 @@ impl CaConn {
                     if crst.stwin_count > 30000 || crst.stwin_bytes > 1024 * 1024 * 500 {
                         let subid = match &mut st.reading {
                             ReadingState::EnableMonitoring(x) => Some(x.subid.clone()),
-                            ReadingState::Monitoring(x) => Some(x.subid.clone()),
+                            ReadingState::Monitoring(x) => {
+                                match x.mon2state {
+                                    // actually, no differing behavior needed so far.
+                                    Monitoring2State::Passive => (),
+                                    Monitoring2State::ReadPending(ioid, since) => (),
+                                }
+                                Some(x.subid.clone())
+                            }
                             ReadingState::StopMonitoringForPolling(_) => {
                                 self.stats.transition_to_polling_bad_state().inc();
                                 None
@@ -1376,6 +1415,7 @@ impl CaConn {
                         st.reading = ReadingState::Monitoring(MonitoringState {
                             tsbeg: tsnow,
                             subid: st2.subid,
+                            mon2state: Monitoring2State::Passive,
                         });
                         let crst = &mut st.channel;
                         let writer = &mut st.writer;
@@ -1383,7 +1423,13 @@ impl CaConn {
                         let stats = self.stats.as_ref();
                         Self::event_add_ingest(ev.payload_len, ev.value, crst, writer, iiq, tsnow, stnow, stats)?;
                     }
-                    ReadingState::Monitoring(_st2) => {
+                    ReadingState::Monitoring(st2) => {
+                        match st2.mon2state {
+                            Monitoring2State::Passive => {}
+                            Monitoring2State::ReadPending(ioid, since) => {
+                                error!("TODO  actually, EventAddRes can anyway not be a response to a ReadNotify");
+                            }
+                        }
                         let crst = &mut st.channel;
                         let writer = &mut st.writer;
                         let iiq = &mut self.insert_item_queue;
@@ -1452,7 +1498,12 @@ impl CaConn {
                     let name = self.name_by_cid(cid);
                     warn!("received event-cancel but channel {name:?} in wrong state");
                 }
-                ReadingState::Monitoring(..) => {
+                ReadingState::Monitoring(st2) => {
+                    match st2.mon2state {
+                        // no special discrimination needed
+                        Monitoring2State::Passive => {}
+                        Monitoring2State::ReadPending(ioid, since) => {}
+                    }
                     let name = self.name_by_cid(cid);
                     warn!("received event-cancel but channel {name:?} in wrong state");
                 }
@@ -1506,31 +1557,28 @@ impl CaConn {
                             PollTickState::Wait(st3, ioid) => {
                                 let dt = tsnow.saturating_duration_since(*st3);
                                 self.stats.caget_lat().ingest((1e3 * dt.as_secs_f32()) as u32);
-                                self.read_ioids.remove(ioid);
                                 // TODO maintain histogram of read-notify latencies
+                                self.read_ioids.remove(ioid);
                                 st2.tick = PollTickState::Idle(tsnow);
-                                let crst = &mut st.channel;
-                                let writer = &mut st.writer;
                                 let iiq = &mut self.insert_item_queue;
                                 let stats = self.stats.as_ref();
-                                Self::event_add_ingest(
-                                    ev.payload_len,
-                                    ev.value,
-                                    crst,
-                                    writer,
-                                    iiq,
-                                    tsnow,
-                                    stnow,
-                                    stats,
-                                )?;
+                                Self::read_notify_res_for_write(ev, st, iiq, stnow, tsnow, stats)?;
                             }
                         },
                         ReadingState::EnableMonitoring(..) => {
                             error!("TODO  handle_read_notify_res  handle EnableMonitoring");
                         }
-                        ReadingState::Monitoring(..) => {
-                            error!("TODO  handle_read_notify_res  handle Monitoring");
-                        }
+                        ReadingState::Monitoring(st2) => match st2.mon2state {
+                            Monitoring2State::Passive => {
+                                error!("ReadNotifyRes even though we do not expect one");
+                            }
+                            Monitoring2State::ReadPending(ioid, since) => {
+                                self.read_ioids.remove(&ioid);
+                                let iiq = &mut self.insert_item_queue;
+                                let stats = self.stats.as_ref();
+                                Self::read_notify_res_for_write(ev, st, iiq, stnow, tsnow, stats)?;
+                            }
+                        },
                         ReadingState::StopMonitoringForPolling(..) => {
                             error!("TODO  handle_read_notify_res  handle StopMonitoringForPolling");
                         }
@@ -1545,6 +1593,20 @@ impl CaConn {
             // warn!("unknown {ioid:?}");
             self.stats.unknown_ioid().inc();
         }
+        Ok(())
+    }
+
+    fn read_notify_res_for_write(
+        ev: proto::ReadNotifyRes,
+        st: &mut WritableState,
+        iiq: &mut VecDeque<QueryItem>,
+        stnow: SystemTime,
+        tsnow: Instant,
+        stats: &CaConnStats,
+    ) -> Result<(), Error> {
+        let crst = &mut st.channel;
+        let writer = &mut st.writer;
+        Self::event_add_ingest(ev.payload_len, ev.value, crst, writer, iiq, tsnow, stnow, stats)?;
         Ok(())
     }
 
@@ -1732,6 +1794,7 @@ impl CaConn {
 
     fn check_channels_state_poll(&mut self, tsnow: Instant, cx: &mut Context) -> Result<(), Error> {
         let mut do_wake_again = false;
+        let mut do_shutdown = None;
         let channels = &mut self.channels;
         for (_k, conf) in channels {
             let chst = &mut conf.state;
@@ -1741,7 +1804,42 @@ impl CaConn {
                 ChannelState::MakingSeriesWriter(_) => {}
                 ChannelState::Writable(st2) => match &mut st2.reading {
                     ReadingState::EnableMonitoring(_) => {}
-                    ReadingState::Monitoring(_) => {}
+                    ReadingState::Monitoring(st3) => match st3.mon2state {
+                        Monitoring2State::Passive => {
+                            // nothing to do
+                        }
+                        Monitoring2State::ReadPending(ioid, since) => {
+                            error!("TODO  check for timeout");
+                            if since + MONITOR_POLL_TIMEOUT < tsnow {
+                                let name = conf.conf.name();
+                                warn!("channel monitor explicit read timeout  {}  ioid {:?}", name, ioid);
+
+                                // Something is wrong with this channel.
+                                // Maybe we lost connection, maybe the IOC went down, maybe there is a bug where only
+                                // this or a subset of the subscribed channels no longer give updates.
+                                // Here we try to close the channel at hand.
+                                // If the close-state does not
+
+                                // TODO need to define the transition from operating channel to inoperable channel in
+                                // a better and reusable way:
+                                // Do not go directly into error state: need to at least attempt to close the channel and wait/timeout for reply.
+
+                                let proto = self.proto.as_mut().ok_or(Error::NoProtocol)?;
+                                let item = CaMsg {
+                                    ty: CaMsgTy::ChannelClose(ChannelClose {
+                                        sid: st2.channel.sid.0,
+                                        cid: st2.channel.cid.0,
+                                    }),
+                                    ts: tsnow,
+                                };
+                                proto.push_out(item);
+                                *chst = ChannelState::Closing(ClosingState {
+                                    tsbeg: tsnow,
+                                    cssid: st2.channel.cssid,
+                                });
+                            }
+                        }
+                    },
                     ReadingState::StopMonitoringForPolling(_) => {}
                     ReadingState::Polling(st3) => match &mut st3.tick {
                         PollTickState::Idle(x) => {
@@ -1777,7 +1875,17 @@ impl CaConn {
                 },
                 ChannelState::Error(_) => {}
                 ChannelState::Ended(_) => {}
+                ChannelState::Closing(st2) => {
+                    if st2.tsbeg + TIMEOUT_CHANNEL_CLOSING < tsnow {
+                        let name = conf.conf.name();
+                        warn!("timeout while closing channel {name}");
+                        do_shutdown = Some(ShutdownReason::IocTimeout);
+                    }
+                }
             }
+        }
+        if let Some(reason) = do_shutdown {
+            self.trigger_shutdown(reason);
         }
         if do_wake_again {
             cx.waker().wake_by_ref();
@@ -1896,12 +2004,12 @@ impl CaConn {
             }
             Ready(Some(Err(e))) => {
                 error!("CaProto yields error: {e:?}  remote {:?}", self.remote_addr_dbg);
-                self.trigger_shutdown(ChannelStatusClosedReason::ProtocolError);
+                self.trigger_shutdown(ShutdownReason::Protocol);
                 Ready(Some(Err(e)))
             }
             Ready(None) => {
                 warn!("handle_peer_ready CaProto is done  {:?}", self.remote_addr_dbg);
-                self.trigger_shutdown(ChannelStatusClosedReason::ProtocolDone);
+                self.trigger_shutdown(ShutdownReason::ProtocolMissing);
                 Ready(None)
             }
             Pending => Pending,
@@ -2032,7 +2140,7 @@ impl CaConn {
                                         addr,
                                         status: ConnectionStatus::ConnectError,
                                     }));
-                                self.trigger_shutdown(ChannelStatusClosedReason::ConnectFail);
+                                self.trigger_shutdown(ShutdownReason::IoError);
                                 Ok(Ready(Some(())))
                             }
                             Err(e) => {
@@ -2045,7 +2153,7 @@ impl CaConn {
                                         addr,
                                         status: ConnectionStatus::ConnectTimeout,
                                     }));
-                                self.trigger_shutdown(ChannelStatusClosedReason::ConnectFail);
+                                self.trigger_shutdown(ShutdownReason::IocTimeout);
                                 Ok(Ready(Some(())))
                             }
                         }
@@ -2133,7 +2241,7 @@ impl CaConn {
                 Ok(_) => Ok(Pending),
                 Err(e) => {
                     error!("handle_own_ticker {e}");
-                    self.trigger_shutdown(ChannelStatusClosedReason::InternalError);
+                    self.trigger_shutdown(ShutdownReason::InternalError);
                     Err(e)
                 }
             },

@@ -370,6 +370,7 @@ pub enum ChannelStatusClosedReason {
     NoProtocol,
     ProtocolDone,
     ConnectFail,
+    IoError,
 }
 
 #[derive(Debug)]
@@ -397,6 +398,7 @@ impl ChannelStatus {
                 NoProtocol => 9,
                 ProtocolDone => 10,
                 ConnectFail => 11,
+                IoError => 12,
             },
         }
     }
@@ -416,6 +418,7 @@ impl ChannelStatus {
             9 => Closed(NoProtocol),
             10 => Closed(ProtocolDone),
             11 => Closed(ConnectFail),
+            12 => Closed(IoError),
             24 => AssignedToAddress,
             _ => {
                 return Err(err::Error::with_msg_no_trace(format!(
@@ -425,6 +428,17 @@ impl ChannelStatus {
         };
         Ok(ret)
     }
+}
+
+#[derive(Debug, Clone)]
+pub enum ShutdownReason {
+    ConnectFail,
+    IoError,
+    ShutdownCommand,
+    InternalError,
+    Protocol,
+    ProtocolMissing,
+    IocTimeout,
 }
 
 #[derive(Debug)]
