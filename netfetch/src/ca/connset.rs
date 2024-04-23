@@ -62,6 +62,7 @@ use std::net::SocketAddr;
 use std::net::SocketAddrV4;
 use std::pin::Pin;
 
+use netpod::OnDrop;
 use std::sync::Arc;
 use std::task::Context;
 use std::task::Poll;
@@ -478,6 +479,15 @@ impl CaConnSet {
 
     async fn run(mut this: CaConnSet) -> Result<(), Error> {
         trace!("CaConnSet  run begin");
+        let (beacons_cancel_guard_tx, rx) = taskrun::tokio::sync::mpsc::channel(12);
+        let beacons_jh = tokio::spawn(async move {
+            if false {
+                crate::ca::beacons::listen_beacons(rx).await
+            } else {
+                Ok(())
+            }
+        });
+        let _g_beacon = OnDrop::new(move || {});
         loop {
             let x = this.next().await;
             match x {
@@ -486,6 +496,10 @@ impl CaConnSet {
             }
         }
         trace!("CaConnSet EndOfStream");
+        beacons_cancel_guard_tx.send(1).await.ok();
+        trace!("CaConnSet beacon cancelled");
+        beacons_jh.await?.map_err(|e| Error::from_string(e))?;
+        trace!("CaConnSet beacon joined");
         trace!("join ioc_finder_jh A  {:?}", this.find_ioc_query_sender.len());
         this.find_ioc_query_sender.as_mut().drop();
         trace!("join ioc_finder_jh B  {:?}", this.find_ioc_query_sender.len());
@@ -496,6 +510,7 @@ impl CaConnSet {
         this.connset_out_tx.close();
         this.connset_inp_rx.close();
         this.shutdown_done = true;
+        trace!("CaConnSet run done");
         Ok(())
     }
 
@@ -1061,7 +1076,7 @@ impl CaConnSet {
         trace2!("ca_conn_consumer  ended {}", addr);
         match ret {
             Ok(x) => {
-                trace!("Sending  CaConnEventValue::EndOfStream");
+                trace!("sending  CaConnEventValue::EndOfStream");
                 tx1.send((addr, CaConnEvent::new_now(CaConnEventValue::EndOfStream(x))))
                     .await?;
             }
@@ -1081,6 +1096,7 @@ impl CaConnSet {
     ) -> Result<EndOfStreamReason, Error> {
         let mut eos_reason = None;
         while let Some(item) = conn.next().await {
+            trace!("ca_conn_item_merge_inner  item {item:?}");
             if let Some(x) = eos_reason {
                 let e = Error::with_msg_no_trace(format!("CaConn delivered already eos  {addr}  {x:?}"));
                 error!("{e}");

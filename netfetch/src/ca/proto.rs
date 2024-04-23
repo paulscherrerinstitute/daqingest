@@ -46,6 +46,7 @@ pub enum Error {
     NeitherPendingNorProgress,
     OutputBufferTooSmall,
     LogicError,
+    BadPayload,
 }
 
 const CA_PROTO_VERSION: u32 = 13;
@@ -53,10 +54,10 @@ const EPICS_EPOCH_OFFSET: u64 = 631152000;
 const PAYLOAD_LEN_MAX: u32 = 1024 * 1024 * 32;
 const PROTO_INPUT_BUF_CAP: u32 = 1024 * 1024 * 40;
 
-const TESTING_UNRESPONSIVE_TODO_REMOVE: bool = true;
+const TESTING_UNRESPONSIVE_TODO_REMOVE: bool = false;
 const TESTING_EVENT_ADD_RES_MAX: u32 = 3;
 
-const TESTING_PROTOCOL_ERROR_TODO_REMOVE: bool = true;
+const TESTING_PROTOCOL_ERROR_TODO_REMOVE: bool = false;
 const TESTING_PROTOCOL_ERROR_AFTER_BYTES: u32 = 400;
 
 #[derive(Debug)]
@@ -867,6 +868,16 @@ impl CaMsg {
                 let ty = CaMsgTy::EventAddRes(d);
                 CaMsg::from_ty_ts(ty, tsnow)
             }
+            0x0c => {
+                if payload.len() != 0 {
+                    return Err(Error::BadPayload);
+                }
+                let ty = CaMsgTy::ChannelCloseRes(ChannelCloseRes {
+                    sid: hi.param1,
+                    cid: hi.param2,
+                });
+                CaMsg::from_ty_ts(ty, tsnow)
+            }
             0x0f => {
                 if payload.len() == 8 {
                     let v = u64::from_be_bytes(payload.try_into().map_err(|_| Error::BadSlice)?);
@@ -1197,6 +1208,8 @@ impl CaProto {
                                         self.buf.put_u8(0x55)?;
                                     }
                                 }
+                            } else {
+                                self.buf.wadv(nf)?;
                             }
                             have_progress = true;
                             self.stats.tcp_recv_bytes().add(nf as _);
@@ -1296,11 +1309,16 @@ impl CaProto {
                 let ret = match &msg.ty {
                     CaMsgTy::EventAddRes(..) => {
                         self.stats.data_count().ingest(hi.data_count() as u32);
-                        if TESTING_UNRESPONSIVE_TODO_REMOVE && self.event_add_res_cnt < TESTING_EVENT_ADD_RES_MAX {
+                        if TESTING_UNRESPONSIVE_TODO_REMOVE {
+                            if self.event_add_res_cnt < TESTING_EVENT_ADD_RES_MAX {
+                                self.event_add_res_cnt += 1;
+                                Ok(Some(CaItem::Msg(msg)))
+                            } else {
+                                Ok(None)
+                            }
+                        } else {
                             self.event_add_res_cnt += 1;
                             Ok(Some(CaItem::Msg(msg)))
-                        } else {
-                            Ok(None)
                         }
                     }
                     _ => Ok(Some(CaItem::Msg(msg))),

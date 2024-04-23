@@ -173,6 +173,7 @@ pub async fn schema_check(pgc: &PgClient) -> Result<(), Error> {
     Ok(())
 }
 
+#[allow(unused)]
 fn ignore_does_not_exist<T>(x: Result<T, tokio_postgres::Error>) -> Result<(), tokio_postgres::Error> {
     match x {
         Ok(_) => Ok(()),

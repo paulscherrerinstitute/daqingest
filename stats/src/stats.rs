@@ -346,6 +346,7 @@ stats_proc::stats_struct!((
             transition_to_polling,
             transition_to_polling_already_in,
             transition_to_polling_bad_state,
+            channel_add_exists,
         ),
         values(inter_ivl_ema, read_ioids_len, proto_out_len,),
         histolog2s(

@@ -366,10 +366,11 @@ fn inspect_items(item_inp: Receiver<VecDeque<QueryItem>>) -> impl Stream<Item = 
                 }
                 QueryItem::Insert(item) => {
                     trace3!(
-                        "execute  Insert  {:?}  {:?}  {:?}",
+                        "execute  Insert  {:?}  {:?}  {:?}  {:?}",
                         item.series,
                         item.ts_msp,
-                        item.val.shape()
+                        item.val.shape(),
+                        item
                     );
                 }
                 QueryItem::TimeBinSimpleF32(_) => {

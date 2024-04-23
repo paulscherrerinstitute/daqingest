@@ -42,6 +42,7 @@ const CHECK_HEALTH_TIMEOUT: Duration = Duration::from_millis(5000);
 const PRINT_ACTIVE_INTERVAL: Duration = Duration::from_millis(60000);
 const PRINT_STATUS_INTERVAL: Duration = Duration::from_millis(20000);
 const CHECK_CHANNEL_SLOW_WARN: Duration = Duration::from_millis(500);
+const RUN_WITHOUT_SCYLLA: bool = true;
 
 pub struct DaemonOpts {
     pgconf: Database,
@@ -637,16 +638,18 @@ pub async fn run(opts: CaIngestOpts, channels_config: Option<ChannelsConfig>) ->
     drop(pg);
     jh.await?.map_err(Error::from_string)?;
 
-    scywr::schema::migrate_scylla_data_schema(opts.scylla_config(), RetentionTime::Short)
-        .await
-        .map_err(Error::from_string)?;
-
-    if let Some(scyconf) = opts.scylla_config_lt() {
-        scywr::schema::migrate_scylla_data_schema(scyconf, RetentionTime::Long)
+    if RUN_WITHOUT_SCYLLA {
+    } else {
+        scywr::schema::migrate_scylla_data_schema(opts.scylla_config(), RetentionTime::Short)
             .await
             .map_err(Error::from_string)?;
-    }
 
+        if let Some(scyconf) = opts.scylla_config_lt() {
+            scywr::schema::migrate_scylla_data_schema(scyconf, RetentionTime::Long)
+                .await
+                .map_err(Error::from_string)?;
+        }
+    }
     info!("database check done");
 
     // TODO use a new stats type:
