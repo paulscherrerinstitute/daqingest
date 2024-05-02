@@ -599,8 +599,9 @@ impl CaMsgTy {
             CreateChanFail(_) => {}
             AccessRightsRes(_) => {}
             EventAdd(_) => {
-                // TODO allow to customize the mask. Test if it works.
-                buf.copy_from_slice(&[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x0e, 0, 0]);
+                // Using flags DBE_ARCHIVE, DBE_ALARM, DBE_PROPERTY.
+                let flags = 0b1110;
+                buf.copy_from_slice(&[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, flags, 0, 0]);
             }
             EventAddRes(_) => {}
             EventAddResEmpty(_) => {}
