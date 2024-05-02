@@ -44,7 +44,7 @@ async fn run_batcher<T>(rx: Receiver<T>, batch_tx: Sender<Vec<T>>, batch_limit: 
                         do_emit = true;
                     }
                 }
-                Err(e) => {
+                Err(_e) => {
                     break;
                 }
             },

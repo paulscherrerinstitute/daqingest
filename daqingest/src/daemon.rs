@@ -19,6 +19,8 @@ use netfetch::throttletrace::ThrottleTrace;
 use netpod::ttl::RetentionTime;
 use netpod::Database;
 use scywr::config::ScyllaIngestConfig;
+use scywr::insertqueues::InsertQueuesRx;
+use scywr::insertqueues::InsertQueuesTx;
 use scywr::insertworker::InsertWorkerOpts;
 use scywr::iteminsertqueue as scywriiq;
 use scywriiq::QueryItem;
@@ -46,7 +48,9 @@ const RUN_WITHOUT_SCYLLA: bool = true;
 
 pub struct DaemonOpts {
     pgconf: Database,
-    scyconf: ScyllaIngestConfig,
+    scyconf_st: ScyllaIngestConfig,
+    scyconf_mt: ScyllaIngestConfig,
+    scyconf_lt: ScyllaIngestConfig,
     #[allow(unused)]
     test_bsread_addr: Option<String>,
     insert_frac: Arc<AtomicU64>,
@@ -97,13 +101,7 @@ impl Daemon {
         .await
         .map_err(|e| Error::with_msg_no_trace(e.to_string()))?;
 
-        let (query_item_tx, query_item_rx) = async_channel::bounded(ingest_opts.insert_item_queue_cap());
-        let query_item_tx_weak = query_item_tx.downgrade();
-
         let insert_queue_counter = Arc::new(AtomicUsize::new(0));
-
-        // Insert queue hook
-        // let query_item_rx = inserthook::active_channel_insert_hook(query_item_rx);
 
         let wrest_stats = Arc::new(SeriesWriterEstablishStats::new());
         let (writer_establis_tx,) =
@@ -111,37 +109,6 @@ impl Daemon {
                 .map_err(|e| Error::with_msg_no_trace(e.to_string()))?;
 
         let local_epics_hostname = ingest_linux::net::local_hostname();
-        let conn_set_ctrl = CaConnSet::start(
-            ingest_opts.backend().into(),
-            local_epics_hostname,
-            query_item_tx,
-            channel_info_query_tx.clone(),
-            ingest_opts.clone(),
-            writer_establis_tx,
-        );
-
-        // TODO remove
-        tokio::spawn({
-            let rx = conn_set_ctrl.receiver().clone();
-            let tx = daemon_ev_tx.clone();
-            async move {
-                loop {
-                    match rx.recv().await {
-                        Ok(item) => {
-                            let item = DaemonEvent::CaConnSetItem(item);
-                            if let Err(_) = tx.send(item).await {
-                                debug!("CaConnSet to Daemon adapter: tx closed, break");
-                                break;
-                            }
-                        }
-                        Err(_) => {
-                            debug!("CaConnSet to Daemon adapter: rx done, break");
-                            break;
-                        }
-                    }
-                }
-            }
-        });
 
         #[cfg(DISABLED)]
         let query_item_rx = {
@@ -172,33 +139,91 @@ impl Daemon {
         };
         let insert_worker_opts = Arc::new(insert_worker_opts);
 
-        debug!("TODO RetentionTime");
+        let (iqtx, iqrx) = {
+            let (st_rf3_tx, st_rf3_rx) = async_channel::bounded(ingest_opts.insert_item_queue_cap());
+            let (st_rf1_tx, st_rf1_rx) = async_channel::bounded(ingest_opts.insert_item_queue_cap());
+            let (mt_rf3_tx, mt_rf3_rx) = async_channel::bounded(ingest_opts.insert_item_queue_cap());
+            let iqtx = InsertQueuesTx {
+                st_rf3_tx,
+                st_rf1_tx,
+                mt_rf3_tx,
+            };
+            let iqrx = InsertQueuesRx {
+                st_rf3_rx,
+                st_rf1_rx,
+                mt_rf3_rx,
+            };
+            (iqtx, iqrx)
+        };
 
-        let rett = RetentionTime::Short;
+        let query_item_tx_weak = iqtx.st_rf3_tx.clone().downgrade();
 
-        #[cfg(DISABLED)]
-        let insert_workers_jh = scywr::insertworker::spawn_scylla_insert_workers(
-            rett,
-            opts.scyconf.clone(),
-            ingest_opts.insert_scylla_sessions(),
-            ingest_opts.insert_worker_count(),
-            ingest_opts.insert_worker_concurrency(),
-            query_item_rx,
-            insert_worker_opts,
-            insert_worker_stats.clone(),
-            ingest_opts.use_rate_limit_queue(),
-        )
-        .await?;
-        let insert_workers_jh = scywr::insertworker::spawn_scylla_insert_workers_dummy(
-            ingest_opts.insert_worker_count(),
-            ingest_opts.insert_worker_concurrency(),
-            query_item_rx,
-            insert_worker_opts,
-            insert_worker_stats.clone(),
-        )
-        .await?;
+        let conn_set_ctrl = CaConnSet::start(
+            ingest_opts.backend().into(),
+            local_epics_hostname,
+            iqtx,
+            channel_info_query_tx.clone(),
+            ingest_opts.clone(),
+            writer_establis_tx,
+        );
+
+        // TODO remove
+        tokio::spawn({
+            let rx = conn_set_ctrl.receiver().clone();
+            let tx = daemon_ev_tx.clone();
+            async move {
+                loop {
+                    match rx.recv().await {
+                        Ok(item) => {
+                            let item = DaemonEvent::CaConnSetItem(item);
+                            if let Err(_) = tx.send(item).await {
+                                debug!("CaConnSet to Daemon adapter: tx closed, break");
+                                break;
+                            }
+                        }
+                        Err(_) => {
+                            debug!("CaConnSet to Daemon adapter: rx done, break");
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+
+        // let query_item_tx_weak = query_item_tx.downgrade();
+        // Insert queue hook
+        // let query_item_rx = inserthook::active_channel_insert_hook(query_item_rx);
+
+        let mut insert_worker_jhs = Vec::new();
+
+        if RUN_WITHOUT_SCYLLA {
+            let jh = scywr::insertworker::spawn_scylla_insert_workers_dummy(
+                ingest_opts.insert_worker_count(),
+                ingest_opts.insert_worker_concurrency(),
+                iqrx.st_rf3_rx,
+                insert_worker_opts,
+                insert_worker_stats.clone(),
+            )
+            .await?;
+            insert_worker_jhs.extend(jh);
+        } else {
+            let jh = scywr::insertworker::spawn_scylla_insert_workers(
+                // TODO does the worker actually need RETT? Yes, to use the correct table names.
+                RetentionTime::Short,
+                opts.scyconf_st.clone(),
+                ingest_opts.insert_scylla_sessions(),
+                ingest_opts.insert_worker_count(),
+                ingest_opts.insert_worker_concurrency(),
+                iqrx.st_rf3_rx.clone(),
+                insert_worker_opts,
+                insert_worker_stats.clone(),
+                ingest_opts.use_rate_limit_queue(),
+            )
+            .await?;
+            insert_worker_jhs.extend(jh);
+        };
         let stats = Arc::new(DaemonStats::new());
-        stats.insert_worker_spawned().add(insert_workers_jh.len() as _);
+        stats.insert_worker_spawned().add(insert_worker_jhs.len() as _);
 
         #[cfg(feature = "bsread")]
         if let Some(bsaddr) = &opts.test_bsread_addr {
@@ -248,7 +273,7 @@ impl Daemon {
             count_unassigned: 0,
             count_assigned: 0,
             last_status_print: SystemTime::now(),
-            insert_workers_jh,
+            insert_workers_jh: insert_worker_jhs,
             stats,
             insert_worker_stats,
             series_by_channel_stats,
@@ -289,11 +314,14 @@ impl Daemon {
     async fn handle_timer_tick(&mut self) -> Result<(), Error> {
         if self.shutting_down {
             let nworkers = self.insert_workers_running.load(atomic::Ordering::Acquire);
-            let nitems = self
-                .query_item_tx_weak
-                .upgrade()
-                .map(|x| (x.sender_count(), x.receiver_count(), x.len()));
-            info!("qu senders A  nworkers {}  nitems {:?}", nworkers, nitems);
+            #[cfg(DISABLED)]
+            {
+                let nitems = self
+                    .query_item_tx_weak
+                    .upgrade()
+                    .map(|x| (x.sender_count(), x.receiver_count(), x.len()));
+                info!("qu senders A  nworkers {}  nitems {:?}", nworkers, nitems);
+            }
             if nworkers == 0 {
                 info!("goodbye");
                 std::process::exit(0);
@@ -552,15 +580,15 @@ impl Daemon {
     }
 
     pub async fn daemon(mut self) -> Result<(), Error> {
-        {
+        let worker_jh = {
             let backend = String::new();
-            let (item_tx, item_rx) = async_channel::bounded(256);
+            let (_item_tx, item_rx) = async_channel::bounded(256);
             let info_worker_tx = self.channel_info_query_tx.clone();
             let iiq_tx = self.query_item_tx_weak.upgrade().unwrap();
             let worker_fut =
                 netfetch::metrics::postingest::process_api_query_items(backend, item_rx, info_worker_tx, iiq_tx);
-            let worker_jh = taskrun::spawn(worker_fut);
-        }
+            taskrun::spawn(worker_fut)
+        };
         Self::spawn_ticker(self.tx.clone(), self.stats.clone());
         loop {
             if self.shutting_down {
@@ -598,12 +626,15 @@ impl Daemon {
                 }
             }
         }
-        info!("Wait for metrics handler");
+        info!("wait for metrics handler");
         self.metrics_shutdown_tx.send(1).await?;
         if let Some(jh) = self.metrics_jh.take() {
             jh.await??;
         }
-        info!("Joined metrics handler");
+        info!("joined metrics handler");
+        info!("\n\n\n-----------------------\n\n\nwait for postingest task");
+        worker_jh.await?.map_err(|e| Error::from_string(e))?;
+        info!("joined postingest task");
         Ok(())
     }
 }
@@ -630,25 +661,24 @@ pub async fn run(opts: CaIngestOpts, channels_config: Option<ChannelsConfig>) ->
     info!("start up {opts:?}");
     ingest_linux::signal::set_signal_handler(libc::SIGINT, handler_sigint).map_err(Error::from_string)?;
     ingest_linux::signal::set_signal_handler(libc::SIGTERM, handler_sigterm).map_err(Error::from_string)?;
-
-    let (pg, jh) = dbpg::conn::make_pg_client(opts.postgresql_config())
-        .await
-        .map_err(Error::from_string)?;
-    dbpg::schema::schema_check(&pg).await.map_err(Error::from_string)?;
-    drop(pg);
-    jh.await?.map_err(Error::from_string)?;
-
-    if RUN_WITHOUT_SCYLLA {
-    } else {
-        scywr::schema::migrate_scylla_data_schema(opts.scylla_config(), RetentionTime::Short)
+    {
+        let (pg, jh) = dbpg::conn::make_pg_client(opts.postgresql_config())
             .await
             .map_err(Error::from_string)?;
-
-        if let Some(scyconf) = opts.scylla_config_lt() {
-            scywr::schema::migrate_scylla_data_schema(scyconf, RetentionTime::Long)
-                .await
-                .map_err(Error::from_string)?;
-        }
+        dbpg::schema::schema_check(&pg).await.map_err(Error::from_string)?;
+        jh.await?.map_err(Error::from_string)?;
+    }
+    if RUN_WITHOUT_SCYLLA {
+    } else {
+        scywr::schema::migrate_scylla_data_schema(opts.scylla_config_st(), RetentionTime::Short)
+            .await
+            .map_err(Error::from_string)?;
+        scywr::schema::migrate_scylla_data_schema(opts.scylla_config_mt(), RetentionTime::Medium)
+            .await
+            .map_err(Error::from_string)?;
+        scywr::schema::migrate_scylla_data_schema(opts.scylla_config_lt(), RetentionTime::Long)
+            .await
+            .map_err(Error::from_string)?;
     }
     info!("database check done");
 
@@ -668,7 +698,9 @@ pub async fn run(opts: CaIngestOpts, channels_config: Option<ChannelsConfig>) ->
 
     let opts2 = DaemonOpts {
         pgconf: opts.postgresql_config().clone(),
-        scyconf: opts.scylla_config().clone(),
+        scyconf_st: opts.scylla_config_st().clone(),
+        scyconf_mt: opts.scylla_config_mt().clone(),
+        scyconf_lt: opts.scylla_config_lt().clone(),
         test_bsread_addr: opts.test_bsread_addr.clone(),
         insert_frac: insert_frac.clone(),
         store_workers_rate,

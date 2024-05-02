@@ -75,7 +75,7 @@ impl SeriesWriter {
         channel: String,
         scalar_type: ScalarType,
         shape: Shape,
-        tsnow: SystemTime,
+        stnow: SystemTime,
     ) -> Result<Self, Error> {
         let (tx, rx) = async_channel::bounded(1);
         let item = ChannelInfoQuery {
@@ -89,7 +89,7 @@ impl SeriesWriter {
         worker_tx.send(item).await?;
         let res = rx.recv().await?.map_err(|_| Error::SeriesLookupError)?;
         let cssid = ChannelStatusSeriesId::new(res.series.to_series().id());
-        Self::establish_with_cssid(worker_tx, cssid, backend, channel, scalar_type, shape, tsnow).await
+        Self::establish_with_cssid(worker_tx, cssid, backend, channel, scalar_type, shape, stnow).await
     }
 
     pub async fn establish_with_cssid(

@@ -63,6 +63,7 @@ use std::net::SocketAddrV4;
 use std::pin::Pin;
 
 use netpod::OnDrop;
+use scywr::insertqueues::InsertQueuesTx;
 use std::sync::Arc;
 use std::task::Context;
 use std::task::Poll;
@@ -367,7 +368,7 @@ pub struct CaConnSet {
     find_ioc_query_queue: VecDeque<IocAddrQuery>,
     find_ioc_query_sender: Pin<Box<SenderPolling<IocAddrQuery>>>,
     find_ioc_res_rx: Pin<Box<Receiver<VecDeque<FindIocRes>>>>,
-    storage_insert_tx: Pin<Box<Sender<VecDeque<QueryItem>>>>,
+    iqtx: Pin<Box<InsertQueuesTx>>,
     storage_insert_queue: VecDeque<VecDeque<QueryItem>>,
     storage_insert_sender: Pin<Box<SenderPolling<VecDeque<QueryItem>>>>,
     ca_conn_res_tx: Pin<Box<Sender<(SocketAddr, CaConnEvent)>>>,
@@ -398,7 +399,7 @@ impl CaConnSet {
     pub fn start(
         backend: String,
         local_epics_hostname: String,
-        storage_insert_tx: Sender<VecDeque<QueryItem>>,
+        iqtx: InsertQueuesTx,
         channel_info_query_tx: Sender<ChannelInfoQuery>,
         ingest_opts: CaIngestOpts,
         establish_worker_tx: async_channel::Sender<EstablishWorkerJob>,
@@ -435,9 +436,12 @@ impl CaConnSet {
             find_ioc_query_queue: VecDeque::new(),
             find_ioc_query_sender: Box::pin(SenderPolling::new(find_ioc_query_tx)),
             find_ioc_res_rx: Box::pin(find_ioc_res_rx),
-            storage_insert_tx: Box::pin(storage_insert_tx.clone()),
+            iqtx: Box::pin(iqtx.clone()),
             storage_insert_queue: VecDeque::new(),
-            storage_insert_sender: Box::pin(SenderPolling::new(storage_insert_tx)),
+
+            // TODO simplify for all combinations
+            storage_insert_sender: Box::pin(SenderPolling::new(iqtx.st_rf3_tx.clone())),
+
             ca_conn_res_tx: Box::pin(ca_conn_res_tx),
             ca_conn_res_rx: Box::pin(ca_conn_res_rx),
             shutdown_stopping: false,
@@ -480,13 +484,17 @@ impl CaConnSet {
     async fn run(mut this: CaConnSet) -> Result<(), Error> {
         trace!("CaConnSet  run begin");
         let (beacons_cancel_guard_tx, rx) = taskrun::tokio::sync::mpsc::channel(12);
-        let beacons_jh = tokio::spawn(async move {
-            if false {
-                crate::ca::beacons::listen_beacons(rx).await
-            } else {
-                Ok(())
-            }
-        });
+        let beacons_jh = {
+            let tx2 = this.channel_info_query_tx.clone().unwrap();
+            let backend = this.backend.clone();
+            tokio::spawn(async move {
+                if false {
+                    crate::ca::beacons::listen_beacons(rx, tx2, backend).await
+                } else {
+                    Ok(())
+                }
+            })
+        };
         let _g_beacon = OnDrop::new(move || {});
         loop {
             let x = this.next().await;
@@ -1039,7 +1047,7 @@ impl CaConnSet {
             add.backend.clone(),
             addr_v4,
             self.local_epics_hostname.clone(),
-            self.storage_insert_tx.as_ref().get_ref().clone(),
+            self.iqtx.st_rf3_tx.clone(),
             self.channel_info_query_tx
                 .clone()
                 .ok_or_else(|| Error::with_msg_no_trace("no more channel_info_query_tx available"))?,
@@ -1050,8 +1058,7 @@ impl CaConnSet {
         let conn_tx = conn.conn_command_tx();
         let conn_stats = conn.stats();
         let tx1 = self.ca_conn_res_tx.as_ref().get_ref().clone();
-        let tx2 = self.storage_insert_tx.as_ref().get_ref().clone();
-        let jh = tokio::spawn(Self::ca_conn_item_merge(conn, tx1, tx2, addr, self.stats.clone()));
+        let jh = tokio::spawn(Self::ca_conn_item_merge(conn, tx1, addr, self.stats.clone()));
         let ca_conn_res = CaConnRes {
             state: CaConnState::new(CaConnStateValue::Fresh),
             sender: Box::pin(conn_tx.into()),
@@ -1065,7 +1072,6 @@ impl CaConnSet {
     async fn ca_conn_item_merge(
         conn: CaConn,
         tx1: Sender<(SocketAddr, CaConnEvent)>,
-        _tx2: Sender<VecDeque<QueryItem>>,
         addr: SocketAddr,
         stats: Arc<CaConnSetStats>,
     ) -> Result<(), Error> {
@@ -1546,7 +1552,8 @@ impl Stream for CaConnSet {
             trace4!("CaConnSet  poll  loop");
             self.stats.poll_loop_begin().inc();
 
-            self.stats.storage_insert_tx_len.set(self.storage_insert_tx.len() as _);
+            // TODO generalize to all combinations
+            self.stats.storage_insert_tx_len.set(self.iqtx.st_rf3_tx.len() as _);
             self.stats
                 .storage_insert_queue_len
                 .set(self.storage_insert_queue.len() as _);

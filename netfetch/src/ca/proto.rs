@@ -8,7 +8,6 @@ use slidebuf::SlideBuf;
 use stats::CaProtoStats;
 use std::collections::VecDeque;
 use std::io;
-use std::net::SocketAddrV4;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::Context;
@@ -1045,7 +1044,7 @@ impl CaState {
 pub struct CaProto {
     tcp: TcpStream,
     tcp_eof: bool,
-    remote_addr_dbg: SocketAddrV4,
+    remote_name: String,
     state: CaState,
     buf: SlideBuf,
     outbuf: SlideBuf,
@@ -1058,11 +1057,11 @@ pub struct CaProto {
 }
 
 impl CaProto {
-    pub fn new(tcp: TcpStream, remote_addr_dbg: SocketAddrV4, array_truncate: usize, stats: Arc<CaProtoStats>) -> Self {
+    pub fn new(tcp: TcpStream, remote_name: String, array_truncate: usize, stats: Arc<CaProtoStats>) -> Self {
         Self {
             tcp,
             tcp_eof: false,
-            remote_addr_dbg,
+            remote_name,
             state: CaState::StdHead,
             buf: SlideBuf::new(PROTO_INPUT_BUF_CAP as usize),
             outbuf: SlideBuf::new(1024 * 256),
@@ -1186,7 +1185,7 @@ impl CaProto {
                             debug!(
                                 "peer done  {:?}  {:?}  {:?}",
                                 self.tcp.peer_addr(),
-                                self.remote_addr_dbg,
+                                self.remote_name,
                                 self.state
                             );
                             self.tcp_eof = true;

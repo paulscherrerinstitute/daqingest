@@ -365,13 +365,7 @@ fn inspect_items(item_inp: Receiver<VecDeque<QueryItem>>) -> impl Stream<Item = 
                     trace2!("execute  ChannelStatus  {item:?}");
                 }
                 QueryItem::Insert(item) => {
-                    trace3!(
-                        "execute  Insert  {:?}  {:?}  {:?}  {:?}",
-                        item.series,
-                        item.ts_msp,
-                        item.val.shape(),
-                        item
-                    );
+                    trace3!("execute  Insert  {}", item.string_short());
                 }
                 QueryItem::TimeBinSimpleF32(_) => {
                     trace2!("execute  TimeBinSimpleF32");

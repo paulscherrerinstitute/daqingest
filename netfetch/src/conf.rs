@@ -27,11 +27,9 @@ pub struct CaIngestOpts {
     #[serde(default, with = "humantime_serde")]
     timeout: Option<Duration>,
     postgresql: Database,
-    scylla: ScyllaIngestConfig,
-    #[serde(default)]
-    scylla_mt: Option<ScyllaIngestConfig>,
-    #[serde(default)]
-    scylla_lt: Option<ScyllaIngestConfig>,
+    scylla_st: ScyllaIngestConfig,
+    scylla_mt: ScyllaIngestConfig,
+    scylla_lt: ScyllaIngestConfig,
     array_truncate: Option<u64>,
     insert_worker_count: Option<usize>,
     insert_worker_concurrency: Option<usize>,
@@ -56,16 +54,16 @@ impl CaIngestOpts {
         &self.postgresql
     }
 
-    pub fn scylla_config(&self) -> &ScyllaIngestConfig {
-        &self.scylla
+    pub fn scylla_config_st(&self) -> &ScyllaIngestConfig {
+        &self.scylla_st
     }
 
-    pub fn scylla_config_mt(&self) -> Option<&ScyllaIngestConfig> {
-        self.scylla_mt.as_ref()
+    pub fn scylla_config_mt(&self) -> &ScyllaIngestConfig {
+        &self.scylla_mt
     }
 
-    pub fn scylla_config_lt(&self) -> Option<&ScyllaIngestConfig> {
-        self.scylla_lt.as_ref()
+    pub fn scylla_config_lt(&self) -> &ScyllaIngestConfig {
+        &self.scylla_lt
     }
 
     pub fn search(&self) -> &Vec<String> {
@@ -140,7 +138,10 @@ scylla:
     assert_eq!(conf.channels, Some(PathBuf::from("/some/path/file.txt")));
     assert_eq!(&conf.api_bind, "0.0.0.0:3011");
     assert_eq!(conf.search.get(0), Some(&"172.26.0.255".to_string()));
-    assert_eq!(conf.scylla.hosts().get(1), Some(&"sf-nube-12:19042".to_string()));
+    assert_eq!(
+        conf.scylla_config_st().hosts().get(1),
+        Some(&"sf-nube-12:19042".to_string())
+    );
     assert_eq!(conf.timeout, Some(Duration::from_millis(1000 * (60 * 10 + 3) + 45)));
 }
 

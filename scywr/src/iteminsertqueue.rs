@@ -48,6 +48,7 @@ pub enum ScalarValue {
     I8(i8),
     I16(i16),
     I32(i32),
+    I64(i64),
     F32(f32),
     F64(f64),
     Enum(i16),
@@ -61,11 +62,26 @@ impl ScalarValue {
             ScalarValue::I8(_) => 1,
             ScalarValue::I16(_) => 2,
             ScalarValue::I32(_) => 4,
+            ScalarValue::I64(_) => 8,
             ScalarValue::F32(_) => 4,
             ScalarValue::F64(_) => 8,
             ScalarValue::Enum(_) => 2,
             ScalarValue::String(x) => x.len() as u32,
             ScalarValue::Bool(_) => 1,
+        }
+    }
+
+    pub fn string_short(&self) -> String {
+        match self {
+            ScalarValue::I8(x) => x.to_string(),
+            ScalarValue::I16(x) => x.to_string(),
+            ScalarValue::I32(x) => x.to_string(),
+            ScalarValue::I64(x) => x.to_string(),
+            ScalarValue::F32(x) => x.to_string(),
+            ScalarValue::F64(x) => x.to_string(),
+            ScalarValue::Enum(x) => x.to_string(),
+            ScalarValue::String(x) => x.to_string(),
+            ScalarValue::Bool(x) => x.to_string(),
         }
     }
 }
@@ -177,6 +193,18 @@ impl ArrayValue {
             }
         }
     }
+
+    pub fn string_short(&self) -> String {
+        use ArrayValue::*;
+        match self {
+            I8(x) => format!("{}", x.get(0).map_or(0, |x| *x)),
+            I16(x) => format!("{}", x.get(0).map_or(0, |x| *x)),
+            I32(x) => format!("{}", x.get(0).map_or(0, |x| *x)),
+            F32(x) => format!("{}", x.get(0).map_or(0., |x| *x)),
+            F64(x) => format!("{}", x.get(0).map_or(0., |x| *x)),
+            Bool(x) => format!("{}", x.get(0).map_or(false, |x| *x)),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -199,6 +227,7 @@ impl DataValue {
                 ScalarValue::I8(_) => ScalarType::I8,
                 ScalarValue::I16(_) => ScalarType::I16,
                 ScalarValue::I32(_) => ScalarType::I32,
+                ScalarValue::I64(_) => ScalarType::I64,
                 ScalarValue::F32(_) => ScalarType::F32,
                 ScalarValue::F64(_) => ScalarType::F64,
                 ScalarValue::Enum(_) => ScalarType::U16,
@@ -220,6 +249,13 @@ impl DataValue {
         match self {
             DataValue::Scalar(_) => Shape::Scalar,
             DataValue::Array(a) => Shape::Wave(a.len() as u32),
+        }
+    }
+
+    pub fn string_short(&self) -> String {
+        match self {
+            DataValue::Scalar(x) => x.string_short(),
+            DataValue::Array(x) => x.string_short(),
         }
     }
 }
@@ -471,6 +507,18 @@ pub struct InsertItem {
     pub ts_local: TsMs,
 }
 
+impl InsertItem {
+    pub fn string_short(&self) -> String {
+        format!(
+            "{}  {}  {}  {}",
+            self.series.id(),
+            self.ts_msp.ms(),
+            self.ts_lsp.ms(),
+            self.val.string_short()
+        )
+    }
+}
+
 #[derive(Debug)]
 pub struct TimeBinSimpleF32 {
     pub series: SeriesId,
@@ -682,6 +730,7 @@ pub async fn insert_item(
                 I16(val) => insert_scalar_gen(par, val, &data_store.qu_insert_scalar_i16, &data_store).await?,
                 Enum(val) => insert_scalar_gen(par, val, &data_store.qu_insert_scalar_i16, &data_store).await?,
                 I32(val) => insert_scalar_gen(par, val, &data_store.qu_insert_scalar_i32, &data_store).await?,
+                I64(val) => insert_scalar_gen(par, val, &data_store.qu_insert_scalar_i64, &data_store).await?,
                 F32(val) => insert_scalar_gen(par, val, &data_store.qu_insert_scalar_f32, &data_store).await?,
                 F64(val) => insert_scalar_gen(par, val, &data_store.qu_insert_scalar_f64, &data_store).await?,
                 String(val) => insert_scalar_gen(par, val, &data_store.qu_insert_scalar_string, &data_store).await?,
@@ -751,6 +800,7 @@ pub fn insert_item_fut(
                 I8(val) => insert_scalar_gen_fut(par, val, data_store.qu_insert_scalar_i8.clone(), scy),
                 I16(val) => insert_scalar_gen_fut(par, val, data_store.qu_insert_scalar_i16.clone(), scy),
                 I32(val) => insert_scalar_gen_fut(par, val, data_store.qu_insert_scalar_i32.clone(), scy),
+                I64(val) => insert_scalar_gen_fut(par, val, data_store.qu_insert_scalar_i64.clone(), scy),
                 F32(val) => insert_scalar_gen_fut(par, val, data_store.qu_insert_scalar_f32.clone(), scy),
                 F64(val) => insert_scalar_gen_fut(par, val, data_store.qu_insert_scalar_f64.clone(), scy),
                 Enum(val) => insert_scalar_gen_fut(par, val, data_store.qu_insert_scalar_i16.clone(), scy),

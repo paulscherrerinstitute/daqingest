@@ -96,8 +96,17 @@ macro_rules! trace3 {
 #[allow(unused)]
 macro_rules! trace4 {
     ($($arg:tt)*) => {
-        if true {
+        if false {
             trace!($($arg)*);
+        }
+    };
+}
+
+#[allow(unused)]
+macro_rules! trace_flush_queue {
+    ($($arg:tt)*) => {
+        if false {
+            trace3!($($arg)*);
         }
     };
 }
@@ -1932,7 +1941,7 @@ impl CaConn {
                             CaMsgTy::SearchRes(k) => {
                                 let a = k.addr.to_be_bytes();
                                 let addr = format!("{}.{}.{}.{}:{}", a[0], a[1], a[2], a[3], k.tcp_port);
-                                trace!("Search result indicates server address: {addr}");
+                                trace!("search result indicates server address: {addr}");
                                 // TODO count this unexpected case.
                             }
                             CaMsgTy::CreateChanRes(k) => {
@@ -1940,12 +1949,12 @@ impl CaConn {
                                 cx.waker().wake_by_ref();
                             }
                             CaMsgTy::EventAddRes(ev) => {
-                                trace2!("got EventAddRes  {:?}  cnt {}", camsg.ts, ev.data_count);
+                                trace4!("got EventAddRes  {:?}  cnt {}", camsg.ts, ev.data_count);
                                 self.stats.event_add_res_recv.inc();
                                 Self::handle_event_add_res(self, ev, tsnow)?
                             }
                             CaMsgTy::EventAddResEmpty(ev) => {
-                                trace2!("got EventAddResEmpty  {:?}", camsg.ts);
+                                trace4!("got EventAddResEmpty  {:?}", camsg.ts);
                                 Self::handle_event_add_res_empty(self, ev, tsnow)?
                             }
                             CaMsgTy::ReadNotifyRes(ev) => Self::handle_read_notify_res(self, ev, tsnow)?,
@@ -1957,7 +1966,7 @@ impl CaConn {
                                     self.stats.pong_recv_lat().ingest(dt);
                                 } else {
                                     let addr = &self.remote_addr_dbg;
-                                    warn!("Received Echo even though we didn't asked for it  {addr:?}");
+                                    warn!("received Echo even though we didn't asked for it  {addr:?}");
                                 }
                                 self.ioc_ping_last = tsnow;
                                 self.ioc_ping_next = tsnow + Self::ioc_ping_ivl_rng(&mut self.rng);
@@ -2144,7 +2153,7 @@ impl CaConn {
                                 self.backoff_reset();
                                 let proto = CaProto::new(
                                     tcp,
-                                    self.remote_addr_dbg.clone(),
+                                    self.remote_addr_dbg.to_string(),
                                     self.opts.array_truncate,
                                     self.ca_proto_stats.clone(),
                                 );
@@ -2408,7 +2417,7 @@ impl CaConn {
     {
         use Poll::*;
         if qu.len() != 0 {
-            trace3!("attempt_flush_queue  id {:7}  len {}", id, qu.len());
+            trace_flush_queue!("attempt_flush_queue  id {:7}  len {}", id, qu.len());
         }
         let mut have_progress = false;
         let mut i = 0;
@@ -2431,7 +2440,7 @@ impl CaConn {
             if sp.is_sending() {
                 match sp.poll_unpin(cx) {
                     Ready(Ok(())) => {
-                        trace3!("attempt_flush_queue  id {:7}  send done", id);
+                        trace_flush_queue!("attempt_flush_queue  id {:7}  send done", id);
                         have_progress = true;
                     }
                     Ready(Err(e)) => {
