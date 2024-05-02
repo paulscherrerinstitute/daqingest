@@ -17,7 +17,6 @@ use taskrun::tokio;
 use tokio::io::AsyncRead;
 use tokio::io::AsyncWrite;
 use tokio::io::ReadBuf;
-use tokio::net::TcpStream;
 
 #[derive(Debug, ThisError)]
 pub enum Error {
@@ -1041,8 +1040,12 @@ impl CaState {
     }
 }
 
+pub trait AsyncWriteRead: AsyncWrite + AsyncRead + Send + 'static {}
+
+impl<T> AsyncWriteRead for T where T: AsyncWrite + AsyncRead + Send + 'static {}
+
 pub struct CaProto {
-    tcp: TcpStream,
+    tcp: Pin<Box<dyn AsyncWriteRead>>,
     tcp_eof: bool,
     remote_name: String,
     state: CaState,
@@ -1057,9 +1060,14 @@ pub struct CaProto {
 }
 
 impl CaProto {
-    pub fn new(tcp: TcpStream, remote_name: String, array_truncate: usize, stats: Arc<CaProtoStats>) -> Self {
+    pub fn new<T: AsyncWriteRead>(
+        tcp: T,
+        remote_name: String,
+        array_truncate: usize,
+        stats: Arc<CaProtoStats>,
+    ) -> Self {
         Self {
-            tcp,
+            tcp: Box::pin(tcp),
             tcp_eof: false,
             remote_name,
             state: CaState::StdHead,
@@ -1182,12 +1190,7 @@ impl CaProto {
                     Ok(()) => {
                         let nf = rbuf.filled().len();
                         if nf == 0 {
-                            debug!(
-                                "peer done  {:?}  {:?}  {:?}",
-                                self.tcp.peer_addr(),
-                                self.remote_name,
-                                self.state
-                            );
+                            debug!("peer done  {:?}  {:?}", self.remote_name, self.state);
                             self.tcp_eof = true;
                         } else {
                             if false {
