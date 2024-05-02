@@ -7,10 +7,10 @@ use log::*;
 use netpod::ScalarType;
 use netpod::Shape;
 use netpod::TsNano;
+use scywr::insertqueues::InsertDeques;
 use scywr::iteminsertqueue::DataValue;
 use scywr::iteminsertqueue::ScalarValue;
 use serieswriter::writer::SeriesWriter;
-use std::collections::VecDeque;
 use std::io::Cursor;
 use std::net::Ipv4Addr;
 use std::time::SystemTime;
@@ -36,7 +36,7 @@ pub async fn listen_beacons(
     sock.set_broadcast(true).unwrap();
     let mut buf = Vec::new();
     buf.resize(1024 * 4, 0);
-    let mut item_qu = VecDeque::new();
+    let mut iqdqs = InsertDeques::new();
     loop {
         let bb = &mut buf;
         let (n, remote) = taskrun::tokio::select! {
@@ -65,12 +65,12 @@ pub async fn listen_beacons(
                 let ts_local = ts;
                 let blob = addr_u32 as i64;
                 let val = DataValue::Scalar(ScalarValue::I64(blob));
-                writer.write(ts, ts_local, val, &mut item_qu)?;
+                writer.write(ts, ts_local, val, &mut iqdqs)?;
             }
         }
-        if item_qu.len() != 0 {
+        if iqdqs.len() != 0 {
             // TODO deliver to insert queue
-            item_qu.clear();
+            iqdqs.clear();
         }
     }
     Ok(())

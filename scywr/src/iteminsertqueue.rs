@@ -345,7 +345,7 @@ impl GetValHelp<f64> for DataValue {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum ConnectionStatus {
     ConnectError,
     ConnectTimeout,
@@ -387,7 +387,7 @@ impl ConnectionStatus {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ConnectionStatusItem {
     pub ts: SystemTime,
     pub addr: SocketAddrV4,
@@ -409,7 +409,7 @@ pub enum ChannelStatusClosedReason {
     IoError,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum ChannelStatus {
     AssignedToAddress,
     Opened,
@@ -477,7 +477,7 @@ pub enum ShutdownReason {
     IocTimeout,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ChannelStatusItem {
     pub ts: SystemTime,
     pub cssid: ChannelStatusSeriesId,
@@ -494,7 +494,7 @@ impl ChannelStatusItem {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct InsertItem {
     pub series: SeriesId,
     pub ts_msp: TsMs,
@@ -519,7 +519,7 @@ impl InsertItem {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct TimeBinSimpleF32 {
     pub series: SeriesId,
     pub bin_len_ms: i32,
@@ -531,7 +531,8 @@ pub struct TimeBinSimpleF32 {
     pub avg: f32,
 }
 
-#[derive(Debug)]
+// Needs to be Clone to send it to multiple retention times if required.
+#[derive(Debug, Clone)]
 pub enum QueryItem {
     ConnectionStatus(ConnectionStatusItem),
     ChannelStatus(ChannelStatusItem),
@@ -540,7 +541,7 @@ pub enum QueryItem {
     Accounting(Accounting),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Accounting {
     pub part: i32,
     pub ts: TsMs,

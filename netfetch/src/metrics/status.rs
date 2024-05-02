@@ -18,6 +18,8 @@ struct ChannelState {
     ioc_address: Option<SocketAddr>,
     connection: ConnectionState,
     archiving_configuration: ChannelConfig,
+    recv_count: u64,
+    recv_bytes: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -58,6 +60,8 @@ pub async fn channel_states(params: HashMap<String, String>, tx: Sender<CaConnSe
                             ioc_address: None,
                             connection: ConnectionState::Connecting,
                             archiving_configuration: st1.config,
+                            recv_count: 0,
+                            recv_bytes: 0,
                         };
                         states.channels.insert(k, chst);
                     }
@@ -66,6 +70,8 @@ pub async fn channel_states(params: HashMap<String, String>, tx: Sender<CaConnSe
                             ioc_address: None,
                             connection: ConnectionState::Connecting,
                             archiving_configuration: st1.config,
+                            recv_count: 0,
+                            recv_bytes: 0,
                         };
                         states.channels.insert(k, chst);
                     }
@@ -77,6 +83,8 @@ pub async fn channel_states(params: HashMap<String, String>, tx: Sender<CaConnSe
                                     ioc_address: None,
                                     connection: ConnectionState::Connecting,
                                     archiving_configuration: st1.config,
+                                    recv_count: 0,
+                                    recv_bytes: 0,
                                 };
                                 states.channels.insert(k, chst);
                             }
@@ -88,6 +96,8 @@ pub async fn channel_states(params: HashMap<String, String>, tx: Sender<CaConnSe
                                             ioc_address: Some(SocketAddr::V4(addr)),
                                             connection: ConnectionState::Connecting,
                                             archiving_configuration: st1.config,
+                                            recv_count: 0,
+                                            recv_bytes: 0,
                                         };
                                         states.channels.insert(k, chst);
                                     }
@@ -99,10 +109,14 @@ pub async fn channel_states(params: HashMap<String, String>, tx: Sender<CaConnSe
                                                     ioc_address: Some(SocketAddr::V4(addr)),
                                                     connection: ConnectionState::Connecting,
                                                     archiving_configuration: st1.config,
+                                                    recv_count: 0,
+                                                    recv_bytes: 0,
                                                 };
                                                 states.channels.insert(k, chst);
                                             }
                                             ConnectionStateValue::ChannelStateInfo(st6) => {
+                                                let recv_count = st6.recv_count.unwrap_or(0);
+                                                let recv_bytes = st6.recv_bytes.unwrap_or(0);
                                                 use crate::ca::conn::ChannelConnectedInfo;
                                                 match st6.channel_connected_info {
                                                     ChannelConnectedInfo::Disconnected => {
@@ -112,6 +126,8 @@ pub async fn channel_states(params: HashMap<String, String>, tx: Sender<CaConnSe
                                                             // TODO config is stored in two places
                                                             // conf: st6.conf,
                                                             archiving_configuration: st1.config,
+                                                            recv_count,
+                                                            recv_bytes,
                                                         };
                                                         states.channels.insert(k, chst);
                                                     }
@@ -120,6 +136,8 @@ pub async fn channel_states(params: HashMap<String, String>, tx: Sender<CaConnSe
                                                             ioc_address: Some(SocketAddr::V4(addr)),
                                                             connection: ConnectionState::Connecting,
                                                             archiving_configuration: st1.config,
+                                                            recv_count,
+                                                            recv_bytes,
                                                         };
                                                         states.channels.insert(k, chst);
                                                     }
@@ -128,6 +146,8 @@ pub async fn channel_states(params: HashMap<String, String>, tx: Sender<CaConnSe
                                                             ioc_address: Some(SocketAddr::V4(addr)),
                                                             connection: ConnectionState::Connected,
                                                             archiving_configuration: st1.config,
+                                                            recv_count,
+                                                            recv_bytes,
                                                         };
                                                         states.channels.insert(k, chst);
                                                     }
@@ -136,6 +156,8 @@ pub async fn channel_states(params: HashMap<String, String>, tx: Sender<CaConnSe
                                                             ioc_address: Some(SocketAddr::V4(addr)),
                                                             connection: ConnectionState::Error,
                                                             archiving_configuration: st1.config,
+                                                            recv_count,
+                                                            recv_bytes,
                                                         };
                                                         states.channels.insert(k, chst);
                                                     }
@@ -150,6 +172,8 @@ pub async fn channel_states(params: HashMap<String, String>, tx: Sender<CaConnSe
                                     ioc_address: None,
                                     connection: ConnectionState::Connecting,
                                     archiving_configuration: st1.config,
+                                    recv_count: 0,
+                                    recv_bytes: 0,
                                 };
                                 states.channels.insert(k, chst);
                             }
@@ -158,6 +182,8 @@ pub async fn channel_states(params: HashMap<String, String>, tx: Sender<CaConnSe
                                     ioc_address: None,
                                     connection: ConnectionState::Unreachable,
                                     archiving_configuration: st1.config,
+                                    recv_count: 0,
+                                    recv_bytes: 0,
                                 };
                                 states.channels.insert(k, chst);
                             }
@@ -166,6 +192,8 @@ pub async fn channel_states(params: HashMap<String, String>, tx: Sender<CaConnSe
                                     ioc_address: None,
                                     connection: ConnectionState::Unreachable,
                                     archiving_configuration: st1.config,
+                                    recv_count: 0,
+                                    recv_bytes: 0,
                                 };
                                 states.channels.insert(k, chst);
                             }

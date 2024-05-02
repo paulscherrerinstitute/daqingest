@@ -30,6 +30,7 @@ use proto::CaMsgTy;
 use proto::CaProto;
 use proto::CreateChan;
 use proto::EventAdd;
+use scywr::insertqueues::InsertDeques;
 use scywr::iteminsertqueue as scywriiq;
 use scywr::iteminsertqueue::Accounting;
 use scywr::iteminsertqueue::DataValue;
@@ -758,7 +759,7 @@ pub struct CaConn {
     channel_status_emit_last: Instant,
     tick_last_writer: Instant,
     init_state_count: u64,
-    insert_item_queue: VecDeque<QueryItem>,
+    iqdqs: InsertDeques,
     remote_addr_dbg: SocketAddrV4,
     local_epics_hostname: String,
     stats: Arc<CaConnStats>,
@@ -824,7 +825,7 @@ impl CaConn {
             cid_by_sid: HashMap::new(),
             channel_status_emit_last: tsnow,
             tick_last_writer: tsnow,
-            insert_item_queue: VecDeque::new(),
+            iqdqs: InsertDeques::new(),
             remote_addr_dbg,
             local_epics_hostname,
             stats,
@@ -906,7 +907,8 @@ impl CaConn {
         };
         self.channel_state_on_shutdown(channel_reason);
         let addr = self.remote_addr_dbg.clone();
-        self.insert_item_queue
+        self.iqdqs
+            .lt_rf3_rx
             .push_back(QueryItem::ConnectionStatus(ConnectionStatusItem {
                 ts: self.tmp_ts_poll,
                 addr,
@@ -1004,7 +1006,7 @@ impl CaConn {
                         cssid: st2.channel.cssid.clone(),
                         status: ChannelStatus::Opened,
                     });
-                    self.insert_item_queue.push_back(item);
+                    self.iqdqs.lt_rf3_rx.push_back(item);
                 }
                 let name = conf.conf.name();
                 if name.starts_with("TEST:PEAKING:") {
@@ -1171,7 +1173,7 @@ impl CaConn {
                         cssid: cssid.clone(),
                         status: ChannelStatus::Closed(channel_reason.clone()),
                     });
-                    self.insert_item_queue.push_back(item);
+                    self.iqdqs.lt_rf3_rx.push_back(item);
                     *chst = ChannelState::Ended(cssid);
                 }
                 ChannelState::Error(..) => {
@@ -1337,9 +1339,9 @@ impl CaConn {
                         });
                         let crst = &mut st.channel;
                         let writer = &mut st.writer;
-                        let iiq = &mut self.insert_item_queue;
+                        let iqdqs = &mut self.iqdqs;
                         let stats = self.stats.as_ref();
-                        Self::event_add_ingest(ev.payload_len, ev.value, crst, writer, iiq, tsnow, stnow, stats)?;
+                        Self::event_add_ingest(ev.payload_len, ev.value, crst, writer, iqdqs, tsnow, stnow, stats)?;
                     }
                     ReadingState::Monitoring(st2) => {
                         match &mut st2.mon2state {
@@ -1353,9 +1355,9 @@ impl CaConn {
                         }
                         let crst = &mut st.channel;
                         let writer = &mut st.writer;
-                        let iiq = &mut self.insert_item_queue;
+                        let iqdqs = &mut self.iqdqs;
                         let stats = self.stats.as_ref();
-                        Self::event_add_ingest(ev.payload_len, ev.value, crst, writer, iiq, tsnow, stnow, stats)?;
+                        Self::event_add_ingest(ev.payload_len, ev.value, crst, writer, iqdqs, tsnow, stnow, stats)?;
                     }
                     ReadingState::StopMonitoringForPolling(st2) => {
                         // TODO count for metrics
@@ -1483,9 +1485,9 @@ impl CaConn {
                                 // TODO maintain histogram of read-notify latencies
                                 self.read_ioids.remove(ioid);
                                 st2.tick = PollTickState::Idle(tsnow);
-                                let iiq = &mut self.insert_item_queue;
+                                let iqdqs = &mut self.iqdqs;
                                 let stats = self.stats.as_ref();
-                                Self::read_notify_res_for_write(ev, st, iiq, stnow, tsnow, stats)?;
+                                Self::read_notify_res_for_write(ev, st, iqdqs, stnow, tsnow, stats)?;
                             }
                         },
                         ReadingState::EnableMonitoring(..) => {
@@ -1506,9 +1508,9 @@ impl CaConn {
                                 }
                                 self.read_ioids.remove(&ioid);
                                 st2.mon2state = Monitoring2State::Passive(Monitoring2PassiveState { tsbeg: tsnow });
-                                let iiq = &mut self.insert_item_queue;
+                                let iqdqs = &mut self.iqdqs;
                                 let stats = self.stats.as_ref();
-                                Self::read_notify_res_for_write(ev, st, iiq, stnow, tsnow, stats)?;
+                                Self::read_notify_res_for_write(ev, st, iqdqs, stnow, tsnow, stats)?;
                             }
                         },
                         ReadingState::StopMonitoringForPolling(..) => {
@@ -1531,14 +1533,14 @@ impl CaConn {
     fn read_notify_res_for_write(
         ev: proto::ReadNotifyRes,
         st: &mut WritableState,
-        iiq: &mut VecDeque<QueryItem>,
+        iqdqs: &mut InsertDeques,
         stnow: SystemTime,
         tsnow: Instant,
         stats: &CaConnStats,
     ) -> Result<(), Error> {
         let crst = &mut st.channel;
         let writer = &mut st.writer;
-        Self::event_add_ingest(ev.payload_len, ev.value, crst, writer, iiq, tsnow, stnow, stats)?;
+        Self::event_add_ingest(ev.payload_len, ev.value, crst, writer, iqdqs, tsnow, stnow, stats)?;
         Ok(())
     }
 
@@ -1547,7 +1549,7 @@ impl CaConn {
         value: CaEventValue,
         crst: &mut CreatedState,
         writer: &mut SeriesWriter,
-        iiq: &mut VecDeque<QueryItem>,
+        iqdqs: &mut InsertDeques,
         tsnow: Instant,
         stnow: SystemTime,
         stats: &CaConnStats,
@@ -1577,7 +1579,7 @@ impl CaConn {
             Self::check_ev_value_data(&value.data, writer.scalar_type())?;
             {
                 let val: DataValue = value.data.into();
-                writer.write(TsNano::from_ns(ts), TsNano::from_ns(ts_local), val, iiq)?;
+                writer.write(TsNano::from_ns(ts), TsNano::from_ns(ts_local), val, iqdqs)?;
             }
         }
         if false {
@@ -2144,7 +2146,8 @@ impl CaConn {
                             Ok(Ok(tcp)) => {
                                 self.stats.tcp_connected.inc();
                                 let addr = addr.clone();
-                                self.insert_item_queue
+                                self.iqdqs
+                                    .lt_rf3_rx
                                     .push_back(QueryItem::ConnectionStatus(ConnectionStatusItem {
                                         ts: self.tmp_ts_poll,
                                         addr,
@@ -2164,7 +2167,8 @@ impl CaConn {
                             Ok(Err(e)) => {
                                 debug!("error connect to {addr} {e}");
                                 let addr = addr.clone();
-                                self.insert_item_queue
+                                self.iqdqs
+                                    .lt_rf3_rx
                                     .push_back(QueryItem::ConnectionStatus(ConnectionStatusItem {
                                         ts: self.tmp_ts_poll,
                                         addr,
@@ -2177,7 +2181,8 @@ impl CaConn {
                                 // TODO log with exponential backoff
                                 debug!("timeout connect to {addr} {e}");
                                 let addr = addr.clone();
-                                self.insert_item_queue
+                                self.iqdqs
+                                    .lt_rf3_rx
                                     .push_back(QueryItem::ConnectionStatus(ConnectionStatusItem {
                                         ts: self.tmp_ts_poll,
                                         addr,
@@ -2237,7 +2242,7 @@ impl CaConn {
             self.stats.loop2_count.inc();
             if self.is_shutdown() {
                 break;
-            } else if self.insert_item_queue.len() >= self.opts.insert_queue_max {
+            } else if self.iqdqs.len() >= self.opts.insert_queue_max {
                 break;
             } else {
                 match self.handle_conn_state(tsnow, cx) {
@@ -2365,7 +2370,7 @@ impl CaConn {
                                 count,
                                 bytes,
                             });
-                            self.insert_item_queue.push_back(item);
+                            self.iqdqs.lt_rf3_rx.push_back(item);
                         }
                     }
                 }
@@ -2379,7 +2384,7 @@ impl CaConn {
         for (_, chconf) in &mut self.channels {
             let chst = &mut chconf.state;
             if let ChannelState::Writable(st2) = chst {
-                st2.writer.tick(&mut self.insert_item_queue)?;
+                st2.writer.tick(&mut self.iqdqs)?;
             }
         }
         Ok(())
@@ -2392,13 +2397,11 @@ impl CaConn {
     fn queues_out_flushed(&self) -> bool {
         debug!(
             "async out flushed iiq  {}  {}  caout {}",
-            self.insert_item_queue.is_empty(),
+            self.iqdqs.len() == 0,
             self.storage_insert_sender.is_idle(),
             self.ca_conn_event_out_queue.is_empty()
         );
-        self.insert_item_queue.is_empty()
-            && self.storage_insert_sender.is_idle()
-            && self.ca_conn_event_out_queue.is_empty()
+        self.iqdqs.len() == 0 && self.storage_insert_sender.is_idle() && self.ca_conn_event_out_queue.is_empty()
     }
 
     fn attempt_flush_queue<T, Q, FB, FS>(
@@ -2415,9 +2418,10 @@ impl CaConn {
         FB: Fn(&mut VecDeque<T>) -> Option<Q>,
         FS: Fn(&Q),
     {
+        let self_name = "attempt_flush_queue";
         use Poll::*;
         if qu.len() != 0 {
-            trace_flush_queue!("attempt_flush_queue  id {:7}  len {}", id, qu.len());
+            trace_flush_queue!("{self_name}  id {:10}  len {}", id, qu.len());
         }
         let mut have_progress = false;
         let mut i = 0;
@@ -2440,7 +2444,7 @@ impl CaConn {
             if sp.is_sending() {
                 match sp.poll_unpin(cx) {
                     Ready(Ok(())) => {
-                        trace_flush_queue!("attempt_flush_queue  id {:7}  send done", id);
+                        trace_flush_queue!("{self_name}  id {:10}  send done", id);
                         have_progress = true;
                     }
                     Ready(Err(e)) => {
@@ -2485,6 +2489,24 @@ macro_rules! flush_queue {
     };
 }
 
+macro_rules! flush_queue_dqs {
+    ($self:expr, $qu:ident, $sp:ident, $batcher:expr, $loop_max:expr, $have:expr, $id:expr, $cx:expr, $stats:expr) => {
+        let obj = $self.as_mut().get_mut();
+        let qu = &mut obj.iqdqs.$qu;
+        let sp = &mut obj.$sp;
+        match Self::attempt_flush_queue(qu, sp, $batcher, $loop_max, $cx, $id, $stats) {
+            Ok(Ready(Some(()))) => {
+                *$have.0 |= true;
+            }
+            Ok(Ready(None)) => {}
+            Ok(Pending) => {
+                *$have.1 |= true;
+            }
+            Err(e) => break Ready(Some(CaConnEvent::err_now(e))),
+        }
+    };
+}
+
 fn send_individual<T>(qu: &mut VecDeque<T>) -> Option<T> {
     qu.pop_front()
 }
@@ -2514,7 +2536,7 @@ impl Stream for CaConn {
             let lts1 = Instant::now();
 
             self.stats.poll_loop_begin().inc();
-            let qlen = self.insert_item_queue.len();
+            let qlen = self.iqdqs.len();
             if qlen >= self.opts.insert_queue_max * 2 / 3 {
                 self.stats.insert_item_queue_pressure().inc();
             } else if qlen >= self.opts.insert_queue_max {
@@ -2543,8 +2565,8 @@ impl Stream for CaConn {
             }
 
             {
-                let iiq = &self.insert_item_queue;
-                self.stats.iiq_len().ingest(iiq.len() as u32);
+                let n = self.iqdqs.len();
+                self.stats.iiq_len().ingest(n as u32);
             }
 
             {
@@ -2552,14 +2574,14 @@ impl Stream for CaConn {
                 let stats_fn = move |item: &VecDeque<QueryItem>| {
                     stats2.iiq_batch_len().ingest(item.len() as u32);
                 };
-                flush_queue!(
+                flush_queue_dqs!(
                     self,
-                    insert_item_queue,
+                    st_rf1_rx,
                     storage_insert_sender,
                     send_batched::<256, _>,
                     32,
                     (&mut have_progress, &mut have_pending),
-                    "strg",
+                    "iq_st_rf1",
                     cx,
                     stats_fn
                 );

@@ -79,12 +79,12 @@ pub struct Daemon {
     connset_status_last: Instant,
     // TODO should be a stats object?
     insert_workers_running: AtomicU64,
-    query_item_tx_weak: WeakSender<VecDeque<QueryItem>>,
     connset_health_lat_ema: f32,
     metrics_shutdown_tx: Sender<u32>,
     metrics_shutdown_rx: Receiver<u32>,
     metrics_jh: Option<JoinHandle<Result<(), Error>>>,
     channel_info_query_tx: Sender<ChannelInfoQuery>,
+    iqtx: Option<InsertQueuesTx>,
 }
 
 impl Daemon {
@@ -143,20 +143,23 @@ impl Daemon {
             let (st_rf3_tx, st_rf3_rx) = async_channel::bounded(ingest_opts.insert_item_queue_cap());
             let (st_rf1_tx, st_rf1_rx) = async_channel::bounded(ingest_opts.insert_item_queue_cap());
             let (mt_rf3_tx, mt_rf3_rx) = async_channel::bounded(ingest_opts.insert_item_queue_cap());
+            let (lt_rf3_tx, lt_rf3_rx) = async_channel::bounded(ingest_opts.insert_item_queue_cap());
             let iqtx = InsertQueuesTx {
                 st_rf3_tx,
                 st_rf1_tx,
                 mt_rf3_tx,
+                lt_rf3_tx,
             };
             let iqrx = InsertQueuesRx {
                 st_rf3_rx,
                 st_rf1_rx,
                 mt_rf3_rx,
+                lt_rf3_rx,
             };
             (iqtx, iqrx)
         };
 
-        let query_item_tx_weak = iqtx.st_rf3_tx.clone().downgrade();
+        let iqtx2 = iqtx.clone();
 
         let conn_set_ctrl = CaConnSet::start(
             ingest_opts.backend().into(),
@@ -281,12 +284,12 @@ impl Daemon {
             connset_ctrl: conn_set_ctrl,
             connset_status_last: Instant::now(),
             insert_workers_running: AtomicU64::new(0),
-            query_item_tx_weak,
             connset_health_lat_ema: 0.,
             metrics_shutdown_tx,
             metrics_shutdown_rx,
             metrics_jh: None,
             channel_info_query_tx,
+            iqtx: Some(iqtx2),
         };
         Ok(ret)
     }
@@ -584,9 +587,9 @@ impl Daemon {
             let backend = String::new();
             let (_item_tx, item_rx) = async_channel::bounded(256);
             let info_worker_tx = self.channel_info_query_tx.clone();
-            let iiq_tx = self.query_item_tx_weak.upgrade().unwrap();
-            let worker_fut =
-                netfetch::metrics::postingest::process_api_query_items(backend, item_rx, info_worker_tx, iiq_tx);
+            use netfetch::metrics::postingest::process_api_query_items;
+            let iqtx = self.iqtx.take().unwrap();
+            let worker_fut = process_api_query_items(backend, item_rx, info_worker_tx, iqtx);
             taskrun::spawn(worker_fut)
         };
         Self::spawn_ticker(self.tx.clone(), self.stats.clone());

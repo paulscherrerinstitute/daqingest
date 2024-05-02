@@ -7,6 +7,8 @@ use mrucache::mucache::MuCache;
 use netpod::ScalarType;
 use netpod::Shape;
 use netpod::TsNano;
+use scywr::insertqueues::InsertDeques;
+use scywr::insertqueues::InsertQueuesTx;
 use scywr::iteminsertqueue::DataValue;
 use scywr::iteminsertqueue::QueryItem;
 use scywr::iteminsertqueue::ScalarValue;
@@ -44,11 +46,11 @@ pub async fn process_api_query_items(
     backend: String,
     item_rx: Receiver<EventValueItem>,
     info_worker_tx: Sender<ChannelInfoQuery>,
-    iiq_tx: Sender<VecDeque<QueryItem>>,
+    mut iqtx: InsertQueuesTx,
 ) -> Result<(), Error> {
     // TODO so far arbitrary upper limit on the number of ad-hoc channels:
     let mut mucache: MuCache<String, SeriesWriter> = MuCache::new(2000);
-    let mut item_qu = VecDeque::new();
+    let mut iqdqs = InsertDeques::new();
     let mut sw_tick_last = Instant::now();
 
     #[allow(irrefutable_let_patterns)]
@@ -56,7 +58,7 @@ pub async fn process_api_query_items(
         let tsnow = Instant::now();
         if tsnow.saturating_duration_since(sw_tick_last) >= Duration::from_millis(5000) {
             sw_tick_last = tsnow;
-            tick_writers(mucache.all_ref_mut(), &mut item_qu)?;
+            tick_writers(mucache.all_ref_mut(), &mut iqdqs)?;
         }
         let item = match item {
             Ok(Ok(item)) => item,
@@ -81,26 +83,23 @@ pub async fn process_api_query_items(
             stnow,
         )
         .await?;
-
-        let sw = &mut sw;
-        sw.write(item.ts, item.ts, item.val, &mut item_qu)?;
-        let item = core::mem::replace(&mut item_qu, VecDeque::new());
-        iiq_tx.send(item).await?;
+        sw.write(item.ts, item.ts, item.val, &mut iqdqs)?;
+        iqtx.send_all(&mut iqdqs).await.map_err(|_| Error::SendError)?;
     }
-    finish_writers(mucache.all_ref_mut(), &mut item_qu)?;
+    finish_writers(mucache.all_ref_mut(), &mut iqdqs)?;
     Ok(())
 }
 
-fn tick_writers(sws: Vec<&mut SeriesWriter>, iiq: &mut VecDeque<QueryItem>) -> Result<(), Error> {
+fn tick_writers(sws: Vec<&mut SeriesWriter>, iqdqs: &mut InsertDeques) -> Result<(), Error> {
     for sw in sws {
-        sw.tick(iiq)?;
+        sw.tick(iqdqs)?;
     }
     Ok(())
 }
 
-fn finish_writers(sws: Vec<&mut SeriesWriter>, iiq: &mut VecDeque<QueryItem>) -> Result<(), Error> {
+fn finish_writers(sws: Vec<&mut SeriesWriter>, iqdqs: &mut InsertDeques) -> Result<(), Error> {
     for sw in sws {
-        sw.tick(iiq)?;
+        sw.tick(iqdqs)?;
     }
     Ok(())
 }

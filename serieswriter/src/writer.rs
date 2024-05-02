@@ -13,6 +13,7 @@ use netpod::ScalarType;
 use netpod::SeriesKind;
 use netpod::Shape;
 use netpod::TsNano;
+use scywr::insertqueues::InsertDeques;
 use scywr::iteminsertqueue::DataValue;
 use scywr::iteminsertqueue::InsertItem;
 use scywr::iteminsertqueue::QueryItem;
@@ -149,7 +150,7 @@ impl SeriesWriter {
         ts: TsNano,
         ts_local: TsNano,
         val: DataValue,
-        item_qu: &mut VecDeque<QueryItem>,
+        iqdqs: &mut InsertDeques,
     ) -> Result<(), Error> {
         // TODO compute the binned data here as well and flush completed bins if needed.
         self.binner.push(ts.clone(), &val)?;
@@ -193,7 +194,7 @@ impl SeriesWriter {
         let item = InsertItem {
             series: self.sid.clone(),
             ts_msp: ts_msp.to_ts_ms(),
-            ts_lsp: ts_lsp,
+            ts_lsp,
             msp_bump: ts_msp_changed,
             pulse: 0,
             scalar_type: self.scalar_type.clone(),
@@ -201,12 +202,13 @@ impl SeriesWriter {
             val,
             ts_local: ts_local.to_ts_ms(),
         };
-        item_qu.push_back(QueryItem::Insert(item));
+        // TODO decide on the path in the new deques struct
+        iqdqs.st_rf3_rx.push_back(QueryItem::Insert(item));
         Ok(())
     }
 
-    pub fn tick(&mut self, iiq: &mut VecDeque<QueryItem>) -> Result<(), Error> {
-        self.binner.tick(iiq)?;
+    pub fn tick(&mut self, iqdqs: &mut InsertDeques) -> Result<(), Error> {
+        self.binner.tick(iqdqs)?;
         Ok(())
     }
 }
@@ -348,15 +350,13 @@ fn write_00() {
         let tsnow = SystemTime::now();
         let mut writer = SeriesWriter::establish(tx, backend.into(), channel.into(), scalar_type, shape, tsnow).await?;
         eprintln!("{writer:?}");
-        let mut item_queue = VecDeque::new();
-        let item_qu = &mut item_queue;
+        let mut iqdqs = InsertDeques::new();
         for i in 0..10 {
             let ts = TsNano::from_ns(HOUR * 24 + SEC * i);
             let ts_local = ts.clone();
             let val = DataValue::Scalar(scywr::iteminsertqueue::ScalarValue::I16(i as _));
-            writer.write(ts, ts_local, val, item_qu)?;
+            writer.write(ts, ts_local, val, &mut iqdqs)?;
         }
-        eprintln!("{item_queue:?}");
         Ok::<_, Error>(())
     };
     taskrun::run(fut).unwrap();

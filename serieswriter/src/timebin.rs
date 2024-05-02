@@ -21,6 +21,7 @@ use netpod::ScalarType;
 use netpod::Shape;
 use netpod::TsMs;
 use netpod::TsNano;
+use scywr::insertqueues::InsertDeques;
 use scywr::iteminsertqueue::DataValue;
 use scywr::iteminsertqueue::GetValHelp;
 use scywr::iteminsertqueue::QueryItem;
@@ -54,7 +55,7 @@ struct TickParams<'a> {
     acc: &'a mut Box<dyn Any + Send>,
     tb: &'a mut Box<dyn TimeBinner>,
     pc: &'a mut PatchCollect,
-    iiq: &'a mut VecDeque<QueryItem>,
+    iqdqs: &'a mut InsertDeques,
     next_coarse: Option<&'a mut EventsDim0TimeBinner<f32>>,
 }
 
@@ -236,7 +237,7 @@ impl ConnTimeBin {
         f(params)
     }
 
-    pub fn tick(&mut self, insert_item_queue: &mut VecDeque<QueryItem>) -> Result<(), Error> {
+    pub fn tick(&mut self, iqdqs: &mut InsertDeques) -> Result<(), Error> {
         if !self.did_setup {
             return Ok(());
         }
@@ -246,7 +247,7 @@ impl ConnTimeBin {
             acc: &mut self.acc,
             tb: self.events_binner.as_mut().unwrap(),
             pc: &mut self.patch_collect,
-            iiq: insert_item_queue,
+            iqdqs,
             next_coarse: self.next_coarse.as_mut().map(|x| x.as_mut()),
         };
         f(params)
@@ -292,7 +293,7 @@ where
     let acc = params.acc;
     let tb = params.tb;
     // let pc = params.pc;
-    let iiq = params.iiq;
+    let iqdqs = params.iqdqs;
     let next = params.next_coarse;
     if let Some(c) = acc.downcast_mut::<EventsDim0<STY>>() {
         if c.len() >= 1 {
@@ -301,7 +302,7 @@ where
             let nbins = tb.bins_ready_count();
             if nbins >= 1 {
                 trace!("store bins len {}  {:?}", nbins, params.series);
-                store_bins(params.series.clone(), tb, iiq, next)?;
+                store_bins(params.series.clone(), tb, iqdqs, next)?;
                 // if let Some(mut bins) = tb.bins_ready() {
                 //     //info!("store bins  {bins:?}");
                 //     let mut bins = bins.to_simple_bins_f32();
@@ -340,7 +341,7 @@ where
 fn store_bins(
     series: SeriesId,
     tb: &mut Box<dyn TimeBinner>,
-    iiq: &mut VecDeque<QueryItem>,
+    iqdqs: &mut InsertDeques,
     next: Option<&mut EventsDim0TimeBinner<f32>>,
 ) -> Result<(), Error> {
     if let Some(mut bins) = tb.bins_ready() {
@@ -384,7 +385,11 @@ fn store_bins(
                     };
                     let item = QueryItem::TimeBinSimpleF32(item);
                     trace!("push item B  ts1ms {ts1ms}  bin_len_ms {bin_len_ms}  ts_msp {ts_msp}  off {off}");
-                    iiq.push_back(item);
+
+                    // TODO check which RT we want to push into
+                    iqdqs.st_rf3_rx.push_back(item.clone());
+                    iqdqs.mt_rf3_rx.push_back(item.clone());
+                    iqdqs.lt_rf3_rx.push_back(item);
                 }
             }
             Ok(())

@@ -246,6 +246,7 @@ async fn parse_channel_config_txt(fname: &Path, re_p: Regex, re_n: Regex) -> Res
                     short_term: Some(ChannelReadConfig::Monitor),
                     medium_term: None,
                     long_term: None,
+                    is_polled: false,
                 },
             };
             conf.channels.push(item);
@@ -274,6 +275,8 @@ pub struct IngestConfigArchiving {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[serde(with = "serde_option_channel_read_config")]
     long_term: Option<ChannelReadConfig>,
+    #[serde(default, skip_serializing_if = "bool_is_false")]
+    is_polled: bool,
 }
 
 fn bool_is_false(x: &bool) -> bool {
@@ -368,7 +371,7 @@ mod serde_option_channel_read_config {
         type Value = Option<ChannelReadConfig>;
 
         fn expecting(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
-            write!(fmt, "keyword `Monitor`, an integer, or not this field at all")
+            write!(fmt, "keyword `Monitor`, keyword `None`, an integer, or missing")
         }
 
         fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
@@ -390,8 +393,9 @@ mod serde_option_channel_read_config {
         where
             E: de::Error,
         {
-            if v < 1 || v > 108000 {
-                let e = E::custom(format!("unsupported value {v:?}, polling must be in range 1..108000"));
+            let max = 108000;
+            if v < 1 || v > max {
+                let e = E::custom(format!("unsupported value {v:?}, polling must be in range 1..{max:?}"));
                 return Err(e);
             }
             Ok(Some(ChannelReadConfig::Poll(Duration::from_secs(v as u64))))
@@ -401,8 +405,9 @@ mod serde_option_channel_read_config {
         where
             E: de::Error,
         {
-            if v < 1 || v > 108000 {
-                let e = E::custom(format!("unsupported value {v:?}, polling must be in range 1..108000"));
+            let max = 108000;
+            if v < 1 || v > max {
+                let e = E::custom(format!("unsupported value {v:?}, polling must be in range 1..{max:?}"));
                 return Err(e);
             }
             self.visit_u64(v as u64)
@@ -436,6 +441,17 @@ CH-02:
     short_term: Monitor
 CH-03:
   archiving_configuration:
+CH-04:
+  archiving_configuration:
+    short_term: None
+    medium_term: None
+    long_term: 3600
+    is_polled: true
+CH-05:
+  archiving_configuration:
+    short_term: None
+    medium_term: None
+    long_term: Monitor
 "###;
     let x: BTreeMap<String, ChannelConfigParse> = serde_yaml::from_str(inp).unwrap();
     assert_eq!(
@@ -501,6 +517,7 @@ impl ChannelConfig {
                 short_term: Some(ChannelReadConfig::Monitor),
                 medium_term: None,
                 long_term: None,
+                is_polled: false,
             },
         }
     }
