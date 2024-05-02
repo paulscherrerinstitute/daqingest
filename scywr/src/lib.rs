@@ -11,6 +11,7 @@ pub mod insertworker;
 pub mod iteminsertqueue;
 pub mod ratelimit;
 pub mod schema;
+pub mod senderpolling;
 pub mod session;
 pub mod store;
 pub mod tools;

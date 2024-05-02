@@ -4,7 +4,6 @@ use super::proto::ReadNotify;
 use crate::ca::proto::ChannelClose;
 use crate::ca::proto::EventCancel;
 use crate::conf::ChannelConfig;
-use crate::senderpolling::SenderPolling;
 use crate::throttletrace::ThrottleTrace;
 use async_channel::Receiver;
 use async_channel::Sender;
@@ -31,11 +30,14 @@ use proto::CaProto;
 use proto::CreateChan;
 use proto::EventAdd;
 use scywr::insertqueues::InsertDeques;
+use scywr::insertqueues::InsertQueuesTx;
+use scywr::insertqueues::InsertSenderPolling;
 use scywr::iteminsertqueue as scywriiq;
 use scywr::iteminsertqueue::Accounting;
 use scywr::iteminsertqueue::DataValue;
 use scywr::iteminsertqueue::QueryItem;
 use scywr::iteminsertqueue::ShutdownReason;
+use scywr::senderpolling::SenderPolling;
 use scywriiq::ChannelStatus;
 use scywriiq::ChannelStatusClosedReason;
 use scywriiq::ChannelStatusItem;
@@ -770,7 +772,7 @@ pub struct CaConn {
     ioc_ping_last: Instant,
     ioc_ping_next: Instant,
     ioc_ping_start: Option<Instant>,
-    storage_insert_sender: Pin<Box<SenderPolling<VecDeque<QueryItem>>>>,
+    iqsp: Pin<Box<InsertSenderPolling>>,
     ca_conn_event_out_queue: VecDeque<CaConnEvent>,
     ca_conn_event_out_queue_max: usize,
     thr_msg_poll: ThrottleTrace,
@@ -799,7 +801,7 @@ impl CaConn {
         backend: String,
         remote_addr_dbg: SocketAddrV4,
         local_epics_hostname: String,
-        storage_insert_tx: Sender<VecDeque<QueryItem>>,
+        iqtx: InsertQueuesTx,
         channel_info_query_tx: Sender<ChannelInfoQuery>,
         stats: Arc<CaConnStats>,
         ca_proto_stats: Arc<CaProtoStats>,
@@ -836,7 +838,7 @@ impl CaConn {
             ioc_ping_last: tsnow,
             ioc_ping_next: tsnow + Self::ioc_ping_ivl_rng(&mut rng),
             ioc_ping_start: None,
-            storage_insert_sender: Box::pin(SenderPolling::new(storage_insert_tx)),
+            iqsp: Box::pin(InsertSenderPolling::new(iqtx)),
             ca_conn_event_out_queue: VecDeque::new(),
             ca_conn_event_out_queue_max: 2000,
             thr_msg_poll: ThrottleTrace::new(Duration::from_millis(10000)),
@@ -2398,15 +2400,16 @@ impl CaConn {
         debug!(
             "async out flushed iiq  {}  {}  caout {}",
             self.iqdqs.len() == 0,
-            self.storage_insert_sender.is_idle(),
+            self.iqsp.is_idle(),
             self.ca_conn_event_out_queue.is_empty()
         );
-        self.iqdqs.len() == 0 && self.storage_insert_sender.is_idle() && self.ca_conn_event_out_queue.is_empty()
+        self.iqdqs.len() == 0 && self.iqsp.is_idle() && self.ca_conn_event_out_queue.is_empty()
     }
 
     fn attempt_flush_queue<T, Q, FB, FS>(
         qu: &mut VecDeque<T>,
-        sp: &mut Pin<Box<SenderPolling<Q>>>,
+        // sp: &mut Pin<Box<SenderPolling<Q>>>,
+        mut sp: Pin<&mut SenderPolling<Q>>,
         qu_to_si: FB,
         loop_max: u32,
         cx: &mut Context,
@@ -2448,7 +2451,7 @@ impl CaConn {
                         have_progress = true;
                     }
                     Ready(Err(e)) => {
-                        use crate::senderpolling::Error as SpErr;
+                        use scywr::senderpolling::Error as SpErr;
                         match e {
                             SpErr::NoSendInProgress => return Err(Error::NotSending),
                             SpErr::Closed(_) => return Err(Error::ClosedSending),
@@ -2475,7 +2478,7 @@ macro_rules! flush_queue {
     ($self:expr, $qu:ident, $sp:ident, $batcher:expr, $loop_max:expr, $have:expr, $id:expr, $cx:expr, $stats:expr) => {
         let obj = $self.as_mut().get_mut();
         let qu = &mut obj.$qu;
-        let sp = &mut obj.$sp;
+        let sp = obj.$sp.as_mut();
         match Self::attempt_flush_queue(qu, sp, $batcher, $loop_max, $cx, $id, $stats) {
             Ok(Ready(Some(()))) => {
                 *$have.0 |= true;
@@ -2493,7 +2496,11 @@ macro_rules! flush_queue_dqs {
     ($self:expr, $qu:ident, $sp:ident, $batcher:expr, $loop_max:expr, $have:expr, $id:expr, $cx:expr, $stats:expr) => {
         let obj = $self.as_mut().get_mut();
         let qu = &mut obj.iqdqs.$qu;
-        let sp = &mut obj.$sp;
+        // let sp = std::pin::pin!(obj.iqsp.$sp);
+        // let sp = &mut obj.iqsp.$sp;
+        // let sp = std::pin::pin!(sp);
+        // let sp = todo!();
+        let sp = obj.iqsp.as_mut().$sp();
         match Self::attempt_flush_queue(qu, sp, $batcher, $loop_max, $cx, $id, $stats) {
             Ok(Ready(Some(()))) => {
                 *$have.0 |= true;
@@ -2577,11 +2584,41 @@ impl Stream for CaConn {
                 flush_queue_dqs!(
                     self,
                     st_rf1_rx,
-                    storage_insert_sender,
+                    st_rf1_sp_pin,
                     send_batched::<256, _>,
                     32,
                     (&mut have_progress, &mut have_pending),
-                    "iq_st_rf1",
+                    "st_rf1_rx",
+                    cx,
+                    stats_fn
+                );
+                let stats2 = self.stats.clone();
+                let stats_fn = move |item: &VecDeque<QueryItem>| {
+                    stats2.iiq_batch_len().ingest(item.len() as u32);
+                };
+                flush_queue_dqs!(
+                    self,
+                    st_rf3_rx,
+                    st_rf3_sp_pin,
+                    send_batched::<256, _>,
+                    32,
+                    (&mut have_progress, &mut have_pending),
+                    "st_rf3_rx",
+                    cx,
+                    stats_fn
+                );
+                let stats2 = self.stats.clone();
+                let stats_fn = move |item: &VecDeque<QueryItem>| {
+                    stats2.iiq_batch_len().ingest(item.len() as u32);
+                };
+                flush_queue_dqs!(
+                    self,
+                    mt_rf3_rx,
+                    mt_rf3_sp_pin,
+                    send_batched::<256, _>,
+                    32,
+                    (&mut have_progress, &mut have_pending),
+                    "mt_rf3_rx",
                     cx,
                     stats_fn
                 );

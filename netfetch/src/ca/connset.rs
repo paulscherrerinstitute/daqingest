@@ -10,7 +10,6 @@ use crate::conf::ChannelConfig;
 use crate::daemon_common::Channel;
 use crate::errconv::ErrConv;
 use crate::rt::JoinHandle;
-use crate::senderpolling::SenderPolling;
 use crate::throttletrace::ThrottleTrace;
 use async_channel::Receiver;
 use async_channel::Sender;
@@ -38,6 +37,7 @@ use netpod::SeriesKind;
 use netpod::Shape;
 use scywr::iteminsertqueue::ChannelStatusItem;
 use scywr::iteminsertqueue::QueryItem;
+use scywr::senderpolling::SenderPolling;
 use serde::Serialize;
 use series::ChannelStatusSeriesId;
 use serieswriter::writer::EstablishWorkerJob;
@@ -1047,7 +1047,7 @@ impl CaConnSet {
             add.backend.clone(),
             addr_v4,
             self.local_epics_hostname.clone(),
-            self.iqtx.st_rf3_tx.clone(),
+            self.iqtx.clone2(),
             self.channel_info_query_tx
                 .clone()
                 .ok_or_else(|| Error::with_msg_no_trace("no more channel_info_query_tx available"))?,

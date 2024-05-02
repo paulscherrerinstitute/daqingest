@@ -1,7 +1,10 @@
 use crate::iteminsertqueue::QueryItem;
+use crate::senderpolling::SenderPolling;
 use async_channel::Receiver;
 use async_channel::Sender;
+use pin_project::pin_project;
 use std::collections::VecDeque;
+use std::pin::Pin;
 
 #[derive(Clone)]
 pub struct InsertQueuesTx {
@@ -24,6 +27,10 @@ impl InsertQueuesTx {
         let item = core::mem::replace(&mut iqdqs.lt_rf3_rx, VecDeque::new());
         self.lt_rf3_tx.send(item).await.map_err(|_| ())?;
         Ok(())
+    }
+
+    pub fn clone2(&self) -> Self {
+        self.clone()
     }
 }
 
@@ -63,5 +70,46 @@ impl InsertDeques {
         self.st_rf3_rx.clear();
         self.mt_rf3_rx.clear();
         self.lt_rf3_rx.clear();
+    }
+}
+
+#[pin_project]
+pub struct InsertSenderPolling {
+    #[pin]
+    pub st_rf1_sp: SenderPolling<VecDeque<QueryItem>>,
+    #[pin]
+    pub st_rf3_sp: SenderPolling<VecDeque<QueryItem>>,
+    #[pin]
+    pub mt_rf3_sp: SenderPolling<VecDeque<QueryItem>>,
+}
+
+impl InsertSenderPolling {
+    pub fn new(iqtx: InsertQueuesTx) -> Self {
+        Self {
+            st_rf1_sp: SenderPolling::new(iqtx.st_rf1_tx),
+            st_rf3_sp: SenderPolling::new(iqtx.st_rf3_tx),
+            mt_rf3_sp: SenderPolling::new(iqtx.mt_rf3_tx),
+        }
+    }
+
+    pub fn is_idle(&self) -> bool {
+        self.st_rf1_sp.is_idle() && self.st_rf3_sp.is_idle() && self.mt_rf3_sp.is_idle()
+    }
+
+    pub fn st_rf1_sp_pin(self: Pin<&mut Self>) -> Pin<&mut SenderPolling<VecDeque<QueryItem>>> {
+        // unsafe {
+        //     let this = self.get_unchecked_mut();
+        //     let pp1 = &mut this.st_rf1_sp;
+        //     Pin::new_unchecked(pp1)
+        // }
+        self.project().st_rf1_sp
+    }
+
+    pub fn st_rf3_sp_pin(self: Pin<&mut Self>) -> Pin<&mut SenderPolling<VecDeque<QueryItem>>> {
+        self.project().st_rf3_sp
+    }
+
+    pub fn mt_rf3_sp_pin(self: Pin<&mut Self>) -> Pin<&mut SenderPolling<VecDeque<QueryItem>>> {
+        self.project().mt_rf3_sp
     }
 }
