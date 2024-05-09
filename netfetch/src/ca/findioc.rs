@@ -603,17 +603,17 @@ impl Stream for FindIocStream {
                             have_progress = true;
                         }
                         Ready(Err(e)) => {
-                            error!("{e:?}");
+                            error!("{e}");
                         }
                         Pending => {
                             g.clear_ready();
-                            warn!("socket seemed ready for write, but is not");
+                            // warn!("socket seemed ready for write, but is not");
                             have_progress = true;
                         }
                     },
                     Ready(Err(e)) => {
-                        let e = Error::with_msg_no_trace(format!("{e:?}"));
-                        error!("poll_write_ready {e:?}");
+                        error!("poll_write_ready {e}");
+                        let e = Error::from_string(e);
                     }
                     Pending => {}
                 }

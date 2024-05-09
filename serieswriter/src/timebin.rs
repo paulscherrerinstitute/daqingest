@@ -388,8 +388,8 @@ fn store_bins(
 
                     // TODO check which RT we want to push into
                     iqdqs.st_rf3_rx.push_back(item.clone());
-                    iqdqs.mt_rf3_rx.push_back(item.clone());
-                    iqdqs.lt_rf3_rx.push_back(item);
+                    // iqdqs.mt_rf3_rx.push_back(item.clone());
+                    // iqdqs.lt_rf3_rx.push_back(item);
                 }
             }
             Ok(())

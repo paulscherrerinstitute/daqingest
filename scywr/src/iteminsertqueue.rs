@@ -7,6 +7,8 @@ use err::thiserror;
 use err::ThisError;
 use futures_util::Future;
 use futures_util::FutureExt;
+#[allow(unused)]
+use netpod::log::*;
 use netpod::DtNano;
 use netpod::ScalarType;
 use netpod::Shape;
@@ -43,7 +45,7 @@ pub enum Error {
     GetValHelpInnerTypeMismatch,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum ScalarValue {
     I8(i8),
     I16(i16),
@@ -86,7 +88,7 @@ impl ScalarValue {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum ArrayValue {
     I8(Vec<i8>),
     I16(Vec<i16>),
@@ -207,7 +209,7 @@ impl ArrayValue {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum DataValue {
     Scalar(ScalarValue),
     Array(ArrayValue),
@@ -620,6 +622,14 @@ impl InsertFut {
         // let fut = StackFuture::from(fut);
         Self { scy, qu, fut }
     }
+
+    pub fn dummy(scy: Arc<ScySession>, qu: Arc<PreparedStatement>) -> Self {
+        Self {
+            scy,
+            qu,
+            fut: Box::pin(async { Err(QueryError::InvalidMessage("no longer used".into())) }),
+        }
+    }
 }
 
 impl Future for InsertFut {
@@ -834,6 +844,16 @@ pub fn insert_item_fut(
     }
 }
 
+#[cfg(DISABLED)]
+pub fn insert_connection_status_fut(
+    item: ConnectionStatusItem,
+    data_store: &DataStore,
+    stats: Arc<InsertWorkerStats>,
+) -> InsertFut {
+    warn!("separate connection status table no longer used");
+    InsertFut::dummy(data_store.scy.clone(), data_store.qu_dummy.clone())
+}
+
 pub fn insert_connection_status_fut(
     item: ConnectionStatusItem,
     data_store: &DataStore,
@@ -853,6 +873,16 @@ pub fn insert_connection_status_fut(
         tsnet,
         stats,
     )
+}
+
+#[cfg(DISABLED)]
+pub fn insert_channel_status_fut(
+    item: ChannelStatusItem,
+    data_store: &DataStore,
+    stats: Arc<InsertWorkerStats>,
+) -> SmallVec<[InsertFut; 4]> {
+    warn!("separate channel status table no longer used");
+    SmallVec::new()
 }
 
 pub fn insert_channel_status_fut(
@@ -884,6 +914,12 @@ pub fn insert_channel_status_fut(
     smallvec![fut1, fut2]
 }
 
+#[cfg(DISABLED)]
+pub async fn insert_connection_status(item: ConnectionStatusItem, data_store: &DataStore) -> Result<(), Error> {
+    warn!("separate connection status table no longer used");
+    Ok(())
+}
+
 pub async fn insert_connection_status(item: ConnectionStatusItem, data_store: &DataStore) -> Result<(), Error> {
     let ts = TsMs::from_system_time(item.ts);
     let (msp, lsp) = ts.to_grid_02(CONNECTION_STATUS_DIV);
@@ -894,6 +930,12 @@ pub async fn insert_connection_status(item: ConnectionStatusItem, data_store: &D
         .scy
         .execute(&data_store.qu_insert_connection_status, params)
         .await?;
+    Ok(())
+}
+
+#[cfg(DISABLED)]
+pub async fn insert_channel_status(item: ChannelStatusItem, data_store: &DataStore) -> Result<(), Error> {
+    warn!("separate channel status table no longer used");
     Ok(())
 }
 

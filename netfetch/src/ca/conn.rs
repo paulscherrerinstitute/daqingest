@@ -46,9 +46,9 @@ use scywriiq::ConnectionStatusItem;
 use serde::Serialize;
 use series::ChannelStatusSeriesId;
 use series::SeriesId;
-use serieswriter::writer::EstablishWorkerJob;
-use serieswriter::writer::JobId;
-use serieswriter::writer::SeriesWriter;
+use serieswriter::establish_worker::EstablishWorkerJob;
+use serieswriter::establish_worker::JobId;
+use serieswriter::rtwriter::RtWriter;
 use stats::rand_xoshiro::rand_core::RngCore;
 use stats::rand_xoshiro::rand_core::SeedableRng;
 use stats::rand_xoshiro::Xoshiro128PlusPlus;
@@ -72,11 +72,12 @@ use taskrun::tokio;
 use tokio::net::TcpStream;
 
 const CONNECTING_TIMEOUT: Duration = Duration::from_millis(6000);
-const IOC_PING_IVL: Duration = Duration::from_millis(80000);
+const IOC_PING_IVL: Duration = Duration::from_millis(1000 * 80);
 const DO_RATE_CHECK: bool = false;
-const MONITOR_POLL_TIMEOUT: Duration = Duration::from_millis(3000);
-const TIMEOUT_CHANNEL_CLOSING: Duration = Duration::from_millis(3000);
-const TIMEOUT_MONITOR_PASSIVE: Duration = Duration::from_millis(3000);
+const MONITOR_POLL_TIMEOUT: Duration = Duration::from_millis(6000);
+const TIMEOUT_CHANNEL_CLOSING: Duration = Duration::from_millis(8000);
+const TIMEOUT_MONITOR_PASSIVE: Duration = Duration::from_millis(1000 * 68);
+const TIMEOUT_PONG_WAIT: Duration = Duration::from_millis(10000);
 
 #[allow(unused)]
 macro_rules! trace2 {
@@ -90,7 +91,7 @@ macro_rules! trace2 {
 #[allow(unused)]
 macro_rules! trace3 {
     ($($arg:tt)*) => {
-        if true {
+        if false {
             trace!($($arg)*);
         }
     };
@@ -120,7 +121,7 @@ pub enum Error {
     ProtocolError,
     IocIssue,
     Protocol(#[from] crate::ca::proto::Error),
-    Writer(#[from] serieswriter::writer::Error),
+    RtWriter(#[from] serieswriter::rtwriter::Error),
     // TODO remove false positive from ThisError derive
     #[allow(private_interfaces)]
     UnknownCid(Cid),
@@ -137,6 +138,7 @@ pub enum Error {
     Error,
     DurationOutOfBounds,
     NoFreeCid,
+    InsertQueues(#[from] scywr::insertqueues::Error),
 }
 
 impl err::ToErr for Error {
@@ -324,7 +326,7 @@ enum PollTickState {
 struct WritableState {
     tsbeg: Instant,
     channel: CreatedState,
-    writer: SeriesWriter,
+    writer: RtWriter,
     reading: ReadingState,
 }
 
@@ -344,7 +346,10 @@ struct CreatedState {
     ca_dbr_type: u16,
     ca_dbr_count: u32,
     ts_created: Instant,
+    // Updated when we receive something via monitoring or polling
     ts_alive_last: Instant,
+    // Updated on monitoring, polling or when the channel config changes to reset the timeout
+    ts_activity_last: Instant,
     ts_msp_last: u64,
     ts_msp_grid_last: u32,
     inserted_in_ts_msp: u64,
@@ -374,6 +379,7 @@ impl CreatedState {
             ca_dbr_count: 0,
             ts_created: tsnow,
             ts_alive_last: tsnow,
+            ts_activity_last: tsnow,
             ts_msp_last: 0,
             ts_msp_grid_last: 0,
             inserted_in_ts_msp: 0,
@@ -415,6 +421,12 @@ struct ClosingState {
 struct ChannelConf {
     conf: ChannelConfig,
     state: ChannelState,
+}
+
+impl ChannelConf {
+    pub fn poll_conf(&self) -> Option<(u64,)> {
+        self.conf.poll_conf()
+    }
 }
 
 impl ChannelState {
@@ -701,6 +713,18 @@ impl CaConnEvent {
             value,
         }
     }
+
+    pub fn desc_short(&self) -> CaConnEventDescShort {
+        CaConnEventDescShort {}
+    }
+}
+
+pub struct CaConnEventDescShort {}
+
+impl fmt::Display for CaConnEventDescShort {
+    fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+        write!(fmt, "CaConnEventDescShort {{ TODO-impl }}")
+    }
 }
 
 #[derive(Debug)]
@@ -781,8 +805,8 @@ pub struct CaConn {
     rng: Xoshiro128PlusPlus,
     writer_establish_qu: VecDeque<EstablishWorkerJob>,
     writer_establish_tx: Pin<Box<SenderPolling<EstablishWorkerJob>>>,
-    writer_tx: Sender<(JobId, Result<SeriesWriter, serieswriter::writer::Error>)>,
-    writer_rx: Pin<Box<Receiver<(JobId, Result<SeriesWriter, serieswriter::writer::Error>)>>>,
+    writer_tx: Sender<(JobId, Result<RtWriter, serieswriter::rtwriter::Error>)>,
+    writer_rx: Pin<Box<Receiver<(JobId, Result<RtWriter, serieswriter::rtwriter::Error>)>>>,
     tmp_ts_poll: SystemTime,
     poll_tsnow: Instant,
     ioid: u32,
@@ -909,9 +933,10 @@ impl CaConn {
         };
         self.channel_state_on_shutdown(channel_reason);
         let addr = self.remote_addr_dbg.clone();
-        self.iqdqs
-            .lt_rf3_rx
-            .push_back(QueryItem::ConnectionStatus(ConnectionStatusItem {
+        // TODO handle Err:
+        let _ = self
+            .iqdqs
+            .emit_status_item(QueryItem::ConnectionStatus(ConnectionStatusItem {
                 ts: self.tmp_ts_poll,
                 addr,
                 // TODO map to appropriate status
@@ -990,7 +1015,7 @@ impl CaConn {
         }
     }
 
-    fn handle_writer_establish_inner(&mut self, cid: Cid, writer: SeriesWriter) -> Result<(), Error> {
+    fn handle_writer_establish_inner(&mut self, cid: Cid, writer: RtWriter) -> Result<(), Error> {
         trace!("handle_writer_establish_inner  {cid:?}");
         // At this point we have created the channel and created a writer for that type and sid.
         // We do not yet monitor.
@@ -999,6 +1024,8 @@ impl CaConn {
         // Create a monitor for the channel.
         // NOTE: must store the Writer even if not yet in Evented, we could also transition to Polled!
         if let Some(conf) = self.channels.get_mut(&cid) {
+            // TODO refactor, should only execute this when required:
+            let conf_poll_conf = conf.poll_conf();
             let chst = &mut conf.state;
             if let ChannelState::MakingSeriesWriter(st2) = chst {
                 self.stats.get_series_id_ok.inc();
@@ -1008,21 +1035,21 @@ impl CaConn {
                         cssid: st2.channel.cssid.clone(),
                         status: ChannelStatus::Opened,
                     });
-                    self.iqdqs.lt_rf3_rx.push_back(item);
+                    self.iqdqs.emit_status_item(item);
                 }
-                let name = conf.conf.name();
-                if name.starts_with("TEST:PEAKING:") {
+                if let Some((ivl,)) = conf_poll_conf {
                     let created_state = WritableState {
                         tsbeg: self.poll_tsnow,
                         channel: std::mem::replace(&mut st2.channel, CreatedState::dummy()),
+                        // channel: st2.channel.clone(),
                         writer,
                         reading: ReadingState::Polling(PollingState {
                             tsbeg: self.poll_tsnow,
-                            poll_ivl: Duration::from_millis(1000),
+                            poll_ivl: Duration::from_millis(ivl),
                             tick: PollTickState::Idle(self.poll_tsnow),
                         }),
                     };
-                    *chst = ChannelState::Writable(created_state);
+                    conf.state = ChannelState::Writable(created_state);
                     Ok(())
                 } else {
                     let subid = {
@@ -1058,7 +1085,7 @@ impl CaConn {
                             subid,
                         }),
                     };
-                    *chst = ChannelState::Writable(created_state);
+                    conf.state = ChannelState::Writable(created_state);
                     Ok(())
                 }
             } else {
@@ -1175,7 +1202,7 @@ impl CaConn {
                         cssid: cssid.clone(),
                         status: ChannelStatus::Closed(channel_reason.clone()),
                     });
-                    self.iqdqs.lt_rf3_rx.push_back(item);
+                    self.iqdqs.emit_status_item(item);
                     *chst = ChannelState::Ended(cssid);
                 }
                 ChannelState::Error(..) => {
@@ -1307,8 +1334,8 @@ impl CaConn {
                             ReadingState::Monitoring(x) => {
                                 match x.mon2state {
                                     // actually, no differing behavior needed so far.
-                                    Monitoring2State::Passive(_) => (),
-                                    Monitoring2State::ReadPending(ioid, since) => (),
+                                    Monitoring2State::Passive(_) => {}
+                                    Monitoring2State::ReadPending(ioid, since) => {}
                                 }
                                 Some(x.subid.clone())
                             }
@@ -1350,9 +1377,10 @@ impl CaConn {
                             Monitoring2State::Passive(st3) => {
                                 st3.tsbeg = tsnow;
                             }
-                            Monitoring2State::ReadPending(ioid, since) => {
-                                warn!("TODO  we are waiting for a explicit caget, but received a monitor event");
-                                st2.mon2state = Monitoring2State::Passive(Monitoring2PassiveState { tsbeg: tsnow });
+                            Monitoring2State::ReadPending(_ioid, _since) => {
+                                // Received EventAdd while still waiting for answer to explicit ReadNotify.
+                                // This is fine.
+                                self.stats.recv_event_add_while_wait_on_read_notify.inc();
                             }
                         }
                         let crst = &mut st.channel;
@@ -1377,9 +1405,11 @@ impl CaConn {
                     }
                 }
             }
-            _ => {
-                // TODO count instead of print
-                error!("unexpected state: EventAddRes while having {ch_s:?}");
+            ChannelState::Creating(_) | ChannelState::Init(_) | ChannelState::MakingSeriesWriter(_) => {
+                self.stats.recv_read_notify_but_not_init_yet.inc();
+            }
+            ChannelState::Closing(_) | ChannelState::Ended(_) | ChannelState::Error(_) => {
+                self.stats.recv_read_notify_but_no_longer_ready.inc();
             }
         }
         Ok(())
@@ -1479,7 +1509,7 @@ impl CaConn {
                     match &mut st.reading {
                         ReadingState::Polling(st2) => match &mut st2.tick {
                             PollTickState::Idle(_st3) => {
-                                warn!("received ReadNotifyRes while in Wait state");
+                                self.stats.recv_read_notify_while_polling_idle.inc();
                             }
                             PollTickState::Wait(st3, ioid) => {
                                 let dt = tsnow.saturating_duration_since(*st3);
@@ -1492,21 +1522,26 @@ impl CaConn {
                                 Self::read_notify_res_for_write(ev, st, iqdqs, stnow, tsnow, stats)?;
                             }
                         },
-                        ReadingState::EnableMonitoring(..) => {
-                            error!("TODO  handle_read_notify_res  handle EnableMonitoring");
+                        ReadingState::EnableMonitoring(_) => {
+                            self.stats.recv_read_notify_while_enabling_monitoring.inc();
                         }
                         ReadingState::Monitoring(st2) => match &mut st2.mon2state {
                             Monitoring2State::Passive(st3) => {
-                                self.read_ioids.remove(&ioid);
+                                if self.read_ioids.remove(&ioid).is_some() {
+                                    self.stats.recv_read_notify_state_passive_found_ioid.inc();
+                                } else {
+                                    self.stats.recv_read_notify_state_passive.inc();
+                                }
                                 st3.tsbeg = tsnow;
-                                error!("ReadNotifyRes even though we do not expect one");
                             }
                             Monitoring2State::ReadPending(ioid2, _since) => {
-                                trace!("\nhandle_read_notify_res  received ReadNotify in Monitoring2State::ReadPending\n\n");
                                 // We don't check again for `since` here. That's done in timeout checking.
                                 // So we could be here a little beyond timeout but we don't care about that.
                                 if ioid != *ioid2 {
-                                    warn!("IOID mismatch ReadNotifyRes on Monitor Read Pending  {ioid:?}  {ioid2:?}");
+                                    // warn!("IOID mismatch ReadNotifyRes on Monitor Read Pending  {ioid:?}  {ioid2:?}");
+                                    self.stats.recv_read_notify_state_read_pending_bad_ioid.inc();
+                                } else {
+                                    self.stats.recv_read_notify_state_read_pending.inc();
                                 }
                                 self.read_ioids.remove(&ioid);
                                 st2.mon2state = Monitoring2State::Passive(Monitoring2PassiveState { tsbeg: tsnow });
@@ -1550,7 +1585,7 @@ impl CaConn {
         payload_len: u32,
         value: CaEventValue,
         crst: &mut CreatedState,
-        writer: &mut SeriesWriter,
+        writer: &mut RtWriter,
         iqdqs: &mut InsertDeques,
         tsnow: Instant,
         stnow: SystemTime,
@@ -1558,6 +1593,7 @@ impl CaConn {
     ) -> Result<(), Error> {
         // debug!("event_add_ingest  payload_len {}  value {:?}", payload_len, value);
         crst.ts_alive_last = tsnow;
+        crst.ts_activity_last = tsnow;
         crst.item_recv_ivl_ema.tick(tsnow);
         crst.recv_count += 1;
         crst.recv_bytes += payload_len as u64;
@@ -1578,7 +1614,7 @@ impl CaConn {
                 crst.muted_before = 0;
                 crst.insert_item_ivl_ema.tick(tsnow);
             }
-            Self::check_ev_value_data(&value.data, writer.scalar_type())?;
+            Self::check_ev_value_data(&value.data, &writer.scalar_type())?;
             {
                 let val: DataValue = value.data.into();
                 writer.write(TsNano::from_ns(ts), TsNano::from_ns(ts_local), val, iqdqs)?;
@@ -1849,12 +1885,12 @@ impl CaConn {
         Ok(())
     }
 
-    fn check_channels_alive(&mut self, tsnow: Instant, cx: &mut Context) -> Result<(), Error> {
-        trace2!("check_channels_alive  {addr:?}", addr = &self.remote_addr_dbg);
+    fn check_channels_alive(&mut self, tsnow: Instant, _cx: &mut Context) -> Result<(), Error> {
+        trace3!("check_channels_alive  {}", self.remote_addr_dbg);
         if let Some(started) = self.ioc_ping_start {
-            if started + Duration::from_millis(4000) < tsnow {
+            if started + TIMEOUT_PONG_WAIT < tsnow {
                 self.stats.pong_timeout().inc();
-                warn!("pong timeout {addr:?}", addr = self.remote_addr_dbg);
+                warn!("pong timeout {}", self.remote_addr_dbg);
                 self.ioc_ping_start = None;
                 let item = CaConnEvent {
                     ts: tsnow,
@@ -1867,7 +1903,6 @@ impl CaConn {
             if self.ioc_ping_next < tsnow {
                 if let Some(proto) = &mut self.proto {
                     self.stats.ping_start().inc();
-                    info!("start ping");
                     self.ioc_ping_start = Some(tsnow);
                     let msg = CaMsg::from_ty_ts(CaMsgTy::Echo, tsnow);
                     proto.push_out(msg);
@@ -1889,8 +1924,8 @@ impl CaConn {
                             // TODO handle timeout check
                         }
                         ReadingState::Monitoring(st3) => match &st3.mon2state {
-                            Monitoring2State::Passive(st4) => {}
-                            Monitoring2State::ReadPending(_, tsbeg) => {
+                            Monitoring2State::Passive(_st4) => {}
+                            Monitoring2State::ReadPending(_, _) => {
                                 // This is handled in check_channels_state_poll
                                 // TODO should unify.
                             }
@@ -1898,14 +1933,14 @@ impl CaConn {
                         ReadingState::StopMonitoringForPolling(_) => {
                             // TODO handle timeout check
                         }
-                        ReadingState::Polling(st3) => {
+                        ReadingState::Polling(_st3) => {
                             // This is handled in check_channels_state_poll
                             // TODO should unify.
                         }
                     }
-                    if tsnow.duration_since(st2.channel.ts_alive_last) >= Duration::from_millis(10000) {
-                        warn!("TODO assume channel not alive because nothing received, but should do CAGET");
+                    if st2.channel.ts_activity_last + conf.conf.expect_activity_within() < tsnow {
                         not_alive_count += 1;
+                        self.stats.channel_not_alive_no_activity.inc();
                     } else {
                         alive_count += 1;
                     }
@@ -2082,6 +2117,7 @@ impl CaConn {
             ca_dbr_count: k.data_count,
             ts_created: tsnow,
             ts_alive_last: tsnow,
+            ts_activity_last: tsnow,
             ts_msp_last: 0,
             ts_msp_grid_last: 0,
             inserted_in_ts_msp: u64::MAX,
@@ -2104,8 +2140,10 @@ impl CaConn {
             JobId(cid.0 as _),
             self.backend.clone(),
             conf.conf.name().into(),
+            cssid,
             scalar_type,
             shape,
+            conf.conf.min_quiets(),
             self.writer_tx.clone(),
             self.tmp_ts_poll,
         );
@@ -2149,12 +2187,11 @@ impl CaConn {
                                 self.stats.tcp_connected.inc();
                                 let addr = addr.clone();
                                 self.iqdqs
-                                    .lt_rf3_rx
-                                    .push_back(QueryItem::ConnectionStatus(ConnectionStatusItem {
+                                    .emit_status_item(QueryItem::ConnectionStatus(ConnectionStatusItem {
                                         ts: self.tmp_ts_poll,
                                         addr,
                                         status: ConnectionStatus::Established,
-                                    }));
+                                    }))?;
                                 self.backoff_reset();
                                 let proto = CaProto::new(
                                     tcp,
@@ -2167,29 +2204,27 @@ impl CaConn {
                                 Ok(Ready(Some(())))
                             }
                             Ok(Err(e)) => {
-                                debug!("error connect to {addr} {e}");
+                                info!("error connect to {addr} {e}");
                                 let addr = addr.clone();
                                 self.iqdqs
-                                    .lt_rf3_rx
-                                    .push_back(QueryItem::ConnectionStatus(ConnectionStatusItem {
+                                    .emit_status_item(QueryItem::ConnectionStatus(ConnectionStatusItem {
                                         ts: self.tmp_ts_poll,
                                         addr,
                                         status: ConnectionStatus::ConnectError,
-                                    }));
+                                    }))?;
                                 self.trigger_shutdown(ShutdownReason::IoError);
                                 Ok(Ready(Some(())))
                             }
                             Err(e) => {
                                 // TODO log with exponential backoff
-                                debug!("timeout connect to {addr} {e}");
+                                info!("timeout connect to {addr} {e}");
                                 let addr = addr.clone();
                                 self.iqdqs
-                                    .lt_rf3_rx
-                                    .push_back(QueryItem::ConnectionStatus(ConnectionStatusItem {
+                                    .emit_status_item(QueryItem::ConnectionStatus(ConnectionStatusItem {
                                         ts: self.tmp_ts_poll,
                                         addr,
                                         status: ConnectionStatus::ConnectTimeout,
-                                    }));
+                                    }))?;
                                 self.trigger_shutdown(ShutdownReason::IocTimeout);
                                 Ok(Ready(Some(())))
                             }
@@ -2372,7 +2407,7 @@ impl CaConn {
                                 count,
                                 bytes,
                             });
-                            self.iqdqs.lt_rf3_rx.push_back(item);
+                            self.iqdqs.emit_status_item(item)?;
                         }
                     }
                 }
@@ -2454,7 +2489,10 @@ impl CaConn {
                         use scywr::senderpolling::Error as SpErr;
                         match e {
                             SpErr::NoSendInProgress => return Err(Error::NotSending),
-                            SpErr::Closed(_) => return Err(Error::ClosedSending),
+                            SpErr::Closed(_) => {
+                                error!("{self_name}  queue closed  id {:10}", id);
+                                return Err(Error::ClosedSending);
+                            }
                         }
                     }
                     Pending => {
@@ -2470,6 +2508,11 @@ impl CaConn {
         } else {
             Ok(Ready(None))
         }
+    }
+
+    fn log_queues_summary(&self) {
+        self.iqdqs.log_summary();
+        self.iqsp.log_summary();
     }
 }
 
@@ -2592,6 +2635,7 @@ impl Stream for CaConn {
                     cx,
                     stats_fn
                 );
+
                 let stats2 = self.stats.clone();
                 let stats_fn = move |item: &VecDeque<QueryItem>| {
                     stats2.iiq_batch_len().ingest(item.len() as u32);
@@ -2607,6 +2651,7 @@ impl Stream for CaConn {
                     cx,
                     stats_fn
                 );
+
                 let stats2 = self.stats.clone();
                 let stats_fn = move |item: &VecDeque<QueryItem>| {
                     stats2.iiq_batch_len().ingest(item.len() as u32);
@@ -2619,6 +2664,22 @@ impl Stream for CaConn {
                     32,
                     (&mut have_progress, &mut have_pending),
                     "mt_rf3_rx",
+                    cx,
+                    stats_fn
+                );
+
+                let stats2 = self.stats.clone();
+                let stats_fn = move |item: &VecDeque<QueryItem>| {
+                    stats2.iiq_batch_len().ingest(item.len() as u32);
+                };
+                flush_queue_dqs!(
+                    self,
+                    lt_rf3_rx,
+                    lt_rf3_sp_pin,
+                    send_batched::<256, _>,
+                    32,
+                    (&mut have_progress, &mut have_pending),
+                    "lt_rf3_rx",
                     cx,
                     stats_fn
                 );
@@ -2728,6 +2789,7 @@ impl Stream for CaConn {
                         continue;
                     } else if have_pending {
                         debug!("is_shutdown  NOT queues_out_flushed  pend  {}", self.remote_addr_dbg);
+                        self.log_queues_summary();
                         self.stats.poll_pending().inc();
                         Pending
                     } else {

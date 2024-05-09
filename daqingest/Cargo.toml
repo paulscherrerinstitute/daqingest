@@ -1,6 +1,6 @@
 [package]
 name = "daqingest"
-version = "0.2.0-aa.3"
+version = "0.2.1-aa.0"
 authors = ["Dominik Werder <dominik.werder@gmail.com>"]
 edition = "2021"
 

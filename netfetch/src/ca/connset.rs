@@ -40,7 +40,6 @@ use scywr::iteminsertqueue::QueryItem;
 use scywr::senderpolling::SenderPolling;
 use serde::Serialize;
 use series::ChannelStatusSeriesId;
-use serieswriter::writer::EstablishWorkerJob;
 use statemap::ActiveChannelState;
 use statemap::CaConnStateValue;
 use statemap::ChannelState;
@@ -64,6 +63,7 @@ use std::pin::Pin;
 
 use netpod::OnDrop;
 use scywr::insertqueues::InsertQueuesTx;
+use serieswriter::establish_worker::EstablishWorkerJob;
 use std::sync::Arc;
 use std::task::Context;
 use std::task::Poll;
@@ -1102,7 +1102,7 @@ impl CaConnSet {
     ) -> Result<EndOfStreamReason, Error> {
         let mut eos_reason = None;
         while let Some(item) = conn.next().await {
-            trace!("ca_conn_item_merge_inner  item {item:?}");
+            trace!("ca_conn_item_merge_inner  item {}", item.desc_short());
             if let Some(x) = eos_reason {
                 let e = Error::with_msg_no_trace(format!("CaConn delivered already eos  {addr}  {x:?}"));
                 error!("{e}");

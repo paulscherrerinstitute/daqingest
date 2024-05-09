@@ -5,6 +5,7 @@ use regex::Regex;
 use scywr::config::ScyllaIngestConfig;
 use serde::Deserialize;
 use serde::Serialize;
+use serieswriter::rtwriter::MinQuiets;
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::path::PathBuf;
@@ -39,6 +40,8 @@ pub struct CaIngestOpts {
     insert_frac: Option<u64>,
     use_rate_limit_queue: Option<bool>,
     pub test_bsread_addr: Option<String>,
+    #[serde(default)]
+    scylla_disable: bool,
 }
 
 impl CaIngestOpts {
@@ -109,12 +112,16 @@ impl CaIngestOpts {
     pub fn use_rate_limit_queue(&self) -> bool {
         self.use_rate_limit_queue.unwrap_or(false)
     }
+
+    pub fn scylla_disable(&self) -> bool {
+        self.scylla_disable
+    }
 }
 
 #[test]
 fn parse_config_minimal() {
     let conf = r###"
-backend: scylla
+backend: test_backend
 timeout: 10m 3s 45ms
 api_bind: "0.0.0.0:3011"
 channels: /some/path/file.txt
@@ -127,7 +134,7 @@ postgresql:
   user: USER
   pass: PASS
   name: NAME
-scylla:
+scylla_st:
   hosts:
     - sf-nube-11:19042
     - sf-nube-12:19042
@@ -524,5 +531,76 @@ impl ChannelConfig {
 
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    pub fn is_polled(&self) -> bool {
+        self.arch.is_polled
+    }
+
+    pub fn poll_conf(&self) -> Option<(u64,)> {
+        if self.is_polled() {
+            if let Some(ChannelReadConfig::Poll(x)) = self.arch.short_term {
+                Some((x.as_millis() as u64,))
+            } else if let Some(ChannelReadConfig::Poll(x)) = self.arch.medium_term {
+                Some((x.as_millis() as u64,))
+            } else if let Some(ChannelReadConfig::Poll(x)) = self.arch.long_term {
+                Some((x.as_millis() as u64,))
+            } else {
+                Some((60,))
+            }
+        } else {
+            None
+        }
+    }
+
+    /// Only used when in monitoring mode. If we do not see activity for this Duration then
+    /// we issue a manual read to see if the channel is alive.
+    pub fn manual_poll_on_quiet(&self) -> Duration {
+        Duration::from_secs(120)
+    }
+
+    pub fn expect_activity_within(&self) -> Duration {
+        let dur = if self.is_polled() {
+            // It would be anyway invalid to be polled and specify a monitor record policy.
+            match self.arch.short_term {
+                Some(ChannelReadConfig::Poll(x)) => x,
+                Some(ChannelReadConfig::Monitor) => self.manual_poll_on_quiet(),
+                None => match self.arch.medium_term {
+                    Some(ChannelReadConfig::Poll(x)) => x,
+                    Some(ChannelReadConfig::Monitor) => self.manual_poll_on_quiet(),
+                    None => match self.arch.long_term {
+                        Some(ChannelReadConfig::Poll(x)) => x,
+                        Some(ChannelReadConfig::Monitor) => self.manual_poll_on_quiet(),
+                        None => {
+                            // This is an invalid configuration, so just a fallback
+                            self.manual_poll_on_quiet()
+                        }
+                    },
+                },
+            }
+        } else {
+            self.manual_poll_on_quiet()
+        };
+        dur + Duration::from_millis(1000 * 10)
+    }
+
+    pub fn min_quiets(&self) -> MinQuiets {
+        MinQuiets {
+            st: match self.arch.short_term {
+                Some(ChannelReadConfig::Monitor) => Duration::ZERO,
+                Some(ChannelReadConfig::Poll(x)) => x,
+                None => Duration::MAX,
+            },
+            mt: match self.arch.medium_term {
+                Some(ChannelReadConfig::Monitor) => Duration::ZERO,
+                Some(ChannelReadConfig::Poll(x)) => x,
+                None => Duration::MAX,
+            },
+            lt: match self.arch.long_term {
+                Some(ChannelReadConfig::Monitor) => Duration::ZERO,
+                Some(ChannelReadConfig::Poll(x)) => x,
+                None => Duration::MAX,
+            },
+        }
     }
 }

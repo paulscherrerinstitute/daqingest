@@ -40,6 +40,7 @@ pub struct DataStore {
     pub qu_insert_channel_status_by_ts_msp: Arc<PreparedStatement>,
     pub qu_insert_binned_scalar_f32_v02: Arc<PreparedStatement>,
     pub qu_account_00: Arc<PreparedStatement>,
+    pub qu_dummy: Arc<PreparedStatement>,
 }
 
 macro_rules! prep_qu_ins_a {
@@ -51,6 +52,35 @@ macro_rules! prep_qu_ins_a {
             ),
             $rett.table_prefix(),
             $id1
+        );
+        let q = $scy.prepare(cql).await?;
+        Arc::new(q)
+    }};
+}
+
+macro_rules! prep_qu_ins_b {
+    ($id1:expr, $rett:expr, $scy:expr) => {{
+        let cql = format!(
+            concat!(
+                "insert into {}{} (series, ts_msp, ts_lsp, pulse, valueblob)",
+                " values (?, ?, ?, ?, ?)"
+            ),
+            $rett.table_prefix(),
+            $id1
+        );
+        let q = $scy.prepare(cql).await?;
+        Arc::new(q)
+    }};
+}
+
+macro_rules! prep_qu_ins_c {
+    ($id1:expr, $fields:expr, $values:expr, $rett:expr, $scy:expr) => {{
+        let cql = format!(
+            concat!("insert into {}{} ({})", " values ({})"),
+            $rett.table_prefix(),
+            $id1,
+            $fields,
+            $values,
         );
         let q = $scy.prepare(cql).await?;
         Arc::new(q)
@@ -80,62 +110,63 @@ impl DataStore {
         let qu_insert_scalar_string = prep_qu_ins_a!("events_scalar_string", rett, scy);
 
         // array
-        let cql = "insert into events_array_i8 (series, ts_msp, ts_lsp, pulse, valueblob) values (?, ?, ?, ?, ?)";
-        let q = scy.prepare(cql).await?;
-        let qu_insert_array_i8 = Arc::new(q);
-
-        let cql = "insert into events_array_i16 (series, ts_msp, ts_lsp, pulse, valueblob) values (?, ?, ?, ?, ?)";
-        let q = scy.prepare(cql).await?;
-        let qu_insert_array_i16 = Arc::new(q);
-
-        let cql = "insert into events_array_i32 (series, ts_msp, ts_lsp, pulse, valueblob) values (?, ?, ?, ?, ?)";
-        let q = scy.prepare(cql).await?;
-        let qu_insert_array_i32 = Arc::new(q);
-
-        let cql = "insert into events_array_i64 (series, ts_msp, ts_lsp, pulse, valueblob) values (?, ?, ?, ?, ?)";
-        let q = scy.prepare(cql).await?;
-        let qu_insert_array_i64 = Arc::new(q);
-
-        let cql = "insert into events_array_f32 (series, ts_msp, ts_lsp, pulse, valueblob) values (?, ?, ?, ?, ?)";
-        let q = scy.prepare(cql).await?;
-        let qu_insert_array_f32 = Arc::new(q);
-
-        let cql = "insert into events_array_f64 (series, ts_msp, ts_lsp, pulse, valueblob) values (?, ?, ?, ?, ?)";
-        let q = scy.prepare(cql).await?;
-        let qu_insert_array_f64 = Arc::new(q);
-
-        let cql = "insert into events_array_bool (series, ts_msp, ts_lsp, pulse, valueblob) values (?, ?, ?, ?, ?)";
-        let q = scy.prepare(cql).await?;
-        let qu_insert_array_bool = Arc::new(q);
+        let qu_insert_array_i8 = prep_qu_ins_b!("events_array_i8", rett, scy);
+        let qu_insert_array_i16 = prep_qu_ins_b!("events_array_i16", rett, scy);
+        let qu_insert_array_i32 = prep_qu_ins_b!("events_array_i32", rett, scy);
+        let qu_insert_array_i64 = prep_qu_ins_b!("events_array_i64", rett, scy);
+        let qu_insert_array_f32 = prep_qu_ins_b!("events_array_f32", rett, scy);
+        let qu_insert_array_f64 = prep_qu_ins_b!("events_array_f64", rett, scy);
+        let qu_insert_array_bool = prep_qu_ins_b!("events_array_bool", rett, scy);
 
         // Connection status:
-        let cql = "insert into connection_status (ts_msp, ts_lsp, kind, addr) values (?, ?, ?, ?)";
-        let q = scy.prepare(cql).await?;
-        let qu_insert_connection_status = Arc::new(q);
-
-        let cql = "insert into channel_status (series, ts_msp, ts_lsp, kind) values (?, ?, ?, ?)";
-        let q = scy.prepare(cql).await?;
-        let qu_insert_channel_status = Arc::new(q);
-
-        let cql = "insert into channel_status_by_ts_msp (ts_msp, ts_lsp, series, kind) values (?, ?, ?, ?)";
-        let q = scy.prepare(cql).await?;
-        let qu_insert_channel_status_by_ts_msp = Arc::new(q);
-
-        let cql = concat!(
-            "insert into binned_scalar_f32 (",
-            "series, bin_len_ms, ts_msp, off, count, min, max, avg)",
-            " values (?, ?, ?, ?, ?, ?, ?, ?)"
+        let qu_insert_connection_status = prep_qu_ins_c!(
+            "connection_status",
+            "ts_msp, ts_lsp, kind, addr",
+            "?, ?, ?, ?",
+            rett,
+            scy
         );
-        let q = scy.prepare(cql).await?;
-        let qu_insert_binned_scalar_f32_v02 = Arc::new(q);
 
-        let cql = concat!(
-            "insert into account_00",
-            " (part, ts, series, count, bytes)",
-            " values (?, ?, ?, ?, ?)"
+        let qu_insert_channel_status = prep_qu_ins_c!(
+            "channel_status",
+            "series, ts_msp, ts_lsp, kind",
+            "?, ?, ?, ?",
+            rett,
+            scy
         );
-        let q = scy.prepare(cql).await?;
-        let qu_account_00 = Arc::new(q);
+
+        let qu_insert_channel_status_by_ts_msp = prep_qu_ins_c!(
+            "channel_status_by_ts_msp",
+            "ts_msp, ts_lsp, series, kind",
+            "?, ?, ?, ?",
+            rett,
+            scy
+        );
+
+        let qu_insert_binned_scalar_f32_v02 = prep_qu_ins_c!(
+            "binned_scalar_f32",
+            "series, bin_len_ms, ts_msp, off, count, min, max, avg",
+            "?, ?, ?, ?, ?, ?, ?, ?",
+            rett,
+            scy
+        );
+
+        let qu_account_00 = prep_qu_ins_c!(
+            "account_00",
+            "part, ts, series, count, bytes",
+            "?, ?, ?, ?, ?",
+            rett,
+            scy
+        );
+
+        let q = scy
+            .prepare(format!(
+                concat!("select * from {}{} limit 1"),
+                rett.table_prefix(),
+                "ts_msp"
+            ))
+            .await?;
+        let qu_dummy = Arc::new(q);
 
         let ret = Self {
             rett,
@@ -161,6 +192,7 @@ impl DataStore {
             qu_insert_channel_status_by_ts_msp,
             qu_insert_binned_scalar_f32_v02,
             qu_account_00,
+            qu_dummy,
         };
         Ok(ret)
     }

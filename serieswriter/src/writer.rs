@@ -1,12 +1,8 @@
 use crate::timebin::ConnTimeBin;
-use async_channel::Receiver;
 use async_channel::Sender;
 use dbpg::seriesbychannel::ChannelInfoQuery;
 use err::thiserror;
 use err::ThisError;
-use futures_util::future;
-use futures_util::StreamExt;
-use log::*;
 use netpod::timeunits::HOUR;
 use netpod::timeunits::SEC;
 use netpod::ScalarType;
@@ -19,12 +15,7 @@ use scywr::iteminsertqueue::InsertItem;
 use scywr::iteminsertqueue::QueryItem;
 use series::ChannelStatusSeriesId;
 use series::SeriesId;
-use stats::SeriesWriterEstablishStats;
 use std::collections::VecDeque;
-use std::sync::atomic;
-use std::sync::atomic::AtomicU64;
-use std::sync::Arc;
-use std::time::Duration;
 use std::time::SystemTime;
 
 #[derive(Debug, ThisError)]
@@ -42,12 +33,13 @@ pub enum Error {
 }
 
 impl<T> From<async_channel::SendError<T>> for Error {
-    fn from(value: async_channel::SendError<T>) -> Self {
+    fn from(_value: async_channel::SendError<T>) -> Self {
         Error::ChannelSendError
     }
 }
+
 impl From<async_channel::RecvError> for Error {
-    fn from(value: async_channel::RecvError) -> Self {
+    fn from(_value: async_channel::RecvError) -> Self {
         Error::ChannelRecvError
     }
 }
@@ -65,8 +57,7 @@ pub struct SeriesWriter {
     msp_max_bytes: u32,
     // TODO this should be in an Option:
     ts_msp_grid_last: u32,
-    binner: ConnTimeBin,
-    written_last: Option<DataValue>,
+    binner: Option<ConnTimeBin>,
 }
 
 impl SeriesWriter {
@@ -94,13 +85,13 @@ impl SeriesWriter {
     }
 
     pub async fn establish_with_cssid(
-        worker_tx: Sender<ChannelInfoQuery>,
+        channel_info_tx: Sender<ChannelInfoQuery>,
         cssid: ChannelStatusSeriesId,
         backend: String,
         channel: String,
         scalar_type: ScalarType,
         shape: Shape,
-        tsnow: SystemTime,
+        stnow: SystemTime,
     ) -> Result<Self, Error> {
         let (tx, rx) = async_channel::bounded(1);
         let item = ChannelInfoQuery {
@@ -111,11 +102,23 @@ impl SeriesWriter {
             shape: shape.clone(),
             tx: Box::pin(tx),
         };
-        worker_tx.send(item).await?;
+        channel_info_tx.send(item).await?;
         let res = rx.recv().await?.map_err(|_| Error::SeriesLookupError)?;
         let sid = res.series.to_series();
+        Self::establish_with_cssid_sid(cssid, sid, scalar_type, shape, stnow).await
+    }
+
+    pub async fn establish_with_cssid_sid(
+        cssid: ChannelStatusSeriesId,
+        sid: SeriesId,
+        scalar_type: ScalarType,
+        shape: Shape,
+        stnow: SystemTime,
+    ) -> Result<Self, Error> {
         let mut binner = ConnTimeBin::empty(sid.clone(), TsNano::from_ns(SEC * 10));
-        binner.setup_for(&scalar_type, &shape, tsnow)?;
+        binner.setup_for(&scalar_type, &shape, stnow)?;
+        let _ = binner;
+        let binner = None;
         let res = Self {
             cssid,
             sid,
@@ -128,7 +131,6 @@ impl SeriesWriter {
             msp_max_bytes: 1024 * 1024 * 20,
             ts_msp_grid_last: 0,
             binner,
-            written_last: None,
         };
         Ok(res)
     }
@@ -150,10 +152,12 @@ impl SeriesWriter {
         ts: TsNano,
         ts_local: TsNano,
         val: DataValue,
-        iqdqs: &mut InsertDeques,
+        deque: &mut VecDeque<QueryItem>,
     ) -> Result<(), Error> {
         // TODO compute the binned data here as well and flush completed bins if needed.
-        self.binner.push(ts.clone(), &val)?;
+        if let Some(binner) = self.binner.as_mut() {
+            binner.push(ts.clone(), &val)?;
+        }
 
         // TODO decide on better msp/lsp: random offset!
         // As long as one writer is active, the msp is arbitrary.
@@ -203,161 +207,15 @@ impl SeriesWriter {
             ts_local: ts_local.to_ts_ms(),
         };
         // TODO decide on the path in the new deques struct
-        iqdqs.st_rf3_rx.push_back(QueryItem::Insert(item));
+        deque.push_back(QueryItem::Insert(item));
         Ok(())
     }
 
-    pub fn tick(&mut self, iqdqs: &mut InsertDeques) -> Result<(), Error> {
-        self.binner.tick(iqdqs)?;
+    pub fn tick(&mut self, deque: &mut VecDeque<QueryItem>) -> Result<(), Error> {
+        if let Some(binner) = self.binner.as_mut() {
+            // TODO
+            //binner.tick(deque)?;
+        }
         Ok(())
     }
-}
-
-pub struct JobId(pub u64);
-
-pub struct EstablishWriterWorker {
-    worker_tx: Sender<ChannelInfoQuery>,
-    jobrx: Receiver<EstablishWorkerJob>,
-    stats: Arc<SeriesWriterEstablishStats>,
-}
-
-impl EstablishWriterWorker {
-    fn new(
-        worker_tx: Sender<ChannelInfoQuery>,
-        jobrx: Receiver<EstablishWorkerJob>,
-        stats: Arc<SeriesWriterEstablishStats>,
-    ) -> Self {
-        Self {
-            worker_tx,
-            jobrx,
-            stats,
-        }
-    }
-
-    async fn work(self) {
-        let cnt = Arc::new(AtomicU64::new(0));
-        taskrun::spawn({
-            let cnt = cnt.clone();
-            async move {
-                if true {
-                    return Ok::<_, Error>(());
-                }
-                loop {
-                    taskrun::tokio::time::sleep(Duration::from_millis(10000)).await;
-                    debug!("EstablishWriterWorker  cnt {}", cnt.load(atomic::Ordering::SeqCst));
-                }
-                Ok::<_, Error>(())
-            }
-        });
-        self.jobrx
-            .map(move |item| {
-                let wtx = self.worker_tx.clone();
-                let cnt = cnt.clone();
-                let stats = self.stats.clone();
-                async move {
-                    let res = SeriesWriter::establish(
-                        wtx.clone(),
-                        item.backend,
-                        item.channel,
-                        item.scalar_type,
-                        item.shape,
-                        item.tsnow,
-                    )
-                    .await;
-                    cnt.fetch_add(1, atomic::Ordering::SeqCst);
-                    if item.restx.send((item.job_id, res)).await.is_err() {
-                        stats.result_send_fail().inc();
-                        trace!("can not send writer establish result");
-                    }
-                }
-            })
-            .buffer_unordered(512)
-            .for_each(|_| future::ready(()))
-            .await;
-    }
-}
-
-pub struct EstablishWorkerJob {
-    job_id: JobId,
-    backend: String,
-    channel: String,
-    scalar_type: ScalarType,
-    shape: Shape,
-    restx: Sender<(JobId, Result<SeriesWriter, Error>)>,
-    tsnow: SystemTime,
-}
-
-impl EstablishWorkerJob {
-    pub fn new(
-        job_id: JobId,
-        backend: String,
-        channel: String,
-        scalar_type: ScalarType,
-        shape: Shape,
-        restx: Sender<(JobId, Result<SeriesWriter, Error>)>,
-        tsnow: SystemTime,
-    ) -> Self {
-        Self {
-            job_id,
-            backend,
-            channel,
-            scalar_type,
-            shape,
-            restx,
-            tsnow,
-        }
-    }
-}
-
-pub fn start_writer_establish_worker(
-    worker_tx: Sender<ChannelInfoQuery>,
-    stats: Arc<SeriesWriterEstablishStats>,
-) -> Result<(Sender<EstablishWorkerJob>,), Error> {
-    let (tx, rx) = async_channel::bounded(256);
-    let worker = EstablishWriterWorker::new(worker_tx, rx, stats);
-    taskrun::spawn(worker.work());
-    Ok((tx,))
-}
-
-#[test]
-fn write_00() {
-    use netpod::Database;
-    use scywr::config::ScyllaIngestConfig;
-    use stats::SeriesByChannelStats;
-    use std::sync::Arc;
-    let fut = async {
-        let dbconf = &Database {
-            name: "daqbuffer".into(),
-            host: "localhost".into(),
-            port: 5432,
-            user: "daqbuffer".into(),
-            pass: "daqbuffer".into(),
-        };
-        let scyconf = &ScyllaIngestConfig::new(["127.0.0.1:19042"], "daqingest_test_00_rf3", "daqingest_test_00_rf1");
-        let (pgc, pg_jh) = dbpg::conn::make_pg_client(dbconf).await?;
-        dbpg::schema::schema_check(&pgc).await?;
-        scywr::schema::migrate_scylla_data_schema(scyconf, netpod::ttl::RetentionTime::Short).await?;
-        let scy = scywr::session::create_session(scyconf).await?;
-        let stats = SeriesByChannelStats::new();
-        let stats = Arc::new(stats);
-        let (tx, jhs, jh) =
-            dbpg::seriesbychannel::start_lookup_workers::<dbpg::seriesbychannel::SalterRandom>(1, dbconf, stats)
-                .await?;
-        let backend = "bck-test-00";
-        let channel = "chn-test-00";
-        let scalar_type = ScalarType::I16;
-        let shape = Shape::Scalar;
-        let tsnow = SystemTime::now();
-        let mut writer = SeriesWriter::establish(tx, backend.into(), channel.into(), scalar_type, shape, tsnow).await?;
-        eprintln!("{writer:?}");
-        let mut iqdqs = InsertDeques::new();
-        for i in 0..10 {
-            let ts = TsNano::from_ns(HOUR * 24 + SEC * i);
-            let ts_local = ts.clone();
-            let val = DataValue::Scalar(scywr::iteminsertqueue::ScalarValue::I16(i as _));
-            writer.write(ts, ts_local, val, &mut iqdqs)?;
-        }
-        Ok::<_, Error>(())
-    };
-    taskrun::run(fut).unwrap();
 }

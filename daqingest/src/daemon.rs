@@ -44,7 +44,6 @@ const CHECK_HEALTH_TIMEOUT: Duration = Duration::from_millis(5000);
 const PRINT_ACTIVE_INTERVAL: Duration = Duration::from_millis(60000);
 const PRINT_STATUS_INTERVAL: Duration = Duration::from_millis(20000);
 const CHECK_CHANNEL_SLOW_WARN: Duration = Duration::from_millis(500);
-const RUN_WITHOUT_SCYLLA: bool = true;
 
 pub struct DaemonOpts {
     pgconf: Database,
@@ -104,9 +103,11 @@ impl Daemon {
         let insert_queue_counter = Arc::new(AtomicUsize::new(0));
 
         let wrest_stats = Arc::new(SeriesWriterEstablishStats::new());
-        let (writer_establis_tx,) =
-            serieswriter::writer::start_writer_establish_worker(channel_info_query_tx.clone(), wrest_stats.clone())
-                .map_err(|e| Error::with_msg_no_trace(e.to_string()))?;
+        let (writer_establis_tx,) = serieswriter::establish_worker::start_writer_establish_worker(
+            channel_info_query_tx.clone(),
+            wrest_stats.clone(),
+        )
+        .map_err(|e| Error::with_msg_no_trace(e.to_string()))?;
 
         let local_epics_hostname = ingest_linux::net::local_hostname();
 
@@ -199,26 +200,71 @@ impl Daemon {
 
         let mut insert_worker_jhs = Vec::new();
 
-        if RUN_WITHOUT_SCYLLA {
+        if ingest_opts.scylla_disable() {
             let jh = scywr::insertworker::spawn_scylla_insert_workers_dummy(
                 ingest_opts.insert_worker_count(),
                 ingest_opts.insert_worker_concurrency(),
                 iqrx.st_rf3_rx,
-                insert_worker_opts,
+                insert_worker_opts.clone(),
+                insert_worker_stats.clone(),
+            )
+            .await?;
+            insert_worker_jhs.extend(jh);
+            let jh = scywr::insertworker::spawn_scylla_insert_workers_dummy(
+                ingest_opts.insert_worker_count(),
+                ingest_opts.insert_worker_concurrency(),
+                iqrx.mt_rf3_rx,
+                insert_worker_opts.clone(),
+                insert_worker_stats.clone(),
+            )
+            .await?;
+            insert_worker_jhs.extend(jh);
+            let jh = scywr::insertworker::spawn_scylla_insert_workers_dummy(
+                ingest_opts.insert_worker_count(),
+                ingest_opts.insert_worker_concurrency(),
+                iqrx.lt_rf3_rx,
+                insert_worker_opts.clone(),
                 insert_worker_stats.clone(),
             )
             .await?;
             insert_worker_jhs.extend(jh);
         } else {
             let jh = scywr::insertworker::spawn_scylla_insert_workers(
-                // TODO does the worker actually need RETT? Yes, to use the correct table names.
                 RetentionTime::Short,
                 opts.scyconf_st.clone(),
                 ingest_opts.insert_scylla_sessions(),
                 ingest_opts.insert_worker_count(),
                 ingest_opts.insert_worker_concurrency(),
-                iqrx.st_rf3_rx.clone(),
-                insert_worker_opts,
+                iqrx.st_rf3_rx,
+                insert_worker_opts.clone(),
+                insert_worker_stats.clone(),
+                ingest_opts.use_rate_limit_queue(),
+            )
+            .await?;
+            insert_worker_jhs.extend(jh);
+
+            let jh = scywr::insertworker::spawn_scylla_insert_workers(
+                RetentionTime::Medium,
+                opts.scyconf_mt.clone(),
+                ingest_opts.insert_scylla_sessions(),
+                ingest_opts.insert_worker_count().min(2),
+                ingest_opts.insert_worker_concurrency().min(8),
+                iqrx.mt_rf3_rx,
+                insert_worker_opts.clone(),
+                insert_worker_stats.clone(),
+                ingest_opts.use_rate_limit_queue(),
+            )
+            .await?;
+            insert_worker_jhs.extend(jh);
+
+            let jh = scywr::insertworker::spawn_scylla_insert_workers(
+                RetentionTime::Long,
+                opts.scyconf_lt.clone(),
+                ingest_opts.insert_scylla_sessions(),
+                ingest_opts.insert_worker_count().min(2),
+                ingest_opts.insert_worker_concurrency().min(8),
+                iqrx.lt_rf3_rx,
+                insert_worker_opts.clone(),
                 insert_worker_stats.clone(),
                 ingest_opts.use_rate_limit_queue(),
             )
@@ -629,15 +675,15 @@ impl Daemon {
                 }
             }
         }
-        info!("wait for metrics handler");
+        debug!("wait for metrics handler");
         self.metrics_shutdown_tx.send(1).await?;
         if let Some(jh) = self.metrics_jh.take() {
             jh.await??;
         }
-        info!("joined metrics handler");
-        info!("\n\n\n-----------------------\n\n\nwait for postingest task");
+        debug!("joined metrics handler");
+        debug!("wait for postingest task");
         worker_jh.await?.map_err(|e| Error::from_string(e))?;
-        info!("joined postingest task");
+        debug!("joined postingest task");
         Ok(())
     }
 }
@@ -669,10 +715,13 @@ pub async fn run(opts: CaIngestOpts, channels_config: Option<ChannelsConfig>) ->
             .await
             .map_err(Error::from_string)?;
         dbpg::schema::schema_check(&pg).await.map_err(Error::from_string)?;
+        drop(pg);
         jh.await?.map_err(Error::from_string)?;
     }
-    if RUN_WITHOUT_SCYLLA {
+    if opts.scylla_disable() {
+        warn!("scylla_disable config flag enabled");
     } else {
+        info!("start scylla schema check");
         scywr::schema::migrate_scylla_data_schema(opts.scylla_config_st(), RetentionTime::Short)
             .await
             .map_err(Error::from_string)?;
@@ -682,6 +731,7 @@ pub async fn run(opts: CaIngestOpts, channels_config: Option<ChannelsConfig>) ->
         scywr::schema::migrate_scylla_data_schema(opts.scylla_config_lt(), RetentionTime::Long)
             .await
             .map_err(Error::from_string)?;
+        info!("stop scylla schema check");
     }
     info!("database check done");
 

@@ -788,15 +788,7 @@ impl CaMsg {
                 };
                 CaMsg::from_ty_ts(CaMsgTy::Error(e), tsnow)
             }
-            20 => {
-                let name = std::ffi::CString::new(payload)
-                    .map(|s| s.into_string().unwrap_or_else(|e| format!("{e:?}")))
-                    .unwrap_or_else(|e| format!("{e:?}"));
-                CaMsg::from_ty_ts(CaMsgTy::ClientNameRes(ClientNameRes { name }), tsnow)
-            }
-            // TODO make response type for host name:
-            21 => CaMsg::from_ty_ts(CaMsgTy::HostName("TODOx5288".into()), tsnow),
-            6 => {
+            0x06 => {
                 if hi.payload_len() != 8 {
                     warn!("protocol error: search result is expected with fixed payload size 8");
                 }
@@ -813,29 +805,6 @@ impl CaMsg {
                     id: hi.param2,
                     proto_version,
                 });
-                CaMsg::from_ty_ts(ty, tsnow)
-            }
-            18 => {
-                let ty = CaMsgTy::CreateChanRes(CreateChanRes {
-                    data_type: hi.data_type,
-                    // TODO what am I supposed to use here in case of extended header?
-                    data_count: hi.data_count() as _,
-                    cid: hi.param1,
-                    sid: hi.param2,
-                });
-                CaMsg::from_ty_ts(ty, tsnow)
-            }
-            22 => {
-                // TODO use different structs for request and response:
-                let ty = CaMsgTy::AccessRightsRes(AccessRightsRes {
-                    cid: hi.param1,
-                    rights: hi.param2,
-                });
-                CaMsg::from_ty_ts(ty, tsnow)
-            }
-            26 => {
-                // TODO use different structs for request and response:
-                let ty = CaMsgTy::CreateChanFail(CreateChanFail { cid: hi.param1 });
                 CaMsg::from_ty_ts(ty, tsnow)
             }
             0x01 => {
@@ -897,7 +866,40 @@ impl CaMsg {
                 });
                 CaMsg::from_ty_ts(ty, tsnow)
             }
-            0x11 => CaMsg::from_ty_ts(CaMsgTy::Echo, tsnow),
+            0x12 => {
+                let ty = CaMsgTy::CreateChanRes(CreateChanRes {
+                    data_type: hi.data_type,
+                    // TODO what am I supposed to use here in case of extended header?
+                    data_count: hi.data_count() as _,
+                    cid: hi.param1,
+                    sid: hi.param2,
+                });
+                CaMsg::from_ty_ts(ty, tsnow)
+            }
+            0x16 => {
+                let ty = CaMsgTy::AccessRightsRes(AccessRightsRes {
+                    cid: hi.param1,
+                    rights: hi.param2,
+                });
+                CaMsg::from_ty_ts(ty, tsnow)
+            }
+            0x17 => {
+                let ty = CaMsgTy::Echo;
+                CaMsg::from_ty_ts(ty, tsnow)
+            }
+            0x1a => {
+                // TODO use different structs for request and response:
+                let ty = CaMsgTy::CreateChanFail(CreateChanFail { cid: hi.param1 });
+                CaMsg::from_ty_ts(ty, tsnow)
+            }
+            0x14 => {
+                let name = std::ffi::CString::new(payload)
+                    .map(|s| s.into_string().unwrap_or_else(|e| format!("{e:?}")))
+                    .unwrap_or_else(|e| format!("{e:?}"));
+                CaMsg::from_ty_ts(CaMsgTy::ClientNameRes(ClientNameRes { name }), tsnow)
+            }
+            // TODO make response type for host name:
+            0x15 => CaMsg::from_ty_ts(CaMsgTy::HostName("TODOx5288".into()), tsnow),
             x => return Err(Error::CaCommandNotSupported(x)),
         };
         Ok(msg)

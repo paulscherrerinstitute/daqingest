@@ -80,26 +80,6 @@ pub async fn check_table_readable(name: &str, scy: &ScySession) -> Result<bool, 
     }
 }
 
-pub async fn create_table_ts_msp(table_name: &str, scy: &ScySession) -> Result<(), Error> {
-    use std::fmt::Write;
-    // seconds:
-    let default_time_to_live = 60 * 60 * 5;
-    // hours:
-    let twcs_window_index = 24 * 4;
-    let mut s = String::new();
-    s.write_str("create table ")?;
-    s.write_str(table_name)?;
-    s.write_str(" (series bigint, ts_msp bigint, primary key (series, ts_msp))")?;
-    write!(s, " with default_time_to_live = {}", default_time_to_live)?;
-    s.write_str(" and compaction = { 'class': 'TimeWindowCompactionStrategy'")?;
-    s.write_str(", 'compaction_window_unit': 'HOURS'")?;
-    write!(s, ", 'compaction_window_size': {}", twcs_window_index)?;
-    s.write_str(" }")?;
-    eprintln!("create table cql  {s}");
-    scy.query(s, ()).await?;
-    Ok(())
-}
-
 #[allow(unused)]
 fn dhours(x: u64) -> Duration {
     Duration::from_secs(60 * 60 * x)

@@ -50,6 +50,15 @@ macro_rules! trace3 {
     };
 }
 
+#[allow(unused)]
+macro_rules! trace_item_execute {
+    ($($arg:tt)*) => {
+        if true {
+            debug!($($arg)*);
+        }
+    };
+}
+
 fn stats_inc_for_err(stats: &stats::InsertWorkerStats, err: &crate::iteminsertqueue::Error) {
     use crate::iteminsertqueue::Error;
     match err {
@@ -266,7 +275,10 @@ async fn worker_streamed(
         .insert_workers_running
         .fetch_add(1, atomic::Ordering::AcqRel);
     let stream = item_inp;
-    let stream = inspect_items(stream);
+    let worker_name = data_store
+        .as_ref()
+        .map_or_else(|| format!("dummy"), |x| x.rett.debug_tag().to_string());
+    let stream = inspect_items(stream, worker_name.clone());
     if let Some(data_store) = data_store {
         let stream = transform_to_db_futures(stream, data_store, stats.clone());
         let stream = stream
@@ -351,7 +363,10 @@ where
     })
 }
 
-fn inspect_items(item_inp: Receiver<VecDeque<QueryItem>>) -> impl Stream<Item = VecDeque<QueryItem>> {
+fn inspect_items(
+    item_inp: Receiver<VecDeque<QueryItem>>,
+    worker_name: String,
+) -> impl Stream<Item = VecDeque<QueryItem>> {
     trace!("transform_to_db_futures  begin");
     // TODO possible without box?
     // let item_inp = Box::pin(item_inp);
@@ -359,19 +374,19 @@ fn inspect_items(item_inp: Receiver<VecDeque<QueryItem>>) -> impl Stream<Item = 
         for item in batch {
             match &item {
                 QueryItem::ConnectionStatus(_) => {
-                    trace2!("execute  ConnectionStatus  {item:?}");
+                    trace_item_execute!("execute  {worker_name}  ConnectionStatus  {item:?}");
                 }
                 QueryItem::ChannelStatus(_) => {
-                    trace2!("execute  ChannelStatus  {item:?}");
+                    trace_item_execute!("execute  {worker_name}  ChannelStatus  {item:?}");
                 }
                 QueryItem::Insert(item) => {
-                    trace3!("execute  Insert  {}", item.string_short());
+                    trace_item_execute!("execute  {worker_name}  Insert  {}", item.string_short());
                 }
                 QueryItem::TimeBinSimpleF32(_) => {
-                    trace2!("execute  TimeBinSimpleF32");
+                    trace_item_execute!("execute  {worker_name}  TimeBinSimpleF32");
                 }
                 QueryItem::Accounting(_) => {
-                    trace2!("execute  Accounting  {item:?}");
+                    trace_item_execute!("execute  {worker_name}  Accounting  {item:?}");
                 }
             }
         }

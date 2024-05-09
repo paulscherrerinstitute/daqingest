@@ -89,7 +89,7 @@ async fn main_run_inner(opts: DaqIngestOpts) -> Result<(), Error> {
                 netfetch::ca::search::ca_search(conf, &channels).await?
             }
             ChannelAccess::CaIngest(k) => {
-                info!("daqingest version {}", clap::crate_version!());
+                info!("daqingest version {} +0001", clap::crate_version!());
                 let (conf, channels_config) = parse_config(k.config.into()).await?;
                 daqingest::daemon::run(conf, channels_config).await?
             }

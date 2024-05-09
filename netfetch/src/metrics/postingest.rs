@@ -55,10 +55,11 @@ pub async fn process_api_query_items(
 
     #[allow(irrefutable_let_patterns)]
     while let item = taskrun::tokio::time::timeout(Duration::from_millis(500), item_rx.recv()).await {
+        let deque = &mut iqdqs.st_rf3_rx;
         let tsnow = Instant::now();
         if tsnow.saturating_duration_since(sw_tick_last) >= Duration::from_millis(5000) {
             sw_tick_last = tsnow;
-            tick_writers(mucache.all_ref_mut(), &mut iqdqs)?;
+            tick_writers(mucache.all_ref_mut(), deque)?;
         }
         let item = match item {
             Ok(Ok(item)) => item,
@@ -83,23 +84,25 @@ pub async fn process_api_query_items(
             stnow,
         )
         .await?;
-        sw.write(item.ts, item.ts, item.val, &mut iqdqs)?;
+        sw.write(item.ts, item.ts, item.val, deque)?;
         iqtx.send_all(&mut iqdqs).await.map_err(|_| Error::SendError)?;
     }
-    finish_writers(mucache.all_ref_mut(), &mut iqdqs)?;
+    let deque = &mut iqdqs.st_rf3_rx;
+    finish_writers(mucache.all_ref_mut(), deque)?;
+    iqtx.send_all(&mut iqdqs).await.map_err(|_| Error::SendError)?;
     Ok(())
 }
 
-fn tick_writers(sws: Vec<&mut SeriesWriter>, iqdqs: &mut InsertDeques) -> Result<(), Error> {
+fn tick_writers(sws: Vec<&mut SeriesWriter>, deque: &mut VecDeque<QueryItem>) -> Result<(), Error> {
     for sw in sws {
-        sw.tick(iqdqs)?;
+        sw.tick(deque)?;
     }
     Ok(())
 }
 
-fn finish_writers(sws: Vec<&mut SeriesWriter>, iqdqs: &mut InsertDeques) -> Result<(), Error> {
+fn finish_writers(sws: Vec<&mut SeriesWriter>, deque: &mut VecDeque<QueryItem>) -> Result<(), Error> {
     for sw in sws {
-        sw.tick(iqdqs)?;
+        sw.tick(deque)?;
     }
     Ok(())
 }
