@@ -225,9 +225,9 @@ async fn worker(
                 }
             },
             QueryItem::Insert(item) => {
-                let item_ts_local = item.ts_local;
                 let tsnow = TsMs::from_system_time(SystemTime::now());
-                let dt = tsnow.to_u64().saturating_sub(item_ts_local.to_u64()) as u32;
+                let item_ts_net = item.ts_net.clone();
+                let dt = tsnow.to_u64().saturating_sub(item_ts_net.to_u64()) as u32;
                 stats.item_lat_net_worker().ingest(dt);
                 let insert_frac = insert_worker_opts.insert_frac.load(Ordering::Acquire);
                 let do_insert = i1 % 1000 < insert_frac;
@@ -235,7 +235,7 @@ async fn worker(
                     Ok(_) => {
                         stats.inserted_values().inc();
                         let tsnow = TsMs::from_system_time(SystemTime::now());
-                        let dt = tsnow.to_u64().saturating_sub(item_ts_local.to_u64()) as u32;
+                        let dt = tsnow.to_u64().saturating_sub(item_ts_net.to_u64()) as u32;
                         stats.item_lat_net_store().ingest(dt);
                         backoff = backoff_0;
                     }
@@ -400,8 +400,8 @@ fn prepare_query_insert_futs(
     tsnow: TsMs,
 ) -> SmallVec<[InsertFut; 4]> {
     stats.inserts_value().inc();
-    let item_ts_local = item.ts_local;
-    let dt = tsnow.to_u64().saturating_sub(item_ts_local.to_u64()) as u32;
+    let item_ts_net = item.ts_net;
+    let dt = tsnow.to_u64().saturating_sub(item_ts_net.to_u64()) as u32;
     stats.item_lat_net_worker().ingest(dt);
     let msp_bump = item.msp_bump;
     let series = item.series.clone();
@@ -416,7 +416,7 @@ fn prepare_query_insert_futs(
         let fut = insert_msp_fut(
             series,
             ts_msp,
-            item_ts_local,
+            item_ts_net,
             data_store.scy.clone(),
             data_store.qu_insert_ts_msp.clone(),
             stats.clone(),

@@ -149,14 +149,16 @@ impl SeriesWriter {
 
     pub fn write(
         &mut self,
-        ts: TsNano,
+        ts_ioc: TsNano,
         ts_local: TsNano,
         val: DataValue,
         deque: &mut VecDeque<QueryItem>,
     ) -> Result<(), Error> {
+        let ts_main = ts_local;
+
         // TODO compute the binned data here as well and flush completed bins if needed.
         if let Some(binner) = self.binner.as_mut() {
-            binner.push(ts.clone(), &val)?;
+            binner.push(ts_main.clone(), &val)?;
         }
 
         // TODO decide on better msp/lsp: random offset!
@@ -169,9 +171,9 @@ impl SeriesWriter {
             Some(ts_msp_last) => {
                 if self.inserted_in_current_msp >= self.msp_max_entries
                     || self.bytes_in_current_msp >= self.msp_max_bytes
-                    || ts_msp_last.add_ns(HOUR) <= ts
+                    || ts_msp_last.add_ns(HOUR) <= ts_main
                 {
-                    let ts_msp = ts.div(msp_res_max).mul(msp_res_max);
+                    let ts_msp = ts_main.div(msp_res_max).mul(msp_res_max);
                     if ts_msp == ts_msp_last {
                         (ts_msp, false)
                     } else {
@@ -187,24 +189,25 @@ impl SeriesWriter {
                 }
             }
             None => {
-                let ts_msp = ts.div(msp_res_max).mul(msp_res_max);
+                let ts_msp = ts_main.div(msp_res_max).mul(msp_res_max);
                 self.ts_msp_last = Some(ts_msp);
                 self.inserted_in_current_msp = 1;
                 self.bytes_in_current_msp = val.byte_size();
                 (ts_msp, true)
             }
         };
-        let ts_lsp = ts.delta(ts_msp);
+        let ts_lsp = ts_main.delta(ts_msp);
         let item = InsertItem {
             series: self.sid.clone(),
             ts_msp: ts_msp.to_ts_ms(),
             ts_lsp,
+            ts_net: ts_local.to_ts_ms(),
+            ts_alt_1: ts_ioc,
             msp_bump: ts_msp_changed,
             pulse: 0,
             scalar_type: self.scalar_type.clone(),
             shape: self.shape.clone(),
             val,
-            ts_local: ts_local.to_ts_ms(),
         };
         // TODO decide on the path in the new deques struct
         deque.push_back(QueryItem::Insert(item));

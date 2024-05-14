@@ -555,8 +555,8 @@ impl ChannelConfig {
 
     /// Only used when in monitoring mode. If we do not see activity for this Duration then
     /// we issue a manual read to see if the channel is alive.
-    pub fn manual_poll_on_quiet(&self) -> Duration {
-        Duration::from_secs(120)
+    pub fn manual_poll_on_quiet_after(&self) -> Duration {
+        Duration::from_secs(300)
     }
 
     pub fn expect_activity_within(&self) -> Duration {
@@ -564,22 +564,22 @@ impl ChannelConfig {
             // It would be anyway invalid to be polled and specify a monitor record policy.
             match self.arch.short_term {
                 Some(ChannelReadConfig::Poll(x)) => x,
-                Some(ChannelReadConfig::Monitor) => self.manual_poll_on_quiet(),
+                Some(ChannelReadConfig::Monitor) => self.manual_poll_on_quiet_after(),
                 None => match self.arch.medium_term {
                     Some(ChannelReadConfig::Poll(x)) => x,
-                    Some(ChannelReadConfig::Monitor) => self.manual_poll_on_quiet(),
+                    Some(ChannelReadConfig::Monitor) => self.manual_poll_on_quiet_after(),
                     None => match self.arch.long_term {
                         Some(ChannelReadConfig::Poll(x)) => x,
-                        Some(ChannelReadConfig::Monitor) => self.manual_poll_on_quiet(),
+                        Some(ChannelReadConfig::Monitor) => self.manual_poll_on_quiet_after(),
                         None => {
                             // This is an invalid configuration, so just a fallback
-                            self.manual_poll_on_quiet()
+                            self.manual_poll_on_quiet_after()
                         }
                     },
                 },
             }
         } else {
-            self.manual_poll_on_quiet()
+            self.manual_poll_on_quiet_after()
         };
         dur + Duration::from_millis(1000 * 10)
     }

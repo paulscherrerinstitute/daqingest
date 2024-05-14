@@ -13,6 +13,7 @@ use netpod::DtNano;
 use netpod::ScalarType;
 use netpod::Shape;
 use netpod::TsMs;
+use netpod::TsNano;
 use scylla::frame::value::Value;
 use scylla::frame::value::ValueList;
 use scylla::prepared_statement::PreparedStatement;
@@ -506,7 +507,8 @@ pub struct InsertItem {
     pub scalar_type: ScalarType,
     pub shape: Shape,
     pub val: DataValue,
-    pub ts_local: TsMs,
+    pub ts_net: TsMs,
+    pub ts_alt_1: TsNano,
 }
 
 impl InsertItem {
@@ -556,7 +558,8 @@ struct InsParCom {
     series: SeriesId,
     ts_msp: TsMs,
     ts_lsp: DtNano,
-    ts_local: TsMs,
+    ts_net: TsMs,
+    ts_alt_1: TsNano,
     pulse: u64,
     do_insert: bool,
     stats: Arc<InsertWorkerStats>,
@@ -570,10 +573,11 @@ where
         par.series.to_i64(),
         par.ts_msp.to_i64(),
         par.ts_lsp.to_i64(),
+        par.ts_alt_1.ns() as i64,
         par.pulse as i64,
         val,
     );
-    InsertFut::new(scy, qu, params, par.ts_local, par.stats)
+    InsertFut::new(scy, qu, params, par.ts_net, par.stats)
 }
 
 // val: Vec<ST>   where ST: Value + SerializeCql + Send + 'static,
@@ -582,10 +586,11 @@ fn insert_array_gen_fut(par: InsParCom, val: Vec<u8>, qu: Arc<PreparedStatement>
         par.series.to_i64(),
         par.ts_msp.to_i64(),
         par.ts_lsp.to_i64(),
+        par.ts_alt_1.ns() as i64,
         par.pulse as i64,
         val,
     );
-    InsertFut::new(scy, qu, params, par.ts_local, par.stats)
+    InsertFut::new(scy, qu, params, par.ts_net, par.stats)
 }
 
 #[pin_project::pin_project]
@@ -654,6 +659,7 @@ where
         par.series.to_i64(),
         par.ts_msp.to_i64(),
         par.ts_lsp.to_i64(),
+        par.ts_alt_1.ns() as i64,
         par.pulse as i64,
         val,
     );
@@ -690,6 +696,7 @@ where
             par.series.to_i64(),
             par.ts_msp.to_i64(),
             par.ts_lsp.to_i64(),
+            par.ts_alt_1.ns() as i64,
             par.pulse as i64,
             val,
         );
@@ -730,7 +737,8 @@ pub async fn insert_item(
                 series: item.series,
                 ts_msp: item.ts_msp,
                 ts_lsp: item.ts_lsp,
-                ts_local: item.ts_local,
+                ts_net: item.ts_net,
+                ts_alt_1: item.ts_alt_1,
                 pulse: item.pulse,
                 do_insert,
                 stats: stats.clone(),
@@ -753,7 +761,8 @@ pub async fn insert_item(
                 series: item.series,
                 ts_msp: item.ts_msp,
                 ts_lsp: item.ts_lsp,
-                ts_local: item.ts_local,
+                ts_net: item.ts_net,
+                ts_alt_1: item.ts_alt_1,
                 pulse: item.pulse,
                 do_insert,
                 stats: stats.clone(),
@@ -801,7 +810,8 @@ pub fn insert_item_fut(
                 series: item.series,
                 ts_msp: item.ts_msp,
                 ts_lsp: item.ts_lsp,
-                ts_local: item.ts_local,
+                ts_net: item.ts_net,
+                ts_alt_1: item.ts_alt_1,
                 pulse: item.pulse,
                 do_insert,
                 stats: stats.clone(),
@@ -824,7 +834,8 @@ pub fn insert_item_fut(
                 series: item.series,
                 ts_msp: item.ts_msp,
                 ts_lsp: item.ts_lsp,
-                ts_local: item.ts_local,
+                ts_net: item.ts_net,
+                ts_alt_1: item.ts_alt_1,
                 pulse: item.pulse,
                 do_insert,
                 stats: stats.clone(),

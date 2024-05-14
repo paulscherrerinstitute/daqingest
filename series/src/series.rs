@@ -1,3 +1,4 @@
+use core::fmt;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -31,6 +32,12 @@ impl SeriesId {
 
     pub fn to_i64(&self) -> i64 {
         self.0 as i64
+    }
+}
+
+impl fmt::Display for SeriesId {
+    fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+        write!(fmt, "SeriesId {{ {:20} }}", self.0)
     }
 }
 

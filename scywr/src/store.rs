@@ -47,8 +47,8 @@ macro_rules! prep_qu_ins_a {
     ($id1:expr, $rett:expr, $scy:expr) => {{
         let cql = format!(
             concat!(
-                "insert into {}{} (series, ts_msp, ts_lsp, pulse, value)",
-                " values (?, ?, ?, ?, ?)"
+                "insert into {}{} (series, ts_msp, ts_lsp, ts_alt_1, pulse, value)",
+                " values (?, ?, ?, ?, ?, ?)"
             ),
             $rett.table_prefix(),
             $id1
@@ -62,8 +62,8 @@ macro_rules! prep_qu_ins_b {
     ($id1:expr, $rett:expr, $scy:expr) => {{
         let cql = format!(
             concat!(
-                "insert into {}{} (series, ts_msp, ts_lsp, pulse, valueblob)",
-                " values (?, ?, ?, ?, ?)"
+                "insert into {}{} (series, ts_msp, ts_lsp, ts_alt_1, pulse, valueblob)",
+                " values (?, ?, ?, ?, ?, ?)"
             ),
             $rett.table_prefix(),
             $id1

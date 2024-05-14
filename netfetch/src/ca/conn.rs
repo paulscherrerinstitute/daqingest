@@ -76,7 +76,6 @@ const IOC_PING_IVL: Duration = Duration::from_millis(1000 * 80);
 const DO_RATE_CHECK: bool = false;
 const MONITOR_POLL_TIMEOUT: Duration = Duration::from_millis(6000);
 const TIMEOUT_CHANNEL_CLOSING: Duration = Duration::from_millis(8000);
-const TIMEOUT_MONITOR_PASSIVE: Duration = Duration::from_millis(1000 * 68);
 const TIMEOUT_PONG_WAIT: Duration = Duration::from_millis(10000);
 
 #[allow(unused)]
@@ -111,6 +110,15 @@ macro_rules! trace_flush_queue {
     ($($arg:tt)*) => {
         if false {
             trace3!($($arg)*);
+        }
+    };
+}
+
+#[allow(unused)]
+macro_rules! trace_event_incoming {
+    ($($arg:tt)*) => {
+        if false {
+            trace!($($arg)*);
         }
     };
 }
@@ -1591,7 +1599,13 @@ impl CaConn {
         stnow: SystemTime,
         stats: &CaConnStats,
     ) -> Result<(), Error> {
-        // debug!("event_add_ingest  payload_len {}  value {:?}", payload_len, value);
+        trace_event_incoming!(
+            "event_add_ingest  payload_len {}  value {:?}  {}  {}",
+            payload_len,
+            value,
+            value.status,
+            value.severity
+        );
         crst.ts_alive_last = tsnow;
         crst.ts_activity_last = tsnow;
         crst.item_recv_ivl_ema.tick(tsnow);
@@ -1778,8 +1792,8 @@ impl CaConn {
                     ReadingState::EnableMonitoring(_) => {}
                     ReadingState::Monitoring(st3) => match &st3.mon2state {
                         Monitoring2State::Passive(st4) => {
-                            if st4.tsbeg + TIMEOUT_MONITOR_PASSIVE < tsnow {
-                                trace2!("check_channels_state_poll  Monitoring2State::Passive  timeout");
+                            if st4.tsbeg + conf.conf.manual_poll_on_quiet_after() < tsnow {
+                                debug!("check_channels_state_poll  Monitoring2State::Passive  timeout");
                                 // TODO encapsulate and unify with Polling handler
                                 let ioid = Ioid(self.ioid);
                                 self.ioid = self.ioid.wrapping_add(1);

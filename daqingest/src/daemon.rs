@@ -657,6 +657,29 @@ impl Daemon {
                 }
             }
         }
+        debug!("wait for metrics handler");
+        self.metrics_shutdown_tx.send(1).await?;
+        if let Some(jh) = self.metrics_jh.take() {
+            jh.await??;
+        }
+        debug!("joined metrics handler");
+        debug!("wait for postingest task");
+        match worker_jh.await? {
+            Ok(_) => {}
+            Err(e) => match e {
+                netfetch::metrics::postingest::Error::Msg => {
+                    error!("{e}");
+                }
+                netfetch::metrics::postingest::Error::SeriesWriter(_) => {
+                    error!("{e}");
+                }
+                netfetch::metrics::postingest::Error::SendError => {
+                    error!("join postingest in better way");
+                }
+            },
+        }
+        debug!("joined postingest task");
+        debug!("wait for insert workers");
         while let Some(jh) = self.insert_workers_jh.pop() {
             match jh.await.map_err(Error::from_string) {
                 Ok(x) => match x {
@@ -675,15 +698,7 @@ impl Daemon {
                 }
             }
         }
-        debug!("wait for metrics handler");
-        self.metrics_shutdown_tx.send(1).await?;
-        if let Some(jh) = self.metrics_jh.take() {
-            jh.await??;
-        }
-        debug!("joined metrics handler");
-        debug!("wait for postingest task");
-        worker_jh.await?.map_err(|e| Error::from_string(e))?;
-        debug!("joined postingest task");
+        debug!("joined insert workers");
         Ok(())
     }
 }

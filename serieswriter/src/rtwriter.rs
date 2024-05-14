@@ -3,16 +3,28 @@ use async_channel::Sender;
 use dbpg::seriesbychannel::ChannelInfoQuery;
 use err::thiserror;
 use err::ThisError;
+use netpod::log::*;
 use netpod::ScalarType;
 use netpod::SeriesKind;
 use netpod::Shape;
 use netpod::TsNano;
 use scywr::insertqueues::InsertDeques;
 use scywr::iteminsertqueue::DataValue;
+use scywr::iteminsertqueue::QueryItem;
 use series::ChannelStatusSeriesId;
 use series::SeriesId;
+use std::collections::VecDeque;
 use std::time::Duration;
 use std::time::SystemTime;
+
+#[allow(unused)]
+macro_rules! trace_rt_decision {
+    ($($arg:tt)*) => {
+        if false {
+            trace!($($arg)*);
+        }
+    };
+}
 
 #[derive(Debug, ThisError)]
 pub enum Error {
@@ -108,65 +120,85 @@ impl RtWriter {
 
     pub fn write(
         &mut self,
-        ts: TsNano,
+        ts_ioc: TsNano,
         ts_local: TsNano,
         val: DataValue,
         iqdqs: &mut InsertDeques,
     ) -> Result<(), Error> {
+        let sid = self.sid;
+        Self::write_inner(
+            "ST",
+            self.min_quiets.st,
+            &mut self.state_st,
+            &mut iqdqs.st_rf3_rx,
+            ts_ioc,
+            ts_local,
+            val.clone(),
+            sid,
+        )?;
+        Self::write_inner(
+            "MT",
+            self.min_quiets.mt,
+            &mut self.state_mt,
+            &mut iqdqs.mt_rf3_rx,
+            ts_ioc,
+            ts_local,
+            val.clone(),
+            sid,
+        )?;
+        Self::write_inner(
+            "LT",
+            self.min_quiets.lt,
+            &mut self.state_lt,
+            &mut iqdqs.lt_rf3_rx,
+            ts_ioc,
+            ts_local,
+            val.clone(),
+            sid,
+        )?;
+        Ok(())
+    }
+
+    fn write_inner(
+        rt: &str,
+        min_quiet: Duration,
+        state: &mut State,
+        deque: &mut VecDeque<QueryItem>,
+        ts_ioc: TsNano,
+        ts_local: TsNano,
+        val: DataValue,
+        sid: SeriesId,
+    ) -> Result<(), Error> {
         // Decide whether we want to write.
-        {
-            let min_quiet = self.min_quiets.st;
-            let deque = &mut iqdqs.st_rf3_rx;
-            if self.state_st.last_ins.as_ref().map_or(true, |x| {
-                if x.0 >= ts_local {
-                    // bad clock, ignore.
-                    // TODO count in stats.
-                    false
-                } else if ts_local.ms() - x.0.ms() < 1000 * min_quiet.as_secs() {
-                    false
-                } else {
-                    val != x.1
-                }
-            }) {
-                self.state_st.last_ins = Some((ts, val.clone()));
-                self.state_st.writer.write(ts, ts_local, val.clone(), deque)?;
+        // Use the IOC time for the decision whether to write.
+        // But use the ingest local time as the primary index.
+        let do_write = if let Some(last) = &state.last_ins {
+            if ts_ioc == last.ts_ioc {
+                trace_rt_decision!("{rt}  {sid}  ignore, because same IOC time  {ts_ioc:?}  {ts_local:?}");
+                false
+            } else if ts_local < last.ts_local {
+                trace_rt_decision!("{rt}  {sid}  ignore, because ts_local  rewind  {ts_ioc:?}  {ts_local:?}");
+                false
+            } else if ts_local.ms() - last.ts_local.ms() < 1000 * min_quiet.as_secs() {
+                trace_rt_decision!("{rt}  {sid}  ignore, because not min quiet");
+                false
+            } else if val == last.val {
+                trace_rt_decision!("{rt}  {sid}  ignore, because value did not change");
+                false
+            } else {
+                trace_rt_decision!("{rt}  {sid}  accept");
+                true
             }
-        }
-        {
-            let min_quiet = self.min_quiets.mt;
-            let deque = &mut iqdqs.mt_rf3_rx;
-            if self.state_mt.last_ins.as_ref().map_or(true, |x| {
-                if x.0 >= ts_local {
-                    // bad clock, ignore.
-                    // TODO count in stats.
-                    false
-                } else if ts_local.ms() - x.0.ms() < 1000 * min_quiet.as_secs() {
-                    false
-                } else {
-                    val != x.1
-                }
-            }) {
-                self.state_mt.last_ins = Some((ts, val.clone()));
-                self.state_mt.writer.write(ts, ts_local, val.clone(), deque)?;
-            }
-        }
-        {
-            let min_quiet = self.min_quiets.lt;
-            let deque = &mut iqdqs.lt_rf3_rx;
-            if self.state_lt.last_ins.as_ref().map_or(true, |x| {
-                if x.0 >= ts_local {
-                    // bad clock, ignore.
-                    // TODO count in stats.
-                    false
-                } else if ts_local.ms() - x.0.ms() < 1000 * min_quiet.as_secs() {
-                    false
-                } else {
-                    val != x.1
-                }
-            }) {
-                self.state_lt.last_ins = Some((ts, val.clone()));
-                self.state_lt.writer.write(ts, ts_local, val.clone(), deque)?;
-            }
+        } else {
+            true
+        };
+        if do_write {
+            state.last_ins = Some(LastIns {
+                ts_local,
+                ts_ioc,
+                val: val.clone(),
+            });
+            state.writer.write(ts_ioc, ts_local, val.clone(), deque)?;
         }
         Ok(())
     }
@@ -180,7 +212,14 @@ impl RtWriter {
 }
 
 #[derive(Debug)]
+struct LastIns {
+    ts_local: TsNano,
+    ts_ioc: TsNano,
+    val: DataValue,
+}
+
+#[derive(Debug)]
 struct State {
     writer: SeriesWriter,
-    last_ins: Option<(TsNano, DataValue)>,
+    last_ins: Option<LastIns>,
 }
