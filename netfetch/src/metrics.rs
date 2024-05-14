@@ -17,9 +17,11 @@ use axum::extract::Query;
 use axum::http;
 use axum::response::IntoResponse;
 use axum::response::Response;
+use bytes::Bytes;
 use err::Error;
 use http::Request;
 use http::StatusCode;
+use http_body::Body;
 use log::*;
 use scywr::iteminsertqueue::QueryItem;
 use serde::Deserialize;
@@ -50,13 +52,22 @@ trait ToPublicErrorMsg {
 
 impl ToPublicErrorMsg for err::Error {
     fn to_public_err_msg(&self) -> PublicErrorMsg {
-        todo!()
+        let msg = self
+            .public_msg()
+            .map_or("no error message provided".into(), |x| x.join(", "));
+        PublicErrorMsg(msg)
     }
 }
 
 impl IntoResponse for PublicErrorMsg {
     fn into_response(self) -> axum::response::Response {
-        todo!()
+        let msgbytes = self.0.as_bytes();
+        let body = axum::body::Bytes::from(msgbytes.to_vec());
+        let body = axum::body::Full::new(body);
+        let body = body.map_err(|_| axum::Error::new(Error::from_string("error while trying to create fixed body")));
+        let body = axum::body::BoxBody::new(body);
+        let x = axum::response::Response::builder().status(500).body(body).unwrap();
+        x
     }
 }
 
@@ -67,13 +78,13 @@ where
     T: ToPublicErrorMsg,
 {
     fn from(value: T) -> Self {
-        todo!()
+        Self(value.to_public_err_msg().into_response())
     }
 }
 
 impl IntoResponse for CustomErrorResponse {
     fn into_response(self) -> Response {
-        todo!()
+        self.0
     }
 }
 
@@ -270,7 +281,7 @@ fn make_routes(dcom: Arc<DaemonComm>, connset_cmd_tx: Sender<CaConnSetEvent>, st
             StatusCode::NOT_FOUND
         })
         .nest(
-            "/some",
+            "/daqingest/some",
             Router::new()
                 .route("/path1", get(|| async { (StatusCode::OK, format!("Hello there!")) }))
                 .route(
@@ -278,13 +289,6 @@ fn make_routes(dcom: Arc<DaemonComm>, connset_cmd_tx: Sender<CaConnSetEvent>, st
                     get(|qu: Query<DummyQuery>| async move { (StatusCode::OK, format!("{qu:?}")) }),
                 )
                 .route("/path3/", get(|| async { (StatusCode::OK, format!("Hello there!")) })),
-        )
-        .route(
-            "/metrics",
-            get({
-                let stats_set = stats_set.clone();
-                || async move { metrics(&stats_set) }
-            }),
         )
         .route(
             "/daqingest/metrics",
@@ -295,13 +299,6 @@ fn make_routes(dcom: Arc<DaemonComm>, connset_cmd_tx: Sender<CaConnSetEvent>, st
         )
         .route(
             "/daqingest/metricbeat",
-            get({
-                let stats_set = stats_set.clone();
-                || async move { metricbeat(&stats_set) }
-            }),
-        )
-        .route(
-            "/metricbeat",
             get({
                 let stats_set = stats_set.clone();
                 || async move { metricbeat(&stats_set) }
@@ -397,6 +394,7 @@ pub async fn metrics_service(
     stats_set: StatsSet,
     shutdown_signal: Receiver<u32>,
 ) -> Result<(), Error> {
+    info!("metrics service start  {bind_to}");
     let addr = bind_to.parse().map_err(Error::from_string)?;
     let router = make_routes(dcom, connset_cmd_tx, stats_set).into_make_service();
     axum::Server::bind(&addr)
@@ -405,6 +403,9 @@ pub async fn metrics_service(
             let _ = shutdown_signal.recv().await;
         })
         .await
+        .inspect(|x| {
+            info!("metrics service finished with {x:?}");
+        })
         .map_err(Error::from_string)?;
     Ok(())
 }

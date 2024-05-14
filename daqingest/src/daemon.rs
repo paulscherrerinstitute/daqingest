@@ -638,6 +638,7 @@ impl Daemon {
             let worker_fut = process_api_query_items(backend, item_rx, info_worker_tx, iqtx);
             taskrun::spawn(worker_fut)
         };
+        self.spawn_metrics().await?;
         Self::spawn_ticker(self.tx.clone(), self.stats.clone());
         loop {
             if self.shutting_down {
