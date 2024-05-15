@@ -182,7 +182,7 @@ pub async fn spawn_scylla_insert_workers_dummy(
 }
 
 #[allow(unused)]
-async fn worker(
+async fn worker_unused(
     worker_ix: usize,
     item_inp: Receiver<QueryItem>,
     insert_worker_opts: Arc<InsertWorkerOpts>,
@@ -385,8 +385,12 @@ fn inspect_items(
                 QueryItem::TimeBinSimpleF32(_) => {
                     trace_item_execute!("execute  {worker_name}  TimeBinSimpleF32");
                 }
-                QueryItem::Accounting(_) => {
-                    trace_item_execute!("execute  {worker_name}  Accounting  {item:?}");
+                QueryItem::Accounting(x) => {
+                    if x.series.id() & 0x7f == 77 {
+                        debug!("execute  {worker_name}  Accounting  {item:?}");
+                    } else {
+                        trace_item_execute!("execute  {worker_name}  Accounting  {item:?}");
+                    }
                 }
             }
         }
@@ -476,7 +480,7 @@ fn prepare_accounting_insert_futs(
 ) -> SmallVec<[InsertFut; 4]> {
     let params = (
         item.part,
-        item.ts.to_i64(),
+        item.ts.sec() as i64,
         item.series.id() as i64,
         item.count,
         item.bytes,

@@ -948,7 +948,7 @@ impl CaConnSet {
             }
             EndOfStreamReason::ConnectFail => self.handle_connect_fail(addr)?,
             EndOfStreamReason::OnCommand => {
-                warn!("TODO  make sure no channel is in state which could trigger health timeout")
+                // warn!("TODO  make sure no channel is in state which could trigger health timeout")
             }
             EndOfStreamReason::RemoteClosed => self.handle_connect_fail(addr)?,
             EndOfStreamReason::IocTimeout => self.handle_connect_fail(addr)?,

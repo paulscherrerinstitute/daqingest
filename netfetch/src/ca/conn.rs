@@ -2400,7 +2400,7 @@ impl CaConn {
     fn emit_accounting(&mut self) -> Result<(), Error> {
         let stnow = self.tmp_ts_poll;
         let ts = TsMs::from_system_time(stnow);
-        let (msp, lsp) = ts.to_grid_02(EMIT_ACCOUNTING_SNAP);
+        let (msp, _lsp) = ts.to_grid_02(EMIT_ACCOUNTING_SNAP);
         for (_k, chconf) in self.channels.iter_mut() {
             let st0 = &mut chconf.state;
             match st0 {
