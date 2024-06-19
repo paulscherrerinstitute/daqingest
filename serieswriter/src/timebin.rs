@@ -432,7 +432,7 @@ fn store_patch(series: SeriesId, pc: &mut PatchCollect, iiq: &mut VecDeque<Query
 
             let bin_len_sec = (pc.bin_len().ns() / MS);
             let bin_count = pc.bin_count();
-            let off = ts0 / pc.patch_len().0;
+            let off = ts0 / pc.patch_len().ns();
             let off_msp = off / 1000;
             let off_lsp = off % 1000;
             // let item = TimeBinSimpleF32 {

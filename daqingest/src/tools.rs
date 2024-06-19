@@ -164,6 +164,7 @@ fn table_name_from_type(scalar_type: &ScalarType, shape: &Shape) -> &'static str
             ScalarType::F64 => todo!(),
             ScalarType::BOOL => todo!(),
             ScalarType::STRING => todo!(),
+            ScalarType::Enum => todo!(),
             ScalarType::ChannelStatus => todo!(),
         },
         Shape::Wave(_) => match scalar_type {
@@ -179,6 +180,7 @@ fn table_name_from_type(scalar_type: &ScalarType, shape: &Shape) -> &'static str
             ScalarType::F64 => todo!(),
             ScalarType::BOOL => todo!(),
             ScalarType::STRING => todo!(),
+            ScalarType::Enum => todo!(),
             ScalarType::ChannelStatus => todo!(),
         },
         Shape::Image(_, _) => todo!(),

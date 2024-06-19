@@ -244,7 +244,7 @@ pub enum CaDataScalarValue {
     I32(i32),
     F32(f32),
     F64(f64),
-    Enum(i16),
+    Enum(i16, String),
     String(String),
     // TODO remove, CA has no bool, make new enum for other use cases.
     Bool(bool),
@@ -259,7 +259,7 @@ impl From<CaDataScalarValue> for scywr::iteminsertqueue::ScalarValue {
             CaDataScalarValue::I32(x) => ScalarValue::I32(x),
             CaDataScalarValue::F32(x) => ScalarValue::F32(x),
             CaDataScalarValue::F64(x) => ScalarValue::F64(x),
-            CaDataScalarValue::Enum(x) => ScalarValue::Enum(x),
+            CaDataScalarValue::Enum(x, y) => ScalarValue::Enum(x, y),
             CaDataScalarValue::String(x) => ScalarValue::String(x),
             CaDataScalarValue::Bool(x) => ScalarValue::Bool(x),
         }

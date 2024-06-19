@@ -124,9 +124,9 @@ impl RtWriter {
         ts_local: TsNano,
         val: DataValue,
         iqdqs: &mut InsertDeques,
-    ) -> Result<(), Error> {
+    ) -> Result<((bool, bool, bool),), Error> {
         let sid = self.sid;
-        Self::write_inner(
+        let (did_write_st,) = Self::write_inner(
             "ST",
             self.min_quiets.st,
             &mut self.state_st,
@@ -136,7 +136,7 @@ impl RtWriter {
             val.clone(),
             sid,
         )?;
-        Self::write_inner(
+        let (did_write_mt,) = Self::write_inner(
             "MT",
             self.min_quiets.mt,
             &mut self.state_mt,
@@ -146,7 +146,7 @@ impl RtWriter {
             val.clone(),
             sid,
         )?;
-        Self::write_inner(
+        let (did_write_lt,) = Self::write_inner(
             "LT",
             self.min_quiets.lt,
             &mut self.state_lt,
@@ -156,7 +156,7 @@ impl RtWriter {
             val.clone(),
             sid,
         )?;
-        Ok(())
+        Ok(((did_write_st, did_write_mt, did_write_lt),))
     }
 
     fn write_inner(
@@ -168,7 +168,7 @@ impl RtWriter {
         ts_local: TsNano,
         val: DataValue,
         sid: SeriesId,
-    ) -> Result<(), Error> {
+    ) -> Result<(bool,), Error> {
         // Decide whether we want to write.
         // Use the IOC time for the decision whether to write.
         // But use the ingest local time as the primary index.
@@ -200,7 +200,7 @@ impl RtWriter {
             });
             state.writer.write(ts_ioc, ts_local, val.clone(), deque)?;
         }
-        Ok(())
+        Ok((do_write,))
     }
 
     pub fn tick(&mut self, iqdqs: &mut InsertDeques) -> Result<(), Error> {

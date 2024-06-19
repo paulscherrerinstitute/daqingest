@@ -946,7 +946,8 @@ impl CaConnSet {
                 warn!("received error  {addr}  {e}");
                 self.handle_connect_fail(addr)?
             }
-            EndOfStreamReason::ConnectFail => self.handle_connect_fail(addr)?,
+            EndOfStreamReason::ConnectRefused => self.handle_connect_fail(addr)?,
+            EndOfStreamReason::ConnectTimeout => self.handle_connect_fail(addr)?,
             EndOfStreamReason::OnCommand => {
                 // warn!("TODO  make sure no channel is in state which could trigger health timeout")
             }
@@ -1103,10 +1104,12 @@ impl CaConnSet {
         let mut eos_reason = None;
         while let Some(item) = conn.next().await {
             trace!("ca_conn_item_merge_inner  item {}", item.desc_short());
-            if let Some(x) = eos_reason {
-                let e = Error::with_msg_no_trace(format!("CaConn delivered already eos  {addr}  {x:?}"));
-                error!("{e}");
-                return Err(e);
+            if let Some(x) = &eos_reason {
+                // TODO enable again, should not happen.
+                // let e = Error::with_msg_no_trace(format!("CaConn delivered already eos  {addr}  {x:?}"));
+                // error!("{e}");
+                // return Err(e);
+                warn!("CaConn {addr} EOS reason [{x:?}] after [{eos_reason:?}]");
             }
             stats.item_count.inc();
             match item.value {
@@ -1497,25 +1500,29 @@ impl CaConnSet {
 
     fn try_push_ca_conn_cmds(&mut self, cx: &mut Context) -> Result<(), Error> {
         use Poll::*;
-        for (_, v) in self.ca_conn_ress.iter_mut() {
+        for (addr, v) in self.ca_conn_ress.iter_mut() {
             let tx = &mut v.sender;
             loop {
-                if false {
-                    if v.cmd_queue.len() != 0 || tx.is_sending() {
-                        debug!("try_push_ca_conn_cmds  {:?}  {:?}", v.cmd_queue.len(), tx.len());
-                    }
-                }
                 break if tx.is_sending() {
                     match tx.poll_unpin(cx) {
                         Ready(Ok(())) => {
                             self.stats.try_push_ca_conn_cmds_sent.inc();
                             continue;
                         }
-                        Ready(Err(e)) => {
-                            error!("try_push_ca_conn_cmds {e}");
-                            return Err(Error::with_msg_no_trace(format!("{e}")));
-                        }
-                        Pending => (),
+                        Ready(Err(e)) => match e {
+                            scywr::senderpolling::Error::NoSendInProgress => {
+                                error!("try_push_ca_conn_cmds {e}");
+                                return Err(Error::with_msg_no_trace(format!("{e}")));
+                            }
+                            scywr::senderpolling::Error::Closed(_) => {
+                                // TODO
+                                // Should be nothing to do here.
+                                // The connection ended, which CaConnSet notices anyway.
+                                // self.handle_connect_fail(addr)?;
+                                self.stats.try_push_ca_conn_cmds_closed().inc();
+                            }
+                        },
+                        Pending => {}
                     }
                 } else if let Some(item) = v.cmd_queue.pop_front() {
                     tx.as_mut().send_pin(item);

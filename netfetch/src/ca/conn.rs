@@ -165,6 +165,7 @@ pub enum ChannelConnectedInfo {
 
 #[derive(Clone, Debug, Serialize)]
 pub struct ChannelStateInfo {
+    pub stnow: SystemTime,
     pub cssid: ChannelStatusSeriesId,
     pub addr: SocketAddrV4,
     pub series: Option<SeriesId>,
@@ -184,6 +185,10 @@ pub struct ChannelStateInfo {
     pub item_recv_ivl_ema: Option<f32>,
     pub interest_score: f32,
     pub conf: ChannelConfig,
+    pub recv_last: SystemTime,
+    pub write_st_last: SystemTime,
+    pub write_mt_last: SystemTime,
+    pub write_lt_last: SystemTime,
 }
 
 mod ser_instant {
@@ -358,6 +363,7 @@ struct CreatedState {
     ts_alive_last: Instant,
     // Updated on monitoring, polling or when the channel config changes to reset the timeout
     ts_activity_last: Instant,
+    st_activity_last: SystemTime,
     ts_msp_last: u64,
     ts_msp_grid_last: u32,
     inserted_in_ts_msp: u64,
@@ -374,11 +380,15 @@ struct CreatedState {
     account_emit_last: TsMs,
     account_count: u64,
     account_bytes: u64,
+    dw_st_last: SystemTime,
+    dw_mt_last: SystemTime,
+    dw_lt_last: SystemTime,
 }
 
 impl CreatedState {
     fn dummy() -> Self {
         let tsnow = Instant::now();
+        let stnow = SystemTime::now();
         Self {
             cssid: ChannelStatusSeriesId::new(0),
             cid: Cid(0),
@@ -388,6 +398,7 @@ impl CreatedState {
             ts_created: tsnow,
             ts_alive_last: tsnow,
             ts_activity_last: tsnow,
+            st_activity_last: stnow,
             ts_msp_last: 0,
             ts_msp_grid_last: 0,
             inserted_in_ts_msp: 0,
@@ -404,6 +415,9 @@ impl CreatedState {
             account_emit_last: TsMs(0),
             account_count: 0,
             account_bytes: 0,
+            dw_st_last: SystemTime::UNIX_EPOCH,
+            dw_mt_last: SystemTime::UNIX_EPOCH,
+            dw_lt_last: SystemTime::UNIX_EPOCH,
         }
     }
 }
@@ -438,7 +452,13 @@ impl ChannelConf {
 }
 
 impl ChannelState {
-    fn to_info(&self, cssid: ChannelStatusSeriesId, addr: SocketAddrV4, conf: ChannelConfig) -> ChannelStateInfo {
+    fn to_info(
+        &self,
+        cssid: ChannelStatusSeriesId,
+        addr: SocketAddrV4,
+        conf: ChannelConfig,
+        stnow: SystemTime,
+    ) -> ChannelStateInfo {
         let channel_connected_info = match self {
             ChannelState::Init(..) => ChannelConnectedInfo::Disconnected,
             ChannelState::Creating { .. } => ChannelConnectedInfo::Connecting,
@@ -472,6 +492,19 @@ impl ChannelState {
             ChannelState::Writable(s) => Some(s.channel.recv_bytes),
             _ => None,
         };
+        let (recv_last, write_st_last, write_mt_last, write_lt_last) = match self {
+            ChannelState::Writable(s) => {
+                let a = s.channel.st_activity_last;
+                let b = s.channel.dw_st_last;
+                let c = s.channel.dw_mt_last;
+                let d = s.channel.dw_lt_last;
+                (a, b, c, d)
+            }
+            _ => {
+                let a = SystemTime::UNIX_EPOCH;
+                (a, a, a, a)
+            }
+        };
         let item_recv_ivl_ema = match self {
             ChannelState::Writable(s) => {
                 let ema = s.channel.item_recv_ivl_ema.ema();
@@ -489,6 +522,7 @@ impl ChannelState {
         };
         let interest_score = 1. / item_recv_ivl_ema.unwrap_or(1e10).max(1e-6).min(1e10);
         ChannelStateInfo {
+            stnow,
             cssid,
             addr,
             series,
@@ -502,6 +536,10 @@ impl ChannelState {
             item_recv_ivl_ema,
             interest_score,
             conf,
+            recv_last,
+            write_st_last,
+            write_mt_last,
+            write_lt_last,
         }
     }
 
@@ -749,7 +787,8 @@ pub enum CaConnEventValue {
 pub enum EndOfStreamReason {
     UnspecifiedReason,
     Error(Error),
-    ConnectFail,
+    ConnectRefused,
+    ConnectTimeout,
     OnCommand,
     RemoteClosed,
     IocTimeout,
@@ -910,8 +949,12 @@ impl CaConn {
 
     fn trigger_shutdown(&mut self, reason: ShutdownReason) {
         let channel_reason = match &reason {
-            ShutdownReason::ConnectFail => {
-                self.state = CaConnState::Shutdown(EndOfStreamReason::ConnectFail);
+            ShutdownReason::ConnectRefused => {
+                self.state = CaConnState::Shutdown(EndOfStreamReason::ConnectRefused);
+                ChannelStatusClosedReason::ConnectFail
+            }
+            ShutdownReason::ConnectTimeout => {
+                self.state = CaConnState::Shutdown(EndOfStreamReason::ConnectTimeout);
                 ChannelStatusClosedReason::ConnectFail
             }
             ShutdownReason::IoError => {
@@ -1319,7 +1362,7 @@ impl CaConn {
             // return Err(Error::with_msg_no_trace());
             return Ok(());
         };
-        // debug!("handle_event_add_res {ev:?}");
+        trace!("handle_event_add_res {:?}", ch_s.cssid());
         match ch_s {
             ChannelState::Writable(st) => {
                 // debug!(
@@ -1608,10 +1651,10 @@ impl CaConn {
         );
         crst.ts_alive_last = tsnow;
         crst.ts_activity_last = tsnow;
+        crst.st_activity_last = stnow;
         crst.item_recv_ivl_ema.tick(tsnow);
         crst.recv_count += 1;
         crst.recv_bytes += payload_len as u64;
-        let series = writer.sid();
         // TODO should attach these counters already to Writable state.
         let ts_local = {
             let epoch = stnow.duration_since(std::time::UNIX_EPOCH).unwrap_or(Duration::ZERO);
@@ -1631,7 +1674,16 @@ impl CaConn {
             Self::check_ev_value_data(&value.data, &writer.scalar_type())?;
             {
                 let val: DataValue = value.data.into();
-                writer.write(TsNano::from_ns(ts), TsNano::from_ns(ts_local), val, iqdqs)?;
+                let ((dwst, dwmt, dwlt),) = writer.write(TsNano::from_ns(ts), TsNano::from_ns(ts_local), val, iqdqs)?;
+                if dwst {
+                    crst.dw_st_last = stnow;
+                }
+                if dwmt {
+                    crst.dw_mt_last = stnow;
+                }
+                if dwlt {
+                    crst.dw_lt_last = stnow;
+                }
             }
         }
         if false {
@@ -1641,6 +1693,7 @@ impl CaConn {
                 if tsnow.duration_since(crst.insert_recv_ivl_last) >= Duration::from_millis(10000) {
                     crst.insert_recv_ivl_last = tsnow;
                     let ema = crst.insert_item_ivl_ema.ema();
+                    let _ = ema;
                 }
                 if crst.muted_before == 0 {}
                 crst.muted_before = 1;
@@ -1668,6 +1721,7 @@ impl CaConn {
                 },
                 CaDataScalarValue::I16(..) => match &scalar_type {
                     ScalarType::I16 => {}
+                    ScalarType::Enum => {}
                     _ => {
                         error!("MISMATCH  got i16  exp {:?}", scalar_type);
                     }
@@ -1998,7 +2052,8 @@ impl CaConn {
                                 // TODO count this unexpected case.
                             }
                             CaMsgTy::CreateChanRes(k) => {
-                                self.handle_create_chan_res(k, tsnow)?;
+                                let stnow = SystemTime::now();
+                                self.handle_create_chan_res(k, tsnow, stnow)?;
                                 cx.waker().wake_by_ref();
                             }
                             CaMsgTy::EventAddRes(ev) => {
@@ -2095,7 +2150,12 @@ impl CaConn {
         res.map_err(Into::into)
     }
 
-    fn handle_create_chan_res(&mut self, k: proto::CreateChanRes, tsnow: Instant) -> Result<(), Error> {
+    fn handle_create_chan_res(
+        &mut self,
+        k: proto::CreateChanRes,
+        tsnow: Instant,
+        stnow: SystemTime,
+    ) -> Result<(), Error> {
         let cid = Cid(k.cid);
         let sid = Sid(k.sid);
         let conf = if let Some(x) = self.channels.get_mut(&cid) {
@@ -2132,6 +2192,7 @@ impl CaConn {
             ts_created: tsnow,
             ts_alive_last: tsnow,
             ts_activity_last: tsnow,
+            st_activity_last: stnow,
             ts_msp_last: 0,
             ts_msp_grid_last: 0,
             inserted_in_ts_msp: u64::MAX,
@@ -2148,6 +2209,9 @@ impl CaConn {
             account_emit_last: TsMs::from_ms_u64(0),
             account_count: 0,
             account_bytes: 0,
+            dw_st_last: SystemTime::UNIX_EPOCH,
+            dw_mt_last: SystemTime::UNIX_EPOCH,
+            dw_lt_last: SystemTime::UNIX_EPOCH,
         };
         *chst = ChannelState::MakingSeriesWriter(MakingSeriesWriterState { tsbeg: tsnow, channel });
         let job = EstablishWorkerJob::new(
@@ -2218,6 +2282,7 @@ impl CaConn {
                                 Ok(Ready(Some(())))
                             }
                             Ok(Err(e)) => {
+                                use std::io::ErrorKind;
                                 info!("error connect to {addr} {e}");
                                 let addr = addr.clone();
                                 self.iqdqs
@@ -2226,7 +2291,11 @@ impl CaConn {
                                         addr,
                                         status: ConnectionStatus::ConnectError,
                                     }))?;
-                                self.trigger_shutdown(ShutdownReason::IoError);
+                                let reason = match e.kind() {
+                                    ErrorKind::ConnectionRefused => ShutdownReason::ConnectRefused,
+                                    _ => ShutdownReason::IoError,
+                                };
+                                self.trigger_shutdown(reason);
                                 Ok(Ready(Some(())))
                             }
                             Err(e) => {
@@ -2239,7 +2308,7 @@ impl CaConn {
                                         addr,
                                         status: ConnectionStatus::ConnectTimeout,
                                     }))?;
-                                self.trigger_shutdown(ShutdownReason::IocTimeout);
+                                self.trigger_shutdown(ShutdownReason::ConnectTimeout);
                                 Ok(Ready(Some(())))
                             }
                         }
@@ -2372,10 +2441,11 @@ impl CaConn {
     }
 
     fn emit_channel_status(&mut self) -> Result<(), Error> {
+        let stnow = SystemTime::now();
         let mut channel_statuses = BTreeMap::new();
         for (_, conf) in self.channels.iter() {
             let chst = &conf.state;
-            let chinfo = chst.to_info(chst.cssid(), self.remote_addr_dbg, conf.conf.clone());
+            let chinfo = chst.to_info(chst.cssid(), self.remote_addr_dbg, conf.conf.clone(), stnow);
             channel_statuses.insert(chst.cssid(), chinfo);
         }
         // trace2!("{:?}", channel_statuses);
@@ -2407,21 +2477,21 @@ impl CaConn {
                 ChannelState::Writable(st1) => {
                     let ch = &mut st1.channel;
                     if ch.account_emit_last != msp {
-                        ch.account_emit_last = msp;
                         if ch.account_count != 0 {
-                            let series_id = ch.cssid.id();
+                            let series = st1.writer.sid();
                             let count = ch.account_count as i64;
                             let bytes = ch.account_bytes as i64;
                             ch.account_count = 0;
                             ch.account_bytes = 0;
                             let item = QueryItem::Accounting(Accounting {
-                                part: (series_id & 0xff) as i32,
+                                part: (series.id() & 0xff) as i32,
                                 ts: msp,
-                                series: SeriesId::new(series_id),
+                                series,
                                 count,
                                 bytes,
                             });
                             self.iqdqs.emit_status_item(item)?;
+                            ch.account_emit_last = msp;
                         }
                     }
                 }

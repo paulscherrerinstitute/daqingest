@@ -19,7 +19,7 @@ pub struct PatchCollect {
 impl PatchCollect {
     pub fn new(bin_len: TsNano, bin_count: u64) -> Self {
         Self {
-            patch_len: TsNano(bin_len.0 * bin_count),
+            patch_len: TsNano::from_ns(bin_len.ns() * bin_count),
             bin_len,
             bin_count,
             coll: None,
@@ -68,13 +68,13 @@ impl PatchCollect {
             for (i2, (ts1, ts2)) in ts1s.iter().zip(ts2s).enumerate() {
                 info!("EDGE {}", ts1 / SEC);
                 if self.locked {
-                    if ts2 % self.patch_len.0 == 0 {
+                    if ts2 % self.patch_len.ns() == 0 {
                         info!("FOUND PATCH EDGE-END at {}", ts2 / SEC);
                         i3 = i2 + 1;
                         emit = true;
                     }
                 } else {
-                    if ts1 % self.patch_len.0 == 0 {
+                    if ts1 % self.patch_len.ns() == 0 {
                         info!("FOUND PATCH EDGE-BEG at {}", ts1 / SEC);
                         self.locked = true;
                         i3 = i2;

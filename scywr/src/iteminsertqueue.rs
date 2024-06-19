@@ -54,7 +54,7 @@ pub enum ScalarValue {
     I64(i64),
     F32(f32),
     F64(f64),
-    Enum(i16),
+    Enum(i16, String),
     String(String),
     Bool(bool),
 }
@@ -68,7 +68,7 @@ impl ScalarValue {
             ScalarValue::I64(_) => 8,
             ScalarValue::F32(_) => 4,
             ScalarValue::F64(_) => 8,
-            ScalarValue::Enum(_) => 2,
+            ScalarValue::Enum(_, y) => 2 + y.len() as u32,
             ScalarValue::String(x) => x.len() as u32,
             ScalarValue::Bool(_) => 1,
         }
@@ -82,7 +82,7 @@ impl ScalarValue {
             ScalarValue::I64(x) => x.to_string(),
             ScalarValue::F32(x) => x.to_string(),
             ScalarValue::F64(x) => x.to_string(),
-            ScalarValue::Enum(x) => x.to_string(),
+            ScalarValue::Enum(x, y) => format!("({}, {})", x, y),
             ScalarValue::String(x) => x.to_string(),
             ScalarValue::Bool(x) => x.to_string(),
         }
@@ -233,7 +233,7 @@ impl DataValue {
                 ScalarValue::I64(_) => ScalarType::I64,
                 ScalarValue::F32(_) => ScalarType::F32,
                 ScalarValue::F64(_) => ScalarType::F64,
-                ScalarValue::Enum(_) => ScalarType::U16,
+                ScalarValue::Enum(_, _) => ScalarType::Enum,
                 ScalarValue::String(_) => ScalarType::STRING,
                 ScalarValue::Bool(_) => ScalarType::BOOL,
             },
@@ -471,7 +471,8 @@ impl ChannelStatus {
 
 #[derive(Debug, Clone)]
 pub enum ShutdownReason {
-    ConnectFail,
+    ConnectRefused,
+    ConnectTimeout,
     IoError,
     ShutdownCommand,
     InternalError,
@@ -747,7 +748,7 @@ pub async fn insert_item(
             match val {
                 I8(val) => insert_scalar_gen(par, val, &data_store.qu_insert_scalar_i8, &data_store).await?,
                 I16(val) => insert_scalar_gen(par, val, &data_store.qu_insert_scalar_i16, &data_store).await?,
-                Enum(val) => insert_scalar_gen(par, val, &data_store.qu_insert_scalar_i16, &data_store).await?,
+                Enum(a, b) => insert_scalar_gen(par, a, &data_store.qu_insert_scalar_i16, &data_store).await?,
                 I32(val) => insert_scalar_gen(par, val, &data_store.qu_insert_scalar_i32, &data_store).await?,
                 I64(val) => insert_scalar_gen(par, val, &data_store.qu_insert_scalar_i64, &data_store).await?,
                 F32(val) => insert_scalar_gen(par, val, &data_store.qu_insert_scalar_f32, &data_store).await?,
@@ -824,7 +825,7 @@ pub fn insert_item_fut(
                 I64(val) => insert_scalar_gen_fut(par, val, data_store.qu_insert_scalar_i64.clone(), scy),
                 F32(val) => insert_scalar_gen_fut(par, val, data_store.qu_insert_scalar_f32.clone(), scy),
                 F64(val) => insert_scalar_gen_fut(par, val, data_store.qu_insert_scalar_f64.clone(), scy),
-                Enum(val) => insert_scalar_gen_fut(par, val, data_store.qu_insert_scalar_i16.clone(), scy),
+                Enum(a, b) => insert_scalar_gen_fut(par, a, data_store.qu_insert_scalar_i16.clone(), scy),
                 String(val) => insert_scalar_gen_fut(par, val, data_store.qu_insert_scalar_string.clone(), scy),
                 Bool(val) => insert_scalar_gen_fut(par, val, data_store.qu_insert_scalar_bool.clone(), scy),
             }

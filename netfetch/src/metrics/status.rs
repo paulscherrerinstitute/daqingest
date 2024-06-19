@@ -7,6 +7,7 @@ use serde::Serialize;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::time::SystemTime;
 
 #[derive(Debug, Serialize)]
 pub struct ChannelStates {
@@ -20,6 +21,20 @@ struct ChannelState {
     archiving_configuration: ChannelConfig,
     recv_count: u64,
     recv_bytes: u64,
+    #[serde(with = "humantime_serde", skip_serializing_if = "system_time_epoch")]
+    recv_last: SystemTime,
+    #[serde(with = "humantime_serde", skip_serializing_if = "system_time_epoch")]
+    write_st_last: SystemTime,
+    #[serde(with = "humantime_serde", skip_serializing_if = "system_time_epoch")]
+    write_mt_last: SystemTime,
+    #[serde(with = "humantime_serde", skip_serializing_if = "system_time_epoch")]
+    write_lt_last: SystemTime,
+    #[serde(with = "humantime_serde", skip_serializing_if = "system_time_epoch")]
+    updated: SystemTime,
+}
+
+fn system_time_epoch(x: &SystemTime) -> bool {
+    *x == SystemTime::UNIX_EPOCH
 }
 
 #[derive(Debug, Serialize)]
@@ -62,6 +77,11 @@ pub async fn channel_states(params: HashMap<String, String>, tx: Sender<CaConnSe
                             archiving_configuration: st1.config,
                             recv_count: 0,
                             recv_bytes: 0,
+                            recv_last: SystemTime::UNIX_EPOCH,
+                            write_st_last: SystemTime::UNIX_EPOCH,
+                            write_mt_last: SystemTime::UNIX_EPOCH,
+                            write_lt_last: SystemTime::UNIX_EPOCH,
+                            updated: SystemTime::UNIX_EPOCH,
                         };
                         states.channels.insert(k, chst);
                     }
@@ -72,6 +92,11 @@ pub async fn channel_states(params: HashMap<String, String>, tx: Sender<CaConnSe
                             archiving_configuration: st1.config,
                             recv_count: 0,
                             recv_bytes: 0,
+                            recv_last: SystemTime::UNIX_EPOCH,
+                            write_st_last: SystemTime::UNIX_EPOCH,
+                            write_mt_last: SystemTime::UNIX_EPOCH,
+                            write_lt_last: SystemTime::UNIX_EPOCH,
+                            updated: SystemTime::UNIX_EPOCH,
                         };
                         states.channels.insert(k, chst);
                     }
@@ -85,6 +110,11 @@ pub async fn channel_states(params: HashMap<String, String>, tx: Sender<CaConnSe
                                     archiving_configuration: st1.config,
                                     recv_count: 0,
                                     recv_bytes: 0,
+                                    recv_last: SystemTime::UNIX_EPOCH,
+                                    write_st_last: SystemTime::UNIX_EPOCH,
+                                    write_mt_last: SystemTime::UNIX_EPOCH,
+                                    write_lt_last: SystemTime::UNIX_EPOCH,
+                                    updated: SystemTime::UNIX_EPOCH,
                                 };
                                 states.channels.insert(k, chst);
                             }
@@ -98,6 +128,11 @@ pub async fn channel_states(params: HashMap<String, String>, tx: Sender<CaConnSe
                                             archiving_configuration: st1.config,
                                             recv_count: 0,
                                             recv_bytes: 0,
+                                            recv_last: SystemTime::UNIX_EPOCH,
+                                            write_st_last: SystemTime::UNIX_EPOCH,
+                                            write_mt_last: SystemTime::UNIX_EPOCH,
+                                            write_lt_last: SystemTime::UNIX_EPOCH,
+                                            updated: SystemTime::UNIX_EPOCH,
                                         };
                                         states.channels.insert(k, chst);
                                     }
@@ -111,6 +146,11 @@ pub async fn channel_states(params: HashMap<String, String>, tx: Sender<CaConnSe
                                                     archiving_configuration: st1.config,
                                                     recv_count: 0,
                                                     recv_bytes: 0,
+                                                    recv_last: SystemTime::UNIX_EPOCH,
+                                                    write_st_last: SystemTime::UNIX_EPOCH,
+                                                    write_mt_last: SystemTime::UNIX_EPOCH,
+                                                    write_lt_last: SystemTime::UNIX_EPOCH,
+                                                    updated: SystemTime::UNIX_EPOCH,
                                                 };
                                                 states.channels.insert(k, chst);
                                             }
@@ -128,6 +168,11 @@ pub async fn channel_states(params: HashMap<String, String>, tx: Sender<CaConnSe
                                                             archiving_configuration: st1.config,
                                                             recv_count,
                                                             recv_bytes,
+                                                            recv_last: st6.recv_last,
+                                                            write_st_last: st6.write_st_last,
+                                                            write_mt_last: st6.write_mt_last,
+                                                            write_lt_last: st6.write_lt_last,
+                                                            updated: st6.stnow,
                                                         };
                                                         states.channels.insert(k, chst);
                                                     }
@@ -138,6 +183,11 @@ pub async fn channel_states(params: HashMap<String, String>, tx: Sender<CaConnSe
                                                             archiving_configuration: st1.config,
                                                             recv_count,
                                                             recv_bytes,
+                                                            recv_last: st6.recv_last,
+                                                            write_st_last: st6.write_st_last,
+                                                            write_mt_last: st6.write_mt_last,
+                                                            write_lt_last: st6.write_lt_last,
+                                                            updated: st6.stnow,
                                                         };
                                                         states.channels.insert(k, chst);
                                                     }
@@ -148,6 +198,11 @@ pub async fn channel_states(params: HashMap<String, String>, tx: Sender<CaConnSe
                                                             archiving_configuration: st1.config,
                                                             recv_count,
                                                             recv_bytes,
+                                                            recv_last: st6.recv_last,
+                                                            write_st_last: st6.write_st_last,
+                                                            write_mt_last: st6.write_mt_last,
+                                                            write_lt_last: st6.write_lt_last,
+                                                            updated: st6.stnow,
                                                         };
                                                         states.channels.insert(k, chst);
                                                     }
@@ -158,6 +213,11 @@ pub async fn channel_states(params: HashMap<String, String>, tx: Sender<CaConnSe
                                                             archiving_configuration: st1.config,
                                                             recv_count,
                                                             recv_bytes,
+                                                            recv_last: st6.recv_last,
+                                                            write_st_last: st6.write_st_last,
+                                                            write_mt_last: st6.write_mt_last,
+                                                            write_lt_last: st6.write_lt_last,
+                                                            updated: st6.stnow,
                                                         };
                                                         states.channels.insert(k, chst);
                                                     }
@@ -174,6 +234,11 @@ pub async fn channel_states(params: HashMap<String, String>, tx: Sender<CaConnSe
                                     archiving_configuration: st1.config,
                                     recv_count: 0,
                                     recv_bytes: 0,
+                                    recv_last: SystemTime::UNIX_EPOCH,
+                                    write_st_last: SystemTime::UNIX_EPOCH,
+                                    write_mt_last: SystemTime::UNIX_EPOCH,
+                                    write_lt_last: SystemTime::UNIX_EPOCH,
+                                    updated: SystemTime::UNIX_EPOCH,
                                 };
                                 states.channels.insert(k, chst);
                             }
@@ -184,6 +249,11 @@ pub async fn channel_states(params: HashMap<String, String>, tx: Sender<CaConnSe
                                     archiving_configuration: st1.config,
                                     recv_count: 0,
                                     recv_bytes: 0,
+                                    recv_last: SystemTime::UNIX_EPOCH,
+                                    write_st_last: SystemTime::UNIX_EPOCH,
+                                    write_mt_last: SystemTime::UNIX_EPOCH,
+                                    write_lt_last: SystemTime::UNIX_EPOCH,
+                                    updated: SystemTime::UNIX_EPOCH,
                                 };
                                 states.channels.insert(k, chst);
                             }
@@ -194,6 +264,11 @@ pub async fn channel_states(params: HashMap<String, String>, tx: Sender<CaConnSe
                                     archiving_configuration: st1.config,
                                     recv_count: 0,
                                     recv_bytes: 0,
+                                    recv_last: SystemTime::UNIX_EPOCH,
+                                    write_st_last: SystemTime::UNIX_EPOCH,
+                                    write_mt_last: SystemTime::UNIX_EPOCH,
+                                    write_lt_last: SystemTime::UNIX_EPOCH,
+                                    updated: SystemTime::UNIX_EPOCH,
                                 };
                                 states.channels.insert(k, chst);
                             }
