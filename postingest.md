@@ -12,7 +12,7 @@ The body must be a stream of length delimited frames, where the payload of each 
 a CBOR object.
 
 The http body of the response then looks like this:
-```txt
+```
 [CBOR-frame]
 [CBOR-frame]
 [CBOR-frame]
@@ -20,7 +20,7 @@ The http body of the response then looks like this:
 ```
 
 where each `[CBOR-frame]` looks like:
-```txt
+```
 [length N of the following CBOR object: uint32 little-endian]
 [reserved: 12 bytes of zero-padding]
 [CBOR object: N bytes]
