@@ -20,6 +20,10 @@ pub struct DataStore {
     pub rett: RetentionTime,
     pub scy: Arc<ScySession>,
     pub qu_insert_ts_msp: Arc<PreparedStatement>,
+    pub qu_insert_scalar_u8: Arc<PreparedStatement>,
+    pub qu_insert_scalar_u16: Arc<PreparedStatement>,
+    pub qu_insert_scalar_u32: Arc<PreparedStatement>,
+    pub qu_insert_scalar_u64: Arc<PreparedStatement>,
     pub qu_insert_scalar_i8: Arc<PreparedStatement>,
     pub qu_insert_scalar_i16: Arc<PreparedStatement>,
     pub qu_insert_scalar_i32: Arc<PreparedStatement>,
@@ -28,6 +32,10 @@ pub struct DataStore {
     pub qu_insert_scalar_f64: Arc<PreparedStatement>,
     pub qu_insert_scalar_bool: Arc<PreparedStatement>,
     pub qu_insert_scalar_string: Arc<PreparedStatement>,
+    pub qu_insert_array_u8: Arc<PreparedStatement>,
+    pub qu_insert_array_u16: Arc<PreparedStatement>,
+    pub qu_insert_array_u32: Arc<PreparedStatement>,
+    pub qu_insert_array_u64: Arc<PreparedStatement>,
     pub qu_insert_array_i8: Arc<PreparedStatement>,
     pub qu_insert_array_i16: Arc<PreparedStatement>,
     pub qu_insert_array_i32: Arc<PreparedStatement>,
@@ -100,6 +108,10 @@ impl DataStore {
             .await?;
         let qu_insert_ts_msp = Arc::new(q);
 
+        let qu_insert_scalar_u8 = prep_qu_ins_a!("events_scalar_u8", rett, scy);
+        let qu_insert_scalar_u16 = prep_qu_ins_a!("events_scalar_u16", rett, scy);
+        let qu_insert_scalar_u32 = prep_qu_ins_a!("events_scalar_u32", rett, scy);
+        let qu_insert_scalar_u64 = prep_qu_ins_a!("events_scalar_u64", rett, scy);
         let qu_insert_scalar_i8 = prep_qu_ins_a!("events_scalar_i8", rett, scy);
         let qu_insert_scalar_i16 = prep_qu_ins_a!("events_scalar_i16", rett, scy);
         let qu_insert_scalar_i32 = prep_qu_ins_a!("events_scalar_i32", rett, scy);
@@ -109,7 +121,10 @@ impl DataStore {
         let qu_insert_scalar_bool = prep_qu_ins_a!("events_scalar_bool", rett, scy);
         let qu_insert_scalar_string = prep_qu_ins_a!("events_scalar_string", rett, scy);
 
-        // array
+        let qu_insert_array_u8 = prep_qu_ins_b!("events_array_u8", rett, scy);
+        let qu_insert_array_u16 = prep_qu_ins_b!("events_array_u16", rett, scy);
+        let qu_insert_array_u32 = prep_qu_ins_b!("events_array_u32", rett, scy);
+        let qu_insert_array_u64 = prep_qu_ins_b!("events_array_u64", rett, scy);
         let qu_insert_array_i8 = prep_qu_ins_b!("events_array_i8", rett, scy);
         let qu_insert_array_i16 = prep_qu_ins_b!("events_array_i16", rett, scy);
         let qu_insert_array_i32 = prep_qu_ins_b!("events_array_i32", rett, scy);
@@ -172,6 +187,10 @@ impl DataStore {
             rett,
             scy,
             qu_insert_ts_msp,
+            qu_insert_scalar_u8,
+            qu_insert_scalar_u16,
+            qu_insert_scalar_u32,
+            qu_insert_scalar_u64,
             qu_insert_scalar_i8,
             qu_insert_scalar_i16,
             qu_insert_scalar_i32,
@@ -180,6 +199,10 @@ impl DataStore {
             qu_insert_scalar_f64,
             qu_insert_scalar_bool,
             qu_insert_scalar_string,
+            qu_insert_array_u8,
+            qu_insert_array_u16,
+            qu_insert_array_u32,
+            qu_insert_array_u64,
             qu_insert_array_i8,
             qu_insert_array_i16,
             qu_insert_array_i32,

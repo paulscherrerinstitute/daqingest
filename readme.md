@@ -21,11 +21,10 @@ to the most basic linux system libraries.
 
 ```yml
 # Address to bind the HTTP API to, for runtime control and Prometheus metrics scrape:
-api_bind: "0.0.0.0:3011"
-# The hostname to send to channel access peers as our own hostname:
-local_epics_hostname: sf-daqsync-02.psi.ch
+api_bind: 0.0.0.0:3011
 # The backend name to use for the channels handled by this daqingest instance:
 backend: scylla
+channels: directory-name-with-channel-config-files
 # Addresses to use for channel access search:
 search:
     - "172.26.0.255"
@@ -35,19 +34,30 @@ search:
 postgresql:
     host: postgresql-host
     port: 5432
-    user: database-username
+    user: the-username
     pass: the-password
-    name: the-database-name
-scylla:
+    name: the-database
+scylla_st:
+    keyspace: backend_st
     hosts:
-        - "sf-nube-11:19042"
-        - "sf-nube-12:19042"
-        - "sf-nube-13:19042"
-        - "sf-nube-14:19042"
-    keyspace: ks1
-channels:
-    - "SOME-CHANNEL:1"
-    - "OTHER-CHANNEL:2"
+        - sf-nube-11:19042
+        - sf-nube-12:19042
+        - sf-nube-13:19042
+        - sf-nube-14:19042
+scylla_mt:
+    keyspace: backend_mt
+    hosts:
+        - sf-nube-11:19042
+        - sf-nube-12:19042
+        - sf-nube-13:19042
+        - sf-nube-14:19042
+scylla_lt:
+    keyspace: backend_lt
+    hosts:
+        - sf-nube-11:19042
+        - sf-nube-12:19042
+        - sf-nube-13:19042
+        - sf-nube-14:19042
 ```
 
 
@@ -61,3 +71,8 @@ as configured by the `api_bind` parameter.
 ```txt
 http://<api_bind>/daqingest/channel/state?name=[...]
 ```
+
+
+# HTTP POST ingest
+
+It is possible to [ingest](postingest.md) data via the `api_bind` socket address.

@@ -2,9 +2,11 @@ use crate::iteminsertqueue::QueryItem;
 use crate::senderpolling::SenderPolling;
 use async_channel::Receiver;
 use async_channel::Sender;
+use core::fmt;
 use err::thiserror;
 use err::ThisError;
 use netpod::log::*;
+use netpod::ttl::RetentionTime;
 use pin_project::pin_project;
 use std::collections::VecDeque;
 use std::pin::Pin;
@@ -12,6 +14,8 @@ use std::pin::Pin;
 #[derive(Debug, ThisError)]
 pub enum Error {
     QueuePush,
+    #[error("ChannelSend({0}, {1})")]
+    ChannelSend(RetentionTime, u8),
 }
 
 #[derive(Clone)]
@@ -24,21 +28,71 @@ pub struct InsertQueuesTx {
 
 impl InsertQueuesTx {
     /// Send all accumulated batches
-    pub async fn send_all(&mut self, iqdqs: &mut InsertDeques) -> Result<(), ()> {
+    pub async fn send_all(&mut self, iqdqs: &mut InsertDeques) -> Result<(), Error> {
         // Send each buffer down the corresponding channel
-        let item = core::mem::replace(&mut iqdqs.st_rf1_rx, VecDeque::new());
-        self.st_rf1_tx.send(item).await.map_err(|_| ())?;
-        let item = core::mem::replace(&mut iqdqs.st_rf3_rx, VecDeque::new());
-        self.st_rf3_tx.send(item).await.map_err(|_| ())?;
-        let item = core::mem::replace(&mut iqdqs.mt_rf3_rx, VecDeque::new());
-        self.mt_rf3_tx.send(item).await.map_err(|_| ())?;
-        let item = core::mem::replace(&mut iqdqs.lt_rf3_rx, VecDeque::new());
-        self.lt_rf3_tx.send(item).await.map_err(|_| ())?;
+        if false {
+            let item = core::mem::replace(&mut iqdqs.st_rf1_rx, VecDeque::new());
+            self.st_rf1_tx
+                .send(item)
+                .await
+                .map_err(|_| Error::ChannelSend(RetentionTime::Short, 1))?;
+        }
+        {
+            let item = core::mem::replace(&mut iqdqs.st_rf3_rx, VecDeque::new());
+            self.st_rf3_tx
+                .send(item)
+                .await
+                .map_err(|_| Error::ChannelSend(RetentionTime::Short, 3))?;
+        }
+        {
+            let item = core::mem::replace(&mut iqdqs.mt_rf3_rx, VecDeque::new());
+            self.mt_rf3_tx
+                .send(item)
+                .await
+                .map_err(|_| Error::ChannelSend(RetentionTime::Medium, 3))?;
+        }
+        {
+            let item = core::mem::replace(&mut iqdqs.lt_rf3_rx, VecDeque::new());
+            self.lt_rf3_tx
+                .send(item)
+                .await
+                .map_err(|_| Error::ChannelSend(RetentionTime::Long, 3))?;
+        }
         Ok(())
     }
 
     pub fn clone2(&self) -> Self {
         self.clone()
+    }
+
+    pub fn summary(&self) -> InsertQueuesTxSummary {
+        InsertQueuesTxSummary { obj: self }
+    }
+}
+
+pub struct InsertQueuesTxSummary<'a> {
+    obj: &'a InsertQueuesTx,
+}
+
+impl<'a> fmt::Display for InsertQueuesTxSummary<'a> {
+    fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+        let obj = self.obj;
+        write!(
+            fmt,
+            "InsertQueuesTx {{ st_rf1_tx: {} {} {}, st_rf3_tx: {} {} {}, mt_rf3_tx: {} {} {}, lt_rf3_tx: {} {} {} }}",
+            obj.st_rf1_tx.is_closed(),
+            obj.st_rf1_tx.is_full(),
+            obj.st_rf1_tx.len(),
+            obj.st_rf3_tx.is_closed(),
+            obj.st_rf3_tx.is_full(),
+            obj.st_rf3_tx.len(),
+            obj.mt_rf3_tx.is_closed(),
+            obj.mt_rf3_tx.is_full(),
+            obj.mt_rf3_tx.len(),
+            obj.lt_rf3_tx.is_closed(),
+            obj.lt_rf3_tx.is_full(),
+            obj.lt_rf3_tx.len(),
+        )
     }
 }
 
@@ -72,7 +126,6 @@ impl InsertDeques {
         self.st_rf1_rx.len() + self.st_rf3_rx.len() + self.mt_rf3_rx.len() + self.lt_rf3_rx.len()
     }
 
-    ///
     pub fn clear(&mut self) {
         self.st_rf1_rx.clear();
         self.st_rf3_rx.clear();
@@ -80,14 +133,8 @@ impl InsertDeques {
         self.lt_rf3_rx.clear();
     }
 
-    pub fn log_summary(&self) {
-        let summ = InsertDequesSummary {
-            st_rf1_len: self.st_rf1_rx.len(),
-            st_rf3_len: self.st_rf3_rx.len(),
-            mt_rf3_len: self.mt_rf3_rx.len(),
-            lt_rf3_len: self.lt_rf3_rx.len(),
-        };
-        info!("{summ:?}");
+    pub fn summary(&self) -> InsertDequesSummary {
+        InsertDequesSummary { obj: self }
     }
 
     // Should be used only for connection and channel status items.
@@ -98,13 +145,22 @@ impl InsertDeques {
     }
 }
 
-#[derive(Debug)]
-#[allow(unused)]
-struct InsertDequesSummary {
-    st_rf1_len: usize,
-    st_rf3_len: usize,
-    mt_rf3_len: usize,
-    lt_rf3_len: usize,
+pub struct InsertDequesSummary<'a> {
+    obj: &'a InsertDeques,
+}
+
+impl<'a> fmt::Display for InsertDequesSummary<'a> {
+    fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+        let obj = self.obj;
+        write!(
+            fmt,
+            "InsertDeques {{ st_rf1_len: {}, st_rf3_len: {}, mt_rf3_len: {}, lt_rf3_len: {} }}",
+            obj.st_rf1_rx.len(),
+            obj.st_rf3_rx.len(),
+            obj.mt_rf3_rx.len(),
+            obj.lt_rf3_rx.len()
+        )
+    }
 }
 
 #[pin_project]
@@ -156,22 +212,29 @@ impl InsertSenderPolling {
         unsafe { self.map_unchecked_mut(|x| &mut x.st_rf1_sp) }
     }
 
-    pub fn log_summary(&self) {
-        let summ = InsertSenderPollingSummary {
-            st_rf1_idle: self.st_rf1_sp.is_idle(),
-            st_rf3_idle: self.st_rf3_sp.is_idle(),
-            mt_rf3_idle: self.mt_rf3_sp.is_idle(),
-            lt_rf3_idle: self.lt_rf3_sp.is_idle(),
-        };
-        info!("{summ:?}");
+    pub fn summary(&self) -> InsertSenderPollingSummary {
+        InsertSenderPollingSummary { obj: self }
     }
 }
 
-#[derive(Debug)]
-#[allow(unused)]
-struct InsertSenderPollingSummary {
-    st_rf1_idle: bool,
-    st_rf3_idle: bool,
-    mt_rf3_idle: bool,
-    lt_rf3_idle: bool,
+pub struct InsertSenderPollingSummary<'a> {
+    obj: &'a InsertSenderPolling,
+}
+
+impl<'a> fmt::Display for InsertSenderPollingSummary<'a> {
+    fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+        let obj = self.obj;
+        write!(
+            fmt,
+            "InsertSenderPolling {{ st_rf1_idle_len: {:?} {:?}, st_rf3_idle_len: {:?} {:?}, mt_rf3_idle_len: {:?} {:?}, lt_rf3_idle_len: {:?} {:?} }}",
+            obj.st_rf1_sp.is_idle(),
+            obj.st_rf1_sp.len(),
+            obj.st_rf3_sp.is_idle(),
+            obj.st_rf3_sp.len(),
+            obj.mt_rf3_sp.is_idle(),
+            obj.mt_rf3_sp.len(),
+            obj.lt_rf3_sp.is_idle(),
+            obj.lt_rf3_sp.len(),
+        )
+    }
 }

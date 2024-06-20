@@ -1,4 +1,5 @@
 #![allow(unused)]
+pub mod ingest;
 pub mod postingest;
 pub mod status;
 
@@ -15,17 +16,21 @@ use async_channel::Sender;
 use async_channel::WeakSender;
 use axum::extract::Query;
 use axum::http;
+use axum::http::HeaderMap;
 use axum::response::IntoResponse;
 use axum::response::Response;
 use bytes::Bytes;
+use dbpg::seriesbychannel::ChannelInfoQuery;
 use err::Error;
 use http::Request;
 use http::StatusCode;
 use http_body::Body;
 use log::*;
+use scywr::insertqueues::InsertQueuesTx;
 use scywr::iteminsertqueue::QueryItem;
 use serde::Deserialize;
 use serde::Serialize;
+use serde_json::json;
 use stats::CaConnSetStats;
 use stats::CaConnStats;
 use stats::CaConnStatsAgg;
@@ -37,12 +42,17 @@ use stats::IocFinderStats;
 use stats::SeriesByChannelStats;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::net::SocketAddrV4;
+use std::pin::Pin;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::task::Context;
+use std::task::Poll;
 use std::time::Duration;
 use taskrun::tokio;
+use taskrun::tokio::net::TcpListener;
 
 struct PublicErrorMsg(String);
 
@@ -59,15 +69,45 @@ impl ToPublicErrorMsg for err::Error {
     }
 }
 
+pub struct Res123 {
+    content: Option<Bytes>,
+}
+
+impl http_body::Body for Res123 {
+    type Data = Bytes;
+    type Error = Error;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context,
+    ) -> Poll<Option<Result<http_body::Frame<Self::Data>, Self::Error>>> {
+        use Poll::*;
+        match self.content.take() {
+            Some(x) => Ready(Some(Ok(http_body::Frame::data(x)))),
+            None => Ready(None),
+        }
+    }
+}
+
 impl IntoResponse for PublicErrorMsg {
     fn into_response(self) -> axum::response::Response {
         let msgbytes = self.0.as_bytes();
-        let body = axum::body::Bytes::from(msgbytes.to_vec());
-        let body = axum::body::Full::new(body);
-        let body = body.map_err(|_| axum::Error::new(Error::from_string("error while trying to create fixed body")));
-        let body = axum::body::BoxBody::new(body);
-        let x = axum::response::Response::builder().status(500).body(body).unwrap();
-        x
+        // let body = axum::body::Bytes::from(msgbytes.to_vec());
+        // let body = http_body::Frame::data(body);
+        // let body = body.map_err(|_| axum::Error::new(Error::from_string("error while trying to create fixed body")));
+        // let body = http_body::combinators::BoxBody::new(body);
+        // let body = axum::body::Body::new(body);
+        // let x = axum::response::Response::builder().status(500).body(body).unwrap();
+        // return x;
+        // x
+        // let boddat = http_body::Empty::new();
+        let res: Res123 = Res123 {
+            content: Some(Bytes::from(self.0.as_bytes().to_vec())),
+        };
+        let bod = axum::body::Body::new(res);
+        // let ret: http::Response<Bytes> = todo!();
+        let ret = http::Response::builder().status(500).body(bod).unwrap();
+        ret
     }
 }
 
@@ -268,10 +308,30 @@ fn metrics(stats_set: &StatsSet) -> String {
     [s1, s2, s3, s4, s5, s6, s7].join("")
 }
 
-fn make_routes(dcom: Arc<DaemonComm>, connset_cmd_tx: Sender<CaConnSetEvent>, stats_set: StatsSet) -> axum::Router {
+pub struct RoutesResources {
+    backend: String,
+    worker_tx: Sender<ChannelInfoQuery>,
+    iqtx: InsertQueuesTx,
+}
+
+impl RoutesResources {
+    pub fn new(backend: String, worker_tx: Sender<ChannelInfoQuery>, iqtx: InsertQueuesTx) -> Self {
+        Self {
+            backend,
+            worker_tx,
+            iqtx,
+        }
+    }
+}
+
+fn make_routes(
+    rres: Arc<RoutesResources>,
+    dcom: Arc<DaemonComm>,
+    connset_cmd_tx: Sender<CaConnSetEvent>,
+    stats_set: StatsSet,
+) -> axum::Router {
     use axum::extract;
-    use axum::routing::get;
-    use axum::routing::put;
+    use axum::routing::{get, post, put};
     use axum::Router;
     use http::StatusCode;
 
@@ -290,12 +350,53 @@ fn make_routes(dcom: Arc<DaemonComm>, connset_cmd_tx: Sender<CaConnSetEvent>, st
                 )
                 .route("/path3/", get(|| async { (StatusCode::OK, format!("Hello there!")) })),
         )
-        .route(
-            "/daqingest/metrics",
-            get({
-                let stats_set = stats_set.clone();
-                || async move { metrics(&stats_set) }
-            }),
+        .nest(
+            "/daqingest",
+            Router::new()
+                .fallback(|| async { axum::Json(json!({"subcommands":["channel", "metrics"]})) })
+                .nest(
+                    "/metrics",
+                    Router::new().fallback(|| async { StatusCode::NOT_FOUND }).route(
+                        "/",
+                        get({
+                            let stats_set = stats_set.clone();
+                            || async move { metrics(&stats_set) }
+                        }),
+                    ),
+                )
+                .nest(
+                    "/channel",
+                    Router::new()
+                        .fallback(|| async { axum::Json(json!({"subcommands":["states"]})) })
+                        .route(
+                            "/states",
+                            get({
+                                let tx = connset_cmd_tx.clone();
+                                |Query(params): Query<HashMap<String, String>>| status::channel_states(params, tx)
+                            }),
+                        )
+                        .route(
+                            "/add",
+                            get({
+                                let dcom = dcom.clone();
+                                |Query(params): Query<HashMap<String, String>>| channel_add(params, dcom)
+                            }),
+                        ),
+                )
+                .nest(
+                    "/ingest",
+                    Router::new().route(
+                        "/v1",
+                        post({
+                            let rres = rres.clone();
+                            move |(headers, params, body): (
+                                HeaderMap,
+                                Query<HashMap<String, String>>,
+                                axum::body::Body,
+                            )| { ingest::post_v01((headers, params, body), rres) }
+                        }),
+                    ),
+                ),
         )
         .route(
             "/daqingest/metricbeat",
@@ -316,24 +417,10 @@ fn make_routes(dcom: Arc<DaemonComm>, connset_cmd_tx: Sender<CaConnSetEvent>, st
             }),
         )
         .route(
-            "/daqingest/channel/states",
-            get({
-                let tx = connset_cmd_tx.clone();
-                |Query(params): Query<HashMap<String, String>>| status::channel_states(params, tx)
-            }),
-        )
-        .route(
             "/daqingest/private/channel/states",
             get({
                 let tx = connset_cmd_tx.clone();
                 |Query(params): Query<HashMap<String, String>>| private_channel_states(params, tx)
-            }),
-        )
-        .route(
-            "/daqingest/channel/add",
-            get({
-                let dcom = dcom.clone();
-                |Query(params): Query<HashMap<String, String>>| channel_add(params, dcom)
             }),
         )
         .route(
@@ -393,20 +480,18 @@ pub async fn metrics_service(
     connset_cmd_tx: Sender<CaConnSetEvent>,
     stats_set: StatsSet,
     shutdown_signal: Receiver<u32>,
+    rres: Arc<RoutesResources>,
 ) -> Result<(), Error> {
     info!("metrics service start  {bind_to}");
-    let addr = bind_to.parse().map_err(Error::from_string)?;
-    let router = make_routes(dcom, connset_cmd_tx, stats_set).into_make_service();
-    axum::Server::bind(&addr)
-        .serve(router)
+    let addr: SocketAddr = bind_to.parse().map_err(Error::from_string)?;
+    let router = make_routes(rres, dcom, connset_cmd_tx, stats_set).into_make_service();
+    let listener = TcpListener::bind(addr).await?;
+    // into_make_service_with_connect_info
+    axum::serve(listener, router)
         .with_graceful_shutdown(async move {
             let _ = shutdown_signal.recv().await;
         })
-        .await
-        .inspect(|x| {
-            info!("metrics service finished with {x:?}");
-        })
-        .map_err(Error::from_string)?;
+        .await?;
     Ok(())
 }
 

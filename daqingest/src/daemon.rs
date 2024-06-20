@@ -14,6 +14,7 @@ use netfetch::conf::ChannelConfig;
 use netfetch::conf::ChannelsConfig;
 use netfetch::daemon_common::Channel;
 use netfetch::daemon_common::DaemonEvent;
+use netfetch::metrics::RoutesResources;
 use netfetch::metrics::StatsSet;
 use netfetch::throttletrace::ThrottleTrace;
 use netpod::ttl::RetentionTime;
@@ -603,6 +604,14 @@ impl Daemon {
         let connset_cmd_tx = self.connset_ctrl.sender().clone();
         let ca_conn_stats = self.connset_ctrl.ca_conn_stats().clone();
         let dcom = Arc::new(netfetch::metrics::DaemonComm::new(tx.clone()));
+        let rres = RoutesResources::new(
+            self.ingest_opts.backend().into(),
+            self.channel_info_query_tx.clone(),
+            self.iqtx
+                .take()
+                .ok_or_else(|| Error::with_msg_no_trace("no iqtx available"))?,
+        );
+        let rres = Arc::new(rres);
         let metrics_jh = {
             let conn_set_stats = self.connset_ctrl.stats().clone();
             let stats_set = StatsSet::new(
@@ -621,6 +630,7 @@ impl Daemon {
                 connset_cmd_tx,
                 stats_set,
                 self.metrics_shutdown_rx.clone(),
+                rres,
             );
             tokio::task::spawn(fut)
         };
@@ -634,7 +644,7 @@ impl Daemon {
             let (_item_tx, item_rx) = async_channel::bounded(256);
             let info_worker_tx = self.channel_info_query_tx.clone();
             use netfetch::metrics::postingest::process_api_query_items;
-            let iqtx = self.iqtx.take().unwrap();
+            let iqtx = self.iqtx.clone().unwrap();
             let worker_fut = process_api_query_items(backend, item_rx, info_worker_tx, iqtx);
             taskrun::spawn(worker_fut)
         };

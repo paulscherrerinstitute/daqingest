@@ -19,6 +19,7 @@ pub struct CaIngestOpts {
     backend: String,
     channels: Option<PathBuf>,
     api_bind: String,
+    udp_broadcast_bind: Option<String>,
     search: Vec<String>,
     #[serde(default)]
     search_blacklist: Vec<String>,
@@ -51,6 +52,10 @@ impl CaIngestOpts {
 
     pub fn api_bind(&self) -> String {
         self.api_bind.clone()
+    }
+
+    pub fn udp_broadcast_bind(&self) -> Option<&str> {
+        self.udp_broadcast_bind.as_ref().map(String::as_str)
     }
 
     pub fn postgresql_config(&self) -> &Database {

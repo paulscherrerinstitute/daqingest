@@ -157,8 +157,11 @@ impl Worker {
             " as inp (rid, backend, channel, kind)",
             ")",
             " select q1.rid, t.series, t.scalar_type, t.shape_dims, t.tscs, t.kind from q1",
-            " join series_by_channel t on t.facility = q1.backend and t.channel = q1.channel",
-            " and t.kind = q1.kind and t.agg_kind = 0",
+            " join series_by_channel t",
+            " on t.facility = q1.backend",
+            " and t.channel = q1.channel",
+            " and t.kind = q1.kind",
+            " and t.agg_kind = 0",
             " order by q1.rid",
         );
         let qu_select = pg
@@ -224,6 +227,7 @@ impl Worker {
                     match self.pg.execute("commit", &[]).await {
                         Ok(n) => {
                             let dt = ts1.elapsed();
+                            self.stats.commit_duration_ms().ingest((1e3 * dt.as_secs_f32()) as u32);
                             if dt > Duration::from_millis(40) {
                                 debug!("commit {} {:.0} ms", n, dt.as_secs_f32());
                             }
@@ -345,15 +349,18 @@ impl Worker {
         for (&rid, job) in rids.iter().zip(jobs.into_iter()) {
             loop {
                 break if let Some(row) = &row_opt {
-                    if row.get::<_, i32>(0) == rid {
-                        let series = SeriesId::new(row.get::<_, i64>(1) as _);
+                    let rid2: i32 = row.get(0);
+                    if rid2 == rid {
+                        let series: i64 = row.get(1);
+                        let series = SeriesId::new(series as _);
+                        let shape_dims: Vec<i32> = row.get(3);
                         let scalar_type = ScalarType::from_scylla_i32(row.get(2)).map_err(|_| Error::ScalarType)?;
-                        let shape_dims = Shape::from_scylla_shape_dims(row.get::<_, Vec<i32>>(3).as_slice())
-                            .map_err(|_| Error::Shape)?;
+                        let shape_dims =
+                            Shape::from_scylla_shape_dims(shape_dims.as_slice()).map_err(|_| Error::Shape)?;
                         let tscs: Vec<DateTime<Utc>> = row.get(4);
                         let kind: i16 = row.get(5);
                         let kind = SeriesKind::from_db_i16(kind).map_err(|_| Error::ScalarType)?;
-                        if job.channel == "TEST:MEDIUM:WAVE-01024:F32:000000"
+                        if true && job.channel == "TEST:MEDIUM:WAVE-01024:F32:000000"
                             || series == SeriesId::new(1605348259462543621)
                         {
                             debug!(
@@ -361,7 +368,7 @@ impl Worker {
                                 rid, series, scalar_type, shape_dims, tscs, kind
                             );
                         }
-                        acc.push((rid, series, scalar_type, shape_dims, tscs));
+                        acc.push((rid, series, kind, scalar_type, shape_dims, tscs));
                         row_opt = row_it.next();
                         continue;
                     }
@@ -370,7 +377,7 @@ impl Worker {
             // debug!("check for {job:?}");
             // TODO  call decide with empty accumulator: will result in DoesntExist.
             let v = std::mem::replace(&mut acc, Vec::new());
-            let dec = Self::decide_matching_via_db(job.scalar_type.clone(), job.shape.clone(), v)?;
+            let dec = Self::decide_matching_via_db(&job.scalar_type, &job.shape, v)?;
             // debug!("decision  {dec:?}");
             result.push(FoundResult { job, status: dec });
         }
@@ -378,24 +385,29 @@ impl Worker {
     }
 
     fn decide_matching_via_db(
-        scalar_type: ScalarType,
-        shape: Shape,
-        acc: Vec<(i32, SeriesId, ScalarType, Shape, Vec<DateTime<Utc>>)>,
+        scalar_type: &ScalarType,
+        shape: &Shape,
+        acc: Vec<(i32, SeriesId, SeriesKind, ScalarType, Shape, Vec<DateTime<Utc>>)>,
     ) -> Result<MatchingSeries, Error> {
-        let a2 = acc.iter().map(|x| &x.4).collect();
+        let a2 = acc.iter().map(|x| &x.5).collect();
         Self::assert_order(a2)?;
         let unfolded = Self::unfold_series_rows(acc)?;
-        Self::assert_varying_types(&unfolded)?;
+        // TODO do database cleanup and enable again
+        if false {
+            Self::assert_varying_types(&unfolded)?;
+        }
         if let Some(last) = unfolded.last() {
-            if last.1 == scalar_type && last.2 == shape {
+            if last.2 == *scalar_type && shape_equiv(&last.3, &shape) {
                 Ok(MatchingSeries::Latest(last.0.clone()))
             } else {
+                let mut ret = MatchingSeries::DoesntExist;
                 for e in unfolded.into_iter().rev() {
-                    if e.1 == scalar_type && e.2 == shape {
-                        return Ok(MatchingSeries::UsedBefore(e.0.clone()));
+                    if e.2 == *scalar_type && shape_equiv(&e.3, &shape) {
+                        ret = MatchingSeries::UsedBefore(e.0.clone());
+                        break;
                     }
                 }
-                Ok(MatchingSeries::DoesntExist)
+                Ok(ret)
             }
         } else {
             Ok(MatchingSeries::DoesntExist)
@@ -403,15 +415,15 @@ impl Worker {
     }
 
     fn unfold_series_rows(
-        acc: Vec<(i32, SeriesId, ScalarType, Shape, Vec<DateTime<Utc>>)>,
-    ) -> Result<Vec<(SeriesId, ScalarType, Shape, DateTime<Utc>)>, Error> {
+        acc: Vec<(i32, SeriesId, SeriesKind, ScalarType, Shape, Vec<DateTime<Utc>>)>,
+    ) -> Result<Vec<(SeriesId, SeriesKind, ScalarType, Shape, DateTime<Utc>)>, Error> {
         let mut ret = Vec::new();
         for g in acc.iter() {
-            for h in g.4.iter() {
-                ret.push((g.1.clone(), g.2.clone(), g.3.clone(), *h));
+            for h in g.5.iter() {
+                ret.push((g.1.clone(), g.2.clone(), g.3.clone(), g.4.clone(), *h));
             }
         }
-        ret.sort_by(|a, b| a.cmp(b));
+        ret.sort_by(|a, b| a.4.cmp(&b.4));
         Ok(ret)
     }
 
@@ -432,7 +444,7 @@ impl Worker {
         Ok(())
     }
 
-    fn assert_varying_types(v: &Vec<(SeriesId, ScalarType, Shape, DateTime<Utc>)>) -> Result<(), Error> {
+    fn assert_varying_types(v: &Vec<(SeriesId, SeriesKind, ScalarType, Shape, DateTime<Utc>)>) -> Result<(), Error> {
         if v.len() > 1 {
             let mut z_0 = &v[0].0;
             let mut z_1 = &v[0].1;
@@ -471,9 +483,6 @@ impl Worker {
                     h
                 };
                 let x = (backend, channel, kind, scalar_type.to_scylla_i32(), shape, hasher);
-                if channel == "TEST:MEDIUM:WAVE-01024:F32:000000" {
-                    debug!("INSERT {x:?}");
-                }
                 x
             })
             .fold(
@@ -559,6 +568,23 @@ impl Worker {
         let n = self.pg.execute(&qu, &[&sid]).await?;
         trace!("update_used_before  n {n}");
         Ok(())
+    }
+}
+
+fn shape_equiv(a: &Shape, b: &Shape) -> bool {
+    match a {
+        Shape::Scalar => match b {
+            Shape::Scalar => true,
+            _ => false,
+        },
+        Shape::Wave(_) => match b {
+            Shape::Wave(_) => true,
+            _ => false,
+        },
+        Shape::Image(_, _) => match b {
+            Shape::Image(_, _) => true,
+            _ => false,
+        },
     }
 }
 
