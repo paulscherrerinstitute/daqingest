@@ -16,6 +16,7 @@ use async_channel::Sender;
 use async_channel::WeakSender;
 use axum::extract::Query;
 use axum::http;
+use axum::http::HeaderMap;
 use axum::response::IntoResponse;
 use axum::response::Response;
 use bytes::Bytes;
@@ -388,9 +389,11 @@ fn make_routes(
                         "/v1",
                         post({
                             let rres = rres.clone();
-                            move |(params, body): (Query<HashMap<String, String>>, axum::body::Body)| {
-                                ingest::post_v01((params, body), rres)
-                            }
+                            move |(headers, params, body): (
+                                HeaderMap,
+                                Query<HashMap<String, String>>,
+                                axum::body::Body,
+                            )| { ingest::post_v01((headers, params, body), rres) }
                         }),
                     ),
                 ),

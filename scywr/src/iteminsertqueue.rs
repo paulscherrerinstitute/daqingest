@@ -48,6 +48,10 @@ pub enum Error {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum ScalarValue {
+    U8(u8),
+    U16(u16),
+    U32(u32),
+    U64(u64),
     I8(i8),
     I16(i16),
     I32(i32),
@@ -62,6 +66,10 @@ pub enum ScalarValue {
 impl ScalarValue {
     pub fn byte_size(&self) -> u32 {
         match self {
+            ScalarValue::U8(_) => 1,
+            ScalarValue::U16(_) => 1,
+            ScalarValue::U32(_) => 1,
+            ScalarValue::U64(_) => 1,
             ScalarValue::I8(_) => 1,
             ScalarValue::I16(_) => 2,
             ScalarValue::I32(_) => 4,
@@ -76,6 +84,10 @@ impl ScalarValue {
 
     pub fn string_short(&self) -> String {
         match self {
+            ScalarValue::U8(x) => x.to_string(),
+            ScalarValue::U16(x) => x.to_string(),
+            ScalarValue::U32(x) => x.to_string(),
+            ScalarValue::U64(x) => x.to_string(),
             ScalarValue::I8(x) => x.to_string(),
             ScalarValue::I16(x) => x.to_string(),
             ScalarValue::I32(x) => x.to_string(),
@@ -91,9 +103,14 @@ impl ScalarValue {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum ArrayValue {
+    U8(Vec<u8>),
+    U16(Vec<u16>),
+    U32(Vec<u32>),
+    U64(Vec<u64>),
     I8(Vec<i8>),
     I16(Vec<i16>),
     I32(Vec<i32>),
+    I64(Vec<i64>),
     F32(Vec<f32>),
     F64(Vec<f64>),
     Bool(Vec<bool>),
@@ -103,9 +120,14 @@ impl ArrayValue {
     pub fn len(&self) -> usize {
         use ArrayValue::*;
         match self {
+            U8(a) => a.len(),
+            U16(a) => a.len(),
+            U32(a) => a.len(),
+            U64(a) => a.len(),
             I8(a) => a.len(),
             I16(a) => a.len(),
             I32(a) => a.len(),
+            I64(a) => a.len(),
             F32(a) => a.len(),
             F64(a) => a.len(),
             Bool(a) => a.len(),
@@ -115,9 +137,14 @@ impl ArrayValue {
     pub fn byte_size(&self) -> u32 {
         use ArrayValue::*;
         match self {
+            U8(a) => 1 * a.len() as u32,
+            U16(a) => 2 * a.len() as u32,
+            U32(a) => 4 * a.len() as u32,
+            U64(a) => 8 * a.len() as u32,
             I8(a) => 1 * a.len() as u32,
             I16(a) => 2 * a.len() as u32,
             I32(a) => 4 * a.len() as u32,
+            I64(a) => 8 * a.len() as u32,
             F32(a) => 4 * a.len() as u32,
             F64(a) => 8 * a.len() as u32,
             Bool(a) => 1 * a.len() as u32,
@@ -127,6 +154,50 @@ impl ArrayValue {
     pub fn to_binary_blob(&self) -> Vec<u8> {
         use ArrayValue::*;
         match self {
+            U8(a) => {
+                let n = self.byte_size();
+                let mut blob = Vec::with_capacity(32 + n as usize);
+                for _ in 0..4 {
+                    blob.put_u64_le(0);
+                }
+                for &x in a {
+                    blob.put_u8(x);
+                }
+                blob
+            }
+            U16(a) => {
+                let n = self.byte_size();
+                let mut blob = Vec::with_capacity(32 + n as usize);
+                for _ in 0..4 {
+                    blob.put_u64_le(0);
+                }
+                for &x in a {
+                    blob.put_u16_le(x);
+                }
+                blob
+            }
+            U32(a) => {
+                let n = self.byte_size();
+                let mut blob = Vec::with_capacity(32 + n as usize);
+                for _ in 0..4 {
+                    blob.put_u64_le(0);
+                }
+                for &x in a {
+                    blob.put_u32_le(x);
+                }
+                blob
+            }
+            U64(a) => {
+                let n = self.byte_size();
+                let mut blob = Vec::with_capacity(32 + n as usize);
+                for _ in 0..4 {
+                    blob.put_u64_le(0);
+                }
+                for &x in a {
+                    blob.put_u64_le(x);
+                }
+                blob
+            }
             I8(a) => {
                 let n = self.byte_size();
                 let mut blob = Vec::with_capacity(32 + n as usize);
@@ -157,6 +228,17 @@ impl ArrayValue {
                 }
                 for &x in a {
                     blob.put_i32_le(x);
+                }
+                blob
+            }
+            I64(a) => {
+                let n = self.byte_size();
+                let mut blob = Vec::with_capacity(32 + n as usize);
+                for _ in 0..4 {
+                    blob.put_u64_le(0);
+                }
+                for &x in a {
+                    blob.put_i64_le(x);
                 }
                 blob
             }
@@ -200,9 +282,14 @@ impl ArrayValue {
     pub fn string_short(&self) -> String {
         use ArrayValue::*;
         match self {
+            U8(x) => format!("{}", x.get(0).map_or(0, |x| *x)),
+            U16(x) => format!("{}", x.get(0).map_or(0, |x| *x)),
+            U32(x) => format!("{}", x.get(0).map_or(0, |x| *x)),
+            U64(x) => format!("{}", x.get(0).map_or(0, |x| *x)),
             I8(x) => format!("{}", x.get(0).map_or(0, |x| *x)),
             I16(x) => format!("{}", x.get(0).map_or(0, |x| *x)),
             I32(x) => format!("{}", x.get(0).map_or(0, |x| *x)),
+            I64(x) => format!("{}", x.get(0).map_or(0, |x| *x)),
             F32(x) => format!("{}", x.get(0).map_or(0., |x| *x)),
             F64(x) => format!("{}", x.get(0).map_or(0., |x| *x)),
             Bool(x) => format!("{}", x.get(0).map_or(false, |x| *x)),
@@ -227,6 +314,10 @@ impl DataValue {
     pub fn scalar_type(&self) -> ScalarType {
         match self {
             DataValue::Scalar(x) => match x {
+                ScalarValue::U8(_) => ScalarType::U8,
+                ScalarValue::U16(_) => ScalarType::U16,
+                ScalarValue::U32(_) => ScalarType::U32,
+                ScalarValue::U64(_) => ScalarType::U64,
                 ScalarValue::I8(_) => ScalarType::I8,
                 ScalarValue::I16(_) => ScalarType::I16,
                 ScalarValue::I32(_) => ScalarType::I32,
@@ -238,9 +329,14 @@ impl DataValue {
                 ScalarValue::Bool(_) => ScalarType::BOOL,
             },
             DataValue::Array(x) => match x {
+                ArrayValue::U8(_) => ScalarType::U8,
+                ArrayValue::U16(_) => ScalarType::U16,
+                ArrayValue::U32(_) => ScalarType::U32,
+                ArrayValue::U64(_) => ScalarType::U64,
                 ArrayValue::I8(_) => ScalarType::I8,
                 ArrayValue::I16(_) => ScalarType::I16,
                 ArrayValue::I32(_) => ScalarType::I32,
+                ArrayValue::I64(_) => ScalarType::I64,
                 ArrayValue::F32(_) => ScalarType::F32,
                 ArrayValue::F64(_) => ScalarType::F64,
                 ArrayValue::Bool(_) => ScalarType::BOOL,
@@ -647,143 +743,6 @@ impl Future for InsertFut {
     }
 }
 
-async fn insert_scalar_gen<ST>(
-    par: InsParCom,
-    val: ST,
-    qu: &PreparedStatement,
-    data_store: &DataStore,
-) -> Result<(), Error>
-where
-    ST: Value + SerializeCql,
-{
-    let params = (
-        par.series.to_i64(),
-        par.ts_msp.to_i64(),
-        par.ts_lsp.to_i64(),
-        par.ts_alt_1.ns() as i64,
-        par.pulse as i64,
-        val,
-    );
-    if par.do_insert {
-        let y = data_store.scy.execute(qu, params).await;
-        match y {
-            Ok(_) => Ok(()),
-            Err(e) => match e {
-                QueryError::TimeoutError => Err(Error::DbTimeout),
-                // TODO use `msg`
-                QueryError::DbError(e, _msg) => match e {
-                    DbError::Overloaded => Err(Error::DbOverload),
-                    _ => Err(e.into()),
-                },
-                _ => Err(e.into()),
-            },
-        }
-    } else {
-        Ok(())
-    }
-}
-
-async fn insert_array_gen<ST>(
-    par: InsParCom,
-    val: Vec<ST>,
-    qu: &PreparedStatement,
-    data_store: &DataStore,
-) -> Result<(), Error>
-where
-    ST: Value + SerializeCql,
-{
-    if par.do_insert {
-        let params = (
-            par.series.to_i64(),
-            par.ts_msp.to_i64(),
-            par.ts_lsp.to_i64(),
-            par.ts_alt_1.ns() as i64,
-            par.pulse as i64,
-            val,
-        );
-        let y = data_store.scy.execute(qu, params).await;
-        match y {
-            Ok(_) => Ok(()),
-            Err(e) => match e {
-                QueryError::TimeoutError => Err(Error::DbTimeout),
-                // TODO use `msg`
-                QueryError::DbError(e, _msg) => match e {
-                    DbError::Overloaded => Err(Error::DbOverload),
-                    _ => Err(e.into()),
-                },
-                _ => Err(e.into()),
-            },
-        }
-    } else {
-        Ok(())
-    }
-}
-
-// TODO currently not in use, anything to merge?
-pub async fn insert_item(
-    item: InsertItem,
-    data_store: &DataStore,
-    do_insert: bool,
-    stats: &Arc<InsertWorkerStats>,
-) -> Result<(), Error> {
-    if item.msp_bump {
-        let params = (item.series.id() as i64, item.ts_msp.to_i64());
-        data_store.scy.execute(&data_store.qu_insert_ts_msp, params).await?;
-        stats.inserts_msp().inc();
-    }
-    use DataValue::*;
-    match item.val {
-        Scalar(val) => {
-            let par = InsParCom {
-                series: item.series,
-                ts_msp: item.ts_msp,
-                ts_lsp: item.ts_lsp,
-                ts_net: item.ts_net,
-                ts_alt_1: item.ts_alt_1,
-                pulse: item.pulse,
-                do_insert,
-                stats: stats.clone(),
-            };
-            use ScalarValue::*;
-            match val {
-                I8(val) => insert_scalar_gen(par, val, &data_store.qu_insert_scalar_i8, &data_store).await?,
-                I16(val) => insert_scalar_gen(par, val, &data_store.qu_insert_scalar_i16, &data_store).await?,
-                Enum(a, b) => insert_scalar_gen(par, a, &data_store.qu_insert_scalar_i16, &data_store).await?,
-                I32(val) => insert_scalar_gen(par, val, &data_store.qu_insert_scalar_i32, &data_store).await?,
-                I64(val) => insert_scalar_gen(par, val, &data_store.qu_insert_scalar_i64, &data_store).await?,
-                F32(val) => insert_scalar_gen(par, val, &data_store.qu_insert_scalar_f32, &data_store).await?,
-                F64(val) => insert_scalar_gen(par, val, &data_store.qu_insert_scalar_f64, &data_store).await?,
-                String(val) => insert_scalar_gen(par, val, &data_store.qu_insert_scalar_string, &data_store).await?,
-                Bool(val) => insert_scalar_gen(par, val, &data_store.qu_insert_scalar_bool, &data_store).await?,
-            }
-        }
-        Array(val) => {
-            let par = InsParCom {
-                series: item.series,
-                ts_msp: item.ts_msp,
-                ts_lsp: item.ts_lsp,
-                ts_net: item.ts_net,
-                ts_alt_1: item.ts_alt_1,
-                pulse: item.pulse,
-                do_insert,
-                stats: stats.clone(),
-            };
-            err::todo();
-            use ArrayValue::*;
-            match val {
-                I8(val) => insert_array_gen(par, val, &data_store.qu_insert_array_i8, &data_store).await?,
-                I16(val) => insert_array_gen(par, val, &data_store.qu_insert_array_i16, &data_store).await?,
-                I32(val) => insert_array_gen(par, val, &data_store.qu_insert_array_i32, &data_store).await?,
-                F32(val) => insert_array_gen(par, val, &data_store.qu_insert_array_f32, &data_store).await?,
-                F64(val) => insert_array_gen(par, val, &data_store.qu_insert_array_f64, &data_store).await?,
-                Bool(val) => insert_array_gen(par, val, &data_store.qu_insert_array_bool, &data_store).await?,
-            }
-        }
-    }
-    stats.inserts_value().inc();
-    Ok(())
-}
-
 pub fn insert_msp_fut(
     series: SeriesId,
     ts_msp: TsMs,
@@ -819,6 +778,10 @@ pub fn insert_item_fut(
             };
             use ScalarValue::*;
             match val {
+                U8(val) => insert_scalar_gen_fut(par, val as i8, data_store.qu_insert_scalar_u8.clone(), scy),
+                U16(val) => insert_scalar_gen_fut(par, val as i16, data_store.qu_insert_scalar_u16.clone(), scy),
+                U32(val) => insert_scalar_gen_fut(par, val as i32, data_store.qu_insert_scalar_u32.clone(), scy),
+                U64(val) => insert_scalar_gen_fut(par, val as i64, data_store.qu_insert_scalar_u64.clone(), scy),
                 I8(val) => insert_scalar_gen_fut(par, val, data_store.qu_insert_scalar_i8.clone(), scy),
                 I16(val) => insert_scalar_gen_fut(par, val, data_store.qu_insert_scalar_i16.clone(), scy),
                 I32(val) => insert_scalar_gen_fut(par, val, data_store.qu_insert_scalar_i32.clone(), scy),
@@ -845,9 +808,14 @@ pub fn insert_item_fut(
             let blob = val.to_binary_blob();
             #[allow(unused)]
             match val {
+                U8(val) => insert_array_gen_fut(par, blob, data_store.qu_insert_array_u8.clone(), scy),
+                U16(val) => insert_array_gen_fut(par, blob, data_store.qu_insert_array_u16.clone(), scy),
+                U32(val) => insert_array_gen_fut(par, blob, data_store.qu_insert_array_u32.clone(), scy),
+                U64(val) => insert_array_gen_fut(par, blob, data_store.qu_insert_array_u64.clone(), scy),
                 I8(val) => insert_array_gen_fut(par, blob, data_store.qu_insert_array_i8.clone(), scy),
                 I16(val) => insert_array_gen_fut(par, blob, data_store.qu_insert_array_i16.clone(), scy),
                 I32(val) => insert_array_gen_fut(par, blob, data_store.qu_insert_array_i32.clone(), scy),
+                I64(val) => insert_array_gen_fut(par, blob, data_store.qu_insert_array_i64.clone(), scy),
                 F32(val) => insert_array_gen_fut(par, blob, data_store.qu_insert_array_f32.clone(), scy),
                 F64(val) => insert_array_gen_fut(par, blob, data_store.qu_insert_array_f64.clone(), scy),
                 Bool(val) => insert_array_gen_fut(par, blob, data_store.qu_insert_array_bool.clone(), scy),

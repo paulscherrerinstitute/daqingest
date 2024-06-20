@@ -3,7 +3,6 @@ use crate::iteminsertqueue::insert_channel_status;
 use crate::iteminsertqueue::insert_channel_status_fut;
 use crate::iteminsertqueue::insert_connection_status;
 use crate::iteminsertqueue::insert_connection_status_fut;
-use crate::iteminsertqueue::insert_item;
 use crate::iteminsertqueue::insert_item_fut;
 use crate::iteminsertqueue::insert_msp_fut;
 use crate::iteminsertqueue::Accounting;
@@ -35,7 +34,7 @@ use tokio::task::JoinHandle;
 #[allow(unused)]
 macro_rules! trace2 {
     ($($arg:tt)*) => {
-        if true {
+        if false {
             trace!($($arg)*);
         }
     };
@@ -44,7 +43,7 @@ macro_rules! trace2 {
 #[allow(unused)]
 macro_rules! trace3 {
     ($($arg:tt)*) => {
-        if true {
+        if false {
             trace!($($arg)*);
         }
     };
@@ -53,7 +52,16 @@ macro_rules! trace3 {
 #[allow(unused)]
 macro_rules! trace_item_execute {
     ($($arg:tt)*) => {
-        if true {
+        if false {
+            trace!($($arg)*);
+        }
+    };
+}
+
+#[allow(unused)]
+macro_rules! debug_setup {
+    ($($arg:tt)*) => {
+        if false {
             debug!($($arg)*);
         }
     };
@@ -181,86 +189,6 @@ pub async fn spawn_scylla_insert_workers_dummy(
     Ok(jhs)
 }
 
-#[allow(unused)]
-async fn worker_unused(
-    worker_ix: usize,
-    item_inp: Receiver<QueryItem>,
-    insert_worker_opts: Arc<InsertWorkerOpts>,
-    data_store: Arc<DataStore>,
-    stats: Arc<InsertWorkerStats>,
-) -> Result<(), Error> {
-    stats.worker_start().inc();
-    insert_worker_opts
-        .insert_workers_running
-        .fetch_add(1, atomic::Ordering::AcqRel);
-    let backoff_0 = Duration::from_millis(10);
-    let mut backoff = backoff_0.clone();
-    let mut i1 = 0;
-    loop {
-        let item = if let Ok(item) = item_inp.recv().await {
-            stats.item_recv.inc();
-            item
-        } else {
-            break;
-        };
-        match item {
-            QueryItem::ConnectionStatus(item) => match insert_connection_status(item, &data_store).await {
-                Ok(_) => {
-                    stats.inserted_connection_status().inc();
-                    backoff = backoff_0;
-                }
-                Err(e) => {
-                    stats_inc_for_err(&stats, &e);
-                    back_off_sleep(&mut backoff).await;
-                }
-            },
-            QueryItem::ChannelStatus(item) => match insert_channel_status(item, &data_store).await {
-                Ok(_) => {
-                    stats.inserted_channel_status().inc();
-                    backoff = backoff_0;
-                }
-                Err(e) => {
-                    stats_inc_for_err(&stats, &e);
-                    back_off_sleep(&mut backoff).await;
-                }
-            },
-            QueryItem::Insert(item) => {
-                let tsnow = TsMs::from_system_time(SystemTime::now());
-                let item_ts_net = item.ts_net.clone();
-                let dt = tsnow.to_u64().saturating_sub(item_ts_net.to_u64()) as u32;
-                stats.item_lat_net_worker().ingest(dt);
-                let insert_frac = insert_worker_opts.insert_frac.load(Ordering::Acquire);
-                let do_insert = i1 % 1000 < insert_frac;
-                match insert_item(item, &data_store, do_insert, &stats).await {
-                    Ok(_) => {
-                        stats.inserted_values().inc();
-                        let tsnow = TsMs::from_system_time(SystemTime::now());
-                        let dt = tsnow.to_u64().saturating_sub(item_ts_net.to_u64()) as u32;
-                        stats.item_lat_net_store().ingest(dt);
-                        backoff = backoff_0;
-                    }
-                    Err(e) => {
-                        stats_inc_for_err(&stats, &e);
-                        back_off_sleep(&mut backoff).await;
-                    }
-                }
-                i1 += 1;
-            }
-            QueryItem::TimeBinSimpleF32(item) => {
-                info!("have time bin patch to insert: {item:?}");
-                return Err(Error::with_msg_no_trace("TODO insert item old path"));
-            }
-            QueryItem::Accounting(..) => {}
-        }
-    }
-    stats.worker_finish().inc();
-    insert_worker_opts
-        .insert_workers_running
-        .fetch_sub(1, atomic::Ordering::AcqRel);
-    trace2!("insert worker {worker_ix} done");
-    Ok(())
-}
-
 async fn worker_streamed(
     worker_ix: usize,
     concurrency: usize,
@@ -269,7 +197,7 @@ async fn worker_streamed(
     data_store: Option<Arc<DataStore>>,
     stats: Arc<InsertWorkerStats>,
 ) -> Result<(), Error> {
-    trace!("worker_streamed  begin");
+    debug_setup!("worker_streamed  begin");
     stats.worker_start().inc();
     insert_worker_opts
         .insert_workers_running
@@ -290,7 +218,9 @@ async fn worker_streamed(
             // })
             .buffer_unordered(concurrency);
         let mut stream = Box::pin(stream);
+        debug_setup!("waiting for item");
         while let Some(item) = stream.next().await {
+            trace_item_execute!("see item");
             match item {
                 Ok(_) => {
                     stats.inserted_values().inc();
@@ -321,7 +251,7 @@ async fn worker_streamed(
     insert_worker_opts
         .insert_workers_running
         .fetch_sub(1, atomic::Ordering::AcqRel);
-    trace2!("insert worker {worker_ix} done");
+    debug_setup!("insert worker {worker_ix} done");
     Ok(())
 }
 
@@ -386,7 +316,7 @@ fn inspect_items(
                     trace_item_execute!("execute  {worker_name}  TimeBinSimpleF32");
                 }
                 QueryItem::Accounting(x) => {
-                    if x.series.id() & 0x7f == 77 {
+                    if x.series.id() & 0x7f == 200 {
                         debug!("execute  {worker_name}  Accounting  {item:?}");
                     } else {
                         trace_item_execute!("execute  {worker_name}  Accounting  {item:?}");

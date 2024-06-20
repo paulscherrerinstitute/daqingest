@@ -2595,8 +2595,8 @@ impl CaConn {
     }
 
     fn log_queues_summary(&self) {
-        self.iqdqs.log_summary();
-        self.iqsp.log_summary();
+        trace!("{}", self.iqdqs.summary());
+        trace!("{}", self.iqsp.summary());
     }
 }
 
