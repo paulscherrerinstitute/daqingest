@@ -39,7 +39,7 @@ Each CBOR object must contain the timestamps (integer nanoseconds) and the value
 
 The `shape` URL parameter indicates whether the data is scalar or 1-dimensional,
 for example `shape=[]` indicates a scalar and `shape=[4096]` indicates an array
-with 4096 elements.
+with 4096 elements. Without a `shape` parameter the default is scalar.
 
 The shape nowadays only distinguishes between scalar and 1-dimensional, but the actual length of
 the array dimension may vary from event to event and is therefore not meaningful.

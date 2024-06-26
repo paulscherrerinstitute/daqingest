@@ -14,6 +14,7 @@ use items_2::eventsdim0::EventsDim0NoPulse;
 use items_2::eventsdim1::EventsDim1;
 use items_2::eventsdim1::EventsDim1NoPulse;
 use netpod::log::*;
+use netpod::ttl::RetentionTime;
 use netpod::ScalarType;
 use netpod::Shape;
 use netpod::TsNano;
@@ -118,13 +119,16 @@ async fn post_v01_try(
     let s = params.get("scalarType").ok_or(Error::MissingScalarType)?;
     let scalar_type = ScalarType::from_variant_str(&s).map_err(|e| Error::Parse(e.to_string()))?;
     let shape: Shape = serde_json::from_str(params.get("shape").map_or("[]", |x| x.as_str()))?;
-    debug_setup!("parsed scalar_type {scalar_type:?}");
-    debug_setup!("parsed shape {shape:?}");
+    let rt: RetentionTime = params
+        .get("retentionTime")
+        .and_then(|x| x.parse().ok())
+        .unwrap_or(RetentionTime::Short);
     debug_setup!(
-        "establishing series writer for {:?} {:?} {:?}",
+        "establishing series writer for {:?} {:?} {:?} {:?}",
         channel,
         scalar_type,
-        shape
+        shape,
+        rt
     );
     let mut writer =
         SeriesWriter::establish(worker_tx, backend, channel, scalar_type.clone(), shape.clone(), stnow).await?;
@@ -137,7 +141,7 @@ async fn post_v01_try(
         let x = match x {
             Ok(x) => x,
             Err(_) => {
-                tick_writers(&mut writer, &mut iqdqs)?;
+                tick_writers(&mut writer, &mut iqdqs, rt.clone())?;
                 continue;
             }
         };
@@ -149,7 +153,7 @@ async fn post_v01_try(
             }
         };
         trace_input!("got frame len {}", frame.len());
-        let deque = &mut iqdqs.st_rf3_rx;
+        let deque = iqdqs.deque(rt.clone());
         match &shape {
             Shape::Scalar => match &scalar_type {
                 ScalarType::U8 => {
@@ -240,14 +244,14 @@ async fn post_v01_try(
         trace_queues!("frame send_all begin  {}  {}", iqdqs.summary(), iqtx.summary());
         iqtx.send_all(&mut iqdqs).await?;
         trace_queues!("frame send_all done  {}  {}", iqdqs.summary(), iqtx.summary());
-        tick_writers(&mut writer, &mut iqdqs)?;
+        tick_writers(&mut writer, &mut iqdqs, rt.clone())?;
         trace_queues!("frame tick_writers done  {}  {}", iqdqs.summary(), iqtx.summary());
     }
 
     trace_queues!("after send_all begin  {}  {}", iqdqs.summary(), iqtx.summary());
     iqtx.send_all(&mut iqdqs).await?;
     trace_queues!("after send_all done  {}  {}", iqdqs.summary(), iqtx.summary());
-    finish_writers(&mut writer, &mut iqdqs)?;
+    finish_writers(&mut writer, &mut iqdqs, rt.clone())?;
     trace_queues!("after finish_writers done  {}  {}", iqdqs.summary(), iqtx.summary());
 
     let ret = Json(serde_json::json!({}));
@@ -306,12 +310,12 @@ where
     Ok(())
 }
 
-fn tick_writers(writer: &mut SeriesWriter, deque: &mut InsertDeques) -> Result<(), Error> {
-    writer.tick(&mut deque.st_rf3_rx)?;
+fn tick_writers(writer: &mut SeriesWriter, deques: &mut InsertDeques, rt: RetentionTime) -> Result<(), Error> {
+    writer.tick(deques.deque(rt))?;
     Ok(())
 }
 
-fn finish_writers(writer: &mut SeriesWriter, deque: &mut InsertDeques) -> Result<(), Error> {
-    writer.tick(&mut deque.st_rf3_rx)?;
+fn finish_writers(writer: &mut SeriesWriter, deques: &mut InsertDeques, rt: RetentionTime) -> Result<(), Error> {
+    writer.tick(deques.deque(rt))?;
     Ok(())
 }

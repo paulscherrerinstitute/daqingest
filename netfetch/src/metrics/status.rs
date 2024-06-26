@@ -3,6 +3,8 @@ use crate::ca::connset::ChannelStatusesRequest;
 use crate::ca::connset::ConnSetCmd;
 use crate::conf::ChannelConfig;
 use async_channel::Sender;
+use chrono::DateTime;
+use chrono::Utc;
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
@@ -11,7 +13,40 @@ use std::time::SystemTime;
 
 #[derive(Debug, Serialize)]
 pub struct ChannelStates {
+    running_since: DateTime<Utc>,
+    // #[serde(with = "humantime_serde")]
+    // running_since_2: SystemTime,
     channels: BTreeMap<String, ChannelState>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct StorageUsage {
+    count: u64,
+    bytes: u64,
+}
+
+impl StorageUsage {
+    pub fn new() -> Self {
+        Self { count: 0, bytes: 0 }
+    }
+
+    pub fn reset(&mut self) {
+        self.count = 0;
+        self.bytes = 0;
+    }
+
+    pub fn push_written(&mut self, payload_len: u32) {
+        self.count += 1;
+        self.bytes += 16 + payload_len as u64;
+    }
+
+    pub fn count(&self) -> u64 {
+        self.count
+    }
+
+    pub fn bytes(&self) -> u64 {
+        self.bytes
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -50,11 +85,7 @@ enum ConnectionState {
 // BTreeMap<String, ChannelState>
 pub async fn channel_states(params: HashMap<String, String>, tx: Sender<CaConnSetEvent>) -> axum::Json<ChannelStates> {
     let name = params.get("name").map_or(String::new(), |x| x.clone()).to_string();
-    let limit = params
-        .get("limit")
-        .map(|x| x.parse().ok())
-        .unwrap_or(None)
-        .unwrap_or(40);
+    let limit = params.get("limit").and_then(|x| x.parse().ok()).unwrap_or(40);
     let (tx2, rx2) = async_channel::bounded(1);
     let req = ChannelStatusesRequest { name, limit, tx: tx2 };
     let item = CaConnSetEvent::ConnSetCmd(ConnSetCmd::ChannelStatuses(req));
@@ -62,6 +93,7 @@ pub async fn channel_states(params: HashMap<String, String>, tx: Sender<CaConnSe
     tx.send(item).await.unwrap();
     let res = rx2.recv().await.unwrap();
     let mut states = ChannelStates {
+        running_since: Utc::now(),
         channels: BTreeMap::new(),
     };
     for (k, st1) in res.channels_ca_conn_set {

@@ -1,4 +1,5 @@
 #![allow(unused)]
+pub mod delete;
 pub mod ingest;
 pub mod postingest;
 pub mod status;
@@ -26,6 +27,7 @@ use http::Request;
 use http::StatusCode;
 use http_body::Body;
 use log::*;
+use scywr::config::ScyllaIngestConfig;
 use scywr::insertqueues::InsertQueuesTx;
 use scywr::iteminsertqueue::QueryItem;
 use serde::Deserialize;
@@ -312,14 +314,27 @@ pub struct RoutesResources {
     backend: String,
     worker_tx: Sender<ChannelInfoQuery>,
     iqtx: InsertQueuesTx,
+    scyconf_st: ScyllaIngestConfig,
+    scyconf_mt: ScyllaIngestConfig,
+    scyconf_lt: ScyllaIngestConfig,
 }
 
 impl RoutesResources {
-    pub fn new(backend: String, worker_tx: Sender<ChannelInfoQuery>, iqtx: InsertQueuesTx) -> Self {
+    pub fn new(
+        backend: String,
+        worker_tx: Sender<ChannelInfoQuery>,
+        iqtx: InsertQueuesTx,
+        scyconf_st: ScyllaIngestConfig,
+        scyconf_mt: ScyllaIngestConfig,
+        scyconf_lt: ScyllaIngestConfig,
+    ) -> Self {
         Self {
             backend,
             worker_tx,
             iqtx,
+            scyconf_st,
+            scyconf_mt,
+            scyconf_lt,
         }
     }
 }
@@ -381,6 +396,13 @@ fn make_routes(
                                 let dcom = dcom.clone();
                                 |Query(params): Query<HashMap<String, String>>| channel_add(params, dcom)
                             }),
+                        )
+                        .route(
+                            "/remove",
+                            get({
+                                let dcom = dcom.clone();
+                                |Query(params): Query<HashMap<String, String>>| channel_remove(params, dcom)
+                            }),
                         ),
                 )
                 .nest(
@@ -396,6 +418,33 @@ fn make_routes(
                             )| { ingest::post_v01((headers, params, body), rres) }
                         }),
                     ),
+                )
+                .nest(
+                    "/private",
+                    Router::new()
+                        .nest(
+                            "/channel",
+                            Router::new().route(
+                                "/delete",
+                                post({
+                                    let rres = rres.clone();
+                                    move |(headers, params, body): (
+                                        HeaderMap,
+                                        Query<HashMap<String, String>>,
+                                        axum::body::Body,
+                                    )| {
+                                        delete::delete((headers, params, body), rres)
+                                    }
+                                }),
+                            ),
+                        )
+                        .route(
+                            "/channel/states",
+                            get({
+                                let tx = connset_cmd_tx.clone();
+                                |Query(params): Query<HashMap<String, String>>| private_channel_states(params, tx)
+                            }),
+                        ),
                 ),
         )
         .route(
@@ -414,20 +463,6 @@ fn make_routes(
             get({
                 let dcom = dcom.clone();
                 |Query(params): Query<HashMap<String, String>>| find_channel(params, dcom)
-            }),
-        )
-        .route(
-            "/daqingest/private/channel/states",
-            get({
-                let tx = connset_cmd_tx.clone();
-                |Query(params): Query<HashMap<String, String>>| private_channel_states(params, tx)
-            }),
-        )
-        .route(
-            "/daqingest/channel/remove",
-            get({
-                let dcom = dcom.clone();
-                |Query(params): Query<HashMap<String, String>>| channel_remove(params, dcom)
             }),
         )
         .route(

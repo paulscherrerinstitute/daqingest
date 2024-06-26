@@ -4,6 +4,7 @@ use super::proto::ReadNotify;
 use crate::ca::proto::ChannelClose;
 use crate::ca::proto::EventCancel;
 use crate::conf::ChannelConfig;
+use crate::metrics::status::StorageUsage;
 use crate::throttletrace::ThrottleTrace;
 use async_channel::Receiver;
 use async_channel::Sender;
@@ -18,6 +19,7 @@ use futures_util::StreamExt;
 use hashbrown::HashMap;
 use log::*;
 use netpod::timeunits::*;
+use netpod::ttl::RetentionTime;
 use netpod::ScalarType;
 use netpod::Shape;
 use netpod::TsMs;
@@ -193,6 +195,7 @@ pub struct ChannelStateInfo {
 
 mod ser_instant {
     use super::*;
+    use netpod::DATETIME_FMT_3MS;
     use serde::Deserializer;
     use serde::Serializer;
 
@@ -221,9 +224,7 @@ mod ser_instant {
                         .unwrap();
                     now.checked_add_signed(dur2).unwrap()
                 };
-                //info!("formatting {:?}", t1);
-                let s = t1.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
-                //info!("final string {:?}", s);
+                let s = t1.format(DATETIME_FMT_3MS).to_string();
                 ser.serialize_str(&s)
             }
             None => ser.serialize_none(),
@@ -352,6 +353,34 @@ enum ReadingState {
 }
 
 #[derive(Debug, Clone)]
+struct AccountingInfo {
+    usage: StorageUsage,
+    beg: TsMs,
+}
+
+impl AccountingInfo {
+    fn new(beg: TsMs) -> Self {
+        Self {
+            usage: StorageUsage::new(),
+            beg,
+        }
+    }
+
+    fn push_written(&mut self, payload_len: u32) {
+        self.usage.push_written(payload_len);
+    }
+
+    fn usage(&self) -> &StorageUsage {
+        &self.usage
+    }
+
+    fn reset(&mut self, msp: TsMs) {
+        self.beg = msp;
+        self.usage.reset();
+    }
+}
+
+#[derive(Debug, Clone)]
 struct CreatedState {
     cssid: ChannelStatusSeriesId,
     cid: Cid,
@@ -377,9 +406,9 @@ struct CreatedState {
     stwin_ts: u64,
     stwin_count: u32,
     stwin_bytes: u32,
-    account_emit_last: TsMs,
-    account_count: u64,
-    account_bytes: u64,
+    acc_st: AccountingInfo,
+    acc_mt: AccountingInfo,
+    acc_lt: AccountingInfo,
     dw_st_last: SystemTime,
     dw_mt_last: SystemTime,
     dw_lt_last: SystemTime,
@@ -389,6 +418,7 @@ impl CreatedState {
     fn dummy() -> Self {
         let tsnow = Instant::now();
         let stnow = SystemTime::now();
+        let (acc_msp, _) = TsMs::from_system_time(stnow).to_grid_02(EMIT_ACCOUNTING_SNAP);
         Self {
             cssid: ChannelStatusSeriesId::new(0),
             cid: Cid(0),
@@ -412,9 +442,9 @@ impl CreatedState {
             stwin_ts: 0,
             stwin_count: 0,
             stwin_bytes: 0,
-            account_emit_last: TsMs(0),
-            account_count: 0,
-            account_bytes: 0,
+            acc_st: AccountingInfo::new(acc_msp),
+            acc_mt: AccountingInfo::new(acc_msp),
+            acc_lt: AccountingInfo::new(acc_msp),
             dw_st_last: SystemTime::UNIX_EPOCH,
             dw_mt_last: SystemTime::UNIX_EPOCH,
             dw_lt_last: SystemTime::UNIX_EPOCH,
@@ -829,7 +859,7 @@ pub struct CaConn {
     cid_by_name: BTreeMap<String, Cid>,
     cid_by_subid: HashMap<Subid, Cid>,
     cid_by_sid: HashMap<Sid, Cid>,
-    channel_status_emit_last: Instant,
+    channel_status_emit_next: Instant,
     tick_last_writer: Instant,
     init_state_count: u64,
     iqdqs: InsertDeques,
@@ -896,7 +926,7 @@ impl CaConn {
             cid_by_name: BTreeMap::new(),
             cid_by_subid: HashMap::new(),
             cid_by_sid: HashMap::new(),
-            channel_status_emit_last: tsnow,
+            channel_status_emit_next: tsnow + Self::channel_status_emit_ivl(&mut rng),
             tick_last_writer: tsnow,
             iqdqs: InsertDeques::new(),
             remote_addr_dbg,
@@ -929,6 +959,10 @@ impl CaConn {
 
     fn ioc_ping_ivl_rng(rng: &mut Xoshiro128PlusPlus) -> Duration {
         IOC_PING_IVL * 100 / (70 + (rng.next_u32() % 60))
+    }
+
+    fn channel_status_emit_ivl(rng: &mut Xoshiro128PlusPlus) -> Duration {
+        Duration::from_millis(6000 + (rng.next_u32() & 0x7ff) as u64)
     }
 
     fn new_self_ticker() -> Pin<Box<tokio::time::Sleep>> {
@@ -1664,25 +1698,23 @@ impl CaConn {
         let ts_diff = ts.abs_diff(ts_local);
         stats.ca_ts_off().ingest((ts_diff / MS) as u32);
         {
-            {
-                crst.account_count += 1;
-                // TODO how do we account for bytes? Here, we also add 8 bytes for the timestamp.
-                crst.account_bytes += 8 + payload_len as u64;
-                crst.muted_before = 0;
-                crst.insert_item_ivl_ema.tick(tsnow);
-            }
             Self::check_ev_value_data(&value.data, &writer.scalar_type())?;
+            crst.muted_before = 0;
+            crst.insert_item_ivl_ema.tick(tsnow);
             {
                 let val: DataValue = value.data.into();
                 let ((dwst, dwmt, dwlt),) = writer.write(TsNano::from_ns(ts), TsNano::from_ns(ts_local), val, iqdqs)?;
                 if dwst {
                     crst.dw_st_last = stnow;
+                    crst.acc_st.push_written(payload_len);
                 }
                 if dwmt {
                     crst.dw_mt_last = stnow;
+                    crst.acc_mt.push_written(payload_len);
                 }
                 if dwlt {
                     crst.dw_lt_last = stnow;
+                    crst.acc_lt.push_written(payload_len);
                 }
             }
         }
@@ -1751,7 +1783,7 @@ impl CaConn {
             Ready(Some(k)) => match k {
                 Ok(k) => match k {
                     CaItem::Empty => {
-                        info!("CaItem::Empty");
+                        debug!("CaItem::Empty");
                         Ready(Some(Ok(())))
                     }
                     CaItem::Msg(msg) => match msg.ty {
@@ -2183,6 +2215,7 @@ impl CaConn {
         let ca_dbr_type = k.data_type + 14;
         let scalar_type = ScalarType::from_ca_id(k.data_type)?;
         let shape = Shape::from_ca_count(k.data_count)?;
+        let (acc_msp, _) = TsMs::from_system_time(stnow).to_grid_02(EMIT_ACCOUNTING_SNAP);
         let channel = CreatedState {
             cssid,
             cid,
@@ -2206,9 +2239,9 @@ impl CaConn {
             stwin_ts: 0,
             stwin_count: 0,
             stwin_bytes: 0,
-            account_emit_last: TsMs::from_ms_u64(0),
-            account_count: 0,
-            account_bytes: 0,
+            acc_st: AccountingInfo::new(acc_msp),
+            acc_mt: AccountingInfo::new(acc_msp),
+            acc_lt: AccountingInfo::new(acc_msp),
             dw_st_last: SystemTime::UNIX_EPOCH,
             dw_mt_last: SystemTime::UNIX_EPOCH,
             dw_lt_last: SystemTime::UNIX_EPOCH,
@@ -2230,7 +2263,7 @@ impl CaConn {
     }
 
     fn handle_channel_close_res(&mut self, k: proto::ChannelCloseRes, tsnow: Instant) -> Result<(), Error> {
-        info!("{:?}", k);
+        debug!("{:?}", k);
         Ok(())
     }
 
@@ -2283,7 +2316,7 @@ impl CaConn {
                             }
                             Ok(Err(e)) => {
                                 use std::io::ErrorKind;
-                                info!("error connect to {addr} {e}");
+                                debug!("error connect to {addr} {e}");
                                 let addr = addr.clone();
                                 self.iqdqs
                                     .emit_status_item(QueryItem::ConnectionStatus(ConnectionStatusItem {
@@ -2300,7 +2333,7 @@ impl CaConn {
                             }
                             Err(e) => {
                                 // TODO log with exponential backoff
-                                info!("timeout connect to {addr} {e}");
+                                debug!("timeout connect to {addr} {e}");
                                 let addr = addr.clone();
                                 self.iqdqs
                                     .emit_status_item(QueryItem::ConnectionStatus(ConnectionStatusItem {
@@ -2415,8 +2448,8 @@ impl CaConn {
         self.check_channels_state_poll(tsnow, cx)?;
         self.check_channels_alive(tsnow, cx)?;
         // TODO add some random variation
-        if self.channel_status_emit_last + Duration::from_millis(3000) <= tsnow {
-            self.channel_status_emit_last = tsnow;
+        if self.channel_status_emit_next <= tsnow {
+            self.channel_status_emit_next = tsnow + Self::channel_status_emit_ivl(&mut self.rng);
             self.emit_channel_status()?;
             self.emit_accounting()?;
         }
@@ -2476,22 +2509,25 @@ impl CaConn {
             match st0 {
                 ChannelState::Writable(st1) => {
                     let ch = &mut st1.channel;
-                    if ch.account_emit_last != msp {
-                        if ch.account_count != 0 {
-                            let series = st1.writer.sid();
-                            let count = ch.account_count as i64;
-                            let bytes = ch.account_bytes as i64;
-                            ch.account_count = 0;
-                            ch.account_bytes = 0;
-                            let item = QueryItem::Accounting(Accounting {
-                                part: (series.id() & 0xff) as i32,
-                                ts: msp,
-                                series,
-                                count,
-                                bytes,
-                            });
-                            self.iqdqs.emit_status_item(item)?;
-                            ch.account_emit_last = msp;
+                    for (acc, rt) in [&mut ch.acc_st, &mut ch.acc_mt, &mut ch.acc_lt].into_iter().zip([
+                        RetentionTime::Short,
+                        RetentionTime::Medium,
+                        RetentionTime::Long,
+                    ]) {
+                        if acc.beg != msp {
+                            if acc.usage().count() != 0 {
+                                let series = st1.writer.sid();
+                                let item = Accounting {
+                                    part: (series.id() & 0xff) as i32,
+                                    ts: acc.beg,
+                                    series,
+                                    count: acc.usage().count() as _,
+                                    bytes: acc.usage().bytes() as _,
+                                };
+                                //info!("EMIT ITEM  {rt:?}  {item:?}");
+                                self.iqdqs.emit_accounting_item(rt, item)?;
+                                acc.reset(msp);
+                            }
                         }
                     }
                 }

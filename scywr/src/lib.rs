@@ -1,5 +1,6 @@
 pub mod access;
 pub mod config;
+pub mod delete;
 pub mod err;
 pub mod fut;
 pub mod futbatch;

@@ -1,3 +1,4 @@
+use crate::iteminsertqueue::Accounting;
 use crate::iteminsertqueue::QueryItem;
 use crate::senderpolling::SenderPolling;
 use async_channel::Receiver;
@@ -140,8 +141,23 @@ impl InsertDeques {
     // Should be used only for connection and channel status items.
     // It encapsulates the decision to which queue(s) we want to send these kind of items.
     pub fn emit_status_item(&mut self, item: QueryItem) -> Result<(), Error> {
-        self.lt_rf3_rx.push_back(item);
+        self.deque(RetentionTime::Long).push_back(item);
         Ok(())
+    }
+
+    // Should be used only for connection and channel status items.
+    // It encapsulates the decision to which queue(s) we want to send these kind of items.
+    pub fn emit_accounting_item(&mut self, rt: RetentionTime, item: Accounting) -> Result<(), Error> {
+        self.deque(rt).push_back(QueryItem::Accounting(item));
+        Ok(())
+    }
+
+    pub fn deque(&mut self, rt: RetentionTime) -> &mut VecDeque<QueryItem> {
+        match rt {
+            RetentionTime::Short => &mut self.st_rf3_rx,
+            RetentionTime::Medium => &mut self.mt_rf3_rx,
+            RetentionTime::Long => &mut self.lt_rf3_rx,
+        }
     }
 }
 

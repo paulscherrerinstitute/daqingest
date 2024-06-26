@@ -610,6 +610,9 @@ impl Daemon {
             self.iqtx
                 .take()
                 .ok_or_else(|| Error::with_msg_no_trace("no iqtx available"))?,
+            self.ingest_opts.scylla_config_st().clone(),
+            self.ingest_opts.scylla_config_mt().clone(),
+            self.ingest_opts.scylla_config_lt().clone(),
         );
         let rres = Arc::new(rres);
         let metrics_jh = {
