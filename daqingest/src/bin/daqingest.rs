@@ -30,6 +30,7 @@ async fn main_run(opts: DaqIngestOpts) -> Result<(), Error> {
 }
 
 async fn main_run_inner(opts: DaqIngestOpts) -> Result<(), Error> {
+    let buildmark = "+0006";
     use daqingest::opts::ChannelAccess;
     use daqingest::opts::SubCmd;
     match opts.subcmd {
@@ -89,7 +90,7 @@ async fn main_run_inner(opts: DaqIngestOpts) -> Result<(), Error> {
                 netfetch::ca::search::ca_search(conf, &channels).await?
             }
             ChannelAccess::CaIngest(k) => {
-                info!("daqingest version {} +0004", clap::crate_version!());
+                info!("daqingest version {} {}", clap::crate_version!(), buildmark);
                 let (conf, channels_config) = parse_config(k.config.into()).await?;
                 daqingest::daemon::run(conf, channels_config).await?
             }
@@ -105,6 +106,18 @@ async fn main_run_inner(opts: DaqIngestOpts) -> Result<(), Error> {
         }
         SubCmd::Version => {
             println!("{}", clap::crate_version!());
+        }
+        SubCmd::LogTest => {
+            info!("log-test");
+            warn!("log-test");
+            error!("log-test");
+            debug!("log-test");
+            trace!("log-test");
+            series::log_test();
+            let _spg = tracing::span!(tracing::Level::INFO, "log_span_debug");
+            _spg.in_scope(|| {
+                series::log_test();
+            })
         }
     }
     Ok(())

@@ -30,6 +30,7 @@ pub enum SubCmd {
     #[cfg(feature = "bsread")]
     BsreadDump(BsreadDump),
     Version,
+    LogTest,
 }
 
 #[derive(Debug, clap::Parser)]

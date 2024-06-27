@@ -48,6 +48,7 @@ pub struct DataStore {
     pub qu_insert_channel_status_by_ts_msp: Arc<PreparedStatement>,
     pub qu_insert_binned_scalar_f32_v02: Arc<PreparedStatement>,
     pub qu_account_00: Arc<PreparedStatement>,
+    pub qu_account_recv_00: Arc<PreparedStatement>,
     pub qu_dummy: Arc<PreparedStatement>,
 }
 
@@ -174,6 +175,14 @@ impl DataStore {
             scy
         );
 
+        let qu_account_recv_00 = prep_qu_ins_c!(
+            "account_recv_00",
+            "part, ts, series, count, bytes",
+            "?, ?, ?, ?, ?",
+            rett,
+            scy
+        );
+
         let q = scy
             .prepare(format!(
                 concat!("select * from {}{} limit 1"),
@@ -215,6 +224,7 @@ impl DataStore {
             qu_insert_channel_status_by_ts_msp,
             qu_insert_binned_scalar_f32_v02,
             qu_account_00,
+            qu_account_recv_00,
             qu_dummy,
         };
         Ok(ret)

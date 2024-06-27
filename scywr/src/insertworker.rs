@@ -1,11 +1,10 @@
 use crate::config::ScyllaIngestConfig;
-use crate::iteminsertqueue::insert_channel_status;
 use crate::iteminsertqueue::insert_channel_status_fut;
-use crate::iteminsertqueue::insert_connection_status;
 use crate::iteminsertqueue::insert_connection_status_fut;
 use crate::iteminsertqueue::insert_item_fut;
 use crate::iteminsertqueue::insert_msp_fut;
 use crate::iteminsertqueue::Accounting;
+use crate::iteminsertqueue::AccountingRecv;
 use crate::iteminsertqueue::InsertFut;
 use crate::iteminsertqueue::InsertItem;
 use crate::iteminsertqueue::QueryItem;
@@ -13,7 +12,6 @@ use crate::iteminsertqueue::TimeBinSimpleF32;
 use crate::store::DataStore;
 use async_channel::Receiver;
 use atomic::AtomicU64;
-use atomic::Ordering;
 use err::Error;
 use futures_util::Stream;
 use futures_util::StreamExt;
@@ -97,6 +95,7 @@ fn stats_inc_for_err(stats: &stats::InsertWorkerStats, err: &crate::iteminsertqu
     }
 }
 
+#[allow(unused)]
 fn back_off_next(backoff_dt: &mut Duration) {
     *backoff_dt = *backoff_dt + (*backoff_dt) * 3 / 2;
     let dtmax = Duration::from_millis(4000);
@@ -105,6 +104,7 @@ fn back_off_next(backoff_dt: &mut Duration) {
     }
 }
 
+#[allow(unused)]
 async fn back_off_sleep(backoff_dt: &mut Duration) {
     back_off_next(backoff_dt);
     tokio::time::sleep(*backoff_dt).await;
@@ -285,6 +285,9 @@ where
                 }
                 QueryItem::TimeBinSimpleF32(item) => prepare_timebin_insert_futs(item, &data_store, &stats, tsnow),
                 QueryItem::Accounting(item) => prepare_accounting_insert_futs(item, &data_store, &stats, tsnow),
+                QueryItem::AccountingRecv(item) => {
+                    prepare_accounting_recv_insert_futs(item, &data_store, &stats, tsnow)
+                }
             };
             trace!("prepared futs  len {}", futs.len());
             res.extend(futs.into_iter());
@@ -315,12 +318,11 @@ fn inspect_items(
                 QueryItem::TimeBinSimpleF32(_) => {
                     trace_item_execute!("execute  {worker_name}  TimeBinSimpleF32");
                 }
-                QueryItem::Accounting(x) => {
-                    if x.series.id() & 0x7f == 200 {
-                        debug!("execute  {worker_name}  Accounting  {item:?}");
-                    } else {
-                        trace_item_execute!("execute  {worker_name}  Accounting  {item:?}");
-                    }
+                QueryItem::Accounting(_) => {
+                    trace_item_execute!("execute  {worker_name}  Accounting  {item:?}");
+                }
+                QueryItem::AccountingRecv(_) => {
+                    trace_item_execute!("execute  {worker_name}  Accounting  {item:?}");
                 }
             }
         }
@@ -418,6 +420,30 @@ fn prepare_accounting_insert_futs(
     let fut = InsertFut::new(
         data_store.scy.clone(),
         data_store.qu_account_00.clone(),
+        params,
+        tsnow,
+        stats.clone(),
+    );
+    let futs = smallvec![fut];
+    futs
+}
+
+fn prepare_accounting_recv_insert_futs(
+    item: AccountingRecv,
+    data_store: &Arc<DataStore>,
+    stats: &Arc<InsertWorkerStats>,
+    tsnow: TsMs,
+) -> SmallVec<[InsertFut; 4]> {
+    let params = (
+        item.part,
+        item.ts.sec() as i64,
+        item.series.id() as i64,
+        item.count,
+        item.bytes,
+    );
+    let fut = InsertFut::new(
+        data_store.scy.clone(),
+        data_store.qu_account_recv_00.clone(),
         params,
         tsnow,
         stats.clone(),

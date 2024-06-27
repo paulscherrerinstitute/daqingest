@@ -1511,8 +1511,9 @@ impl CaConnSet {
                         }
                         Ready(Err(e)) => match e {
                             scywr::senderpolling::Error::NoSendInProgress => {
-                                error!("try_push_ca_conn_cmds {e}");
-                                return Err(Error::with_msg_no_trace(format!("{e}")));
+                                let e = Error::with_msg_no_trace(format!("try_push_ca_conn_cmds  E-A  {addr}  {e}"));
+                                error!("{e}");
+                                return Err(e);
                             }
                             scywr::senderpolling::Error::Closed(_) => {
                                 // TODO

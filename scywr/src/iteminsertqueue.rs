@@ -640,10 +640,20 @@ pub enum QueryItem {
     Insert(InsertItem),
     TimeBinSimpleF32(TimeBinSimpleF32),
     Accounting(Accounting),
+    AccountingRecv(AccountingRecv),
 }
 
 #[derive(Debug, Clone)]
 pub struct Accounting {
+    pub part: i32,
+    pub ts: TsMs,
+    pub series: SeriesId,
+    pub count: i64,
+    pub bytes: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct AccountingRecv {
     pub part: i32,
     pub ts: TsMs,
     pub series: SeriesId,

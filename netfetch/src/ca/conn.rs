@@ -36,6 +36,7 @@ use scywr::insertqueues::InsertQueuesTx;
 use scywr::insertqueues::InsertSenderPolling;
 use scywr::iteminsertqueue as scywriiq;
 use scywr::iteminsertqueue::Accounting;
+use scywr::iteminsertqueue::AccountingRecv;
 use scywr::iteminsertqueue::DataValue;
 use scywr::iteminsertqueue::QueryItem;
 use scywr::iteminsertqueue::ShutdownReason;
@@ -406,6 +407,7 @@ struct CreatedState {
     stwin_ts: u64,
     stwin_count: u32,
     stwin_bytes: u32,
+    acc_recv: AccountingInfo,
     acc_st: AccountingInfo,
     acc_mt: AccountingInfo,
     acc_lt: AccountingInfo,
@@ -442,6 +444,7 @@ impl CreatedState {
             stwin_ts: 0,
             stwin_count: 0,
             stwin_bytes: 0,
+            acc_recv: AccountingInfo::new(acc_msp),
             acc_st: AccountingInfo::new(acc_msp),
             acc_mt: AccountingInfo::new(acc_msp),
             acc_lt: AccountingInfo::new(acc_msp),
@@ -1689,6 +1692,7 @@ impl CaConn {
         crst.item_recv_ivl_ema.tick(tsnow);
         crst.recv_count += 1;
         crst.recv_bytes += payload_len as u64;
+        crst.acc_recv.push_written(payload_len);
         // TODO should attach these counters already to Writable state.
         let ts_local = {
             let epoch = stnow.duration_since(std::time::UNIX_EPOCH).unwrap_or(Duration::ZERO);
@@ -2239,6 +2243,7 @@ impl CaConn {
             stwin_ts: 0,
             stwin_count: 0,
             stwin_bytes: 0,
+            acc_recv: AccountingInfo::new(acc_msp),
             acc_st: AccountingInfo::new(acc_msp),
             acc_mt: AccountingInfo::new(acc_msp),
             acc_lt: AccountingInfo::new(acc_msp),
@@ -2524,10 +2529,27 @@ impl CaConn {
                                     count: acc.usage().count() as _,
                                     bytes: acc.usage().bytes() as _,
                                 };
-                                //info!("EMIT ITEM  {rt:?}  {item:?}");
+                                trace!("EMIT ITEM  {rt:?}  {item:?}");
                                 self.iqdqs.emit_accounting_item(rt, item)?;
-                                acc.reset(msp);
                             }
+                            acc.reset(msp);
+                        }
+                    }
+                    {
+                        let acc = &mut ch.acc_recv;
+                        if acc.beg != msp {
+                            if acc.usage().count() != 0 {
+                                let series = st1.writer.sid();
+                                let item = AccountingRecv {
+                                    part: (series.id() & 0xff) as i32,
+                                    ts: acc.beg,
+                                    series,
+                                    count: acc.usage().count() as _,
+                                    bytes: acc.usage().bytes() as _,
+                                };
+                                self.iqdqs.emit_accounting_recv(item)?;
+                            }
+                            acc.reset(msp);
                         }
                     }
                 }

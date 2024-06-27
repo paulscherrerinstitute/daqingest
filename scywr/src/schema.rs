@@ -579,5 +579,23 @@ pub async fn migrate_scylla_data_schema(scyconf: &ScyllaIngestConfig, rett: Rete
         );
         tab.setup(scy).await?;
     }
+    {
+        let tab = GenTwcsTab::new(
+            ks,
+            rett.table_prefix(),
+            "account_recv_00",
+            &[
+                ("part", "int"),
+                ("ts", "bigint"),
+                ("series", "bigint"),
+                ("count", "bigint"),
+                ("bytes", "bigint"),
+            ],
+            ["part", "ts"],
+            ["series"],
+            rett.ttl_channel_status(),
+        );
+        tab.setup(scy).await?;
+    }
     Ok(())
 }
