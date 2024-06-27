@@ -1,4 +1,3 @@
-use crate::timebin::ConnTimeBin;
 use async_channel::Sender;
 use dbpg::seriesbychannel::ChannelInfoQuery;
 use err::thiserror;
@@ -57,7 +56,6 @@ pub struct SeriesWriter {
     msp_max_bytes: u32,
     // TODO this should be in an Option:
     ts_msp_grid_last: u32,
-    binner: Option<ConnTimeBin>,
 }
 
 impl SeriesWriter {
@@ -115,10 +113,6 @@ impl SeriesWriter {
         shape: Shape,
         stnow: SystemTime,
     ) -> Result<Self, Error> {
-        let mut binner = ConnTimeBin::empty(sid.clone(), TsNano::from_ns(SEC * 10));
-        binner.setup_for(&scalar_type, &shape, stnow)?;
-        let _ = binner;
-        let binner = None;
         let res = Self {
             cssid,
             sid,
@@ -130,7 +124,6 @@ impl SeriesWriter {
             msp_max_entries: 64000,
             msp_max_bytes: 1024 * 1024 * 20,
             ts_msp_grid_last: 0,
-            binner,
         };
         Ok(res)
     }
@@ -155,11 +148,6 @@ impl SeriesWriter {
         deque: &mut VecDeque<QueryItem>,
     ) -> Result<(), Error> {
         let ts_main = ts_local;
-
-        // TODO compute the binned data here as well and flush completed bins if needed.
-        if let Some(binner) = self.binner.as_mut() {
-            binner.push(ts_main.clone(), &val)?;
-        }
 
         // TODO decide on better msp/lsp: random offset!
         // As long as one writer is active, the msp is arbitrary.
@@ -215,10 +203,6 @@ impl SeriesWriter {
     }
 
     pub fn tick(&mut self, deque: &mut VecDeque<QueryItem>) -> Result<(), Error> {
-        if let Some(binner) = self.binner.as_mut() {
-            // TODO
-            //binner.tick(deque)?;
-        }
         Ok(())
     }
 }

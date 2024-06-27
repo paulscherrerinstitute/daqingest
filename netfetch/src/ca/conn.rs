@@ -49,6 +49,7 @@ use scywriiq::ConnectionStatusItem;
 use serde::Serialize;
 use series::ChannelStatusSeriesId;
 use series::SeriesId;
+use serieswriter::binwriter::BinWriter;
 use serieswriter::establish_worker::EstablishWorkerJob;
 use serieswriter::establish_worker::JobId;
 use serieswriter::rtwriter::RtWriter;
@@ -133,6 +134,7 @@ pub enum Error {
     IocIssue,
     Protocol(#[from] crate::ca::proto::Error),
     RtWriter(#[from] serieswriter::rtwriter::Error),
+    BinWriter(#[from] serieswriter::binwriter::Error),
     // TODO remove false positive from ThisError derive
     #[allow(private_interfaces)]
     UnknownCid(Cid),
@@ -342,6 +344,7 @@ struct WritableState {
     tsbeg: Instant,
     channel: CreatedState,
     writer: RtWriter,
+    binwriter: BinWriter,
     reading: ReadingState,
 }
 
@@ -414,6 +417,8 @@ struct CreatedState {
     dw_st_last: SystemTime,
     dw_mt_last: SystemTime,
     dw_lt_last: SystemTime,
+    scalar_type: ScalarType,
+    shape: Shape,
 }
 
 impl CreatedState {
@@ -451,6 +456,8 @@ impl CreatedState {
             dw_st_last: SystemTime::UNIX_EPOCH,
             dw_mt_last: SystemTime::UNIX_EPOCH,
             dw_lt_last: SystemTime::UNIX_EPOCH,
+            scalar_type: ScalarType::I8,
+            shape: Shape::Scalar,
         }
     }
 }
@@ -1105,6 +1112,7 @@ impl CaConn {
 
     fn handle_writer_establish_inner(&mut self, cid: Cid, writer: RtWriter) -> Result<(), Error> {
         trace!("handle_writer_establish_inner  {cid:?}");
+        let stnow = self.tmp_ts_poll.clone();
         // At this point we have created the channel and created a writer for that type and sid.
         // We do not yet monitor.
         // TODO main objectives now:
@@ -1116,6 +1124,13 @@ impl CaConn {
             let conf_poll_conf = conf.poll_conf();
             let chst = &mut conf.state;
             if let ChannelState::MakingSeriesWriter(st2) = chst {
+                let binwriter = BinWriter::new(
+                    st2.channel.cssid,
+                    writer.sid(),
+                    st2.channel.scalar_type.clone(),
+                    st2.channel.shape.clone(),
+                    stnow,
+                )?;
                 self.stats.get_series_id_ok.inc();
                 {
                     let item = QueryItem::ChannelStatus(ChannelStatusItem {
@@ -1131,6 +1146,7 @@ impl CaConn {
                         channel: std::mem::replace(&mut st2.channel, CreatedState::dummy()),
                         // channel: st2.channel.clone(),
                         writer,
+                        binwriter,
                         reading: ReadingState::Polling(PollingState {
                             tsbeg: self.poll_tsnow,
                             poll_ivl: Duration::from_millis(ivl),
@@ -1168,6 +1184,7 @@ impl CaConn {
                         tsbeg: self.poll_tsnow,
                         channel: std::mem::replace(&mut st2.channel, CreatedState::dummy()),
                         writer,
+                        binwriter,
                         reading: ReadingState::EnableMonitoring(EnableMonitoringState {
                             tsbeg: self.poll_tsnow,
                             subid,
@@ -1456,9 +1473,20 @@ impl CaConn {
                         });
                         let crst = &mut st.channel;
                         let writer = &mut st.writer;
+                        let binwriter = &mut st.binwriter;
                         let iqdqs = &mut self.iqdqs;
                         let stats = self.stats.as_ref();
-                        Self::event_add_ingest(ev.payload_len, ev.value, crst, writer, iqdqs, tsnow, stnow, stats)?;
+                        Self::event_add_ingest(
+                            ev.payload_len,
+                            ev.value,
+                            crst,
+                            writer,
+                            binwriter,
+                            iqdqs,
+                            tsnow,
+                            stnow,
+                            stats,
+                        )?;
                     }
                     ReadingState::Monitoring(st2) => {
                         match &mut st2.mon2state {
@@ -1473,9 +1501,20 @@ impl CaConn {
                         }
                         let crst = &mut st.channel;
                         let writer = &mut st.writer;
+                        let binwriter = &mut st.binwriter;
                         let iqdqs = &mut self.iqdqs;
                         let stats = self.stats.as_ref();
-                        Self::event_add_ingest(ev.payload_len, ev.value, crst, writer, iqdqs, tsnow, stnow, stats)?;
+                        Self::event_add_ingest(
+                            ev.payload_len,
+                            ev.value,
+                            crst,
+                            writer,
+                            binwriter,
+                            iqdqs,
+                            tsnow,
+                            stnow,
+                            stats,
+                        )?;
                     }
                     ReadingState::StopMonitoringForPolling(st2) => {
                         // TODO count for metrics
@@ -1665,7 +1704,18 @@ impl CaConn {
     ) -> Result<(), Error> {
         let crst = &mut st.channel;
         let writer = &mut st.writer;
-        Self::event_add_ingest(ev.payload_len, ev.value, crst, writer, iqdqs, tsnow, stnow, stats)?;
+        let binwriter = &mut st.binwriter;
+        Self::event_add_ingest(
+            ev.payload_len,
+            ev.value,
+            crst,
+            writer,
+            binwriter,
+            iqdqs,
+            tsnow,
+            stnow,
+            stats,
+        )?;
         Ok(())
     }
 
@@ -1674,6 +1724,7 @@ impl CaConn {
         value: CaEventValue,
         crst: &mut CreatedState,
         writer: &mut RtWriter,
+        binwriter: &mut BinWriter,
         iqdqs: &mut InsertDeques,
         tsnow: Instant,
         stnow: SystemTime,
@@ -1705,9 +1756,12 @@ impl CaConn {
             Self::check_ev_value_data(&value.data, &writer.scalar_type())?;
             crst.muted_before = 0;
             crst.insert_item_ivl_ema.tick(tsnow);
+            let ts_ioc = TsNano::from_ns(ts);
+            let ts_local = TsNano::from_ns(ts_local);
+            let val: DataValue = value.data.into();
+            binwriter.ingest(ts_ioc, ts_local, &val, iqdqs)?;
             {
-                let val: DataValue = value.data.into();
-                let ((dwst, dwmt, dwlt),) = writer.write(TsNano::from_ns(ts), TsNano::from_ns(ts_local), val, iqdqs)?;
+                let ((dwst, dwmt, dwlt),) = writer.write(ts_ioc, ts_local, val, iqdqs)?;
                 if dwst {
                     crst.dw_st_last = stnow;
                     crst.acc_st.push_written(payload_len);
@@ -2250,6 +2304,8 @@ impl CaConn {
             dw_st_last: SystemTime::UNIX_EPOCH,
             dw_mt_last: SystemTime::UNIX_EPOCH,
             dw_lt_last: SystemTime::UNIX_EPOCH,
+            scalar_type: scalar_type.clone(),
+            shape: shape.clone(),
         };
         *chst = ChannelState::MakingSeriesWriter(MakingSeriesWriterState { tsbeg: tsnow, channel });
         let job = EstablishWorkerJob::new(
