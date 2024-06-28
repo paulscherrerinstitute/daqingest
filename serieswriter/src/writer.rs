@@ -28,7 +28,6 @@ pub enum Error {
     Scy(#[from] scywr::session::Error),
     ScySchema(#[from] scywr::schema::Error),
     Series(#[from] dbpg::seriesbychannel::Error),
-    Timebin(#[from] crate::timebin::Error),
 }
 
 impl<T> From<async_channel::SendError<T>> for Error {

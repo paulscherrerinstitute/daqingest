@@ -4,6 +4,8 @@ use async_channel::Sender;
 use err::thiserror;
 use err::ThisError;
 use netpod::log::*;
+use netpod::ttl::RetentionTime;
+use netpod::DtNano;
 use netpod::ScalarType;
 use netpod::Shape;
 use netpod::TsNano;
@@ -34,6 +36,7 @@ pub enum Error {
 
 #[derive(Debug)]
 pub struct BinWriter {
+    rt: RetentionTime,
     sid: SeriesId,
     scalar_type: ScalarType,
     shape: Shape,
@@ -42,17 +45,28 @@ pub struct BinWriter {
 
 impl BinWriter {
     pub fn new(
+        beg: TsNano,
+        rt: RetentionTime,
         // channel_info_tx: Sender<ChannelInfoQuery>,
         cssid: ChannelStatusSeriesId,
         sid: SeriesId,
         scalar_type: ScalarType,
         shape: Shape,
-        stnow: SystemTime,
     ) -> Result<Self, Error> {
-        type A = SeriesWriter;
-        let mut binner = ConnTimeBin::empty(sid.clone(), TsNano::from_ms(1000 * 2));
-        binner.setup_for(&scalar_type, &shape, stnow)?;
+        // TODO select the desired bin width based on channel configuration:
+        // that's user knowledge, it really depends on what users want.
+        // For the moment, assume a fixed value.
+        let bin_len = DtNano::from_ms(1000 * 10);
+        let binner = ConnTimeBin::new(
+            rt.clone(),
+            sid.clone(),
+            beg,
+            bin_len,
+            scalar_type.clone(),
+            shape.clone(),
+        )?;
         let ret = Self {
+            rt,
             sid,
             scalar_type,
             shape,

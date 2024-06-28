@@ -17,7 +17,7 @@ pub struct PatchCollect {
 }
 
 impl PatchCollect {
-    pub fn new(bin_len: TsNano, bin_count: u64) -> Self {
+    fn new(bin_len: TsNano, bin_count: u64) -> Self {
         Self {
             patch_len: TsNano::from_ns(bin_len.ns() * bin_count),
             bin_len,
@@ -40,7 +40,7 @@ impl PatchCollect {
         self.bin_count
     }
 
-    pub fn ingest(&mut self, item: &mut dyn TimeBinned) -> Result<(), Error> {
+    fn ingest(&mut self, item: &mut dyn TimeBinned) -> Result<(), Error> {
         let mut n1 = 0;
         let mut item_len_exp = item.len();
         loop {

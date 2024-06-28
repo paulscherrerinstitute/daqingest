@@ -4,6 +4,7 @@ use dbpg::seriesbychannel::ChannelInfoQuery;
 use err::thiserror;
 use err::ThisError;
 use netpod::log::*;
+use netpod::DtNano;
 use netpod::ScalarType;
 use netpod::SeriesKind;
 use netpod::Shape;
@@ -181,6 +182,9 @@ impl RtWriter {
                 false
             } else if ts_local.ms() - last.ts_local.ms() < 1000 * min_quiet.as_secs() {
                 trace_rt_decision!("{rt}  {sid}  ignore, because not min quiet");
+                false
+            } else if ts_local.delta(last.ts_local) < DtNano::from_ms(5) {
+                trace_rt_decision!("{rt}  {sid}  ignore, because store rate cap");
                 false
             } else if val == last.val {
                 trace_rt_decision!("{rt}  {sid}  ignore, because value did not change");

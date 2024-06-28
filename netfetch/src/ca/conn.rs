@@ -1124,12 +1124,15 @@ impl CaConn {
             let conf_poll_conf = conf.poll_conf();
             let chst = &mut conf.state;
             if let ChannelState::MakingSeriesWriter(st2) = chst {
+                let dt = stnow.duration_since(SystemTime::UNIX_EPOCH).unwrap();
+                let beg = TsNano::from_ns(SEC * dt.as_secs() + dt.subsec_nanos() as u64);
                 let binwriter = BinWriter::new(
+                    beg,
+                    RetentionTime::Short,
                     st2.channel.cssid,
                     writer.sid(),
                     st2.channel.scalar_type.clone(),
                     st2.channel.shape.clone(),
-                    stnow,
                 )?;
                 self.stats.get_series_id_ok.inc();
                 {
@@ -1759,7 +1762,7 @@ impl CaConn {
             let ts_ioc = TsNano::from_ns(ts);
             let ts_local = TsNano::from_ns(ts_local);
             let val: DataValue = value.data.into();
-            binwriter.ingest(ts_ioc, ts_local, &val, iqdqs)?;
+            // binwriter.ingest(ts_ioc, ts_local, &val, iqdqs)?;
             {
                 let ((dwst, dwmt, dwlt),) = writer.write(ts_ioc, ts_local, val, iqdqs)?;
                 if dwst {
