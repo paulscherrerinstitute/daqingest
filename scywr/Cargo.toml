@@ -7,7 +7,7 @@ edition = "2021"
 [dependencies]
 futures-util = "0.3.28"
 async-channel = "2.3.1"
-scylla = "0.11.0"
+scylla = "0.13.0"
 smallvec = "1.11.0"
 pin-project = "1.1.5"
 stackfuture = "0.3.0"

@@ -202,6 +202,7 @@ enum CaDbrMetaType {
     Plain,
     Status,
     Time,
+    Ctrl,
 }
 
 #[derive(Debug)]
@@ -212,6 +213,13 @@ pub struct CaDbrType {
 
 impl CaDbrType {
     pub fn from_ca_u16(k: u16) -> Result<Self, Error> {
+        if k == 31 {
+            let ret = CaDbrType {
+                meta: CaDbrMetaType::Ctrl,
+                scalar_type: CaScalarType::Enum,
+            };
+            return Ok(ret);
+        }
         if k > 20 {
             return Err(Error::BadCaDbrTypeId(k));
         }
@@ -908,18 +916,39 @@ impl CaMsg {
     fn extract_ca_data_value(hi: &HeadInfo, payload: &[u8], array_truncate: usize) -> Result<CaEventValue, Error> {
         use netpod::Shape;
         let ca_dbr_ty = CaDbrType::from_ca_u16(hi.data_type)?;
-        if let CaDbrMetaType::Time = ca_dbr_ty.meta {
-        } else {
-            return Err(Error::MismatchDbrTimeType);
-        }
-        let ca_status = u16::from_be_bytes(payload[0..2].try_into().map_err(|_| Error::BadSlice)?);
-        let ca_severity = u16::from_be_bytes(payload[2..4].try_into().map_err(|_| Error::BadSlice)?);
-        let ca_secs = u32::from_be_bytes(payload[4..8].try_into().map_err(|_| Error::BadSlice)?);
-        let ca_nanos = u32::from_be_bytes(payload[8..12].try_into().map_err(|_| Error::BadSlice)?);
-        let ca_sh = Shape::from_ca_count(hi.data_count() as _).map_err(|_| {
-            error!("BadCaCount  {hi:?}");
-            Error::BadCaCount
-        })?;
+        let ca_status;
+        let ca_severity;
+        let ca_secs;
+        let ca_nanos;
+        let ca_sh;
+        let data_offset = match &ca_dbr_ty.meta {
+            CaDbrMetaType::Plain => return Err(Error::MismatchDbrTimeType),
+            CaDbrMetaType::Status => return Err(Error::MismatchDbrTimeType),
+            CaDbrMetaType::Time => {
+                ca_status = u16::from_be_bytes(payload[0..2].try_into().map_err(|_| Error::BadSlice)?);
+                ca_severity = u16::from_be_bytes(payload[2..4].try_into().map_err(|_| Error::BadSlice)?);
+                ca_secs = u32::from_be_bytes(payload[4..8].try_into().map_err(|_| Error::BadSlice)?);
+                ca_nanos = u32::from_be_bytes(payload[8..12].try_into().map_err(|_| Error::BadSlice)?);
+                ca_sh = Shape::from_ca_count(hi.data_count() as _).map_err(|_| {
+                    error!("BadCaCount  {hi:?}");
+                    Error::BadCaCount
+                })?;
+                12
+            }
+            CaDbrMetaType::Ctrl => {
+                ca_status = u16::from_be_bytes(payload[0..2].try_into().map_err(|_| Error::BadSlice)?);
+                ca_severity = u16::from_be_bytes(payload[2..4].try_into().map_err(|_| Error::BadSlice)?);
+                let st = std::time::SystemTime::now();
+                let dt = st.duration_since(std::time::SystemTime::UNIX_EPOCH).unwrap();
+                ca_secs = (dt.as_secs() - EPICS_EPOCH_OFFSET) as u32;
+                ca_nanos = dt.subsec_nanos();
+                ca_sh = Shape::Scalar;
+                let varcnt = u16::from_be_bytes(payload[4..6].try_into().map_err(|_| Error::BadSlice)?);
+                let s = String::from_utf8_lossy(&payload[6..6 + 26 * 16]);
+                info!("enum variants debug  {varcnt}  {s}");
+                2 + 2 + 2 + 26 * 16
+            }
+        };
         let meta_padding = match ca_dbr_ty.meta {
             CaDbrMetaType::Plain => 0,
             CaDbrMetaType::Status => match ca_dbr_ty.scalar_type {
@@ -940,8 +969,17 @@ impl CaMsg {
                 CaScalarType::Enum => 2,
                 CaScalarType::String => 0,
             },
+            CaDbrMetaType::Ctrl => match ca_dbr_ty.scalar_type {
+                CaScalarType::I8 => 1,
+                CaScalarType::I16 => 0,
+                CaScalarType::I32 => 0,
+                CaScalarType::F32 => 0,
+                CaScalarType::F64 => 0,
+                CaScalarType::Enum => 0,
+                CaScalarType::String => 0,
+            },
         };
-        let valbuf = &payload[12 + meta_padding..];
+        let valbuf = &payload[data_offset + meta_padding..];
         let value = match ca_sh {
             Shape::Scalar => Self::ca_scalar_value(&ca_dbr_ty.scalar_type, valbuf)?,
             Shape::Wave(n) => Self::ca_wave_value(&ca_dbr_ty.scalar_type, (n as usize).min(array_truncate), valbuf)?,

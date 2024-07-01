@@ -33,7 +33,7 @@ pub enum Error {
     SeriesWriter(#[from] crate::writer::Error),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct MinQuiets {
     pub st: Duration,
     pub mt: Duration,

@@ -1,3 +1,5 @@
+mod enumfetch;
+
 use super::proto;
 use super::proto::CaEventValue;
 use super::proto::ReadNotify;
@@ -10,6 +12,7 @@ use async_channel::Receiver;
 use async_channel::Sender;
 use core::fmt;
 use dbpg::seriesbychannel::ChannelInfoQuery;
+use enumfetch::ConnFuture;
 use err::thiserror;
 use err::ThisError;
 use futures_util::Future;
@@ -152,6 +155,7 @@ pub enum Error {
     DurationOutOfBounds,
     NoFreeCid,
     InsertQueues(#[from] scywr::insertqueues::Error),
+    FutLogic,
 }
 
 impl err::ToErr for Error {
@@ -283,6 +287,12 @@ struct CreatingState {
 struct MakingSeriesWriterState {
     tsbeg: Instant,
     channel: CreatedState,
+}
+
+#[derive(Debug, Clone)]
+struct FetchEnumDetails {
+    tsbeg: Instant,
+    cssid: ChannelStatusSeriesId,
 }
 
 #[derive(Debug, Clone)]
@@ -419,6 +429,8 @@ struct CreatedState {
     dw_lt_last: SystemTime,
     scalar_type: ScalarType,
     shape: Shape,
+    log_more: bool,
+    name: String,
 }
 
 impl CreatedState {
@@ -458,7 +470,13 @@ impl CreatedState {
             dw_lt_last: SystemTime::UNIX_EPOCH,
             scalar_type: ScalarType::I8,
             shape: Shape::Scalar,
+            log_more: false,
+            name: String::new(),
         }
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
     }
 }
 
@@ -466,6 +484,7 @@ impl CreatedState {
 enum ChannelState {
     Init(ChannelStatusSeriesId),
     Creating(CreatingState),
+    FetchEnumDetails(FetchEnumDetails),
     MakingSeriesWriter(MakingSeriesWriterState),
     Writable(WritableState),
     Closing(ClosingState),
@@ -502,6 +521,7 @@ impl ChannelState {
         let channel_connected_info = match self {
             ChannelState::Init(..) => ChannelConnectedInfo::Disconnected,
             ChannelState::Creating { .. } => ChannelConnectedInfo::Connecting,
+            ChannelState::FetchEnumDetails(_) => ChannelConnectedInfo::Connecting,
             ChannelState::MakingSeriesWriter(_) => ChannelConnectedInfo::Connecting,
             ChannelState::Writable(_) => ChannelConnectedInfo::Connected,
             ChannelState::Error(_) => ChannelConnectedInfo::Error,
@@ -587,6 +607,7 @@ impl ChannelState {
         match self {
             ChannelState::Init(cssid) => cssid.clone(),
             ChannelState::Creating(st) => st.cssid.clone(),
+            ChannelState::FetchEnumDetails(st) => st.cssid.clone(),
             ChannelState::MakingSeriesWriter(st) => st.channel.cssid.clone(),
             ChannelState::Writable(st) => st.channel.cssid.clone(),
             ChannelState::Error(e) => match e {
@@ -898,6 +919,7 @@ pub struct CaConn {
     poll_tsnow: Instant,
     ioid: u32,
     read_ioids: HashMap<Ioid, Cid>,
+    handler_by_ioid: HashMap<Ioid, Option<Pin<Box<dyn ConnFuture>>>>,
 }
 
 impl Drop for CaConn {
@@ -964,6 +986,7 @@ impl CaConn {
             poll_tsnow: tsnow,
             ioid: 100,
             read_ioids: HashMap::new(),
+            handler_by_ioid: HashMap::new(),
         }
     }
 
@@ -977,6 +1000,15 @@ impl CaConn {
 
     fn new_self_ticker() -> Pin<Box<tokio::time::Sleep>> {
         Box::pin(tokio::time::sleep(Duration::from_millis(500)))
+    }
+
+    fn proto(&mut self) -> Option<&mut CaProto> {
+        self.proto.as_mut()
+    }
+
+    fn ioid_next(&mut self) -> Ioid {
+        self.ioid = self.ioid.wrapping_add(1);
+        Ioid(self.ioid)
     }
 
     pub fn conn_command_tx(&self) -> Sender<ConnCommand> {
@@ -1298,6 +1330,9 @@ impl CaConn {
                 ChannelState::Creating(st2) => {
                     *chst = ChannelState::Ended(st2.cssid.clone());
                 }
+                ChannelState::FetchEnumDetails(st) => {
+                    *chst = ChannelState::Ended(st.cssid.clone());
+                }
                 ChannelState::MakingSeriesWriter(st) => {
                     *chst = ChannelState::Ended(st.channel.cssid.clone());
                 }
@@ -1329,6 +1364,9 @@ impl CaConn {
             let st = &mut conf.state;
             match st {
                 ChannelState::Init(..) => {
+                    // TODO need last-save-ts for this state.
+                }
+                ChannelState::FetchEnumDetails(..) => {
                     // TODO need last-save-ts for this state.
                 }
                 ChannelState::Creating(..) => {
@@ -1535,7 +1573,10 @@ impl CaConn {
                     }
                 }
             }
-            ChannelState::Creating(_) | ChannelState::Init(_) | ChannelState::MakingSeriesWriter(_) => {
+            ChannelState::Creating(_)
+            | ChannelState::Init(_)
+            | ChannelState::FetchEnumDetails(_)
+            | ChannelState::MakingSeriesWriter(_) => {
                 self.stats.recv_read_notify_but_not_init_yet.inc();
             }
             ChannelState::Closing(_) | ChannelState::Ended(_) | ChannelState::Error(_) => {
@@ -1607,94 +1648,112 @@ impl CaConn {
         Ok(())
     }
 
-    fn handle_read_notify_res(&mut self, ev: proto::ReadNotifyRes, tsnow: Instant) -> Result<(), Error> {
+    fn handle_read_notify_res(
+        &mut self,
+        ev: proto::ReadNotifyRes,
+        camsg_ts: Instant,
+        tsnow: Instant,
+    ) -> Result<(), Error> {
         // trace!("handle_read_notify_res  {ev:?}");
         // TODO can not rely on the SID in the response.
         let sid_ev = Sid(ev.sid);
         let ioid = Ioid(ev.ioid);
-        if let Some(cid) = self.read_ioids.get(&ioid) {
-            let ch_s = if let Some(x) = self.channels.get_mut(cid) {
-                &mut x.state
+        if let Some(pp) = self.handler_by_ioid.get_mut(&ioid) {
+            if let Some(mut fut) = pp.take() {
+                let camsg = CaMsg {
+                    ty: CaMsgTy::ReadNotifyRes(ev),
+                    ts: camsg_ts,
+                };
+                fut.as_mut().camsg(camsg, self);
+                Ok(())
             } else {
-                warn!("handle_read_notify_res can not find channel for  {cid:?}  {ioid:?}");
-                return Ok(());
-            };
-            match ch_s {
-                ChannelState::Writable(st) => {
-                    if st.channel.sid != sid_ev {
-                        // TODO count for metrics
-                        // warn!("mismatch in ReadNotifyRes {:?} {:?}", st.channel.sid, sid_ev);
-                    }
-                    let stnow = self.tmp_ts_poll;
-                    let crst = &mut st.channel;
-                    let stwin_ts = stnow.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() / 1;
-                    if crst.stwin_ts != stwin_ts {
-                        crst.stwin_ts = stwin_ts;
-                        crst.stwin_count = 0;
-                    }
-                    {
-                        crst.stwin_count += 1;
-                        crst.stwin_bytes += ev.payload_len;
-                    }
-                    match &mut st.reading {
-                        ReadingState::Polling(st2) => match &mut st2.tick {
-                            PollTickState::Idle(_st3) => {
-                                self.stats.recv_read_notify_while_polling_idle.inc();
-                            }
-                            PollTickState::Wait(st3, ioid) => {
-                                let dt = tsnow.saturating_duration_since(*st3);
-                                self.stats.caget_lat().ingest((1e3 * dt.as_secs_f32()) as u32);
-                                // TODO maintain histogram of read-notify latencies
-                                self.read_ioids.remove(ioid);
-                                st2.tick = PollTickState::Idle(tsnow);
-                                let iqdqs = &mut self.iqdqs;
-                                let stats = self.stats.as_ref();
-                                Self::read_notify_res_for_write(ev, st, iqdqs, stnow, tsnow, stats)?;
-                            }
-                        },
-                        ReadingState::EnableMonitoring(_) => {
-                            self.stats.recv_read_notify_while_enabling_monitoring.inc();
-                        }
-                        ReadingState::Monitoring(st2) => match &mut st2.mon2state {
-                            Monitoring2State::Passive(st3) => {
-                                if self.read_ioids.remove(&ioid).is_some() {
-                                    self.stats.recv_read_notify_state_passive_found_ioid.inc();
-                                } else {
-                                    self.stats.recv_read_notify_state_passive.inc();
-                                }
-                                st3.tsbeg = tsnow;
-                            }
-                            Monitoring2State::ReadPending(ioid2, _since) => {
-                                // We don't check again for `since` here. That's done in timeout checking.
-                                // So we could be here a little beyond timeout but we don't care about that.
-                                if ioid != *ioid2 {
-                                    // warn!("IOID mismatch ReadNotifyRes on Monitor Read Pending  {ioid:?}  {ioid2:?}");
-                                    self.stats.recv_read_notify_state_read_pending_bad_ioid.inc();
-                                } else {
-                                    self.stats.recv_read_notify_state_read_pending.inc();
-                                }
-                                self.read_ioids.remove(&ioid);
-                                st2.mon2state = Monitoring2State::Passive(Monitoring2PassiveState { tsbeg: tsnow });
-                                let iqdqs = &mut self.iqdqs;
-                                let stats = self.stats.as_ref();
-                                Self::read_notify_res_for_write(ev, st, iqdqs, stnow, tsnow, stats)?;
-                            }
-                        },
-                        ReadingState::StopMonitoringForPolling(..) => {
-                            error!("TODO  handle_read_notify_res  handle StopMonitoringForPolling");
-                        }
-                    }
-                }
-                _ => {
-                    // TODO count instead of print
-                    error!("unexpected state: ReadNotifyRes while having {ch_s:?}");
-                }
+                Err(Error::FutLogic)
             }
         } else {
-            // warn!("unknown {ioid:?}");
-            self.stats.unknown_ioid().inc();
+            if let Some(cid) = self.read_ioids.get(&ioid) {
+                let ch_s = if let Some(x) = self.channels.get_mut(cid) {
+                    &mut x.state
+                } else {
+                    warn!("handle_read_notify_res can not find channel for  {cid:?}  {ioid:?}");
+                    return Ok(());
+                };
+                match ch_s {
+                    ChannelState::Writable(st) => {
+                        if st.channel.sid != sid_ev {
+                            // TODO count for metrics
+                            // warn!("mismatch in ReadNotifyRes {:?} {:?}", st.channel.sid, sid_ev);
+                        }
+                        let stnow = self.tmp_ts_poll;
+                        let crst = &mut st.channel;
+                        let stwin_ts = stnow.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() / 1;
+                        if crst.stwin_ts != stwin_ts {
+                            crst.stwin_ts = stwin_ts;
+                            crst.stwin_count = 0;
+                        }
+                        {
+                            crst.stwin_count += 1;
+                            crst.stwin_bytes += ev.payload_len;
+                        }
+                        match &mut st.reading {
+                            ReadingState::Polling(st2) => match &mut st2.tick {
+                                PollTickState::Idle(_st3) => {
+                                    self.stats.recv_read_notify_while_polling_idle.inc();
+                                }
+                                PollTickState::Wait(st3, ioid) => {
+                                    let dt = tsnow.saturating_duration_since(*st3);
+                                    self.stats.caget_lat().ingest((1e3 * dt.as_secs_f32()) as u32);
+                                    // TODO maintain histogram of read-notify latencies
+                                    self.read_ioids.remove(ioid);
+                                    st2.tick = PollTickState::Idle(tsnow);
+                                    let iqdqs = &mut self.iqdqs;
+                                    let stats = self.stats.as_ref();
+                                    Self::read_notify_res_for_write(ev, st, iqdqs, stnow, tsnow, stats)?;
+                                }
+                            },
+                            ReadingState::EnableMonitoring(_) => {
+                                self.stats.recv_read_notify_while_enabling_monitoring.inc();
+                            }
+                            ReadingState::Monitoring(st2) => match &mut st2.mon2state {
+                                Monitoring2State::Passive(st3) => {
+                                    if self.read_ioids.remove(&ioid).is_some() {
+                                        self.stats.recv_read_notify_state_passive_found_ioid.inc();
+                                    } else {
+                                        self.stats.recv_read_notify_state_passive.inc();
+                                    }
+                                    st3.tsbeg = tsnow;
+                                }
+                                Monitoring2State::ReadPending(ioid2, _since) => {
+                                    // We don't check again for `since` here. That's done in timeout checking.
+                                    // So we could be here a little beyond timeout but we don't care about that.
+                                    if ioid != *ioid2 {
+                                        // warn!("IOID mismatch ReadNotifyRes on Monitor Read Pending  {ioid:?}  {ioid2:?}");
+                                        self.stats.recv_read_notify_state_read_pending_bad_ioid.inc();
+                                    } else {
+                                        self.stats.recv_read_notify_state_read_pending.inc();
+                                    }
+                                    self.read_ioids.remove(&ioid);
+                                    st2.mon2state = Monitoring2State::Passive(Monitoring2PassiveState { tsbeg: tsnow });
+                                    let iqdqs = &mut self.iqdqs;
+                                    let stats = self.stats.as_ref();
+                                    Self::read_notify_res_for_write(ev, st, iqdqs, stnow, tsnow, stats)?;
+                                }
+                            },
+                            ReadingState::StopMonitoringForPolling(..) => {
+                                error!("TODO  handle_read_notify_res  handle StopMonitoringForPolling");
+                            }
+                        }
+                    }
+                    _ => {
+                        // TODO count instead of print
+                        error!("unexpected state: ReadNotifyRes while having {ch_s:?}");
+                    }
+                }
+            } else {
+                // warn!("unknown {ioid:?}");
+                self.stats.unknown_ioid().inc();
+            }
+            Ok(())
         }
-        Ok(())
     }
 
     fn read_notify_res_for_write(
@@ -1733,13 +1792,20 @@ impl CaConn {
         stnow: SystemTime,
         stats: &CaConnStats,
     ) -> Result<(), Error> {
-        trace_event_incoming!(
-            "event_add_ingest  payload_len {}  value {:?}  {}  {}",
-            payload_len,
-            value,
-            value.status,
-            value.severity
-        );
+        if crst.log_more {
+            info!(
+                "event_add_ingest  payload_len {}  value {:?}  {}  {}",
+                payload_len, value, value.status, value.severity
+            );
+        } else {
+            trace_event_incoming!(
+                "event_add_ingest  payload_len {}  value {:?}  {}  {}",
+                payload_len,
+                value,
+                value.status,
+                value.severity
+            );
+        }
         crst.ts_alive_last = tsnow;
         crst.ts_activity_last = tsnow;
         crst.st_activity_last = stnow;
@@ -1934,6 +2000,7 @@ impl CaConn {
             match chst {
                 ChannelState::Init(_) => {}
                 ChannelState::Creating(_) => {}
+                ChannelState::FetchEnumDetails(_) => {}
                 ChannelState::MakingSeriesWriter(_) => {}
                 ChannelState::Writable(st2) => match &mut st2.reading {
                     ReadingState::EnableMonitoring(_) => {}
@@ -2158,7 +2225,7 @@ impl CaConn {
                                 trace4!("got EventAddResEmpty  {:?}", camsg.ts);
                                 Self::handle_event_add_res_empty(self, ev, tsnow)?
                             }
-                            CaMsgTy::ReadNotifyRes(ev) => Self::handle_read_notify_res(self, ev, tsnow)?,
+                            CaMsgTy::ReadNotifyRes(ev) => Self::handle_read_notify_res(self, ev, camsg.ts, tsnow)?,
                             CaMsgTy::Echo => {
                                 // let addr = &self.remote_addr_dbg;
                                 if let Some(started) = self.ioc_ping_start {
@@ -2276,8 +2343,22 @@ impl CaConn {
         let ca_dbr_type = k.data_type + 14;
         let scalar_type = ScalarType::from_ca_id(k.data_type)?;
         let shape = Shape::from_ca_count(k.data_count)?;
+
+        let log_more = match &scalar_type {
+            ScalarType::Enum => {
+                if cssid.id() % 20 == 14 {
+                    let name = conf.conf.name();
+                    info!("ENUM  {}", name);
+                    true
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        };
+
         let (acc_msp, _) = TsMs::from_system_time(stnow).to_grid_02(EMIT_ACCOUNTING_SNAP);
-        let channel = CreatedState {
+        let created_state = CreatedState {
             cssid,
             cid,
             sid,
@@ -2309,20 +2390,40 @@ impl CaConn {
             dw_lt_last: SystemTime::UNIX_EPOCH,
             scalar_type: scalar_type.clone(),
             shape: shape.clone(),
+            log_more,
+            name: conf.conf.name().into(),
         };
-        *chst = ChannelState::MakingSeriesWriter(MakingSeriesWriterState { tsbeg: tsnow, channel });
-        let job = EstablishWorkerJob::new(
-            JobId(cid.0 as _),
-            self.backend.clone(),
-            conf.conf.name().into(),
-            cssid,
-            scalar_type,
-            shape,
-            conf.conf.min_quiets(),
-            self.writer_tx.clone(),
-            self.tmp_ts_poll,
-        );
-        self.writer_establish_qu.push_back(job);
+        match &scalar_type {
+            ScalarType::Enum => {
+                if created_state.log_more {
+                    let min_quiets = conf.conf.min_quiets();
+                    let fut = enumfetch::EnumFetch::new(created_state, self, min_quiets);
+                    // TODO should always check if the slot is free.
+                    let ioid = fut.ioid();
+                    let x = Box::pin(fut);
+                    self.handler_by_ioid.insert(ioid, Some(x));
+                } else {
+                }
+            }
+            _ => {
+                *chst = ChannelState::MakingSeriesWriter(MakingSeriesWriterState {
+                    tsbeg: tsnow,
+                    channel: created_state,
+                });
+                let job = EstablishWorkerJob::new(
+                    JobId(cid.0 as _),
+                    self.backend.clone(),
+                    conf.conf.name().into(),
+                    cssid,
+                    scalar_type,
+                    shape,
+                    conf.conf.min_quiets(),
+                    self.writer_tx.clone(),
+                    self.tmp_ts_poll,
+                );
+                self.writer_establish_qu.push_back(job);
+            }
+        }
         Ok(())
     }
 
