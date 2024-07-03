@@ -127,6 +127,9 @@ impl RtWriter {
         iqdqs: &mut InsertDeques,
     ) -> Result<((bool, bool, bool),), Error> {
         let sid = self.sid;
+        if sid.id() == 6050300124140774549 {
+            info!("write {:?}", val);
+        }
         let (did_write_st,) = Self::write_inner(
             "ST",
             self.min_quiets.st,

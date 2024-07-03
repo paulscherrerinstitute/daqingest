@@ -32,6 +32,7 @@ pub struct DataStore {
     pub qu_insert_scalar_f64: Arc<PreparedStatement>,
     pub qu_insert_scalar_bool: Arc<PreparedStatement>,
     pub qu_insert_scalar_string: Arc<PreparedStatement>,
+    pub qu_insert_scalar_enum: Arc<PreparedStatement>,
     pub qu_insert_array_u8: Arc<PreparedStatement>,
     pub qu_insert_array_u16: Arc<PreparedStatement>,
     pub qu_insert_array_u32: Arc<PreparedStatement>,
@@ -56,8 +57,8 @@ macro_rules! prep_qu_ins_a {
     ($id1:expr, $rett:expr, $scy:expr) => {{
         let cql = format!(
             concat!(
-                "insert into {}{} (series, ts_msp, ts_lsp, ts_alt_1, pulse, value)",
-                " values (?, ?, ?, ?, ?, ?)"
+                "insert into {}{} (series, ts_msp, ts_lsp, pulse, value)",
+                " values (?, ?, ?, 0, ?)"
             ),
             $rett.table_prefix(),
             $id1
@@ -71,8 +72,23 @@ macro_rules! prep_qu_ins_b {
     ($id1:expr, $rett:expr, $scy:expr) => {{
         let cql = format!(
             concat!(
-                "insert into {}{} (series, ts_msp, ts_lsp, ts_alt_1, pulse, valueblob)",
-                " values (?, ?, ?, ?, ?, ?)"
+                "insert into {}{} (series, ts_msp, ts_lsp, pulse, valueblob)",
+                " values (?, ?, ?, 0, ?)"
+            ),
+            $rett.table_prefix(),
+            $id1
+        );
+        let q = $scy.prepare(cql).await?;
+        Arc::new(q)
+    }};
+}
+
+macro_rules! prep_qu_ins_enum {
+    ($id1:expr, $rett:expr, $scy:expr) => {{
+        let cql = format!(
+            concat!(
+                "insert into {}{} (series, ts_msp, ts_lsp, value, valuestr)",
+                " values (?, ?, ?, ?, ?)"
             ),
             $rett.table_prefix(),
             $id1
@@ -121,6 +137,7 @@ impl DataStore {
         let qu_insert_scalar_f64 = prep_qu_ins_a!("events_scalar_f64", rett, scy);
         let qu_insert_scalar_bool = prep_qu_ins_a!("events_scalar_bool", rett, scy);
         let qu_insert_scalar_string = prep_qu_ins_a!("events_scalar_string", rett, scy);
+        let qu_insert_scalar_enum = prep_qu_ins_enum!("events_scalar_enum", rett, scy);
 
         let qu_insert_array_u8 = prep_qu_ins_b!("events_array_u8", rett, scy);
         let qu_insert_array_u16 = prep_qu_ins_b!("events_array_u16", rett, scy);
@@ -208,6 +225,7 @@ impl DataStore {
             qu_insert_scalar_f64,
             qu_insert_scalar_bool,
             qu_insert_scalar_string,
+            qu_insert_scalar_enum,
             qu_insert_array_u8,
             qu_insert_array_u16,
             qu_insert_array_u32,

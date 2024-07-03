@@ -324,7 +324,7 @@ impl DataValue {
                 ScalarValue::I64(_) => ScalarType::I64,
                 ScalarValue::F32(_) => ScalarType::F32,
                 ScalarValue::F64(_) => ScalarType::F64,
-                ScalarValue::Enum(_, _) => ScalarType::Enum,
+                ScalarValue::Enum(..) => ScalarType::Enum,
                 ScalarValue::String(_) => ScalarType::STRING,
                 ScalarValue::Bool(_) => ScalarType::BOOL,
             },
@@ -617,8 +617,6 @@ struct InsParCom {
     ts_msp: TsMs,
     ts_lsp: DtNano,
     ts_net: TsMs,
-    ts_alt_1: TsNano,
-    pulse: u64,
     do_insert: bool,
     stats: Arc<InsertWorkerStats>,
 }
@@ -627,27 +625,34 @@ fn insert_scalar_gen_fut<ST>(par: InsParCom, val: ST, qu: Arc<PreparedStatement>
 where
     ST: Value + SerializeCql + Send + 'static,
 {
+    let params = (par.series.to_i64(), par.ts_msp.to_i64(), par.ts_lsp.to_i64(), val);
+    InsertFut::new(scy, qu, params, par.ts_net, par.stats)
+}
+
+fn insert_scalar_enum_gen_fut<ST1, ST2>(
+    par: InsParCom,
+    val: ST1,
+    valstr: ST2,
+    qu: Arc<PreparedStatement>,
+    scy: Arc<ScySession>,
+) -> InsertFut
+where
+    ST1: Value + SerializeCql + Send + 'static,
+    ST2: Value + SerializeCql + Send + 'static,
+{
     let params = (
         par.series.to_i64(),
         par.ts_msp.to_i64(),
         par.ts_lsp.to_i64(),
-        par.ts_alt_1.ns() as i64,
-        par.pulse as i64,
         val,
+        valstr,
     );
     InsertFut::new(scy, qu, params, par.ts_net, par.stats)
 }
 
 // val: Vec<ST>   where ST: Value + SerializeCql + Send + 'static,
 fn insert_array_gen_fut(par: InsParCom, val: Vec<u8>, qu: Arc<PreparedStatement>, scy: Arc<ScySession>) -> InsertFut {
-    let params = (
-        par.series.to_i64(),
-        par.ts_msp.to_i64(),
-        par.ts_lsp.to_i64(),
-        par.ts_alt_1.ns() as i64,
-        par.pulse as i64,
-        val,
-    );
+    let params = (par.series.to_i64(), par.ts_msp.to_i64(), par.ts_lsp.to_i64(), val);
     InsertFut::new(scy, qu, params, par.ts_net, par.stats)
 }
 
@@ -732,8 +737,6 @@ pub fn insert_item_fut(
                 ts_msp: item.ts_msp,
                 ts_lsp: item.ts_lsp,
                 ts_net: item.ts_net,
-                ts_alt_1: item.ts_alt_1,
-                pulse: item.pulse,
                 do_insert,
                 stats: stats.clone(),
             };
@@ -749,7 +752,9 @@ pub fn insert_item_fut(
                 I64(val) => insert_scalar_gen_fut(par, val, data_store.qu_insert_scalar_i64.clone(), scy),
                 F32(val) => insert_scalar_gen_fut(par, val, data_store.qu_insert_scalar_f32.clone(), scy),
                 F64(val) => insert_scalar_gen_fut(par, val, data_store.qu_insert_scalar_f64.clone(), scy),
-                Enum(a, b) => insert_scalar_gen_fut(par, a, data_store.qu_insert_scalar_i16.clone(), scy),
+                Enum(val, valstr) => {
+                    insert_scalar_enum_gen_fut(par, val, valstr, data_store.qu_insert_scalar_enum.clone(), scy)
+                }
                 String(val) => insert_scalar_gen_fut(par, val, data_store.qu_insert_scalar_string.clone(), scy),
                 Bool(val) => insert_scalar_gen_fut(par, val, data_store.qu_insert_scalar_bool.clone(), scy),
             }
@@ -760,8 +765,6 @@ pub fn insert_item_fut(
                 ts_msp: item.ts_msp,
                 ts_lsp: item.ts_lsp,
                 ts_net: item.ts_net,
-                ts_alt_1: item.ts_alt_1,
-                pulse: item.pulse,
                 do_insert,
                 stats: stats.clone(),
             };

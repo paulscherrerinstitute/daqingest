@@ -426,6 +426,24 @@ async fn check_event_tables(keyspace: &str, rett: RetentionTime, scy: &ScySessio
             tab.setup(scy).await?;
         }
     }
+    {
+        let tab = GenTwcsTab::new(
+            keyspace,
+            rett.table_prefix(),
+            format!("events_scalar_enum"),
+            &[
+                ("series", "bigint"),
+                ("ts_msp", "bigint"),
+                ("ts_lsp", "bigint"),
+                ("value", "smallint"),
+                ("valuestr", "text"),
+            ],
+            ["series", "ts_msp"],
+            ["ts_lsp"],
+            rett.ttl_events_d1(),
+        );
+        tab.setup(scy).await?;
+    }
     Ok(())
 }
 

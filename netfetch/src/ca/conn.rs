@@ -130,6 +130,18 @@ macro_rules! trace_event_incoming {
     };
 }
 
+fn dbg_chn_name(name: impl AsRef<str>) -> bool {
+    name.as_ref() == "SINSB02-KCOL-ACT:V-EY21700-MAN-ON-SP"
+}
+
+fn dbg_chn_cid(cid: Cid, conn: &CaConn) -> bool {
+    if let Some(name) = conn.name_by_cid(cid) {
+        dbg_chn_name(name)
+    } else {
+        false
+    }
+}
+
 #[derive(Debug, ThisError)]
 pub enum Error {
     NoProtocol,
@@ -156,6 +168,8 @@ pub enum Error {
     NoFreeCid,
     InsertQueues(#[from] scywr::insertqueues::Error),
     FutLogic,
+    MissingTimestamp,
+    EnumFetch(#[from] enumfetch::Error),
 }
 
 impl err::ToErr for Error {
@@ -431,6 +445,7 @@ struct CreatedState {
     shape: Shape,
     log_more: bool,
     name: String,
+    enum_str_table: Option<Vec<String>>,
 }
 
 impl CreatedState {
@@ -472,6 +487,7 @@ impl CreatedState {
             shape: Shape::Scalar,
             log_more: false,
             name: String::new(),
+            enum_str_table: None,
         }
     }
 
@@ -999,7 +1015,7 @@ impl CaConn {
     }
 
     fn new_self_ticker() -> Pin<Box<tokio::time::Sleep>> {
-        Box::pin(tokio::time::sleep(Duration::from_millis(500)))
+        Box::pin(tokio::time::sleep(Duration::from_millis(1500)))
     }
 
     fn proto(&mut self) -> Option<&mut CaProto> {
@@ -1144,13 +1160,11 @@ impl CaConn {
 
     fn handle_writer_establish_inner(&mut self, cid: Cid, writer: RtWriter) -> Result<(), Error> {
         trace!("handle_writer_establish_inner  {cid:?}");
+        let dbg_chn_cid = dbg_chn_cid(cid, self);
+        if dbg_chn_cid {
+            info!("handle_writer_establish_inner  {:?}", cid);
+        }
         let stnow = self.tmp_ts_poll.clone();
-        // At this point we have created the channel and created a writer for that type and sid.
-        // We do not yet monitor.
-        // TODO main objectives now:
-        // Store the writer with the channel state.
-        // Create a monitor for the channel.
-        // NOTE: must store the Writer even if not yet in Evented, we could also transition to Polled!
         if let Some(conf) = self.channels.get_mut(&cid) {
             // TODO refactor, should only execute this when required:
             let conf_poll_conf = conf.poll_conf();
@@ -1173,7 +1187,7 @@ impl CaConn {
                         cssid: st2.channel.cssid.clone(),
                         status: ChannelStatus::Opened,
                     });
-                    self.iqdqs.emit_status_item(item);
+                    self.iqdqs.emit_status_item(item)?;
                 }
                 if let Some((ivl,)) = conf_poll_conf {
                     let created_state = WritableState {
@@ -1204,7 +1218,9 @@ impl CaConn {
                         subid
                     };
                     {
-                        trace!("send out EventAdd for {cid:?}");
+                        if dbg_chn_cid {
+                            info!("send out EventAdd for {cid:?}");
+                        }
                         let ty = CaMsgTy::EventAdd(EventAdd {
                             sid: st2.channel.sid.to_u32(),
                             data_type: st2.channel.ca_dbr_type,
@@ -1322,6 +1338,9 @@ impl CaConn {
         // TODO  can I reuse emit_channel_info_insert_items ?
         trace!("channel_state_on_shutdown  channels {}", self.channels.len());
         for (_cid, conf) in &mut self.channels {
+            if dbg_chn_name(conf.conf.name()) {
+                info!("channel_state_on_shutdown {:?}", conf);
+            }
             let chst = &mut conf.state;
             match chst {
                 ChannelState::Init(cssid) => {
@@ -1443,6 +1462,7 @@ impl CaConn {
             // return Err(Error::with_msg_no_trace());
             return Ok(());
         };
+        let dbg_chn = dbg_chn_cid(cid, self);
         let ch_s = if let Some(x) = self.channels.get_mut(&cid) {
             &mut x.state
         } else {
@@ -1457,9 +1477,14 @@ impl CaConn {
             // return Err(Error::with_msg_no_trace());
             return Ok(());
         };
-        trace!("handle_event_add_res {:?}", ch_s.cssid());
+        if dbg_chn {
+            info!("handle_event_add_res  {:?}  {:?}", cid, ev);
+        }
         match ch_s {
             ChannelState::Writable(st) => {
+                if dbg_chn {
+                    info!("handle_event_add_res  Writable  {:?}  {:?}", cid, ev);
+                }
                 // debug!(
                 //     "CaConn sees  data_count {}  payload_len {}",
                 //     ev.data_count, ev.payload_len
@@ -1664,7 +1689,7 @@ impl CaConn {
                     ty: CaMsgTy::ReadNotifyRes(ev),
                     ts: camsg_ts,
                 };
-                fut.as_mut().camsg(camsg, self);
+                fut.as_mut().camsg(camsg, self)?;
                 Ok(())
             } else {
                 Err(Error::FutLogic)
@@ -1781,6 +1806,49 @@ impl CaConn {
         Ok(())
     }
 
+    fn convert_event_data(crst: &mut CreatedState, data: super::proto::CaDataValue) -> Result<DataValue, Error> {
+        use super::proto::CaDataValue;
+        use scywr::iteminsertqueue::DataValue;
+        let ret = match data {
+            CaDataValue::Scalar(val) => DataValue::Scalar({
+                use super::proto::CaDataScalarValue;
+                use scywr::iteminsertqueue::ScalarValue;
+                match val {
+                    CaDataScalarValue::I8(x) => ScalarValue::I8(x),
+                    CaDataScalarValue::I16(x) => ScalarValue::I16(x),
+                    CaDataScalarValue::I32(x) => ScalarValue::I32(x),
+                    CaDataScalarValue::F32(x) => ScalarValue::F32(x),
+                    CaDataScalarValue::F64(x) => ScalarValue::F64(x),
+                    CaDataScalarValue::Enum(x) => ScalarValue::Enum(
+                        x,
+                        crst.enum_str_table.as_ref().map_or_else(
+                            || String::from("missingstrings"),
+                            |map| {
+                                map.get(x as usize)
+                                    .map_or_else(|| String::from("undefined"), String::from)
+                            },
+                        ),
+                    ),
+                    CaDataScalarValue::String(x) => ScalarValue::String(x),
+                    CaDataScalarValue::Bool(x) => ScalarValue::Bool(x),
+                }
+            }),
+            CaDataValue::Array(val) => DataValue::Array({
+                use super::proto::CaDataArrayValue;
+                use scywr::iteminsertqueue::ArrayValue;
+                match val {
+                    CaDataArrayValue::I8(x) => ArrayValue::I8(x),
+                    CaDataArrayValue::I16(x) => ArrayValue::I16(x),
+                    CaDataArrayValue::I32(x) => ArrayValue::I32(x),
+                    CaDataArrayValue::F32(x) => ArrayValue::F32(x),
+                    CaDataArrayValue::F64(x) => ArrayValue::F64(x),
+                    CaDataArrayValue::Bool(x) => ArrayValue::Bool(x),
+                }
+            }),
+        };
+        Ok(ret)
+    }
+
     fn event_add_ingest(
         payload_len: u32,
         value: CaEventValue,
@@ -1792,20 +1860,7 @@ impl CaConn {
         stnow: SystemTime,
         stats: &CaConnStats,
     ) -> Result<(), Error> {
-        if crst.log_more {
-            info!(
-                "event_add_ingest  payload_len {}  value {:?}  {}  {}",
-                payload_len, value, value.status, value.severity
-            );
-        } else {
-            trace_event_incoming!(
-                "event_add_ingest  payload_len {}  value {:?}  {}  {}",
-                payload_len,
-                value,
-                value.status,
-                value.severity
-            );
-        }
+        trace_event_incoming!("event_add_ingest  payload_len {}  value {:?}", payload_len, value);
         crst.ts_alive_last = tsnow;
         crst.ts_activity_last = tsnow;
         crst.st_activity_last = stnow;
@@ -1818,7 +1873,7 @@ impl CaConn {
             let epoch = stnow.duration_since(std::time::UNIX_EPOCH).unwrap_or(Duration::ZERO);
             epoch.as_secs() * SEC + epoch.subsec_nanos() as u64
         };
-        let ts = value.ts;
+        let ts = value.ts().ok_or_else(|| Error::MissingTimestamp)?;
         let ts_diff = ts.abs_diff(ts_local);
         stats.ca_ts_off().ingest((ts_diff / MS) as u32);
         {
@@ -1827,7 +1882,7 @@ impl CaConn {
             crst.insert_item_ivl_ema.tick(tsnow);
             let ts_ioc = TsNano::from_ns(ts);
             let ts_local = TsNano::from_ns(ts_local);
-            let val: DataValue = value.data.into();
+            let val = Self::convert_event_data(crst, value.data)?;
             // binwriter.ingest(ts_ioc, ts_local, &val, iqdqs)?;
             {
                 let ((dwst, dwmt, dwlt),) = writer.write(ts_ioc, ts_local, val, iqdqs)?;
@@ -2346,9 +2401,9 @@ impl CaConn {
 
         let log_more = match &scalar_type {
             ScalarType::Enum => {
-                if cssid.id() % 20 == 14 {
+                if cssid.id() % 60 == 14 {
                     let name = conf.conf.name();
-                    info!("ENUM  {}", name);
+                    // info!("ENUM  {}", name);
                     true
                 } else {
                     false
@@ -2392,18 +2447,23 @@ impl CaConn {
             shape: shape.clone(),
             log_more,
             name: conf.conf.name().into(),
+            enum_str_table: None,
         };
+        if dbg_chn_name(created_state.name()) {
+            info!(
+                "handle_create_chan_res  {:?}  {}",
+                created_state.cid,
+                created_state.name()
+            );
+        }
         match &scalar_type {
             ScalarType::Enum => {
-                if created_state.log_more {
-                    let min_quiets = conf.conf.min_quiets();
-                    let fut = enumfetch::EnumFetch::new(created_state, self, min_quiets);
-                    // TODO should always check if the slot is free.
-                    let ioid = fut.ioid();
-                    let x = Box::pin(fut);
-                    self.handler_by_ioid.insert(ioid, Some(x));
-                } else {
-                }
+                let min_quiets = conf.conf.min_quiets();
+                let fut = enumfetch::EnumFetch::new(created_state, self, min_quiets);
+                // TODO should always check if the slot is free.
+                let ioid = fut.ioid();
+                let x = Box::pin(fut);
+                self.handler_by_ioid.insert(ioid, Some(x));
             }
             _ => {
                 *chst = ChannelState::MakingSeriesWriter(MakingSeriesWriterState {

@@ -4,6 +4,7 @@ use err::ThisError;
 use futures_util::Stream;
 use log::*;
 use netpod::timeunits::*;
+use netpod::TsNano;
 use slidebuf::SlideBuf;
 use stats::CaProtoStats;
 use std::collections::VecDeque;
@@ -252,26 +253,10 @@ pub enum CaDataScalarValue {
     I32(i32),
     F32(f32),
     F64(f64),
-    Enum(i16, String),
+    Enum(i16),
     String(String),
     // TODO remove, CA has no bool, make new enum for other use cases.
     Bool(bool),
-}
-
-impl From<CaDataScalarValue> for scywr::iteminsertqueue::ScalarValue {
-    fn from(val: CaDataScalarValue) -> Self {
-        use scywr::iteminsertqueue::ScalarValue;
-        match val {
-            CaDataScalarValue::I8(x) => ScalarValue::I8(x),
-            CaDataScalarValue::I16(x) => ScalarValue::I16(x),
-            CaDataScalarValue::I32(x) => ScalarValue::I32(x),
-            CaDataScalarValue::F32(x) => ScalarValue::F32(x),
-            CaDataScalarValue::F64(x) => ScalarValue::F64(x),
-            CaDataScalarValue::Enum(x, y) => ScalarValue::Enum(x, y),
-            CaDataScalarValue::String(x) => ScalarValue::String(x),
-            CaDataScalarValue::Bool(x) => ScalarValue::Bool(x),
-        }
-    }
 }
 
 #[derive(Clone, Debug)]
@@ -285,42 +270,50 @@ pub enum CaDataArrayValue {
     Bool(Vec<bool>),
 }
 
-impl From<CaDataArrayValue> for scywr::iteminsertqueue::ArrayValue {
-    fn from(val: CaDataArrayValue) -> Self {
-        use scywr::iteminsertqueue::ArrayValue;
-        match val {
-            CaDataArrayValue::I8(x) => ArrayValue::I8(x),
-            CaDataArrayValue::I16(x) => ArrayValue::I16(x),
-            CaDataArrayValue::I32(x) => ArrayValue::I32(x),
-            CaDataArrayValue::F32(x) => ArrayValue::F32(x),
-            CaDataArrayValue::F64(x) => ArrayValue::F64(x),
-            CaDataArrayValue::Bool(x) => ArrayValue::Bool(x),
-        }
-    }
-}
-
 #[derive(Clone, Debug)]
 pub enum CaDataValue {
     Scalar(CaDataScalarValue),
     Array(CaDataArrayValue),
 }
 
-impl From<CaDataValue> for scywr::iteminsertqueue::DataValue {
-    fn from(value: CaDataValue) -> Self {
-        use scywr::iteminsertqueue::DataValue;
-        match value {
-            CaDataValue::Scalar(x) => DataValue::Scalar(x.into()),
-            CaDataValue::Array(x) => DataValue::Array(x.into()),
+#[derive(Clone, Debug)]
+pub struct CaEventValue {
+    pub data: CaDataValue,
+    pub meta: CaMetaValue,
+}
+
+impl CaEventValue {
+    // Timestamp ns from unix epoch.
+    pub fn ts(&self) -> Option<u64> {
+        match &self.meta {
+            CaMetaValue::CaMetaTime(x) => {
+                let ts = SEC * (x.ca_secs as u64 + EPICS_EPOCH_OFFSET) + x.ca_nanos as u64;
+                Some(ts)
+            }
+            CaMetaValue::CaMetaVariants(_) => None,
         }
     }
 }
 
 #[derive(Clone, Debug)]
-pub struct CaEventValue {
-    pub ts: u64,
+pub enum CaMetaValue {
+    CaMetaTime(CaMetaTime),
+    CaMetaVariants(CaMetaVariants),
+}
+
+#[derive(Clone, Debug)]
+pub struct CaMetaTime {
     pub status: u16,
     pub severity: u16,
-    pub data: CaDataValue,
+    pub ca_secs: u32,
+    pub ca_nanos: u32,
+}
+
+#[derive(Clone, Debug)]
+pub struct CaMetaVariants {
+    pub status: u16,
+    pub severity: u16,
+    pub variants: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -637,6 +630,18 @@ macro_rules! convert_scalar_value {
     }};
 }
 
+macro_rules! convert_scalar_enum_value {
+    ($st:ty, $buf:expr) => {{
+        type ST = $st;
+        const STL: usize = std::mem::size_of::<ST>();
+        if $buf.len() < STL {
+            return Err(Error::NotEnoughPayload);
+        }
+        let v = ST::from_be_bytes($buf[..STL].try_into().map_err(|_| Error::BadSlice)?);
+        CaDataValue::Scalar(CaDataScalarValue::Enum(v))
+    }};
+}
+
 macro_rules! convert_wave_value {
     ($st:ty, $var:ident, $n:expr, $buf:expr) => {{
         type ST = $st;
@@ -740,7 +745,7 @@ impl CaMsg {
             CaScalarType::I32 => convert_scalar_value!(i32, I32, buf),
             CaScalarType::F32 => convert_scalar_value!(f32, F32, buf),
             CaScalarType::F64 => convert_scalar_value!(f64, F64, buf),
-            CaScalarType::Enum => convert_scalar_value!(i16, I16, buf),
+            CaScalarType::Enum => convert_scalar_enum_value!(i16, buf),
             CaScalarType::String => {
                 // TODO constrain string length to the CA `data_count`.
                 let mut ixn = buf.len();
@@ -916,37 +921,55 @@ impl CaMsg {
     fn extract_ca_data_value(hi: &HeadInfo, payload: &[u8], array_truncate: usize) -> Result<CaEventValue, Error> {
         use netpod::Shape;
         let ca_dbr_ty = CaDbrType::from_ca_u16(hi.data_type)?;
-        let ca_status;
-        let ca_severity;
-        let ca_secs;
-        let ca_nanos;
-        let ca_sh;
-        let data_offset = match &ca_dbr_ty.meta {
+        let ca_sh = Shape::from_ca_count(hi.data_count() as _).map_err(|_| {
+            error!("BadCaCount  {hi:?}");
+            Error::BadCaCount
+        })?;
+        let (meta, data_offset) = match &ca_dbr_ty.meta {
             CaDbrMetaType::Plain => return Err(Error::MismatchDbrTimeType),
             CaDbrMetaType::Status => return Err(Error::MismatchDbrTimeType),
             CaDbrMetaType::Time => {
-                ca_status = u16::from_be_bytes(payload[0..2].try_into().map_err(|_| Error::BadSlice)?);
-                ca_severity = u16::from_be_bytes(payload[2..4].try_into().map_err(|_| Error::BadSlice)?);
-                ca_secs = u32::from_be_bytes(payload[4..8].try_into().map_err(|_| Error::BadSlice)?);
-                ca_nanos = u32::from_be_bytes(payload[8..12].try_into().map_err(|_| Error::BadSlice)?);
-                ca_sh = Shape::from_ca_count(hi.data_count() as _).map_err(|_| {
-                    error!("BadCaCount  {hi:?}");
-                    Error::BadCaCount
-                })?;
-                12
+                let status = u16::from_be_bytes(payload[0..2].try_into().map_err(|_| Error::BadSlice)?);
+                let severity = u16::from_be_bytes(payload[2..4].try_into().map_err(|_| Error::BadSlice)?);
+                let ca_secs = u32::from_be_bytes(payload[4..8].try_into().map_err(|_| Error::BadSlice)?);
+                let ca_nanos = u32::from_be_bytes(payload[8..12].try_into().map_err(|_| Error::BadSlice)?);
+                let meta = CaMetaValue::CaMetaTime(CaMetaTime {
+                    status,
+                    severity,
+                    ca_secs,
+                    ca_nanos,
+                });
+                (meta, 12)
             }
             CaDbrMetaType::Ctrl => {
-                ca_status = u16::from_be_bytes(payload[0..2].try_into().map_err(|_| Error::BadSlice)?);
-                ca_severity = u16::from_be_bytes(payload[2..4].try_into().map_err(|_| Error::BadSlice)?);
-                let st = std::time::SystemTime::now();
-                let dt = st.duration_since(std::time::SystemTime::UNIX_EPOCH).unwrap();
-                ca_secs = (dt.as_secs() - EPICS_EPOCH_OFFSET) as u32;
-                ca_nanos = dt.subsec_nanos();
-                ca_sh = Shape::Scalar;
+                let status = u16::from_be_bytes(payload[0..2].try_into().map_err(|_| Error::BadSlice)?);
+                let severity = u16::from_be_bytes(payload[2..4].try_into().map_err(|_| Error::BadSlice)?);
                 let varcnt = u16::from_be_bytes(payload[4..6].try_into().map_err(|_| Error::BadSlice)?);
+                if varcnt > 16 {
+                    return Err(Error::BadCaCount);
+                }
                 let s = String::from_utf8_lossy(&payload[6..6 + 26 * 16]);
-                info!("enum variants debug  {varcnt}  {s}");
-                2 + 2 + 2 + 26 * 16
+                let mut variants = Vec::new();
+                for i in 0..varcnt {
+                    let p = (6 + 26 * i) as usize;
+                    let s1 = std::ffi::CStr::from_bytes_until_nul(&payload[p..p + 26])
+                        .map_or(String::from("encodingerror"), |x| {
+                            x.to_str().map_or(String::from("encodingerror"), |x| x.to_string())
+                        });
+                    let s1 = if s1.len() >= 26 {
+                        String::from("toolongerror")
+                    } else {
+                        s1
+                    };
+                    variants.push(s1);
+                }
+                // info!("enum variants debug  {varcnt}  {s}  {variants:?}");
+                let meta = CaMetaValue::CaMetaVariants(CaMetaVariants {
+                    status,
+                    severity,
+                    variants,
+                });
+                (meta, 2 + 2 + 2 + 26 * 16)
             }
         };
         let meta_padding = match ca_dbr_ty.meta {
@@ -988,13 +1011,7 @@ impl CaMsg {
                 err::todoval()
             }
         };
-        let ts = SEC * (ca_secs as u64 + EPICS_EPOCH_OFFSET) + ca_nanos as u64;
-        let value = CaEventValue {
-            ts,
-            status: ca_status,
-            severity: ca_severity,
-            data: value,
-        };
+        let value = CaEventValue { data: value, meta };
         Ok(value)
     }
 }
