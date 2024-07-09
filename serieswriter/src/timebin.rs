@@ -78,6 +78,7 @@ macro_rules! trace_push {
 }
 
 #[derive(Debug, ThisError)]
+#[cstm(name = "SerieswriterTimebin")]
 pub enum Error {
     UnexpectedContainer,
     PatchWithoutBins,

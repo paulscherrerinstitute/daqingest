@@ -26,6 +26,7 @@ use std::time::Duration;
 use std::time::SystemTime;
 
 #[derive(Debug, ThisError)]
+#[cstm(name = "SerieswriterEstablishWorker")]
 pub enum Error {
     Postgres(#[from] dbpg::err::Error),
     PostgresSchema(#[from] dbpg::schema::Error),

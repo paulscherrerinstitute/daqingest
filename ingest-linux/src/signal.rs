@@ -3,6 +3,7 @@ use std::mem::MaybeUninit;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
+#[cstm(name = "LinuxSignal")]
 pub enum Error {
     SignalHandlerSet,
     SignalHandlerUnset,

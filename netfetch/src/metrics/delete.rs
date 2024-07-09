@@ -46,6 +46,7 @@ macro_rules! debug_cql {
 }
 
 #[derive(Debug, ThisError)]
+#[cstm(name = "HttpDelete")]
 pub enum Error {
     Logic,
     MissingRetentionTime,

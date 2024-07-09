@@ -14,6 +14,7 @@ use std::collections::VecDeque;
 use std::pin::Pin;
 
 #[derive(Debug, ThisError)]
+#[cstm(name = "ScyllaInsertQueue")]
 pub enum Error {
     QueuePush,
     #[error("ChannelSend({0}, {1})")]

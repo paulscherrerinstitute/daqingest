@@ -11,6 +11,7 @@ use std::pin::Pin;
 use std::time::Instant;
 
 #[derive(Debug, ThisError)]
+#[cstm(name = "NetfetchEnumfetch")]
 pub enum Error {
     MissingState,
 }

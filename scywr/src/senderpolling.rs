@@ -12,8 +12,10 @@ use std::task::Poll;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
+#[cstm(name = "SenderPolling")]
 pub enum Error<T> {
     NoSendInProgress,
+    #[error("Closed")]
     Closed(T),
 }
 

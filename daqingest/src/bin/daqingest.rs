@@ -72,6 +72,12 @@ async fn main_run_inner(opts: DaqIngestOpts) -> Result<(), Error> {
                                 .await
                                 .map_err(Error::from_string)?;
                         }
+                        DbDataSub::RemoveOlderAll(params) => {
+                            info!("RemoveOlderAll  {:?}  {:?}", params, scyconf);
+                            daqingest::tools::remove_older_all(params, &scyconf)
+                                .await
+                                .map_err(Error::from_string)?;
+                        }
                         DbDataSub::FindOlder(params) => {
                             info!("FindOlder  {:?}  {:?}", pgconf, scyconf);
                             daqingest::tools::find_older_msp(u.backend, params, &pgconf, &scyconf)

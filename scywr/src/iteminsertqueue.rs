@@ -36,6 +36,7 @@ use std::task::Poll;
 use std::time::SystemTime;
 
 #[derive(Debug, ThisError)]
+#[cstm(name = "ScyllaItemInsertQueue")]
 pub enum Error {
     DbTimeout,
     DbOverload,

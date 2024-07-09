@@ -10,6 +10,7 @@ use scylla::transport::errors::NewSessionError;
 use std::sync::Arc;
 
 #[derive(Debug, ThisError)]
+#[cstm(name = "ScyllaSession")]
 pub enum Error {
     NewSession(String),
 }

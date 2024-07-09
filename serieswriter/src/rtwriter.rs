@@ -28,6 +28,7 @@ macro_rules! trace_rt_decision {
 }
 
 #[derive(Debug, ThisError)]
+#[cstm(name = "SerieswriterRtwriter")]
 pub enum Error {
     SeriesLookupError,
     SeriesWriter(#[from] crate::writer::Error),

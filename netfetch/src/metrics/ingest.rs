@@ -64,6 +64,7 @@ macro_rules! trace_queues {
 }
 
 #[derive(Debug, ThisError)]
+#[cstm(name = "MetricsIngest")]
 pub enum Error {
     UnsupportedContentType,
     Logic,

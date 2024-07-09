@@ -143,6 +143,7 @@ fn dbg_chn_cid(cid: Cid, conn: &CaConn) -> bool {
 }
 
 #[derive(Debug, ThisError)]
+#[cstm(name = "NetfetchConn")]
 pub enum Error {
     NoProtocol,
     ProtocolError,
@@ -263,6 +264,12 @@ mod ser_instant {
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 struct Cid(pub u32);
+
+impl fmt::Display for Cid {
+    fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+        write!(fmt, "Cid({})", self.0)
+    }
+}
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 struct Subid(pub u32);
@@ -1819,16 +1826,17 @@ impl CaConn {
                     CaDataScalarValue::I32(x) => ScalarValue::I32(x),
                     CaDataScalarValue::F32(x) => ScalarValue::F32(x),
                     CaDataScalarValue::F64(x) => ScalarValue::F64(x),
-                    CaDataScalarValue::Enum(x) => ScalarValue::Enum(
-                        x,
-                        crst.enum_str_table.as_ref().map_or_else(
+                    CaDataScalarValue::Enum(x) => ScalarValue::Enum(x, {
+                        let conv = crst.enum_str_table.as_ref().map_or_else(
                             || String::from("missingstrings"),
                             |map| {
                                 map.get(x as usize)
                                     .map_or_else(|| String::from("undefined"), String::from)
                             },
-                        ),
-                    ),
+                        );
+                        info!("convert_event_data  {}  {:?}", crst.name(), conv);
+                        conv
+                    }),
                     CaDataScalarValue::String(x) => ScalarValue::String(x),
                     CaDataScalarValue::Bool(x) => ScalarValue::Bool(x),
                 }

@@ -28,6 +28,7 @@ macro_rules! trace_binning {
 }
 
 #[derive(Debug, ThisError)]
+#[cstm(name = "SerieswriterBinwriter")]
 pub enum Error {
     SeriesLookupError,
     SeriesWriter(#[from] crate::writer::Error),

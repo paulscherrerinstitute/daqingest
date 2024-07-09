@@ -5,6 +5,7 @@ use log::*;
 use std::net::SocketAddrV4;
 
 #[derive(Debug, ThisError)]
+#[cstm(name = "PgFindAddr")]
 pub enum Error {
     Postgres(#[from] tokio_postgres::Error),
     IocAddrNotFound,

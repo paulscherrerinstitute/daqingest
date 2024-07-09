@@ -9,3 +9,6 @@ libc = "0.2"
 thiserror = "=0.0.1"
 log = { path = "../log" }
 taskrun = { path = "../../daqbuffer/crates/taskrun" }
+
+[patch.crates-io]
+thiserror = { git = "https://github.com/dominikwerder/thiserror.git", branch = "cstm" }

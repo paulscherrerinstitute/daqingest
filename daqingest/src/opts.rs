@@ -131,6 +131,7 @@ pub struct DbData {
 #[derive(Debug, clap::Parser)]
 pub enum DbDataSub {
     RemoveOlder(RemoveOlder),
+    RemoveOlderAll(RemoveOlderAll),
     FindOlder(FindOlder),
 }
 
@@ -140,6 +141,12 @@ pub struct RemoveOlder {
     pub date: String,
     #[arg(long)]
     pub channel_regex: String,
+}
+
+#[derive(Debug, clap::Parser)]
+pub struct RemoveOlderAll {
+    #[arg(long)]
+    pub date: String,
 }
 
 #[derive(Debug, clap::Parser)]

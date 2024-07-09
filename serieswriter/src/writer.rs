@@ -18,6 +18,7 @@ use std::collections::VecDeque;
 use std::time::SystemTime;
 
 #[derive(Debug, ThisError)]
+#[cstm(name = "SerieswriterWriter")]
 pub enum Error {
     DbPgSid(#[from] dbpg::seriesid::Error),
     ChannelSendError,

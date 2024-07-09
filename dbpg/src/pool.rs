@@ -9,6 +9,7 @@ use log::*;
 use netpod::Database;
 
 #[derive(Debug, ThisError)]
+#[cstm(name = "PgPool")]
 pub enum Error {
     Postgres(#[from] tokio_postgres::Error),
     EndOfPool,

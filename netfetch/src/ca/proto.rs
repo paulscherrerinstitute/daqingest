@@ -20,6 +20,7 @@ use tokio::io::AsyncWrite;
 use tokio::io::ReadBuf;
 
 #[derive(Debug, ThisError)]
+#[cstm(name = "NetfetchCaProto")]
 pub enum Error {
     NetBuf(#[from] netbuf::Error),
     SlideBuf(#[from] slidebuf::Error),

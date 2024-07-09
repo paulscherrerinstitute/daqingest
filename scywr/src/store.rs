@@ -10,6 +10,7 @@ use scylla::Session as ScySession;
 use std::sync::Arc;
 
 #[derive(Debug, ThisError)]
+#[cstm(name = "ScyllaStore")]
 pub enum Error {
     NewSessionError(#[from] NewSessionError),
     QueryError(#[from] QueryError),

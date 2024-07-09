@@ -17,6 +17,7 @@ use std::time::SystemTime;
 use taskrun::tokio::net::UdpSocket;
 
 #[derive(Debug, ThisError)]
+#[cstm(name = "NetfetchBeacons")]
 pub enum Error {
     Io(#[from] std::io::Error),
     SeriesWriter(#[from] serieswriter::writer::Error),

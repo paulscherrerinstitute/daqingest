@@ -19,6 +19,7 @@ use std::time::Instant;
 use std::time::SystemTime;
 
 #[derive(Debug, ThisError)]
+#[cstm(name = "HttpPostingest")]
 pub enum Error {
     Msg,
     SeriesWriter(#[from] serieswriter::writer::Error),

@@ -4,6 +4,7 @@ use err::ThisError;
 use log::*;
 
 #[derive(Debug, ThisError)]
+#[cstm(name = "PgSchema")]
 pub enum Error {
     Postgres(#[from] tokio_postgres::Error),
     LogicError(String),

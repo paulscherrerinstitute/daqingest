@@ -16,6 +16,7 @@ impl fmt::Display for TestError {
 impl std::error::Error for TestError {}
 
 #[derive(Debug, ThisError)]
+#[cstm(name = "PgTestErr")]
 enum Error {
     Postgres(#[from] tokio_postgres::Error),
     Dummy(#[from] TestError),

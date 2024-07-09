@@ -84,6 +84,7 @@ pub trait DropMark {
     fn field(&self) -> &Value;
 }
 
+#[allow(unused)]
 pub struct DropGuard<'a> {
     mark: &'a Value,
 }

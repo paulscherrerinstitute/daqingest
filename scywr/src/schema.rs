@@ -14,6 +14,7 @@ use std::fmt;
 use std::time::Duration;
 
 #[derive(Debug, ThisError)]
+#[cstm(name = "ScyllaSchema")]
 pub enum Error {
     NoKeyspaceChosen,
     Fmt(#[from] fmt::Error),
@@ -268,14 +269,29 @@ impl GenTwcsTab {
         }
         if let Some(row) = rows.get(0) {
             let mut set_opts = Vec::new();
+            info!(
+                "{:20}  vs  {:20}  {:20}  {:20}",
+                row.0,
+                self.default_time_to_live.as_secs(),
+                self.keyspace,
+                self.name,
+            );
             if row.0 != self.default_time_to_live.as_secs() {
-                set_opts.push(format!(
-                    "default_time_to_live = {}",
-                    self.default_time_to_live.as_secs()
-                ));
+                if false {
+                    set_opts.push(format!(
+                        "default_time_to_live = {}",
+                        self.default_time_to_live.as_secs()
+                    ));
+                } else {
+                    info!("mismatch default_time_to_live");
+                }
             }
             if row.1 != self.gc_grace.as_secs() {
-                set_opts.push(format!("gc_grace_seconds = {}", self.gc_grace.as_secs()));
+                if false {
+                    set_opts.push(format!("gc_grace_seconds = {}", self.gc_grace.as_secs()));
+                } else {
+                    info!("mismatch gc_grace_seconds");
+                }
             }
             if row.2 != self.compaction_options() {
                 let params: Vec<_> = self
@@ -284,11 +300,15 @@ impl GenTwcsTab {
                     .map(|(k, v)| format!("'{k}': '{v}'"))
                     .collect();
                 let params = params.join(", ");
-                set_opts.push(format!("compaction = {{ {} }}", params));
+                if false {
+                    set_opts.push(format!("compaction = {{ {} }}", params));
+                } else {
+                    info!("mismatch compaction");
+                }
             }
             if set_opts.len() != 0 {
                 let cql = format!(concat!("alter table {} with {}"), self.name(), set_opts.join(" and "));
-                debug!("{cql}");
+                info!("{cql}");
                 scy.query(cql, ()).await?;
             }
         } else {

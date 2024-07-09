@@ -43,6 +43,7 @@ macro_rules! trace3 {
 }
 
 #[derive(Debug, ThisError)]
+#[cstm(name = "PgSeries")]
 pub enum Error {
     Postgres(#[from] tokio_postgres::Error),
     CreateSeriesFail,
