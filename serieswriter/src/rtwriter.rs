@@ -12,7 +12,6 @@ use netpod::TsNano;
 use scywr::insertqueues::InsertDeques;
 use scywr::iteminsertqueue::DataValue;
 use scywr::iteminsertqueue::QueryItem;
-use series::ChannelStatusSeriesId;
 use series::SeriesId;
 use std::collections::VecDeque;
 use std::time::Duration;
@@ -55,7 +54,6 @@ pub struct RtWriter {
 impl RtWriter {
     pub async fn new(
         channel_info_tx: Sender<ChannelInfoQuery>,
-        cssid: ChannelStatusSeriesId,
         backend: String,
         channel: String,
         scalar_type: ScalarType,
@@ -82,22 +80,50 @@ impl RtWriter {
             res.series.to_series()
         };
         let state_st = {
-            let writer =
-                SeriesWriter::establish_with_cssid_sid(cssid, sid, scalar_type.clone(), shape.clone(), stnow).await?;
+            let writer = SeriesWriter::establish_with_sid(sid, stnow)?;
             State { writer, last_ins: None }
         };
         let state_mt = {
-            let writer =
-                SeriesWriter::establish_with_cssid_sid(cssid, sid, scalar_type.clone(), shape.clone(), stnow).await?;
+            let writer = SeriesWriter::establish_with_sid(sid, stnow)?;
             State { writer, last_ins: None }
         };
         let state_lt = {
-            let writer =
-                SeriesWriter::establish_with_cssid_sid(cssid, sid, scalar_type.clone(), shape.clone(), stnow).await?;
+            let writer = SeriesWriter::establish_with_sid(sid, stnow)?;
             State { writer, last_ins: None }
         };
         let ret = Self {
             sid,
+            scalar_type,
+            shape,
+            state_st,
+            state_mt,
+            state_lt,
+            min_quiets,
+        };
+        Ok(ret)
+    }
+
+    pub fn new_with_series_id(
+        series: SeriesId,
+        scalar_type: ScalarType,
+        shape: Shape,
+        min_quiets: MinQuiets,
+        stnow: SystemTime,
+    ) -> Result<Self, Error> {
+        let state_st = {
+            let writer = SeriesWriter::establish_with_sid(series, stnow)?;
+            State { writer, last_ins: None }
+        };
+        let state_mt = {
+            let writer = SeriesWriter::establish_with_sid(series, stnow)?;
+            State { writer, last_ins: None }
+        };
+        let state_lt = {
+            let writer = SeriesWriter::establish_with_sid(series, stnow)?;
+            State { writer, last_ins: None }
+        };
+        let ret = Self {
+            sid: series,
             scalar_type,
             shape,
             state_st,
@@ -120,6 +146,10 @@ impl RtWriter {
         self.shape.clone()
     }
 
+    pub fn min_quiets(&self) -> MinQuiets {
+        self.min_quiets.clone()
+    }
+
     pub fn write(
         &mut self,
         ts_ioc: TsNano,
@@ -128,9 +158,6 @@ impl RtWriter {
         iqdqs: &mut InsertDeques,
     ) -> Result<((bool, bool, bool),), Error> {
         let sid = self.sid;
-        if sid.id() == 6050300124140774549 {
-            info!("write {:?}", val);
-        }
         let (did_write_st,) = Self::write_inner(
             "ST",
             self.min_quiets.st,

@@ -269,13 +269,6 @@ impl GenTwcsTab {
         }
         if let Some(row) = rows.get(0) {
             let mut set_opts = Vec::new();
-            info!(
-                "{:20}  vs  {:20}  {:20}  {:20}",
-                row.0,
-                self.default_time_to_live.as_secs(),
-                self.keyspace,
-                self.name,
-            );
             if row.0 != self.default_time_to_live.as_secs() {
                 if false {
                     set_opts.push(format!(
@@ -284,6 +277,13 @@ impl GenTwcsTab {
                     ));
                 } else {
                     info!("mismatch default_time_to_live");
+                    info!(
+                        "{:20}  vs  {:20}  {:20}  {:20}",
+                        row.0,
+                        self.default_time_to_live.as_secs(),
+                        self.keyspace,
+                        self.name,
+                    );
                 }
             }
             if row.1 != self.gc_grace.as_secs() {
@@ -457,6 +457,40 @@ async fn check_event_tables(keyspace: &str, rett: RetentionTime, scy: &ScySessio
                 ("ts_lsp", "bigint"),
                 ("value", "smallint"),
                 ("valuestr", "text"),
+            ],
+            ["series", "ts_msp"],
+            ["ts_lsp"],
+            rett.ttl_events_d1(),
+        );
+        tab.setup(scy).await?;
+    }
+    {
+        let tab = GenTwcsTab::new(
+            keyspace,
+            rett.table_prefix(),
+            format!("events_scalar_status"),
+            &[
+                ("series", "bigint"),
+                ("ts_msp", "bigint"),
+                ("ts_lsp", "bigint"),
+                ("value", "smallint"),
+            ],
+            ["series", "ts_msp"],
+            ["ts_lsp"],
+            rett.ttl_events_d1(),
+        );
+        tab.setup(scy).await?;
+    }
+    {
+        let tab = GenTwcsTab::new(
+            keyspace,
+            rett.table_prefix(),
+            format!("events_scalar_severity"),
+            &[
+                ("series", "bigint"),
+                ("ts_msp", "bigint"),
+                ("ts_lsp", "bigint"),
+                ("value", "smallint"),
             ],
             ["series", "ts_msp"],
             ["ts_lsp"],

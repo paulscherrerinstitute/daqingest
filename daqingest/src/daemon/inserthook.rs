@@ -2,8 +2,6 @@ use crate::daemon::PRINT_ACTIVE_INTERVAL;
 use async_channel::Receiver;
 use async_channel::Sender;
 use log::*;
-use netpod::ScalarType;
-use netpod::Shape;
 use scywr::iteminsertqueue::QueryItem;
 use std::collections::BTreeMap;
 use std::time::Instant;
@@ -26,22 +24,17 @@ pub async fn active_channel_insert_hook_worker(rx: Receiver<QueryItem>, tx: Send
         //trace!("insert queue item {item:?}");
         match &item {
             QueryItem::Insert(item) => {
-                let shape_kind = match &item.shape {
-                    Shape::Scalar => 0 as u32,
-                    Shape::Wave(_) => 1,
-                    Shape::Image(_, _) => 2,
-                };
-                if let ScalarType::STRING = item.scalar_type {}
+                // TODO match on the QueryItem itself
+                let shape_kind = 0 as u8;
                 histo
                     .entry(item.series.clone())
-                    .and_modify(|(c, msp, lsp, pulse, _shape_kind)| {
+                    .and_modify(|(c, msp, lsp, _shape_kind)| {
                         *c += 1;
                         *msp = item.ts_msp;
                         *lsp = item.ts_lsp;
-                        *pulse = item.pulse;
                         // TODO should check that shape_kind stays the same.
                     })
-                    .or_insert((0 as usize, item.ts_msp, item.ts_lsp, item.pulse, shape_kind));
+                    .or_insert((1 as u64, item.ts_msp, item.ts_lsp, shape_kind));
             }
             _ => {}
         }
@@ -57,32 +50,16 @@ pub async fn active_channel_insert_hook_worker(rx: Receiver<QueryItem>, tx: Send
             printed_last = tsnow;
             let mut all: Vec<_> = histo
                 .iter()
-                .map(|(k, (c, msp, lsp, pulse, shape_kind))| {
-                    (usize::MAX - *c, k.clone(), *msp, *lsp, *pulse, *shape_kind)
-                })
+                .map(|(k, (c, msp, lsp, shape_kind))| (u64::MAX - *c, k.clone(), *msp, *lsp, *shape_kind))
                 .collect();
             all.sort_unstable();
             info!("Active scalar");
-            for (c, sid, msp, lsp, pulse, _shape_kind) in all.iter().filter(|x| x.5 == 0).take(6) {
-                info!(
-                    "{:10}  {:20}  {:14}  {:20}  {:?}",
-                    usize::MAX - c,
-                    msp.to_u64(),
-                    lsp.ns(),
-                    pulse,
-                    sid
-                );
+            for (c, sid, msp, lsp, _shape_kind) in all.iter().filter(|x| x.4 == 0).take(6) {
+                info!("{:10}  {:20}  {:14}  {:?}", u64::MAX - c, msp.to_u64(), lsp.ns(), sid);
             }
             info!("Active wave");
-            for (c, sid, msp, lsp, pulse, _shape_kind) in all.iter().filter(|x| x.5 == 1).take(6) {
-                info!(
-                    "{:10}  {:20}  {:14}  {:20}  {:?}",
-                    usize::MAX - c,
-                    msp.to_u64(),
-                    lsp.ns(),
-                    pulse,
-                    sid
-                );
+            for (c, sid, msp, lsp, _shape_kind) in all.iter().filter(|x| x.4 == 1).take(6) {
+                info!("{:10}  {:20}  {:14}  {:?}", u64::MAX - c, msp.to_u64(), lsp.ns(), sid);
             }
             histo.clear();
         }

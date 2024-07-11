@@ -1200,7 +1200,6 @@ impl CaConn {
                     let created_state = WritableState {
                         tsbeg: self.poll_tsnow,
                         channel: std::mem::replace(&mut st2.channel, CreatedState::dummy()),
-                        // channel: st2.channel.clone(),
                         writer,
                         binwriter,
                         reading: ReadingState::Polling(PollingState {
@@ -1868,6 +1867,18 @@ impl CaConn {
         stnow: SystemTime,
         stats: &CaConnStats,
     ) -> Result<(), Error> {
+        {
+            use proto::CaMetaValue::*;
+            match &value.meta {
+                CaMetaTime(meta) => {
+                    if meta.status != 0 {
+                        let sid = writer.sid();
+                        debug!("{:?}  status {:3}  severity {:3}", sid, meta.status, meta.severity);
+                    }
+                }
+                _ => {}
+            }
+        }
         trace_event_incoming!("event_add_ingest  payload_len {}  value {:?}", payload_len, value);
         crst.ts_alive_last = tsnow;
         crst.ts_activity_last = tsnow;

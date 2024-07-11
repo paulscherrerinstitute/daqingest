@@ -80,7 +80,6 @@ impl EstablishWriterWorker {
                 async move {
                     let res = RtWriter::new(
                         wtx.clone(),
-                        item.cssid,
                         item.backend,
                         item.channel,
                         item.scalar_type,

@@ -45,10 +45,7 @@ impl From<async_channel::RecvError> for Error {
 
 #[derive(Debug)]
 pub struct SeriesWriter {
-    cssid: ChannelStatusSeriesId,
     sid: SeriesId,
-    scalar_type: ScalarType,
-    shape: Shape,
     ts_msp_last: Option<TsNano>,
     inserted_in_current_msp: u32,
     bytes_in_current_msp: u32,
@@ -78,13 +75,12 @@ impl SeriesWriter {
         };
         worker_tx.send(item).await?;
         let res = rx.recv().await?.map_err(|_| Error::SeriesLookupError)?;
-        let cssid = ChannelStatusSeriesId::new(res.series.to_series().id());
-        Self::establish_with_cssid(worker_tx, cssid, backend, channel, scalar_type, shape, stnow).await
+        let _cssid = ChannelStatusSeriesId::new(res.series.to_series().id());
+        Self::establish_with(worker_tx, backend, channel, scalar_type, shape, stnow).await
     }
 
-    pub async fn establish_with_cssid(
+    pub async fn establish_with(
         channel_info_tx: Sender<ChannelInfoQuery>,
-        cssid: ChannelStatusSeriesId,
         backend: String,
         channel: String,
         scalar_type: ScalarType,
@@ -103,21 +99,12 @@ impl SeriesWriter {
         channel_info_tx.send(item).await?;
         let res = rx.recv().await?.map_err(|_| Error::SeriesLookupError)?;
         let sid = res.series.to_series();
-        Self::establish_with_cssid_sid(cssid, sid, scalar_type, shape, stnow).await
+        Self::establish_with_sid(sid, stnow)
     }
 
-    pub async fn establish_with_cssid_sid(
-        cssid: ChannelStatusSeriesId,
-        sid: SeriesId,
-        scalar_type: ScalarType,
-        shape: Shape,
-        stnow: SystemTime,
-    ) -> Result<Self, Error> {
+    pub fn establish_with_sid(sid: SeriesId, stnow: SystemTime) -> Result<Self, Error> {
         let res = Self {
-            cssid,
             sid,
-            scalar_type,
-            shape,
             ts_msp_last: None,
             inserted_in_current_msp: 0,
             bytes_in_current_msp: 0,
@@ -130,14 +117,6 @@ impl SeriesWriter {
 
     pub fn sid(&self) -> SeriesId {
         self.sid.clone()
-    }
-
-    pub fn scalar_type(&self) -> &ScalarType {
-        &self.scalar_type
-    }
-
-    pub fn shape(&self) -> &Shape {
-        &self.shape
     }
 
     pub fn write(
@@ -192,9 +171,6 @@ impl SeriesWriter {
             ts_net: ts_local.to_ts_ms(),
             ts_alt_1: ts_ioc,
             msp_bump: ts_msp_changed,
-            pulse: 0,
-            scalar_type: self.scalar_type.clone(),
-            shape: self.shape.clone(),
             val,
         };
         // TODO decide on the path in the new deques struct
