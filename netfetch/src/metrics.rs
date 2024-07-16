@@ -1,7 +1,6 @@
 #![allow(unused)]
 pub mod delete;
 pub mod ingest;
-pub mod postingest;
 pub mod status;
 
 use crate::ca::conn::ChannelStateInfo;

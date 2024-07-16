@@ -32,12 +32,12 @@ pub async fn listen_beacons(
     let channel = "epics-ca-beacons".to_string();
     let scalar_type = ScalarType::U64;
     let shape = Shape::Scalar;
-    let mut writer = SeriesWriter::establish(worker_tx, backend, channel, scalar_type, shape, stnow).await?;
+    // let mut writer = SeriesWriter::establish(worker_tx, backend, channel, scalar_type, shape, stnow).await?;
+    // let mut deque = VecDeque::new();
     let sock = UdpSocket::bind("0.0.0.0:5065").await?;
     sock.set_broadcast(true).unwrap();
     let mut buf = Vec::new();
     buf.resize(1024 * 4, 0);
-    let mut deque = VecDeque::new();
     loop {
         let bb = &mut buf;
         let (n, remote) = taskrun::tokio::select! {
@@ -66,13 +66,13 @@ pub async fn listen_beacons(
                 let ts_local = ts;
                 let blob = addr_u32 as i64;
                 let val = DataValue::Scalar(ScalarValue::I64(blob));
-                writer.write(ts, ts_local, val, &mut deque)?;
+                // writer.write(ts, ts_local, val, &mut deque)?;
             }
         }
-        if deque.len() != 0 {
-            // TODO deliver to insert queue
-            deque.clear();
-        }
+        // if deque.len() != 0 {
+        // TODO deliver to insert queue
+        // deque.clear();
+        // }
     }
     Ok(())
 }

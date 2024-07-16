@@ -5,6 +5,7 @@ use axum::http::HeaderMap;
 use axum::Json;
 use bytes::Bytes;
 use core::fmt;
+use dbpg::seriesbychannel::ChannelInfoQuery;
 use err::thiserror;
 use err::ThisError;
 use futures_util::StreamExt;
@@ -16,6 +17,7 @@ use items_2::eventsdim1::EventsDim1NoPulse;
 use netpod::log::*;
 use netpod::ttl::RetentionTime;
 use netpod::ScalarType;
+use netpod::SeriesKind;
 use netpod::Shape;
 use netpod::TsNano;
 use netpod::APP_CBOR_FRAMED;
@@ -25,12 +27,14 @@ use scywr::iteminsertqueue::DataValue;
 use scywr::iteminsertqueue::QueryItem;
 use scywr::iteminsertqueue::ScalarValue;
 use serde::Deserialize;
+use serieswriter::writer::EmittableType;
 use serieswriter::writer::SeriesWriter;
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::io::Cursor;
 use std::sync::Arc;
 use std::time::Duration;
+use std::time::Instant;
 use std::time::SystemTime;
 use streams::framed_bytes::FramedBytesStream;
 use taskrun::tokio::time::timeout;
@@ -61,6 +65,29 @@ macro_rules! trace_queues {
             trace!($($arg)*);
         }
     };
+}
+
+type ValueSeriesWriter = SeriesWriter<WritableType>;
+
+#[derive(Debug, Clone)]
+struct WritableType(DataValue);
+
+impl EmittableType for WritableType {
+    fn ts(&self) -> TsNano {
+        todo!()
+    }
+
+    fn has_change(&self, k: &Self) -> bool {
+        todo!()
+    }
+
+    fn byte_size(&self) -> u32 {
+        todo!()
+    }
+
+    fn into_data_value(self) -> DataValue {
+        todo!()
+    }
 }
 
 #[derive(Debug, ThisError)]
@@ -131,8 +158,18 @@ async fn post_v01_try(
         shape,
         rt
     );
-    let mut writer =
-        SeriesWriter::establish(worker_tx, backend, channel, scalar_type.clone(), shape.clone(), stnow).await?;
+    let (tx, rx) = async_channel::bounded(8);
+    let qu = ChannelInfoQuery {
+        backend,
+        channel,
+        kind: SeriesKind::ChannelData,
+        scalar_type: scalar_type.clone(),
+        shape: shape.clone(),
+        tx: Box::pin(tx),
+    };
+    rres.worker_tx.send(qu).await.unwrap();
+    let chinfo = rx.recv().await.unwrap().unwrap();
+    let mut writer = SeriesWriter::new(chinfo.series.to_series())?;
     debug_setup!("series writer established");
     let mut iqdqs = InsertDeques::new();
     let mut iqtx = rres.iqtx.clone();
@@ -262,7 +299,7 @@ async fn post_v01_try(
 fn evpush_dim0<T, F1>(
     frame: &Bytes,
     deque: &mut VecDeque<QueryItem>,
-    writer: &mut SeriesWriter,
+    writer: &mut ValueSeriesWriter,
     f1: F1,
 ) -> Result<(), Error>
 where
@@ -276,11 +313,12 @@ where
         .map_err(|_| Error::Decode)?;
     let evs: EventsDim0<T> = evs.into();
     trace_input!("see events {:?}", evs);
+    let tsnow = Instant::now();
     for (i, (&ts, val)) in evs.tss.iter().zip(evs.values.iter()).enumerate() {
         let val = val.clone();
         trace_input!("ev  {:6}  {:20}  {:20?}", i, ts, val);
         let val = f1(val);
-        writer.write(TsNano::from_ns(ts), TsNano::from_ns(ts), val, deque)?;
+        writer.write(WritableType(val), tsnow, deque)?;
     }
     Ok(())
 }
@@ -288,7 +326,7 @@ where
 fn evpush_dim1<T, F1>(
     frame: &Bytes,
     deque: &mut VecDeque<QueryItem>,
-    writer: &mut SeriesWriter,
+    writer: &mut ValueSeriesWriter,
     f1: F1,
 ) -> Result<(), Error>
 where
@@ -302,21 +340,22 @@ where
         .map_err(|_| Error::Decode)?;
     let evs: EventsDim1<T> = evs.into();
     trace_input!("see events {:?}", evs);
+    let tsnow = Instant::now();
     for (i, (&ts, val)) in evs.tss.iter().zip(evs.values.iter()).enumerate() {
         let val = val.clone();
         trace_input!("ev  {:6}  {:20}  {:20?}", i, ts, val);
         let val = f1(val);
-        writer.write(TsNano::from_ns(ts), TsNano::from_ns(ts), val, deque)?;
+        writer.write(WritableType(val), tsnow, deque)?;
     }
     Ok(())
 }
 
-fn tick_writers(writer: &mut SeriesWriter, deques: &mut InsertDeques, rt: RetentionTime) -> Result<(), Error> {
+fn tick_writers(writer: &mut ValueSeriesWriter, deques: &mut InsertDeques, rt: RetentionTime) -> Result<(), Error> {
     writer.tick(deques.deque(rt))?;
     Ok(())
 }
 
-fn finish_writers(writer: &mut SeriesWriter, deques: &mut InsertDeques, rt: RetentionTime) -> Result<(), Error> {
+fn finish_writers(writer: &mut ValueSeriesWriter, deques: &mut InsertDeques, rt: RetentionTime) -> Result<(), Error> {
     writer.tick(deques.deque(rt))?;
     Ok(())
 }

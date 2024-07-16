@@ -63,7 +63,6 @@ use std::pin::Pin;
 
 use netpod::OnDrop;
 use scywr::insertqueues::InsertQueuesTx;
-use serieswriter::establish_worker::EstablishWorkerJob;
 use std::sync::Arc;
 use std::task::Context;
 use std::task::Poll;
@@ -387,7 +386,6 @@ pub struct CaConnSet {
     ca_proto_stats: Arc<CaProtoStats>,
     rogue_channel_count: u64,
     connect_fail_count: usize,
-    establish_worker_tx: async_channel::Sender<EstablishWorkerJob>,
     cssid_latency_max: Duration,
 }
 
@@ -402,7 +400,6 @@ impl CaConnSet {
         iqtx: InsertQueuesTx,
         channel_info_query_tx: Sender<ChannelInfoQuery>,
         ingest_opts: CaIngestOpts,
-        establish_worker_tx: async_channel::Sender<EstablishWorkerJob>,
     ) -> CaConnSetCtrl {
         let (ca_conn_res_tx, ca_conn_res_rx) = async_channel::bounded(200);
         let (connset_inp_tx, connset_inp_rx) = async_channel::bounded(200);
@@ -459,7 +456,6 @@ impl CaConnSet {
             ca_proto_stats: ca_proto_stats.clone(),
             rogue_channel_count: 0,
             connect_fail_count: 0,
-            establish_worker_tx,
             cssid_latency_max: Duration::from_millis(2000),
         };
         // TODO await on jh
@@ -1054,7 +1050,6 @@ impl CaConnSet {
                 .ok_or_else(|| Error::with_msg_no_trace("no more channel_info_query_tx available"))?,
             self.ca_conn_stats.clone(),
             self.ca_proto_stats.clone(),
-            self.establish_worker_tx.clone(),
         );
         let conn_tx = conn.conn_command_tx();
         let conn_stats = conn.stats();

@@ -1,6 +1,7 @@
 mod enumfetch;
 
 use super::proto;
+use super::proto::CaDataValue;
 use super::proto::CaEventValue;
 use super::proto::ReadNotify;
 use crate::ca::proto::ChannelClose;
@@ -12,9 +13,11 @@ use async_channel::Receiver;
 use async_channel::Sender;
 use core::fmt;
 use dbpg::seriesbychannel::ChannelInfoQuery;
+use dbpg::seriesbychannel::ChannelInfoResult;
 use enumfetch::ConnFuture;
 use err::thiserror;
 use err::ThisError;
+use futures_util::pin_mut;
 use futures_util::Future;
 use futures_util::FutureExt;
 use futures_util::Stream;
@@ -24,6 +27,7 @@ use log::*;
 use netpod::timeunits::*;
 use netpod::ttl::RetentionTime;
 use netpod::ScalarType;
+use netpod::SeriesKind;
 use netpod::Shape;
 use netpod::TsMs;
 use netpod::TsNano;
@@ -53,9 +57,8 @@ use serde::Serialize;
 use series::ChannelStatusSeriesId;
 use series::SeriesId;
 use serieswriter::binwriter::BinWriter;
-use serieswriter::establish_worker::EstablishWorkerJob;
-use serieswriter::establish_worker::JobId;
 use serieswriter::rtwriter::RtWriter;
+use serieswriter::writer::EmittableType;
 use stats::rand_xoshiro::rand_core::RngCore;
 use stats::rand_xoshiro::rand_core::SeedableRng;
 use stats::rand_xoshiro::Xoshiro128PlusPlus;
@@ -142,6 +145,8 @@ fn dbg_chn_cid(cid: Cid, conn: &CaConn) -> bool {
     }
 }
 
+type CaRtWriter = RtWriter<CaWriterValue>;
+
 #[derive(Debug, ThisError)]
 #[cstm(name = "NetfetchConn")]
 pub enum Error {
@@ -171,6 +176,7 @@ pub enum Error {
     FutLogic,
     MissingTimestamp,
     EnumFetch(#[from] enumfetch::Error),
+    SeriesLookup(#[from] dbpg::seriesbychannel::Error),
 }
 
 impl err::ToErr for Error {
@@ -374,7 +380,7 @@ enum PollTickState {
 struct WritableState {
     tsbeg: Instant,
     channel: CreatedState,
-    writer: RtWriter,
+    writer: CaRtWriter,
     binwriter: BinWriter,
     reading: ReadingState,
 }
@@ -600,7 +606,7 @@ impl ChannelState {
             _ => None,
         };
         let series = match self {
-            ChannelState::Writable(s) => Some(s.writer.sid()),
+            ChannelState::Writable(s) => Some(s.writer.series()),
             _ => None,
         };
         let interest_score = 1. / item_recv_ivl_ema.unwrap_or(1e10).max(1e-6).min(1e10);
@@ -845,15 +851,22 @@ impl CaConnEvent {
     }
 
     pub fn desc_short(&self) -> CaConnEventDescShort {
-        CaConnEventDescShort {}
+        CaConnEventDescShort { inner: self }
     }
 }
 
-pub struct CaConnEventDescShort {}
+pub struct CaConnEventDescShort<'a> {
+    inner: &'a CaConnEvent,
+}
 
-impl fmt::Display for CaConnEventDescShort {
+impl<'a> fmt::Display for CaConnEventDescShort<'a> {
     fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
-        write!(fmt, "CaConnEventDescShort {{ TODO-impl }}")
+        write!(
+            fmt,
+            "CaConnEventDescShort {{ ts: {:?}, value: {} }}",
+            self.inner.ts,
+            self.inner.value.desc_short()
+        )
     }
 }
 
@@ -865,6 +878,19 @@ pub enum CaConnEventValue {
     ChannelStatus(ChannelStatusPartial),
     ChannelCreateFail(String),
     EndOfStream(EndOfStreamReason),
+}
+
+impl CaConnEventValue {
+    pub fn desc_short(&self) -> &'static str {
+        match self {
+            CaConnEventValue::None => "None",
+            CaConnEventValue::EchoTimeout => "EchoTimeout",
+            CaConnEventValue::ConnCommandResult(_) => "ConnCommandResult",
+            CaConnEventValue::ChannelStatus(_) => "ChannelStatus",
+            CaConnEventValue::ChannelCreateFail(_) => "ChannelCreateFail",
+            CaConnEventValue::EndOfStream(_) => "EndOfStream",
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -934,10 +960,12 @@ pub struct CaConn {
     ca_proto_stats: Arc<CaProtoStats>,
     weird_count: usize,
     rng: Xoshiro128PlusPlus,
-    writer_establish_qu: VecDeque<EstablishWorkerJob>,
-    writer_establish_tx: Pin<Box<SenderPolling<EstablishWorkerJob>>>,
-    writer_tx: Sender<(JobId, Result<RtWriter, serieswriter::rtwriter::Error>)>,
-    writer_rx: Pin<Box<Receiver<(JobId, Result<RtWriter, serieswriter::rtwriter::Error>)>>>,
+    channel_info_query_qu: VecDeque<ChannelInfoQuery>,
+    channel_info_query_tx: Pin<Box<SenderPolling<ChannelInfoQuery>>>,
+    channel_info_query_res_rxs: VecDeque<(
+        Pin<Box<Receiver<Result<ChannelInfoResult, dbpg::seriesbychannel::Error>>>>,
+        Cid,
+    )>,
     tmp_ts_poll: SystemTime,
     poll_tsnow: Instant,
     ioid: u32,
@@ -961,11 +989,9 @@ impl CaConn {
         channel_info_query_tx: Sender<ChannelInfoQuery>,
         stats: Arc<CaConnStats>,
         ca_proto_stats: Arc<CaProtoStats>,
-        writer_establish_tx: Sender<EstablishWorkerJob>,
     ) -> Self {
         let _ = channel_info_query_tx;
         let tsnow = Instant::now();
-        let (writer_tx, writer_rx) = async_channel::bounded(32);
         let (cq_tx, cq_rx) = async_channel::bounded(32);
         let mut rng = stats::xoshiro_from_time();
         Self {
@@ -1001,10 +1027,9 @@ impl CaConn {
             ca_proto_stats,
             weird_count: 0,
             rng,
-            writer_establish_qu: VecDeque::new(),
-            writer_establish_tx: Box::pin(SenderPolling::new(writer_establish_tx)),
-            writer_tx,
-            writer_rx: Box::pin(writer_rx),
+            channel_info_query_qu: VecDeque::new(),
+            channel_info_query_tx: Box::pin(SenderPolling::new(channel_info_query_tx)),
+            channel_info_query_res_rxs: VecDeque::new(),
             tmp_ts_poll: SystemTime::now(),
             poll_tsnow: tsnow,
             ioid: 100,
@@ -1142,30 +1167,65 @@ impl CaConn {
 
     fn handle_writer_establish_result(&mut self, cx: &mut Context) -> Result<Poll<Option<()>>, Error> {
         use Poll::*;
+        let mut have_progress = false;
+        let mut have_pending = false;
+        let stnow = self.tmp_ts_poll;
         if self.is_shutdown() {
             Ok(Ready(None))
         } else {
-            let rx = self.writer_rx.as_mut();
-            match rx.poll_next(cx) {
-                Ready(Some(res)) => {
-                    trace!("handle_writer_establish_result  recv  {}", self.remote_addr_dbg);
-                    let jobid = res.0;
-                    // by convention:
-                    let cid = Cid(jobid.0 as _);
-                    let wr = res.1?;
-                    self.handle_writer_establish_inner(cid, wr)?;
-                    Ok(Ready(Some(())))
+            let n = self.channel_info_query_res_rxs.len().min(16);
+            let mut i = 0;
+            while let Some(x) = self.channel_info_query_res_rxs.pop_front() {
+                let mut rx = x.0;
+                let cid = x.1;
+                match rx.poll_next_unpin(cx) {
+                    Ready(Some(res)) => {
+                        trace!("handle_writer_establish_result  recv  {}", self.remote_addr_dbg);
+                        let chinfo = res?;
+                        if let Some(ch) = self.channels.get(&cid) {
+                            if let ChannelState::MakingSeriesWriter(st) = &ch.state {
+                                let scalar_type = st.channel.scalar_type.clone();
+                                let shape = st.channel.shape.clone();
+                                let writer = RtWriter::new(
+                                    chinfo.series.to_series(),
+                                    scalar_type,
+                                    shape,
+                                    ch.conf.min_quiets(),
+                                    stnow,
+                                )?;
+                                self.handle_writer_establish_inner(cid, writer)?;
+                                have_progress = true;
+                            } else {
+                                return Err(Error::Error);
+                            }
+                        } else {
+                            return Err(Error::Error);
+                        }
+                    }
+                    Ready(None) => {
+                        error!("channel lookup queue closed");
+                    }
+                    Pending => {
+                        self.channel_info_query_res_rxs.push_back((rx, cid));
+                        have_pending = true;
+                    }
                 }
-                Ready(None) => {
-                    error!("writer_establish queue closed");
-                    Ok(Ready(None))
+                i += 1;
+                if i >= n {
+                    break;
                 }
-                Pending => Ok(Pending),
+            }
+            if have_progress {
+                Ok(Ready(Some(())))
+            } else if have_pending {
+                Ok(Pending)
+            } else {
+                Ok(Ready(None))
             }
         }
     }
 
-    fn handle_writer_establish_inner(&mut self, cid: Cid, writer: RtWriter) -> Result<(), Error> {
+    fn handle_writer_establish_inner(&mut self, cid: Cid, writer: CaRtWriter) -> Result<(), Error> {
         trace!("handle_writer_establish_inner  {cid:?}");
         let dbg_chn_cid = dbg_chn_cid(cid, self);
         if dbg_chn_cid {
@@ -1183,7 +1243,7 @@ impl CaConn {
                     beg,
                     RetentionTime::Short,
                     st2.channel.cssid,
-                    writer.sid(),
+                    writer.series(),
                     st2.channel.scalar_type.clone(),
                     st2.channel.shape.clone(),
                 )?;
@@ -1812,55 +1872,11 @@ impl CaConn {
         Ok(())
     }
 
-    fn convert_event_data(crst: &mut CreatedState, data: super::proto::CaDataValue) -> Result<DataValue, Error> {
-        use super::proto::CaDataValue;
-        use scywr::iteminsertqueue::DataValue;
-        let ret = match data {
-            CaDataValue::Scalar(val) => DataValue::Scalar({
-                use super::proto::CaDataScalarValue;
-                use scywr::iteminsertqueue::ScalarValue;
-                match val {
-                    CaDataScalarValue::I8(x) => ScalarValue::I8(x),
-                    CaDataScalarValue::I16(x) => ScalarValue::I16(x),
-                    CaDataScalarValue::I32(x) => ScalarValue::I32(x),
-                    CaDataScalarValue::F32(x) => ScalarValue::F32(x),
-                    CaDataScalarValue::F64(x) => ScalarValue::F64(x),
-                    CaDataScalarValue::Enum(x) => ScalarValue::Enum(x, {
-                        let conv = crst.enum_str_table.as_ref().map_or_else(
-                            || String::from("missingstrings"),
-                            |map| {
-                                map.get(x as usize)
-                                    .map_or_else(|| String::from("undefined"), String::from)
-                            },
-                        );
-                        info!("convert_event_data  {}  {:?}", crst.name(), conv);
-                        conv
-                    }),
-                    CaDataScalarValue::String(x) => ScalarValue::String(x),
-                    CaDataScalarValue::Bool(x) => ScalarValue::Bool(x),
-                }
-            }),
-            CaDataValue::Array(val) => DataValue::Array({
-                use super::proto::CaDataArrayValue;
-                use scywr::iteminsertqueue::ArrayValue;
-                match val {
-                    CaDataArrayValue::I8(x) => ArrayValue::I8(x),
-                    CaDataArrayValue::I16(x) => ArrayValue::I16(x),
-                    CaDataArrayValue::I32(x) => ArrayValue::I32(x),
-                    CaDataArrayValue::F32(x) => ArrayValue::F32(x),
-                    CaDataArrayValue::F64(x) => ArrayValue::F64(x),
-                    CaDataArrayValue::Bool(x) => ArrayValue::Bool(x),
-                }
-            }),
-        };
-        Ok(ret)
-    }
-
     fn event_add_ingest(
         payload_len: u32,
         value: CaEventValue,
         crst: &mut CreatedState,
-        writer: &mut RtWriter,
+        writer: &mut CaRtWriter,
         binwriter: &mut BinWriter,
         iqdqs: &mut InsertDeques,
         tsnow: Instant,
@@ -1872,7 +1888,7 @@ impl CaConn {
             match &value.meta {
                 CaMetaTime(meta) => {
                     if meta.status != 0 {
-                        let sid = writer.sid();
+                        let sid = writer.series();
                         debug!("{:?}  status {:3}  severity {:3}", sid, meta.status, meta.severity);
                     }
                 }
@@ -1901,10 +1917,9 @@ impl CaConn {
             crst.insert_item_ivl_ema.tick(tsnow);
             let ts_ioc = TsNano::from_ns(ts);
             let ts_local = TsNano::from_ns(ts_local);
-            let val = Self::convert_event_data(crst, value.data)?;
             // binwriter.ingest(ts_ioc, ts_local, &val, iqdqs)?;
             {
-                let ((dwst, dwmt, dwlt),) = writer.write(ts_ioc, ts_local, val, iqdqs)?;
+                let ((dwst, dwmt, dwlt),) = writer.write(CaWriterValue::new(value, crst), tsnow, iqdqs)?;
                 if dwst {
                     crst.dw_st_last = stnow;
                     crst.acc_st.push_written(payload_len);
@@ -2477,6 +2492,7 @@ impl CaConn {
         }
         match &scalar_type {
             ScalarType::Enum => {
+                // TODO channel created, now fetch enum variants, later make writer
                 let min_quiets = conf.conf.min_quiets();
                 let fut = enumfetch::EnumFetch::new(created_state, self, min_quiets);
                 // TODO should always check if the slot is free.
@@ -2485,22 +2501,26 @@ impl CaConn {
                 self.handler_by_ioid.insert(ioid, Some(x));
             }
             _ => {
+                let backend = self.backend.clone();
+                let channel_name = created_state.name().into();
                 *chst = ChannelState::MakingSeriesWriter(MakingSeriesWriterState {
                     tsbeg: tsnow,
                     channel: created_state,
                 });
-                let job = EstablishWorkerJob::new(
-                    JobId(cid.0 as _),
-                    self.backend.clone(),
-                    conf.conf.name().into(),
-                    cssid,
-                    scalar_type,
-                    shape,
-                    conf.conf.min_quiets(),
-                    self.writer_tx.clone(),
-                    self.tmp_ts_poll,
-                );
-                self.writer_establish_qu.push_back(job);
+                // TODO create a channel for the answer.
+                // Keep only a certain max number of channels in-flight because have to poll on them.
+                // TODO register the channel for the answer.
+                let (tx, rx) = async_channel::bounded(8);
+                let item = ChannelInfoQuery {
+                    backend,
+                    channel: channel_name,
+                    kind: SeriesKind::ChannelData,
+                    scalar_type: scalar_type.clone(),
+                    shape: shape.clone(),
+                    tx: Box::pin(tx),
+                };
+                self.channel_info_query_qu.push_back(item);
+                self.channel_info_query_res_rxs.push_back((Box::pin(rx), cid));
             }
         }
         Ok(())
@@ -2714,6 +2734,7 @@ impl CaConn {
             CaConnState::Shutdown(..) => {}
             CaConnState::EndOfStream => {}
         }
+        self.iqdqs.housekeeping();
         Ok(())
     }
 
@@ -2760,7 +2781,7 @@ impl CaConn {
                     ]) {
                         if acc.beg != msp {
                             if acc.usage().count() != 0 {
-                                let series = st1.writer.sid();
+                                let series = st1.writer.series();
                                 let item = Accounting {
                                     part: (series.id() & 0xff) as i32,
                                     ts: acc.beg,
@@ -2778,7 +2799,7 @@ impl CaConn {
                         let acc = &mut ch.acc_recv;
                         if acc.beg != msp {
                             if acc.usage().count() != 0 {
-                                let series = st1.writer.sid();
+                                let series = st1.writer.series();
                                 let item = AccountingRecv {
                                     part: (series.id() & 0xff) as i32,
                                     ts: acc.beg,
@@ -3071,12 +3092,12 @@ impl Stream for CaConn {
             if !self.is_shutdown() {
                 flush_queue!(
                     self,
-                    writer_establish_qu,
-                    writer_establish_tx,
+                    channel_info_query_qu,
+                    channel_info_query_tx,
                     send_individual,
                     32,
                     (&mut have_progress, &mut have_pending),
-                    "wrest",
+                    "chinf",
                     cx,
                     |_| {}
                 );
@@ -3212,6 +3233,99 @@ impl Stream for CaConn {
         };
         self.stats.proto_out_len().set(n);
         self.stats.poll_reloops().ingest(reloops);
+        ret
+    }
+}
+
+#[derive(Debug, Clone)]
+struct CaWriterValue(CaEventValue, Option<String>);
+
+impl CaWriterValue {
+    fn new(val: CaEventValue, crst: &CreatedState) -> Self {
+        let valstr = match &val.data {
+            CaDataValue::Scalar(val) => {
+                use super::proto::CaDataScalarValue;
+                match val {
+                    CaDataScalarValue::Enum(x) => {
+                        let x = *x;
+                        let table = crst.enum_str_table.as_ref();
+                        let conv = table.map_or_else(
+                            || String::from("missingstrings"),
+                            |map| {
+                                map.get(x as usize)
+                                    .map_or_else(|| String::from("undefined"), String::from)
+                            },
+                        );
+                        trace!("CaWriterValue  convert enum  {}  {:?}", crst.name(), conv);
+                        Some(conv)
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
+        };
+        Self(val, valstr)
+    }
+}
+
+impl EmittableType for CaWriterValue {
+    fn ts(&self) -> TsNano {
+        TsNano::from_ns(self.0.ts().unwrap_or(0))
+    }
+
+    fn has_change(&self, k: &Self) -> bool {
+        if self.0.data != k.0.data {
+            true
+        } else {
+            false
+        }
+    }
+
+    fn byte_size(&self) -> u32 {
+        self.0.data.byte_size()
+    }
+
+    fn into_data_value(mut self) -> DataValue {
+        // TODO need to pass a ref to channel state to convert enum strings.
+        // Or do that already when we construct this?
+        // Also, in general, need to produce a SmallVec of values to emit: value, status, severity, etc..
+        // let val = Self::convert_event_data(crst, value.data)?;
+        use super::proto::CaDataValue;
+        use scywr::iteminsertqueue::DataValue;
+        let ret = match self.0.data {
+            CaDataValue::Scalar(val) => DataValue::Scalar({
+                use super::proto::CaDataScalarValue;
+                use scywr::iteminsertqueue::ScalarValue;
+                match val {
+                    CaDataScalarValue::I8(x) => ScalarValue::I8(x),
+                    CaDataScalarValue::I16(x) => ScalarValue::I16(x),
+                    CaDataScalarValue::I32(x) => ScalarValue::I32(x),
+                    CaDataScalarValue::F32(x) => ScalarValue::F32(x),
+                    CaDataScalarValue::F64(x) => ScalarValue::F64(x),
+                    CaDataScalarValue::Enum(x) => ScalarValue::Enum(
+                        x,
+                        self.1.take().unwrap_or_else(|| {
+                            warn!("NoEnumStr");
+                            String::from("NoEnumStr")
+                        }),
+                    ),
+                    CaDataScalarValue::String(x) => ScalarValue::String(x),
+                    CaDataScalarValue::Bool(x) => ScalarValue::Bool(x),
+                }
+            }),
+            CaDataValue::Array(val) => DataValue::Array({
+                use super::proto::CaDataArrayValue;
+                use scywr::iteminsertqueue::ArrayValue;
+                match val {
+                    CaDataArrayValue::I8(x) => ArrayValue::I8(x),
+                    CaDataArrayValue::I16(x) => ArrayValue::I16(x),
+                    CaDataArrayValue::I32(x) => ArrayValue::I32(x),
+                    CaDataArrayValue::F32(x) => ArrayValue::F32(x),
+                    CaDataArrayValue::F64(x) => ArrayValue::F64(x),
+                    CaDataArrayValue::Bool(x) => ArrayValue::Bool(x),
+                }
+            }),
+        };
         ret
     }
 }

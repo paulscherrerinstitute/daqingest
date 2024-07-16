@@ -169,6 +169,20 @@ impl InsertDeques {
             RetentionTime::Long => &mut self.lt_rf3_rx,
         }
     }
+
+    pub fn housekeeping(&mut self) {
+        let qus = [
+            &mut self.st_rf1_rx,
+            &mut self.st_rf3_rx,
+            &mut self.mt_rf3_rx,
+            &mut self.lt_rf3_rx,
+        ];
+        for qu in qus {
+            if qu.len() * 2 < qu.capacity() {
+                qu.truncate(qu.capacity() * 3 / 4);
+            }
+        }
+    }
 }
 
 pub struct InsertDequesSummary<'a> {

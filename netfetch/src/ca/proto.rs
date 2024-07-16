@@ -247,7 +247,7 @@ impl CaDbrType {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum CaDataScalarValue {
     I8(i8),
     I16(i16),
@@ -260,7 +260,22 @@ pub enum CaDataScalarValue {
     Bool(bool),
 }
 
-#[derive(Clone, Debug)]
+impl CaDataScalarValue {
+    fn byte_size(&self) -> u32 {
+        match self {
+            CaDataScalarValue::I8(_) => 1,
+            CaDataScalarValue::I16(_) => 2,
+            CaDataScalarValue::I32(_) => 4,
+            CaDataScalarValue::F32(_) => 4,
+            CaDataScalarValue::F64(_) => 8,
+            CaDataScalarValue::Enum(_) => 2,
+            CaDataScalarValue::String(v) => v.len() as u32,
+            CaDataScalarValue::Bool(_) => 1,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum CaDataArrayValue {
     I8(Vec<i8>),
     I16(Vec<i16>),
@@ -271,13 +286,35 @@ pub enum CaDataArrayValue {
     Bool(Vec<bool>),
 }
 
-#[derive(Clone, Debug)]
+impl CaDataArrayValue {
+    fn byte_size(&self) -> u32 {
+        match self {
+            CaDataArrayValue::I8(x) => 1 * x.len() as u32,
+            CaDataArrayValue::I16(x) => 2 * x.len() as u32,
+            CaDataArrayValue::I32(x) => 4 * x.len() as u32,
+            CaDataArrayValue::F32(x) => 4 * x.len() as u32,
+            CaDataArrayValue::F64(x) => 8 * x.len() as u32,
+            CaDataArrayValue::Bool(x) => 1 * x.len() as u32,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum CaDataValue {
     Scalar(CaDataScalarValue),
     Array(CaDataArrayValue),
 }
 
-#[derive(Clone, Debug)]
+impl CaDataValue {
+    pub fn byte_size(&self) -> u32 {
+        match self {
+            CaDataValue::Scalar(x) => x.byte_size(),
+            CaDataValue::Array(x) => x.byte_size(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct CaEventValue {
     pub data: CaDataValue,
     pub meta: CaMetaValue,
@@ -296,13 +333,13 @@ impl CaEventValue {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum CaMetaValue {
     CaMetaTime(CaMetaTime),
     CaMetaVariants(CaMetaVariants),
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct CaMetaTime {
     pub status: u16,
     pub severity: u16,
@@ -310,7 +347,7 @@ pub struct CaMetaTime {
     pub ca_nanos: u32,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct CaMetaVariants {
     pub status: u16,
     pub severity: u16,

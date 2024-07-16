@@ -2,11 +2,13 @@ use async_channel::Sender;
 use dbpg::seriesbychannel::ChannelInfoQuery;
 use err::thiserror;
 use err::ThisError;
+use log::*;
 use netpod::timeunits::HOUR;
 use netpod::timeunits::SEC;
 use netpod::ScalarType;
 use netpod::SeriesKind;
 use netpod::Shape;
+use netpod::TsMs;
 use netpod::TsNano;
 use scywr::insertqueues::InsertDeques;
 use scywr::iteminsertqueue::DataValue;
@@ -15,7 +17,16 @@ use scywr::iteminsertqueue::QueryItem;
 use series::ChannelStatusSeriesId;
 use series::SeriesId;
 use std::collections::VecDeque;
+use std::marker::PhantomData;
+use std::time::Instant;
 use std::time::SystemTime;
+
+pub trait EmittableType: Clone {
+    fn ts(&self) -> TsNano;
+    fn has_change(&self, k: &Self) -> bool;
+    fn byte_size(&self) -> u32;
+    fn into_data_value(self) -> DataValue;
+}
 
 #[derive(Debug, ThisError)]
 #[cstm(name = "SerieswriterWriter")]
@@ -44,7 +55,7 @@ impl From<async_channel::RecvError> for Error {
 }
 
 #[derive(Debug)]
-pub struct SeriesWriter {
+pub struct SeriesWriter<ET> {
     sid: SeriesId,
     ts_msp_last: Option<TsNano>,
     inserted_in_current_msp: u32,
@@ -53,56 +64,14 @@ pub struct SeriesWriter {
     msp_max_bytes: u32,
     // TODO this should be in an Option:
     ts_msp_grid_last: u32,
+    _t1: PhantomData<ET>,
 }
 
-impl SeriesWriter {
-    pub async fn establish(
-        worker_tx: Sender<ChannelInfoQuery>,
-        backend: String,
-        channel: String,
-        scalar_type: ScalarType,
-        shape: Shape,
-        stnow: SystemTime,
-    ) -> Result<Self, Error> {
-        let (tx, rx) = async_channel::bounded(1);
-        let item = ChannelInfoQuery {
-            backend: backend.clone(),
-            channel: channel.clone(),
-            kind: SeriesKind::ChannelStatus,
-            scalar_type: ScalarType::ChannelStatus,
-            shape: Shape::Scalar,
-            tx: Box::pin(tx),
-        };
-        worker_tx.send(item).await?;
-        let res = rx.recv().await?.map_err(|_| Error::SeriesLookupError)?;
-        let _cssid = ChannelStatusSeriesId::new(res.series.to_series().id());
-        Self::establish_with(worker_tx, backend, channel, scalar_type, shape, stnow).await
-    }
-
-    pub async fn establish_with(
-        channel_info_tx: Sender<ChannelInfoQuery>,
-        backend: String,
-        channel: String,
-        scalar_type: ScalarType,
-        shape: Shape,
-        stnow: SystemTime,
-    ) -> Result<Self, Error> {
-        let (tx, rx) = async_channel::bounded(1);
-        let item = ChannelInfoQuery {
-            backend,
-            channel,
-            kind: SeriesKind::ChannelData,
-            scalar_type: scalar_type.clone(),
-            shape: shape.clone(),
-            tx: Box::pin(tx),
-        };
-        channel_info_tx.send(item).await?;
-        let res = rx.recv().await?.map_err(|_| Error::SeriesLookupError)?;
-        let sid = res.series.to_series();
-        Self::establish_with_sid(sid, stnow)
-    }
-
-    pub fn establish_with_sid(sid: SeriesId, stnow: SystemTime) -> Result<Self, Error> {
+impl<ET> SeriesWriter<ET>
+where
+    ET: EmittableType,
+{
+    pub fn new(sid: SeriesId) -> Result<Self, Error> {
         let res = Self {
             sid,
             ts_msp_last: None,
@@ -111,6 +80,7 @@ impl SeriesWriter {
             msp_max_entries: 64000,
             msp_max_bytes: 1024 * 1024 * 20,
             ts_msp_grid_last: 0,
+            _t1: PhantomData,
         };
         Ok(res)
     }
@@ -119,14 +89,8 @@ impl SeriesWriter {
         self.sid.clone()
     }
 
-    pub fn write(
-        &mut self,
-        ts_ioc: TsNano,
-        ts_local: TsNano,
-        val: DataValue,
-        deque: &mut VecDeque<QueryItem>,
-    ) -> Result<(), Error> {
-        let ts_main = ts_local;
+    pub fn write(&mut self, item: ET, ts_net: Instant, deque: &mut VecDeque<QueryItem>) -> Result<(), Error> {
+        let ts_main = item.ts();
 
         // TODO decide on better msp/lsp: random offset!
         // As long as one writer is active, the msp is arbitrary.
@@ -146,12 +110,12 @@ impl SeriesWriter {
                     } else {
                         self.ts_msp_last = Some(ts_msp);
                         self.inserted_in_current_msp = 1;
-                        self.bytes_in_current_msp = val.byte_size();
+                        self.bytes_in_current_msp = item.byte_size();
                         (ts_msp, true)
                     }
                 } else {
                     self.inserted_in_current_msp += 1;
-                    self.bytes_in_current_msp += val.byte_size();
+                    self.bytes_in_current_msp += item.byte_size();
                     (ts_msp_last, false)
                 }
             }
@@ -159,7 +123,7 @@ impl SeriesWriter {
                 let ts_msp = ts_main.div(msp_res_max).mul(msp_res_max);
                 self.ts_msp_last = Some(ts_msp);
                 self.inserted_in_current_msp = 1;
-                self.bytes_in_current_msp = val.byte_size();
+                self.bytes_in_current_msp = item.byte_size();
                 (ts_msp, true)
             }
         };
@@ -168,12 +132,13 @@ impl SeriesWriter {
             series: self.sid.clone(),
             ts_msp: ts_msp.to_ts_ms(),
             ts_lsp,
-            ts_net: ts_local.to_ts_ms(),
-            ts_alt_1: ts_ioc,
+            ts_net,
+            ts_alt_1: ts_main,
             msp_bump: ts_msp_changed,
-            val,
+            val: item.into_data_value(),
         };
         // TODO decide on the path in the new deques struct
+        trace!("emit value for ts {:?}", ts_main);
         deque.push_back(QueryItem::Insert(item));
         Ok(())
     }

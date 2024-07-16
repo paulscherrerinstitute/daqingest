@@ -18,6 +18,7 @@ use futures_util::StreamExt;
 use log::*;
 use netpod::ttl::RetentionTime;
 use netpod::TsMs;
+use netpod::TsNano;
 use smallvec::smallvec;
 use smallvec::SmallVec;
 use stats::InsertWorkerStats;
@@ -25,6 +26,7 @@ use std::collections::VecDeque;
 use std::sync::atomic;
 use std::sync::Arc;
 use std::time::Duration;
+use std::time::Instant;
 use std::time::SystemTime;
 use taskrun::tokio;
 use tokio::task::JoinHandle;
@@ -269,7 +271,7 @@ where
     item_inp.map(move |batch| {
         stats.item_recv.inc();
         trace!("transform_to_db_futures  have batch  len {}", batch.len());
-        let tsnow = TsMs::from_system_time(SystemTime::now());
+        let tsnow = Instant::now();
         let mut res = Vec::with_capacity(32);
         for item in batch {
             let futs = match item {
@@ -333,12 +335,13 @@ fn prepare_query_insert_futs(
     item: InsertItem,
     data_store: &Arc<DataStore>,
     stats: &Arc<InsertWorkerStats>,
-    tsnow: TsMs,
+    tsnow: Instant,
 ) -> SmallVec<[InsertFut; 4]> {
     stats.inserts_value().inc();
     let item_ts_net = item.ts_net;
-    let dt = tsnow.to_u64().saturating_sub(item_ts_net.to_u64()) as u32;
-    stats.item_lat_net_worker().ingest(dt);
+    let dt = tsnow.saturating_duration_since(item_ts_net);
+    let dt_ms = 1000 * dt.as_secs() as u32 + dt.subsec_millis();
+    stats.item_lat_net_worker().ingest(dt_ms);
     let msp_bump = item.msp_bump;
     let series = item.series.clone();
     let ts_msp = item.ts_msp;
@@ -366,7 +369,7 @@ fn prepare_timebin_insert_futs(
     item: TimeBinSimpleF32,
     data_store: &Arc<DataStore>,
     stats: &Arc<InsertWorkerStats>,
-    tsnow: TsMs,
+    tsnow: Instant,
 ) -> SmallVec<[InsertFut; 4]> {
     trace!("have time bin patch to insert: {item:?}");
     let params = (
@@ -408,7 +411,7 @@ fn prepare_accounting_insert_futs(
     item: Accounting,
     data_store: &Arc<DataStore>,
     stats: &Arc<InsertWorkerStats>,
-    tsnow: TsMs,
+    tsnow: Instant,
 ) -> SmallVec<[InsertFut; 4]> {
     let params = (
         item.part,
@@ -432,7 +435,7 @@ fn prepare_accounting_recv_insert_futs(
     item: AccountingRecv,
     data_store: &Arc<DataStore>,
     stats: &Arc<InsertWorkerStats>,
-    tsnow: TsMs,
+    tsnow: Instant,
 ) -> SmallVec<[InsertFut; 4]> {
     let params = (
         item.part,

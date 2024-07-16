@@ -25,6 +25,8 @@ use scywr::insertqueues::InsertQueuesTx;
 use scywr::insertworker::InsertWorkerOpts;
 use scywr::iteminsertqueue as scywriiq;
 use scywriiq::QueryItem;
+use stats::rand_xoshiro::rand_core::RngCore;
+use stats::rand_xoshiro::Xoshiro128PlusPlus;
 use stats::DaemonStats;
 use stats::InsertWorkerStats;
 use stats::SeriesByChannelStats;
@@ -103,13 +105,6 @@ impl Daemon {
 
         let insert_queue_counter = Arc::new(AtomicUsize::new(0));
 
-        let wrest_stats = Arc::new(SeriesWriterEstablishStats::new());
-        let (writer_establis_tx,) = serieswriter::establish_worker::start_writer_establish_worker(
-            channel_info_query_tx.clone(),
-            wrest_stats.clone(),
-        )
-        .map_err(|e| Error::with_msg_no_trace(e.to_string()))?;
-
         let local_epics_hostname = ingest_linux::net::local_hostname();
 
         #[cfg(DISABLED)]
@@ -169,7 +164,6 @@ impl Daemon {
             iqtx,
             channel_info_query_tx.clone(),
             ingest_opts.clone(),
-            writer_establis_tx,
         );
 
         // TODO remove
@@ -642,15 +636,6 @@ impl Daemon {
     }
 
     pub async fn daemon(mut self) -> Result<(), Error> {
-        let worker_jh = {
-            let backend = String::new();
-            let (_item_tx, item_rx) = async_channel::bounded(256);
-            let info_worker_tx = self.channel_info_query_tx.clone();
-            use netfetch::metrics::postingest::process_api_query_items;
-            let iqtx = self.iqtx.clone().unwrap();
-            let worker_fut = process_api_query_items(backend, item_rx, info_worker_tx, iqtx);
-            taskrun::spawn(worker_fut)
-        };
         self.spawn_metrics().await?;
         Self::spawn_ticker(self.tx.clone(), self.stats.clone());
         loop {
@@ -677,22 +662,6 @@ impl Daemon {
             jh.await??;
         }
         debug!("joined metrics handler");
-        debug!("wait for postingest task");
-        match worker_jh.await? {
-            Ok(_) => {}
-            Err(e) => match e {
-                netfetch::metrics::postingest::Error::Msg => {
-                    error!("{e}");
-                }
-                netfetch::metrics::postingest::Error::SeriesWriter(_) => {
-                    error!("{e}");
-                }
-                netfetch::metrics::postingest::Error::SendError => {
-                    error!("join postingest in better way");
-                }
-            },
-        }
-        debug!("joined postingest task");
         debug!("wait for insert workers");
         while let Some(jh) = self.insert_workers_jh.pop() {
             match jh.await.map_err(Error::from_string) {
@@ -794,7 +763,19 @@ pub async fn run(opts: CaIngestOpts, channels_config: Option<ChannelsConfig>) ->
         debug!("will configure {} channels", channels_config.len());
         let mut thr_msg = ThrottleTrace::new(Duration::from_millis(1000));
         let mut i = 0;
-        for ch_cfg in channels_config.channels() {
+        let nmax = usize::MAX;
+        let nn = channels_config.channels().len();
+        let mut ixs: Vec<usize> = (0..nn).into_iter().collect();
+        if false {
+            let mut rng = stats::xoshiro_from_time();
+            for _ in 0..2 * ixs.len() {
+                let i = rng.next_u32() as usize % nn;
+                let j = rng.next_u32() as usize % nn;
+                ixs.swap(i, j);
+            }
+        }
+        for ix in ixs.into_iter().take(nmax) {
+            let ch_cfg = &channels_config.channels()[ix];
             match daemon_tx
                 .send(DaemonEvent::ChannelAdd(ch_cfg.clone(), async_channel::bounded(1).0))
                 .await
@@ -808,7 +789,11 @@ pub async fn run(opts: CaIngestOpts, channels_config: Option<ChannelsConfig>) ->
             thr_msg.trigger("daemon sent ChannelAdd", &[&i as &_]);
             i += 1;
         }
-        debug!("{} configured channels applied", channels_config.len());
+        debug!(
+            "{} of {} configured channels applied",
+            i,
+            channels_config.channels().len()
+        );
     }
     daemon_jh.await.map_err(|e| Error::with_msg_no_trace(e.to_string()))??;
     info!("Joined daemon");

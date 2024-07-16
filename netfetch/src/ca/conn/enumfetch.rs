@@ -3,10 +3,10 @@ use super::CreatedState;
 use super::Ioid;
 use crate::ca::proto::CaMsg;
 use crate::ca::proto::ReadNotify;
+use dbpg::seriesbychannel::ChannelInfoQuery;
 use err::thiserror;
 use err::ThisError;
 use log::*;
-use serieswriter::establish_worker::EstablishWorkerJob;
 use std::pin::Pin;
 use std::time::Instant;
 
@@ -67,10 +67,29 @@ impl ConnFuture for EnumFetch {
                 super::proto::CaMetaValue::CaMetaVariants(meta) => {
                     crst.enum_str_table = Some(meta.variants);
                 }
-                _ => {}
+                _ => {
+                    warn!("unexpected message");
+                }
             },
-            _ => {}
+            _ => {
+                warn!("unexpected message");
+            }
         };
+
+        // TODO create a channel for the answer.
+        // TODO register the channel for the answer.
+        let cid = crst.cid.clone();
+        let (tx, rx) = async_channel::bounded(8);
+        let item = ChannelInfoQuery {
+            backend: conn.backend.clone(),
+            channel: crst.name().into(),
+            kind: netpod::SeriesKind::ChannelData,
+            scalar_type: crst.scalar_type.clone(),
+            shape: crst.shape.clone(),
+            tx: Box::pin(tx),
+        };
+        conn.channel_info_query_qu.push_back(item);
+        conn.channel_info_query_res_rxs.push_back((Box::pin(rx), cid));
 
         // This handler must not exist if the channel gets removed.
         let conf = conn.channels.get_mut(&crst.cid).ok_or(Error::MissingState)?;
@@ -78,18 +97,6 @@ impl ConnFuture for EnumFetch {
             tsbeg: tsnow,
             channel: crst.clone(),
         });
-        let job = EstablishWorkerJob::new(
-            serieswriter::establish_worker::JobId(crst.cid.0 as _),
-            conn.backend.clone(),
-            crst.name().into(),
-            crst.cssid.clone(),
-            crst.scalar_type.clone(),
-            crst.shape.clone(),
-            self.min_quiets.clone(),
-            conn.writer_tx.clone(),
-            conn.tmp_ts_poll,
-        );
-        conn.writer_establish_qu.push_back(job);
 
         conn.handler_by_ioid.remove(&self.ioid);
         Ok(())

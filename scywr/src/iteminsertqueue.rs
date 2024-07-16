@@ -33,6 +33,7 @@ use std::ptr::NonNull;
 use std::sync::Arc;
 use std::task::Context;
 use std::task::Poll;
+use std::time::Instant;
 use std::time::SystemTime;
 
 #[derive(Debug, ThisError)]
@@ -553,7 +554,7 @@ pub struct InsertItem {
     pub ts_lsp: DtNano,
     pub msp_bump: bool,
     pub val: DataValue,
-    pub ts_net: TsMs,
+    pub ts_net: Instant,
     pub ts_alt_1: TsNano,
 }
 
@@ -563,7 +564,7 @@ impl InsertItem {
             "{}  {}  {}  {}",
             self.series.id(),
             self.ts_msp.ms(),
-            self.ts_lsp.ms(),
+            self.ts_lsp.ms_u64(),
             self.val.string_short()
         )
     }
@@ -614,7 +615,7 @@ struct InsParCom {
     series: SeriesId,
     ts_msp: TsMs,
     ts_lsp: DtNano,
-    ts_net: TsMs,
+    ts_net: Instant,
     do_insert: bool,
     stats: Arc<InsertWorkerStats>,
 }
@@ -671,16 +672,16 @@ impl InsertFut {
         qu: Arc<PreparedStatement>,
         params: V,
         // timestamp when we first encountered the data to-be inserted, for metrics
-        tsnet: TsMs,
+        tsnet: Instant,
         stats: Arc<InsertWorkerStats>,
     ) -> Self {
         let scy_ref = unsafe { NonNull::from(scy.as_ref()).as_ref() };
         let qu_ref = unsafe { NonNull::from(qu.as_ref()).as_ref() };
         let fut = scy_ref.execute_paged(qu_ref, params, None);
         let fut = fut.map(move |x| {
-            let tsnow = TsMs::from_system_time(SystemTime::now());
-            let dt = tsnow.to_u64().saturating_sub(tsnet.to_u64()) as u32;
-            stats.item_lat_net_store().ingest(dt);
+            let dt = tsnet.elapsed();
+            let dt_ms = 1000 * dt.as_secs() as u32 + dt.subsec_millis();
+            stats.item_lat_net_store().ingest(dt_ms);
             x
         });
         let fut = taskrun::tokio::task::unconstrained(fut);
@@ -711,7 +712,7 @@ pub fn insert_msp_fut(
     series: SeriesId,
     ts_msp: TsMs,
     // for stats, the timestamp when we received that data
-    tsnet: TsMs,
+    tsnet: Instant,
     scy: Arc<ScySession>,
     qu: Arc<PreparedStatement>,
     stats: Arc<InsertWorkerStats>,
@@ -801,10 +802,9 @@ pub fn insert_connection_status_fut(
     data_store: &DataStore,
     stats: Arc<InsertWorkerStats>,
 ) -> InsertFut {
-    let ts = TsMs::from_system_time(item.ts);
-    let (msp, lsp) = ts.to_grid_02(CONNECTION_STATUS_DIV);
+    let tsnow = TsNano::from_system_time(item.ts);
+    let (msp, lsp) = tsnow.to_ts_ms().to_grid_02(CONNECTION_STATUS_DIV);
     // TODO is that the good tsnet to use?
-    let tsnet = ts;
     let kind = item.status.to_kind();
     let addr = format!("{}", item.addr);
     let params = (msp.to_i64(), lsp.to_i64(), kind as i32, addr);
@@ -812,7 +812,7 @@ pub fn insert_connection_status_fut(
         data_store.scy.clone(),
         data_store.qu_insert_connection_status.clone(),
         params,
-        tsnet,
+        Instant::now(),
         stats,
     )
 }
@@ -832,9 +832,9 @@ pub fn insert_channel_status_fut(
     data_store: &DataStore,
     stats: Arc<InsertWorkerStats>,
 ) -> SmallVec<[InsertFut; 4]> {
-    let ts = TsMs::from_system_time(item.ts);
-    let (msp, lsp) = ts.to_grid_02(CONNECTION_STATUS_DIV);
-    let tsnet = ts;
+    let tsnow = TsNano::from_system_time(item.ts);
+    let (msp, lsp) = tsnow.to_ts_ms().to_grid_02(CONNECTION_STATUS_DIV);
+    let tsnet = Instant::now();
     let kind = item.status.to_kind();
     let cssid = item.cssid.id();
     let params = (cssid as i64, msp.to_i64(), lsp.to_i64(), kind as i32);
