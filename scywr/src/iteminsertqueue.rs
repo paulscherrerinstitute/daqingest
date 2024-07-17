@@ -63,6 +63,7 @@ pub enum ScalarValue {
     Enum(i16, String),
     String(String),
     Bool(bool),
+    CaStatus(i16),
 }
 
 impl ScalarValue {
@@ -81,6 +82,7 @@ impl ScalarValue {
             ScalarValue::Enum(_, y) => 2 + y.len() as u32,
             ScalarValue::String(x) => x.len() as u32,
             ScalarValue::Bool(_) => 1,
+            ScalarValue::CaStatus(_) => 2,
         }
     }
 
@@ -99,6 +101,7 @@ impl ScalarValue {
             ScalarValue::Enum(x, y) => format!("({}, {})", x, y),
             ScalarValue::String(x) => x.to_string(),
             ScalarValue::Bool(x) => x.to_string(),
+            ScalarValue::CaStatus(x) => x.to_string(),
         }
     }
 }
@@ -313,7 +316,7 @@ impl DataValue {
         }
     }
 
-    pub fn scalar_type(&self) -> ScalarType {
+    fn unused_scalar_type(&self) -> ScalarType {
         match self {
             DataValue::Scalar(x) => match x {
                 ScalarValue::U8(_) => ScalarType::U8,
@@ -329,6 +332,7 @@ impl DataValue {
                 ScalarValue::Enum(..) => ScalarType::Enum,
                 ScalarValue::String(_) => ScalarType::STRING,
                 ScalarValue::Bool(_) => ScalarType::BOOL,
+                ScalarValue::CaStatus(_) => ScalarType::I16,
             },
             DataValue::Array(x) => match x {
                 ArrayValue::U8(_) => ScalarType::U8,
@@ -555,7 +559,6 @@ pub struct InsertItem {
     pub msp_bump: bool,
     pub val: DataValue,
     pub ts_net: Instant,
-    pub ts_alt_1: TsNano,
 }
 
 impl InsertItem {
@@ -756,6 +759,7 @@ pub fn insert_item_fut(
                 }
                 String(val) => insert_scalar_gen_fut(par, val, data_store.qu_insert_scalar_string.clone(), scy),
                 Bool(val) => insert_scalar_gen_fut(par, val, data_store.qu_insert_scalar_bool.clone(), scy),
+                CaStatus(val) => insert_scalar_gen_fut(par, val, data_store.qu_insert_scalar_castatus.clone(), scy),
             }
         }
         Array(val) => {

@@ -73,6 +73,8 @@ type ValueSeriesWriter = SeriesWriter<WritableType>;
 struct WritableType(DataValue);
 
 impl EmittableType for WritableType {
+    type State = ();
+
     fn ts(&self) -> TsNano {
         todo!()
     }
@@ -85,7 +87,14 @@ impl EmittableType for WritableType {
         todo!()
     }
 
-    fn into_data_value(self) -> DataValue {
+    fn into_query_item(
+        self,
+        ts_msp: netpod::TsMs,
+        ts_msp_changed: bool,
+        ts_lsp: netpod::DtNano,
+        ts_net: Instant,
+        state: &mut <Self as EmittableType>::State,
+    ) -> serieswriter::writer::SmallVec<[QueryItem; 4]> {
         todo!()
     }
 }
@@ -314,11 +323,12 @@ where
     let evs: EventsDim0<T> = evs.into();
     trace_input!("see events {:?}", evs);
     let tsnow = Instant::now();
+    let mut emit_state = ();
     for (i, (&ts, val)) in evs.tss.iter().zip(evs.values.iter()).enumerate() {
         let val = val.clone();
         trace_input!("ev  {:6}  {:20}  {:20?}", i, ts, val);
         let val = f1(val);
-        writer.write(WritableType(val), tsnow, deque)?;
+        writer.write(WritableType(val), &mut emit_state, tsnow, deque)?;
     }
     Ok(())
 }
@@ -341,11 +351,12 @@ where
     let evs: EventsDim1<T> = evs.into();
     trace_input!("see events {:?}", evs);
     let tsnow = Instant::now();
+    let mut emit_state = ();
     for (i, (&ts, val)) in evs.tss.iter().zip(evs.values.iter()).enumerate() {
         let val = val.clone();
         trace_input!("ev  {:6}  {:20}  {:20?}", i, ts, val);
         let val = f1(val);
-        writer.write(WritableType(val), tsnow, deque)?;
+        writer.write(WritableType(val), &mut emit_state, tsnow, deque)?;
     }
     Ok(())
 }

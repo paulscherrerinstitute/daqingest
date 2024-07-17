@@ -5,6 +5,7 @@ use err::ThisError;
 use log::*;
 use netpod::timeunits::HOUR;
 use netpod::timeunits::SEC;
+use netpod::DtNano;
 use netpod::ScalarType;
 use netpod::SeriesKind;
 use netpod::Shape;
@@ -21,11 +22,21 @@ use std::marker::PhantomData;
 use std::time::Instant;
 use std::time::SystemTime;
 
-pub trait EmittableType: Clone {
+pub use smallvec::SmallVec;
+
+pub trait EmittableType: ::core::fmt::Debug + Clone {
+    type State;
     fn ts(&self) -> TsNano;
     fn has_change(&self, k: &Self) -> bool;
     fn byte_size(&self) -> u32;
-    fn into_data_value(self) -> DataValue;
+    fn into_query_item(
+        self,
+        ts_msp: TsMs,
+        ts_msp_changed: bool,
+        ts_lsp: DtNano,
+        ts_net: Instant,
+        state: &mut <Self as EmittableType>::State,
+    ) -> SmallVec<[QueryItem; 4]>;
 }
 
 #[derive(Debug, ThisError)]
@@ -89,7 +100,13 @@ where
         self.sid.clone()
     }
 
-    pub fn write(&mut self, item: ET, ts_net: Instant, deque: &mut VecDeque<QueryItem>) -> Result<(), Error> {
+    pub fn write(
+        &mut self,
+        item: ET,
+        state: &mut <ET as EmittableType>::State,
+        ts_net: Instant,
+        deque: &mut VecDeque<QueryItem>,
+    ) -> Result<(), Error> {
         let ts_main = item.ts();
 
         // TODO decide on better msp/lsp: random offset!
@@ -128,18 +145,11 @@ where
             }
         };
         let ts_lsp = ts_main.delta(ts_msp);
-        let item = InsertItem {
-            series: self.sid.clone(),
-            ts_msp: ts_msp.to_ts_ms(),
-            ts_lsp,
-            ts_net,
-            ts_alt_1: ts_main,
-            msp_bump: ts_msp_changed,
-            val: item.into_data_value(),
-        };
-        // TODO decide on the path in the new deques struct
-        trace!("emit value for ts {:?}", ts_main);
-        deque.push_back(QueryItem::Insert(item));
+        let items = item.into_query_item(ts_msp.to_ts_ms(), ts_msp_changed, ts_lsp, ts_net, state);
+        trace!("emit value for ts {:?}  items len {}", ts_main, items.len());
+        for item in items {
+            deque.push_back(item);
+        }
         Ok(())
     }
 

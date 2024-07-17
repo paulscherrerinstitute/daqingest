@@ -43,12 +43,18 @@ pub struct MinQuiets {
 }
 
 #[derive(Debug)]
-struct State<ET> {
+struct State<ET>
+where
+    ET: EmittableType,
+{
     writer: RateLimitWriter<ET>,
 }
 
 #[derive(Debug)]
-pub struct RtWriter<ET> {
+pub struct RtWriter<ET>
+where
+    ET: EmittableType,
+{
     series: SeriesId,
     scalar_type: ScalarType,
     shape: Shape,
@@ -68,18 +74,19 @@ where
         shape: Shape,
         min_quiets: MinQuiets,
         stnow: SystemTime,
+        emit_state_new: &dyn Fn() -> <ET as EmittableType>::State,
     ) -> Result<Self, Error> {
         let state_st = {
             // let writer = SeriesWriter::establish_with_sid(sid, stnow)?;
-            let writer = RateLimitWriter::new(series, min_quiets.st, "st".into())?;
+            let writer = RateLimitWriter::new(series, min_quiets.st, emit_state_new(), "st".into())?;
             State { writer }
         };
         let state_mt = {
-            let writer = RateLimitWriter::new(series, min_quiets.mt, "mt".into())?;
+            let writer = RateLimitWriter::new(series, min_quiets.mt, emit_state_new(), "mt".into())?;
             State { writer }
         };
         let state_lt = {
-            let writer = RateLimitWriter::new(series, min_quiets.lt, "lt".into())?;
+            let writer = RateLimitWriter::new(series, min_quiets.lt, emit_state_new(), "lt".into())?;
             State { writer }
         };
         let ret = Self {

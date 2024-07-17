@@ -28,9 +28,13 @@ pub enum Error {
     SeriesWriter(#[from] crate::writer::Error),
 }
 
-pub struct RateLimitWriter<ET> {
+pub struct RateLimitWriter<ET>
+where
+    ET: EmittableType,
+{
     series: SeriesId,
     min_quiet: Duration,
+    emit_state: <ET as EmittableType>::State,
     last_insert_ts: TsNano,
     last_insert_val: Option<ET>,
     dbgname: String,
@@ -42,11 +46,17 @@ impl<ET> RateLimitWriter<ET>
 where
     ET: EmittableType,
 {
-    pub fn new(series: SeriesId, min_quiet: Duration, dbgname: String) -> Result<Self, Error> {
+    pub fn new(
+        series: SeriesId,
+        min_quiet: Duration,
+        emit_state: <ET as EmittableType>::State,
+        dbgname: String,
+    ) -> Result<Self, Error> {
         let writer = SeriesWriter::new(series)?;
         let ret = Self {
             series,
             min_quiet,
+            emit_state,
             last_insert_ts: TsNano::from_ns(0),
             last_insert_val: None,
             dbgname,
@@ -90,9 +100,7 @@ where
             }
         };
         if do_write {
-            self.last_insert_ts = item.ts();
-            self.last_insert_val = Some(item.clone());
-            self.writer.write(item, ts_net, deque)?;
+            self.writer.write(item, &mut self.emit_state, ts_net, deque)?;
         }
         Ok((do_write,))
     }
@@ -105,7 +113,7 @@ where
 
 impl<ET> fmt::Debug for RateLimitWriter<ET>
 where
-    ET: fmt::Debug,
+    ET: EmittableType,
 {
     fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
         fmt.debug_struct("RateLimitWriter")

@@ -26,6 +26,7 @@ use hashbrown::HashMap;
 use log::*;
 use netpod::timeunits::*;
 use netpod::ttl::RetentionTime;
+use netpod::DtNano;
 use netpod::ScalarType;
 use netpod::SeriesKind;
 use netpod::Shape;
@@ -314,6 +315,7 @@ struct CreatingState {
 struct MakingSeriesWriterState {
     tsbeg: Instant,
     channel: CreatedState,
+    series_status: SeriesId,
 }
 
 #[derive(Debug, Clone)]
@@ -514,6 +516,7 @@ enum ChannelState {
     Init(ChannelStatusSeriesId),
     Creating(CreatingState),
     FetchEnumDetails(FetchEnumDetails),
+    FetchCaStatusSeries(MakingSeriesWriterState),
     MakingSeriesWriter(MakingSeriesWriterState),
     Writable(WritableState),
     Closing(ClosingState),
@@ -551,6 +554,7 @@ impl ChannelState {
             ChannelState::Init(..) => ChannelConnectedInfo::Disconnected,
             ChannelState::Creating { .. } => ChannelConnectedInfo::Connecting,
             ChannelState::FetchEnumDetails(_) => ChannelConnectedInfo::Connecting,
+            ChannelState::FetchCaStatusSeries(_) => ChannelConnectedInfo::Connecting,
             ChannelState::MakingSeriesWriter(_) => ChannelConnectedInfo::Connecting,
             ChannelState::Writable(_) => ChannelConnectedInfo::Connected,
             ChannelState::Error(_) => ChannelConnectedInfo::Error,
@@ -637,6 +641,7 @@ impl ChannelState {
             ChannelState::Init(cssid) => cssid.clone(),
             ChannelState::Creating(st) => st.cssid.clone(),
             ChannelState::FetchEnumDetails(st) => st.cssid.clone(),
+            ChannelState::FetchCaStatusSeries(st) => st.channel.cssid.clone(),
             ChannelState::MakingSeriesWriter(st) => st.channel.cssid.clone(),
             ChannelState::Writable(st) => st.channel.cssid.clone(),
             ChannelState::Error(e) => match e {
@@ -1183,20 +1188,51 @@ impl CaConn {
                         trace!("handle_writer_establish_result  recv  {}", self.remote_addr_dbg);
                         let chinfo = res?;
                         if let Some(ch) = self.channels.get(&cid) {
-                            if let ChannelState::MakingSeriesWriter(st) = &ch.state {
-                                let scalar_type = st.channel.scalar_type.clone();
-                                let shape = st.channel.shape.clone();
-                                let writer = RtWriter::new(
-                                    chinfo.series.to_series(),
-                                    scalar_type,
-                                    shape,
-                                    ch.conf.min_quiets(),
-                                    stnow,
-                                )?;
-                                self.handle_writer_establish_inner(cid, writer)?;
-                                have_progress = true;
-                            } else {
-                                return Err(Error::Error);
+                            match &ch.state {
+                                ChannelState::FetchCaStatusSeries(st) => {
+                                    let crst = &st.channel;
+                                    let cid = crst.cid.clone();
+                                    let (tx, rx) = async_channel::bounded(8);
+                                    let item = ChannelInfoQuery {
+                                        backend: self.backend.clone(),
+                                        channel: crst.name().into(),
+                                        kind: netpod::SeriesKind::ChannelData,
+                                        scalar_type: crst.scalar_type.clone(),
+                                        shape: crst.shape.clone(),
+                                        tx: Box::pin(tx),
+                                    };
+                                    self.channel_info_query_qu.push_back(item);
+                                    self.channel_info_query_res_rxs.push_back((Box::pin(rx), cid));
+                                    self.channels.get_mut(&cid).unwrap().state =
+                                        ChannelState::MakingSeriesWriter(MakingSeriesWriterState {
+                                            tsbeg: Instant::now(),
+                                            channel: st.channel.clone(),
+                                            series_status: chinfo.series.to_series(),
+                                        });
+                                    have_progress = true;
+                                }
+                                ChannelState::MakingSeriesWriter(st) => {
+                                    let scalar_type = st.channel.scalar_type.clone();
+                                    let shape = st.channel.shape.clone();
+                                    let writer = RtWriter::new(
+                                        chinfo.series.to_series(),
+                                        scalar_type,
+                                        shape,
+                                        ch.conf.min_quiets(),
+                                        stnow,
+                                        &|| CaWriterValueState {
+                                            series_data: chinfo.series.to_series(),
+                                            series_status: st.series_status,
+                                            last_accepted_ts: TsNano::from_ns(0),
+                                            last_accepted_val: None,
+                                        },
+                                    )?;
+                                    self.handle_writer_establish_inner(cid, writer)?;
+                                    have_progress = true;
+                                }
+                                _ => {
+                                    return Err(Error::Error);
+                                }
                             }
                         } else {
                             return Err(Error::Error);
@@ -1418,6 +1454,9 @@ impl CaConn {
                 ChannelState::FetchEnumDetails(st) => {
                     *chst = ChannelState::Ended(st.cssid.clone());
                 }
+                ChannelState::FetchCaStatusSeries(st) => {
+                    *chst = ChannelState::Ended(st.channel.cssid.clone());
+                }
                 ChannelState::MakingSeriesWriter(st) => {
                     *chst = ChannelState::Ended(st.channel.cssid.clone());
                 }
@@ -1456,6 +1495,9 @@ impl CaConn {
                 }
                 ChannelState::Creating(..) => {
                     // TODO need last-save-ts for this state.
+                }
+                ChannelState::FetchCaStatusSeries(..) => {
+                    // TODO ?
                 }
                 ChannelState::MakingSeriesWriter(..) => {
                     // TODO ?
@@ -1667,6 +1709,7 @@ impl CaConn {
             ChannelState::Creating(_)
             | ChannelState::Init(_)
             | ChannelState::FetchEnumDetails(_)
+            | ChannelState::FetchCaStatusSeries(_)
             | ChannelState::MakingSeriesWriter(_) => {
                 self.stats.recv_read_notify_but_not_init_yet.inc();
             }
@@ -2090,6 +2133,7 @@ impl CaConn {
                 ChannelState::Init(_) => {}
                 ChannelState::Creating(_) => {}
                 ChannelState::FetchEnumDetails(_) => {}
+                ChannelState::FetchCaStatusSeries(_) => {}
                 ChannelState::MakingSeriesWriter(_) => {}
                 ChannelState::Writable(st2) => match &mut st2.reading {
                     ReadingState::EnableMonitoring(_) => {}
@@ -2493,8 +2537,7 @@ impl CaConn {
         match &scalar_type {
             ScalarType::Enum => {
                 // TODO channel created, now fetch enum variants, later make writer
-                let min_quiets = conf.conf.min_quiets();
-                let fut = enumfetch::EnumFetch::new(created_state, self, min_quiets);
+                let fut = enumfetch::EnumFetch::new(created_state, self);
                 // TODO should always check if the slot is free.
                 let ioid = fut.ioid();
                 let x = Box::pin(fut);
@@ -2503,10 +2546,6 @@ impl CaConn {
             _ => {
                 let backend = self.backend.clone();
                 let channel_name = created_state.name().into();
-                *chst = ChannelState::MakingSeriesWriter(MakingSeriesWriterState {
-                    tsbeg: tsnow,
-                    channel: created_state,
-                });
                 // TODO create a channel for the answer.
                 // Keep only a certain max number of channels in-flight because have to poll on them.
                 // TODO register the channel for the answer.
@@ -2514,13 +2553,18 @@ impl CaConn {
                 let item = ChannelInfoQuery {
                     backend,
                     channel: channel_name,
-                    kind: SeriesKind::ChannelData,
-                    scalar_type: scalar_type.clone(),
-                    shape: shape.clone(),
+                    kind: SeriesKind::CaStatus,
+                    scalar_type: ScalarType::I16,
+                    shape: Shape::Scalar,
                     tx: Box::pin(tx),
                 };
                 self.channel_info_query_qu.push_back(item);
                 self.channel_info_query_res_rxs.push_back((Box::pin(rx), cid));
+                *chst = ChannelState::FetchCaStatusSeries(MakingSeriesWriterState {
+                    tsbeg: tsnow,
+                    channel: created_state,
+                    series_status: SeriesId::new(0),
+                });
             }
         }
         Ok(())
@@ -3237,6 +3281,13 @@ impl Stream for CaConn {
     }
 }
 
+struct CaWriterValueState {
+    series_data: SeriesId,
+    series_status: SeriesId,
+    last_accepted_ts: TsNano,
+    last_accepted_val: Option<CaWriterValue>,
+}
+
 #[derive(Debug, Clone)]
 struct CaWriterValue(CaEventValue, Option<String>);
 
@@ -3269,12 +3320,16 @@ impl CaWriterValue {
 }
 
 impl EmittableType for CaWriterValue {
+    type State = CaWriterValueState;
+
     fn ts(&self) -> TsNano {
         TsNano::from_ns(self.0.ts().unwrap_or(0))
     }
 
     fn has_change(&self, k: &Self) -> bool {
         if self.0.data != k.0.data {
+            true
+        } else if self.0.meta != k.0.meta {
             true
         } else {
             false
@@ -3285,47 +3340,104 @@ impl EmittableType for CaWriterValue {
         self.0.data.byte_size()
     }
 
-    fn into_data_value(mut self) -> DataValue {
-        // TODO need to pass a ref to channel state to convert enum strings.
-        // Or do that already when we construct this?
-        // Also, in general, need to produce a SmallVec of values to emit: value, status, severity, etc..
-        // let val = Self::convert_event_data(crst, value.data)?;
-        use super::proto::CaDataValue;
-        use scywr::iteminsertqueue::DataValue;
-        let ret = match self.0.data {
-            CaDataValue::Scalar(val) => DataValue::Scalar({
-                use super::proto::CaDataScalarValue;
-                use scywr::iteminsertqueue::ScalarValue;
-                match val {
-                    CaDataScalarValue::I8(x) => ScalarValue::I8(x),
-                    CaDataScalarValue::I16(x) => ScalarValue::I16(x),
-                    CaDataScalarValue::I32(x) => ScalarValue::I32(x),
-                    CaDataScalarValue::F32(x) => ScalarValue::F32(x),
-                    CaDataScalarValue::F64(x) => ScalarValue::F64(x),
-                    CaDataScalarValue::Enum(x) => ScalarValue::Enum(
-                        x,
-                        self.1.take().unwrap_or_else(|| {
-                            warn!("NoEnumStr");
-                            String::from("NoEnumStr")
-                        }),
-                    ),
-                    CaDataScalarValue::String(x) => ScalarValue::String(x),
-                    CaDataScalarValue::Bool(x) => ScalarValue::Bool(x),
-                }
-            }),
-            CaDataValue::Array(val) => DataValue::Array({
-                use super::proto::CaDataArrayValue;
-                use scywr::iteminsertqueue::ArrayValue;
-                match val {
-                    CaDataArrayValue::I8(x) => ArrayValue::I8(x),
-                    CaDataArrayValue::I16(x) => ArrayValue::I16(x),
-                    CaDataArrayValue::I32(x) => ArrayValue::I32(x),
-                    CaDataArrayValue::F32(x) => ArrayValue::F32(x),
-                    CaDataArrayValue::F64(x) => ArrayValue::F64(x),
-                    CaDataArrayValue::Bool(x) => ArrayValue::Bool(x),
-                }
-            }),
+    fn into_query_item(
+        mut self,
+        ts_msp: TsMs,
+        ts_msp_changed: bool,
+        ts_lsp: DtNano,
+        ts_net: Instant,
+        state: &mut <Self as EmittableType>::State,
+    ) -> serieswriter::writer::SmallVec<[QueryItem; 4]> {
+        let mut ret = serieswriter::writer::SmallVec::new();
+        let diff_data = match state.last_accepted_val.as_ref() {
+            Some(last) => self.0.data != last.0.data,
+            None => true,
         };
+        let diff_status = match state.last_accepted_val.as_ref() {
+            Some(last) => match &last.0.meta {
+                proto::CaMetaValue::CaMetaTime(last_meta) => match &self.0.meta {
+                    proto::CaMetaValue::CaMetaTime(meta) => meta.status != last_meta.status,
+                    _ => false,
+                },
+                _ => false,
+            },
+            None => true,
+        };
+        if let Some(ts) = self.0.ts() {
+            state.last_accepted_ts = TsNano::from_ns(ts);
+        }
+        state.last_accepted_val = Some(self.clone());
+        if diff_data {
+            debug!("diff_data    emit {:?}", state.series_data);
+            let data_value = {
+                use super::proto::CaDataValue;
+                use scywr::iteminsertqueue::DataValue;
+                let ret = match self.0.data {
+                    CaDataValue::Scalar(val) => DataValue::Scalar({
+                        use super::proto::CaDataScalarValue;
+                        use scywr::iteminsertqueue::ScalarValue;
+                        match val {
+                            CaDataScalarValue::I8(x) => ScalarValue::I8(x),
+                            CaDataScalarValue::I16(x) => ScalarValue::I16(x),
+                            CaDataScalarValue::I32(x) => ScalarValue::I32(x),
+                            CaDataScalarValue::F32(x) => ScalarValue::F32(x),
+                            CaDataScalarValue::F64(x) => ScalarValue::F64(x),
+                            CaDataScalarValue::Enum(x) => ScalarValue::Enum(
+                                x,
+                                self.1.take().unwrap_or_else(|| {
+                                    warn!("NoEnumStr");
+                                    String::from("NoEnumStr")
+                                }),
+                            ),
+                            CaDataScalarValue::String(x) => ScalarValue::String(x),
+                            CaDataScalarValue::Bool(x) => ScalarValue::Bool(x),
+                        }
+                    }),
+                    CaDataValue::Array(val) => DataValue::Array({
+                        use super::proto::CaDataArrayValue;
+                        use scywr::iteminsertqueue::ArrayValue;
+                        match val {
+                            CaDataArrayValue::I8(x) => ArrayValue::I8(x),
+                            CaDataArrayValue::I16(x) => ArrayValue::I16(x),
+                            CaDataArrayValue::I32(x) => ArrayValue::I32(x),
+                            CaDataArrayValue::F32(x) => ArrayValue::F32(x),
+                            CaDataArrayValue::F64(x) => ArrayValue::F64(x),
+                            CaDataArrayValue::Bool(x) => ArrayValue::Bool(x),
+                        }
+                    }),
+                };
+                ret
+            };
+            let item = scywriiq::InsertItem {
+                series: state.series_data.clone(),
+                ts_msp,
+                ts_lsp,
+                ts_net,
+                msp_bump: ts_msp_changed,
+                val: data_value,
+            };
+            ret.push(QueryItem::Insert(item));
+        }
+        if diff_status {
+            debug!("diff_status  emit {:?}", state.series_status);
+            use scywr::iteminsertqueue::DataValue;
+            use scywr::iteminsertqueue::ScalarValue;
+            match self.0.meta {
+                proto::CaMetaValue::CaMetaTime(meta) => {
+                    let data_value = DataValue::Scalar(ScalarValue::CaStatus(meta.status as i16));
+                    let item = scywriiq::InsertItem {
+                        series: state.series_status.clone(),
+                        ts_msp,
+                        ts_lsp,
+                        ts_net,
+                        msp_bump: ts_msp_changed,
+                        val: data_value,
+                    };
+                    ret.push(QueryItem::Insert(item));
+                }
+                _ => {}
+            };
+        }
         ret
     }
 }

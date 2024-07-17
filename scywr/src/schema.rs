@@ -468,7 +468,7 @@ async fn check_event_tables(keyspace: &str, rett: RetentionTime, scy: &ScySessio
         let tab = GenTwcsTab::new(
             keyspace,
             rett.table_prefix(),
-            format!("events_scalar_status"),
+            format!("events_scalar_castatus"),
             &[
                 ("series", "bigint"),
                 ("ts_msp", "bigint"),
@@ -485,7 +485,7 @@ async fn check_event_tables(keyspace: &str, rett: RetentionTime, scy: &ScySessio
         let tab = GenTwcsTab::new(
             keyspace,
             rett.table_prefix(),
-            format!("events_scalar_severity"),
+            format!("events_scalar_caseverity"),
             &[
                 ("series", "bigint"),
                 ("ts_msp", "bigint"),

@@ -7,6 +7,7 @@ use dbpg::seriesbychannel::ChannelInfoQuery;
 use err::thiserror;
 use err::ThisError;
 use log::*;
+use series::SeriesId;
 use std::pin::Pin;
 use std::time::Instant;
 
@@ -23,11 +24,10 @@ pub trait ConnFuture: Send {
 pub struct EnumFetch {
     created_state: CreatedState,
     ioid: Ioid,
-    min_quiets: serieswriter::rtwriter::MinQuiets,
 }
 
 impl EnumFetch {
-    pub fn new(created_state: CreatedState, conn: &mut CaConn, min_quiets: serieswriter::rtwriter::MinQuiets) -> Self {
+    pub fn new(created_state: CreatedState, conn: &mut CaConn) -> Self {
         if created_state.cssid.id() == 4705698279895902114 {}
         let name = created_state.name();
         // info!("EnumFetch::new  name {name}");
@@ -42,11 +42,7 @@ impl EnumFetch {
         let ts = Instant::now();
         let item = CaMsg::from_ty_ts(ty, ts);
         conn.proto().unwrap().push_out(item);
-        Self {
-            created_state,
-            ioid,
-            min_quiets,
-        }
+        Self { created_state, ioid }
     }
 
     pub fn ioid(&self) -> Ioid {
@@ -76,16 +72,14 @@ impl ConnFuture for EnumFetch {
             }
         };
 
-        // TODO create a channel for the answer.
-        // TODO register the channel for the answer.
         let cid = crst.cid.clone();
         let (tx, rx) = async_channel::bounded(8);
         let item = ChannelInfoQuery {
             backend: conn.backend.clone(),
             channel: crst.name().into(),
-            kind: netpod::SeriesKind::ChannelData,
-            scalar_type: crst.scalar_type.clone(),
-            shape: crst.shape.clone(),
+            kind: netpod::SeriesKind::CaStatus,
+            scalar_type: netpod::ScalarType::I16,
+            shape: netpod::Shape::Scalar,
             tx: Box::pin(tx),
         };
         conn.channel_info_query_qu.push_back(item);
@@ -93,9 +87,10 @@ impl ConnFuture for EnumFetch {
 
         // This handler must not exist if the channel gets removed.
         let conf = conn.channels.get_mut(&crst.cid).ok_or(Error::MissingState)?;
-        conf.state = super::ChannelState::MakingSeriesWriter(super::MakingSeriesWriterState {
+        conf.state = super::ChannelState::FetchCaStatusSeries(super::MakingSeriesWriterState {
             tsbeg: tsnow,
             channel: crst.clone(),
+            series_status: SeriesId::new(0),
         });
 
         conn.handler_by_ioid.remove(&self.ioid);

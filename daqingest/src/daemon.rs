@@ -763,7 +763,7 @@ pub async fn run(opts: CaIngestOpts, channels_config: Option<ChannelsConfig>) ->
         debug!("will configure {} channels", channels_config.len());
         let mut thr_msg = ThrottleTrace::new(Duration::from_millis(1000));
         let mut i = 0;
-        let nmax = usize::MAX;
+        let nmax = 100999777;
         let nn = channels_config.channels().len();
         let mut ixs: Vec<usize> = (0..nn).into_iter().collect();
         if false {
