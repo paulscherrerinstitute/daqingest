@@ -1,5 +1,6 @@
 pub mod binwriter;
 pub mod changewriter;
+pub mod msptool;
 pub mod patchcollect;
 pub mod ratelimitwriter;
 pub mod rtwriter;

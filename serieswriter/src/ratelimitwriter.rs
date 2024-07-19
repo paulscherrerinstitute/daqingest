@@ -28,6 +28,13 @@ pub enum Error {
     SeriesWriter(#[from] crate::writer::Error),
 }
 
+#[derive(Debug)]
+pub struct WriteRes {
+    pub accept: bool,
+    pub bytes: u32,
+    pub status: u8,
+}
+
 pub struct RateLimitWriter<ET>
 where
     ET: EmittableType,
@@ -66,7 +73,7 @@ where
         Ok(ret)
     }
 
-    pub fn write(&mut self, item: ET, ts_net: Instant, deque: &mut VecDeque<QueryItem>) -> Result<(bool,), Error> {
+    pub fn write(&mut self, item: ET, ts_net: Instant, deque: &mut VecDeque<QueryItem>) -> Result<WriteRes, Error> {
         // Decide whether we want to write.
         // TODO catch already in CaConn the cases when the IOC-timestamp did not change.
         let tsl = self.last_insert_ts.clone();
@@ -100,9 +107,21 @@ where
             }
         };
         if do_write {
-            self.writer.write(item, &mut self.emit_state, ts_net, deque)?;
+            let res = self.writer.write(item, &mut self.emit_state, ts_net, deque)?;
+            let ret = WriteRes {
+                accept: true,
+                bytes: res.bytes,
+                status: res.status,
+            };
+            Ok(ret)
+        } else {
+            let ret = WriteRes {
+                accept: false,
+                bytes: 0,
+                status: 0,
+            };
+            Ok(ret)
         }
-        Ok((do_write,))
     }
 
     pub fn tick(&mut self, iqdqs: &mut VecDeque<QueryItem>) -> Result<(), Error> {

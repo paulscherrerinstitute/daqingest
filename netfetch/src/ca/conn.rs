@@ -17,7 +17,6 @@ use dbpg::seriesbychannel::ChannelInfoResult;
 use enumfetch::ConnFuture;
 use err::thiserror;
 use err::ThisError;
-use futures_util::pin_mut;
 use futures_util::Future;
 use futures_util::FutureExt;
 use futures_util::Stream;
@@ -26,7 +25,6 @@ use hashbrown::HashMap;
 use log::*;
 use netpod::timeunits::*;
 use netpod::ttl::RetentionTime;
-use netpod::DtNano;
 use netpod::ScalarType;
 use netpod::SeriesKind;
 use netpod::Shape;
@@ -45,7 +43,7 @@ use scywr::insertqueues::InsertSenderPolling;
 use scywr::iteminsertqueue as scywriiq;
 use scywr::iteminsertqueue::Accounting;
 use scywr::iteminsertqueue::AccountingRecv;
-use scywr::iteminsertqueue::DataValue;
+use scywr::iteminsertqueue::MspItem;
 use scywr::iteminsertqueue::QueryItem;
 use scywr::iteminsertqueue::ShutdownReason;
 use scywr::senderpolling::SenderPolling;
@@ -58,6 +56,7 @@ use serde::Serialize;
 use series::ChannelStatusSeriesId;
 use series::SeriesId;
 use serieswriter::binwriter::BinWriter;
+use serieswriter::msptool::MspSplit;
 use serieswriter::rtwriter::RtWriter;
 use serieswriter::writer::EmittableType;
 use stats::rand_xoshiro::rand_core::RngCore;
@@ -220,6 +219,7 @@ pub struct ChannelStateInfo {
     pub write_st_last: SystemTime,
     pub write_mt_last: SystemTime,
     pub write_lt_last: SystemTime,
+    pub status_emit_count: u64,
 }
 
 mod ser_instant {
@@ -461,6 +461,7 @@ struct CreatedState {
     log_more: bool,
     name: String,
     enum_str_table: Option<Vec<String>>,
+    status_emit_count: u64,
 }
 
 impl CreatedState {
@@ -503,6 +504,7 @@ impl CreatedState {
             log_more: false,
             name: String::new(),
             enum_str_table: None,
+            status_emit_count: 0,
         }
     }
 
@@ -614,6 +616,10 @@ impl ChannelState {
             _ => None,
         };
         let interest_score = 1. / item_recv_ivl_ema.unwrap_or(1e10).max(1e-6).min(1e10);
+        let status_emit_count = match self {
+            ChannelState::Writable(s) => s.channel.status_emit_count,
+            _ => 0,
+        };
         ChannelStateInfo {
             stnow,
             cssid,
@@ -633,6 +639,7 @@ impl ChannelState {
             write_st_last,
             write_mt_last,
             write_lt_last,
+            status_emit_count,
         }
     }
 
@@ -1219,13 +1226,7 @@ impl CaConn {
                                         scalar_type,
                                         shape,
                                         ch.conf.min_quiets(),
-                                        stnow,
-                                        &|| CaWriterValueState {
-                                            series_data: chinfo.series.to_series(),
-                                            series_status: st.series_status,
-                                            last_accepted_ts: TsNano::from_ns(0),
-                                            last_accepted_val: None,
-                                        },
+                                        &|| CaWriterValueState::new(st.series_status, chinfo.series.to_series()),
                                     )?;
                                     self.handle_writer_establish_inner(cid, writer)?;
                                     have_progress = true;
@@ -1958,20 +1959,21 @@ impl CaConn {
             Self::check_ev_value_data(&value.data, &writer.scalar_type())?;
             crst.muted_before = 0;
             crst.insert_item_ivl_ema.tick(tsnow);
-            let ts_ioc = TsNano::from_ns(ts);
-            let ts_local = TsNano::from_ns(ts_local);
+            // let ts_ioc = TsNano::from_ns(ts);
+            // let ts_local = TsNano::from_ns(ts_local);
             // binwriter.ingest(ts_ioc, ts_local, &val, iqdqs)?;
             {
-                let ((dwst, dwmt, dwlt),) = writer.write(CaWriterValue::new(value, crst), tsnow, iqdqs)?;
-                if dwst {
+                let wres = writer.write(CaWriterValue::new(value, crst), tsnow, iqdqs)?;
+                crst.status_emit_count += wres.nstatus() as u64;
+                if wres.st.accept {
                     crst.dw_st_last = stnow;
                     crst.acc_st.push_written(payload_len);
                 }
-                if dwmt {
+                if wres.mt.accept {
                     crst.dw_mt_last = stnow;
                     crst.acc_mt.push_written(payload_len);
                 }
-                if dwlt {
+                if wres.lt.accept {
                     crst.dw_lt_last = stnow;
                     crst.acc_lt.push_written(payload_len);
                 }
@@ -2526,6 +2528,7 @@ impl CaConn {
             log_more,
             name: conf.conf.name().into(),
             enum_str_table: None,
+            status_emit_count: 0,
         };
         if dbg_chn_name(created_state.name()) {
             info!(
@@ -3286,6 +3289,21 @@ struct CaWriterValueState {
     series_status: SeriesId,
     last_accepted_ts: TsNano,
     last_accepted_val: Option<CaWriterValue>,
+    msp_split_status: MspSplit,
+    msp_split_data: MspSplit,
+}
+
+impl CaWriterValueState {
+    fn new(series_status: SeriesId, series_data: SeriesId) -> Self {
+        Self {
+            series_data,
+            series_status,
+            last_accepted_ts: TsNano::from_ns(0),
+            last_accepted_val: None,
+            msp_split_status: MspSplit::new(1024 * 64, 1024 * 1024 * 10),
+            msp_split_data: MspSplit::new(1024 * 64, 1024 * 1024 * 10),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -3342,13 +3360,10 @@ impl EmittableType for CaWriterValue {
 
     fn into_query_item(
         mut self,
-        ts_msp: TsMs,
-        ts_msp_changed: bool,
-        ts_lsp: DtNano,
         ts_net: Instant,
         state: &mut <Self as EmittableType>::State,
-    ) -> serieswriter::writer::SmallVec<[QueryItem; 4]> {
-        let mut ret = serieswriter::writer::SmallVec::new();
+    ) -> serieswriter::writer::EmitRes {
+        let mut items = serieswriter::writer::SmallVec::new();
         let diff_data = match state.last_accepted_val.as_ref() {
             Some(last) => self.0.data != last.0.data,
             None => true,
@@ -3363,12 +3378,15 @@ impl EmittableType for CaWriterValue {
             },
             None => true,
         };
+        let ts = TsNano::from_ns(self.0.ts().unwrap());
         if let Some(ts) = self.0.ts() {
             state.last_accepted_ts = TsNano::from_ns(ts);
         }
         state.last_accepted_val = Some(self.clone());
+        let byte_size = self.byte_size();
         if diff_data {
             debug!("diff_data    emit {:?}", state.series_data);
+            let (ts_msp, ts_lsp, ts_msp_chg) = state.msp_split_data.split(ts, self.byte_size());
             let data_value = {
                 use super::proto::CaDataValue;
                 use scywr::iteminsertqueue::DataValue;
@@ -3408,36 +3426,59 @@ impl EmittableType for CaWriterValue {
                 };
                 ret
             };
+            if ts_msp_chg {
+                items.push(QueryItem::Msp(MspItem::new(
+                    state.series_data.clone(),
+                    ts_msp.to_ts_ms(),
+                    ts_net,
+                )));
+            }
             let item = scywriiq::InsertItem {
                 series: state.series_data.clone(),
-                ts_msp,
+                ts_msp: ts_msp.to_ts_ms(),
                 ts_lsp,
                 ts_net,
-                msp_bump: ts_msp_changed,
                 val: data_value,
             };
-            ret.push(QueryItem::Insert(item));
+            items.push(QueryItem::Insert(item));
         }
+        let mut n_status = 0;
         if diff_status {
-            debug!("diff_status  emit {:?}", state.series_status);
             use scywr::iteminsertqueue::DataValue;
             use scywr::iteminsertqueue::ScalarValue;
             match self.0.meta {
                 proto::CaMetaValue::CaMetaTime(meta) => {
+                    let (ts_msp, ts_lsp, ts_msp_chg) = state.msp_split_status.split(ts, 2);
+                    if ts_msp_chg {
+                        items.push(QueryItem::Msp(MspItem::new(
+                            state.series_status.clone(),
+                            ts_msp.to_ts_ms(),
+                            ts_net,
+                        )));
+                    }
                     let data_value = DataValue::Scalar(ScalarValue::CaStatus(meta.status as i16));
                     let item = scywriiq::InsertItem {
                         series: state.series_status.clone(),
-                        ts_msp,
+                        ts_msp: ts_msp.to_ts_ms(),
                         ts_lsp,
                         ts_net,
-                        msp_bump: ts_msp_changed,
                         val: data_value,
                     };
-                    ret.push(QueryItem::Insert(item));
+                    items.push(QueryItem::Insert(item));
+                    n_status += 1;
+                    // info!("diff_status  emit {:?}", state.series_status);
                 }
-                _ => {}
+                _ => {
+                    // TODO must be able to return error here
+                    warn!("diff_status logic error");
+                }
             };
         }
+        let ret = serieswriter::writer::EmitRes {
+            items,
+            bytes: byte_size,
+            status: n_status,
+        };
         ret
     }
 }

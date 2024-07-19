@@ -1,22 +1,16 @@
 use crate::ratelimitwriter::RateLimitWriter;
 use crate::writer::EmittableType;
-use async_channel::Sender;
-use dbpg::seriesbychannel::ChannelInfoQuery;
 use err::thiserror;
 use err::ThisError;
 use netpod::log::*;
 use netpod::ScalarType;
-use netpod::SeriesKind;
 use netpod::Shape;
-use netpod::TsNano;
 use scywr::insertqueues::InsertDeques;
-use scywr::iteminsertqueue::DataValue;
 use scywr::iteminsertqueue::QueryItem;
 use series::SeriesId;
 use std::collections::VecDeque;
 use std::time::Duration;
 use std::time::Instant;
-use std::time::SystemTime;
 
 #[allow(unused)]
 macro_rules! trace_ {
@@ -51,6 +45,26 @@ where
 }
 
 #[derive(Debug)]
+pub struct WriteRes {
+    pub st: WriteRtRes,
+    pub mt: WriteRtRes,
+    pub lt: WriteRtRes,
+}
+
+impl WriteRes {
+    pub fn nstatus(&self) -> u8 {
+        self.st.status + self.mt.status + self.lt.status
+    }
+}
+
+#[derive(Debug)]
+pub struct WriteRtRes {
+    pub accept: bool,
+    pub bytes: u32,
+    pub status: u8,
+}
+
+#[derive(Debug)]
 pub struct RtWriter<ET>
 where
     ET: EmittableType,
@@ -73,7 +87,6 @@ where
         scalar_type: ScalarType,
         shape: Shape,
         min_quiets: MinQuiets,
-        stnow: SystemTime,
         emit_state_new: &dyn Fn() -> <ET as EmittableType>::State,
     ) -> Result<Self, Error> {
         let state_st = {
@@ -117,20 +130,32 @@ where
         self.min_quiets.clone()
     }
 
-    pub fn write(
-        &mut self,
-        item: ET,
-        ts_net: Instant,
-        iqdqs: &mut InsertDeques,
-    ) -> Result<((bool, bool, bool),), Error> {
+    pub fn write(&mut self, item: ET, ts_net: Instant, iqdqs: &mut InsertDeques) -> Result<WriteRes, Error> {
         trace!("write  {:?}", item.ts());
         // TODO
         // Optimize for the common case that we only write into one of the stores.
         // Make the decision first, based on ref, then clone only as required.
-        let (did_write_st,) = Self::write_inner(&mut self.state_st, item.clone(), ts_net, &mut iqdqs.st_rf3_rx)?;
-        let (did_write_mt,) = Self::write_inner(&mut self.state_mt, item.clone(), ts_net, &mut iqdqs.mt_rf3_rx)?;
-        let (did_write_lt,) = Self::write_inner(&mut self.state_lt, item, ts_net, &mut iqdqs.lt_rf3_rx)?;
-        Ok(((did_write_st, did_write_mt, did_write_lt),))
+        let res_st = Self::write_inner(&mut self.state_st, item.clone(), ts_net, &mut iqdqs.st_rf3_rx)?;
+        let res_mt = Self::write_inner(&mut self.state_mt, item.clone(), ts_net, &mut iqdqs.mt_rf3_rx)?;
+        let res_lt = Self::write_inner(&mut self.state_lt, item, ts_net, &mut iqdqs.lt_rf3_rx)?;
+        let ret = WriteRes {
+            st: WriteRtRes {
+                accept: res_st.accept,
+                bytes: res_st.bytes,
+                status: res_st.status,
+            },
+            mt: WriteRtRes {
+                accept: res_mt.accept,
+                bytes: res_mt.bytes,
+                status: res_mt.status,
+            },
+            lt: WriteRtRes {
+                accept: res_lt.accept,
+                bytes: res_lt.bytes,
+                status: res_lt.status,
+            },
+        };
+        Ok(ret)
     }
 
     fn write_inner(
@@ -138,7 +163,7 @@ where
         item: ET,
         ts_net: Instant,
         deque: &mut VecDeque<QueryItem>,
-    ) -> Result<(bool,), Error> {
+    ) -> Result<crate::ratelimitwriter::WriteRes, Error> {
         Ok(state.writer.write(item, ts_net, deque)?)
     }
 
@@ -148,11 +173,4 @@ where
         self.state_lt.writer.tick(&mut iqdqs.lt_rf3_rx)?;
         Ok(())
     }
-}
-
-#[derive(Debug)]
-struct LastIns {
-    ts_local: TsNano,
-    ts_ioc: TsNano,
-    val: DataValue,
 }

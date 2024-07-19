@@ -66,6 +66,18 @@ struct ChannelState {
     write_lt_last: SystemTime,
     #[serde(with = "humantime_serde", skip_serializing_if = "system_time_epoch")]
     updated: SystemTime,
+    private: StatePrivate,
+}
+
+#[derive(Debug, Serialize)]
+struct StatePrivate {
+    status_emit_count: u64,
+}
+
+impl Default for StatePrivate {
+    fn default() -> Self {
+        Self { status_emit_count: 0 }
+    }
 }
 
 fn system_time_epoch(x: &SystemTime) -> bool {
@@ -114,6 +126,7 @@ pub async fn channel_states(params: HashMap<String, String>, tx: Sender<CaConnSe
                             write_mt_last: SystemTime::UNIX_EPOCH,
                             write_lt_last: SystemTime::UNIX_EPOCH,
                             updated: SystemTime::UNIX_EPOCH,
+                            private: StatePrivate::default(),
                         };
                         states.channels.insert(k, chst);
                     }
@@ -129,6 +142,7 @@ pub async fn channel_states(params: HashMap<String, String>, tx: Sender<CaConnSe
                             write_mt_last: SystemTime::UNIX_EPOCH,
                             write_lt_last: SystemTime::UNIX_EPOCH,
                             updated: SystemTime::UNIX_EPOCH,
+                            private: StatePrivate::default(),
                         };
                         states.channels.insert(k, chst);
                     }
@@ -147,6 +161,7 @@ pub async fn channel_states(params: HashMap<String, String>, tx: Sender<CaConnSe
                                     write_mt_last: SystemTime::UNIX_EPOCH,
                                     write_lt_last: SystemTime::UNIX_EPOCH,
                                     updated: SystemTime::UNIX_EPOCH,
+                                    private: StatePrivate::default(),
                                 };
                                 states.channels.insert(k, chst);
                             }
@@ -165,6 +180,7 @@ pub async fn channel_states(params: HashMap<String, String>, tx: Sender<CaConnSe
                                             write_mt_last: SystemTime::UNIX_EPOCH,
                                             write_lt_last: SystemTime::UNIX_EPOCH,
                                             updated: SystemTime::UNIX_EPOCH,
+                                            private: StatePrivate::default(),
                                         };
                                         states.channels.insert(k, chst);
                                     }
@@ -183,12 +199,16 @@ pub async fn channel_states(params: HashMap<String, String>, tx: Sender<CaConnSe
                                                     write_mt_last: SystemTime::UNIX_EPOCH,
                                                     write_lt_last: SystemTime::UNIX_EPOCH,
                                                     updated: SystemTime::UNIX_EPOCH,
+                                                    private: StatePrivate::default(),
                                                 };
                                                 states.channels.insert(k, chst);
                                             }
                                             ConnectionStateValue::ChannelStateInfo(st6) => {
                                                 let recv_count = st6.recv_count.unwrap_or(0);
                                                 let recv_bytes = st6.recv_bytes.unwrap_or(0);
+                                                let private = StatePrivate {
+                                                    status_emit_count: st6.status_emit_count,
+                                                };
                                                 use crate::ca::conn::ChannelConnectedInfo;
                                                 match st6.channel_connected_info {
                                                     ChannelConnectedInfo::Disconnected => {
@@ -205,6 +225,7 @@ pub async fn channel_states(params: HashMap<String, String>, tx: Sender<CaConnSe
                                                             write_mt_last: st6.write_mt_last,
                                                             write_lt_last: st6.write_lt_last,
                                                             updated: st6.stnow,
+                                                            private,
                                                         };
                                                         states.channels.insert(k, chst);
                                                     }
@@ -220,6 +241,7 @@ pub async fn channel_states(params: HashMap<String, String>, tx: Sender<CaConnSe
                                                             write_mt_last: st6.write_mt_last,
                                                             write_lt_last: st6.write_lt_last,
                                                             updated: st6.stnow,
+                                                            private,
                                                         };
                                                         states.channels.insert(k, chst);
                                                     }
@@ -235,6 +257,7 @@ pub async fn channel_states(params: HashMap<String, String>, tx: Sender<CaConnSe
                                                             write_mt_last: st6.write_mt_last,
                                                             write_lt_last: st6.write_lt_last,
                                                             updated: st6.stnow,
+                                                            private,
                                                         };
                                                         states.channels.insert(k, chst);
                                                     }
@@ -250,6 +273,7 @@ pub async fn channel_states(params: HashMap<String, String>, tx: Sender<CaConnSe
                                                             write_mt_last: st6.write_mt_last,
                                                             write_lt_last: st6.write_lt_last,
                                                             updated: st6.stnow,
+                                                            private,
                                                         };
                                                         states.channels.insert(k, chst);
                                                     }
@@ -271,6 +295,7 @@ pub async fn channel_states(params: HashMap<String, String>, tx: Sender<CaConnSe
                                     write_mt_last: SystemTime::UNIX_EPOCH,
                                     write_lt_last: SystemTime::UNIX_EPOCH,
                                     updated: SystemTime::UNIX_EPOCH,
+                                    private: StatePrivate::default(),
                                 };
                                 states.channels.insert(k, chst);
                             }
@@ -286,6 +311,7 @@ pub async fn channel_states(params: HashMap<String, String>, tx: Sender<CaConnSe
                                     write_mt_last: SystemTime::UNIX_EPOCH,
                                     write_lt_last: SystemTime::UNIX_EPOCH,
                                     updated: SystemTime::UNIX_EPOCH,
+                                    private: StatePrivate::default(),
                                 };
                                 states.channels.insert(k, chst);
                             }
@@ -301,6 +327,7 @@ pub async fn channel_states(params: HashMap<String, String>, tx: Sender<CaConnSe
                                     write_mt_last: SystemTime::UNIX_EPOCH,
                                     write_lt_last: SystemTime::UNIX_EPOCH,
                                     updated: SystemTime::UNIX_EPOCH,
+                                    private: StatePrivate::default(),
                                 };
                                 states.channels.insert(k, chst);
                             }

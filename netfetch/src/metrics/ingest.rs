@@ -89,12 +89,9 @@ impl EmittableType for WritableType {
 
     fn into_query_item(
         self,
-        ts_msp: netpod::TsMs,
-        ts_msp_changed: bool,
-        ts_lsp: netpod::DtNano,
         ts_net: Instant,
         state: &mut <Self as EmittableType>::State,
-    ) -> serieswriter::writer::SmallVec<[QueryItem; 4]> {
+    ) -> serieswriter::writer::EmitRes {
         todo!()
     }
 }

@@ -7,6 +7,7 @@ use crate::iteminsertqueue::Accounting;
 use crate::iteminsertqueue::AccountingRecv;
 use crate::iteminsertqueue::InsertFut;
 use crate::iteminsertqueue::InsertItem;
+use crate::iteminsertqueue::MspItem;
 use crate::iteminsertqueue::QueryItem;
 use crate::iteminsertqueue::TimeBinSimpleF32;
 use crate::store::DataStore;
@@ -17,8 +18,6 @@ use futures_util::Stream;
 use futures_util::StreamExt;
 use log::*;
 use netpod::ttl::RetentionTime;
-use netpod::TsMs;
-use netpod::TsNano;
 use smallvec::smallvec;
 use smallvec::SmallVec;
 use stats::InsertWorkerStats;
@@ -27,7 +26,6 @@ use std::sync::atomic;
 use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
-use std::time::SystemTime;
 use taskrun::tokio;
 use tokio::task::JoinHandle;
 
@@ -276,6 +274,7 @@ where
         for item in batch {
             let futs = match item {
                 QueryItem::Insert(item) => prepare_query_insert_futs(item, &data_store, &stats, tsnow),
+                QueryItem::Msp(item) => prepare_msp_insert_futs(item, &data_store, &stats, tsnow),
                 QueryItem::ConnectionStatus(item) => {
                     stats.inserted_connection_status().inc();
                     let fut = insert_connection_status_fut(item, &data_store, stats.clone());
@@ -314,6 +313,9 @@ fn inspect_items(
                 QueryItem::ChannelStatus(_) => {
                     trace_item_execute!("execute  {worker_name}  ChannelStatus  {item:?}");
                 }
+                QueryItem::Msp(item) => {
+                    trace_item_execute!("execute  {worker_name}  Msp  {}", item.string_short());
+                }
                 QueryItem::Insert(item) => {
                     trace_item_execute!("execute  {worker_name}  Insert  {}", item.string_short());
                 }
@@ -331,6 +333,31 @@ fn inspect_items(
     })
 }
 
+fn prepare_msp_insert_futs(
+    item: MspItem,
+    data_store: &Arc<DataStore>,
+    stats: &Arc<InsertWorkerStats>,
+    tsnow: Instant,
+) -> SmallVec<[InsertFut; 4]> {
+    trace2!("execute  MSP bump");
+    stats.inserts_msp().inc();
+    {
+        let dt = tsnow.saturating_duration_since(item.ts_net());
+        let dt_ms = 1000 * dt.as_secs() as u32 + dt.subsec_millis();
+        stats.item_lat_net_worker().ingest(dt_ms);
+    }
+    let fut = insert_msp_fut(
+        item.series(),
+        item.ts_msp(),
+        item.ts_net(),
+        data_store.scy.clone(),
+        data_store.qu_insert_ts_msp.clone(),
+        stats.clone(),
+    );
+    let futs = smallvec![fut];
+    futs
+}
+
 fn prepare_query_insert_futs(
     item: InsertItem,
     data_store: &Arc<DataStore>,
@@ -342,26 +369,10 @@ fn prepare_query_insert_futs(
     let dt = tsnow.saturating_duration_since(item_ts_net);
     let dt_ms = 1000 * dt.as_secs() as u32 + dt.subsec_millis();
     stats.item_lat_net_worker().ingest(dt_ms);
-    let msp_bump = item.msp_bump;
-    let series = item.series.clone();
-    let ts_msp = item.ts_msp;
     let do_insert = true;
     let mut futs = smallvec![];
     let fut = insert_item_fut(item, &data_store, do_insert, stats);
     futs.push(fut);
-    if msp_bump {
-        trace2!("execute  MSP bump");
-        stats.inserts_msp().inc();
-        let fut = insert_msp_fut(
-            series,
-            ts_msp,
-            item_ts_net,
-            data_store.scy.clone(),
-            data_store.qu_insert_ts_msp.clone(),
-            stats.clone(),
-        );
-        futs.push(fut);
-    }
     futs
 }
 

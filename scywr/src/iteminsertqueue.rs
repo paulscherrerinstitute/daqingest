@@ -552,11 +552,39 @@ impl ChannelStatusItem {
 }
 
 #[derive(Debug, Clone)]
+pub struct MspItem {
+    series: SeriesId,
+    ts_msp: TsMs,
+    ts_net: Instant,
+}
+
+impl MspItem {
+    pub fn new(series: SeriesId, ts_msp: TsMs, ts_net: Instant) -> Self {
+        Self { series, ts_msp, ts_net }
+    }
+
+    pub fn string_short(&self) -> String {
+        format!("{}  {}", self.series.id(), self.ts_msp.ms())
+    }
+
+    pub fn series(&self) -> SeriesId {
+        self.series.clone()
+    }
+
+    pub fn ts_msp(&self) -> TsMs {
+        self.ts_msp.clone()
+    }
+
+    pub fn ts_net(&self) -> Instant {
+        self.ts_net.clone()
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct InsertItem {
     pub series: SeriesId,
     pub ts_msp: TsMs,
     pub ts_lsp: DtNano,
-    pub msp_bump: bool,
     pub val: DataValue,
     pub ts_net: Instant,
 }
@@ -590,6 +618,7 @@ pub struct TimeBinSimpleF32 {
 pub enum QueryItem {
     ConnectionStatus(ConnectionStatusItem),
     ChannelStatus(ChannelStatusItem),
+    Msp(MspItem),
     Insert(InsertItem),
     TimeBinSimpleF32(TimeBinSimpleF32),
     Accounting(Accounting),
