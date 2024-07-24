@@ -4,7 +4,6 @@ use err::ThisError;
 use futures_util::Stream;
 use log::*;
 use netpod::timeunits::*;
-use netpod::TsNano;
 use slidebuf::SlideBuf;
 use stats::CaProtoStats;
 use std::collections::VecDeque;
@@ -986,7 +985,7 @@ impl CaMsg {
                 if varcnt > 16 {
                     return Err(Error::BadCaCount);
                 }
-                let s = String::from_utf8_lossy(&payload[6..6 + 26 * 16]);
+                // let s = String::from_utf8_lossy(&payload[6..6 + 26 * 16]);
                 let mut variants = Vec::new();
                 for i in 0..varcnt {
                     let p = (6 + 26 * i) as usize;

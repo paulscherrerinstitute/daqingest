@@ -5,6 +5,7 @@ use err::thiserror;
 use err::ThisError;
 use log::*;
 use netpod::ScalarType;
+use netpod::SeriesKind;
 use netpod::Shape;
 use netpod::TsNano;
 use scywr::iteminsertqueue::DataValue;
@@ -21,6 +22,21 @@ use taskrun::tokio::net::UdpSocket;
 pub enum Error {
     Io(#[from] std::io::Error),
     SeriesWriter(#[from] serieswriter::writer::Error),
+    ChannelSend,
+    ChannelRecv,
+    ChannelLookup(#[from] dbpg::seriesbychannel::Error),
+}
+
+impl<T> From<async_channel::SendError<T>> for Error {
+    fn from(_value: async_channel::SendError<T>) -> Self {
+        Self::ChannelSend
+    }
+}
+
+impl From<async_channel::RecvError> for Error {
+    fn from(_value: async_channel::RecvError) -> Self {
+        Self::ChannelRecv
+    }
 }
 
 pub async fn listen_beacons(
@@ -32,7 +48,19 @@ pub async fn listen_beacons(
     let channel = "epics-ca-beacons".to_string();
     let scalar_type = ScalarType::U64;
     let shape = Shape::Scalar;
-    // let mut writer = SeriesWriter::establish(worker_tx, backend, channel, scalar_type, shape, stnow).await?;
+    let (tx, rx) = async_channel::bounded(1);
+    let qu = ChannelInfoQuery {
+        backend,
+        channel,
+        kind: SeriesKind::ChannelData,
+        scalar_type,
+        shape,
+        tx: Box::pin(tx),
+    };
+    worker_tx.send(qu).await?;
+    let chinfo = rx.recv().await??;
+    // TODO
+    // let mut writer = SeriesWriter::new(chinfo.series.to_series());
     // let mut deque = VecDeque::new();
     let sock = UdpSocket::bind("0.0.0.0:5065").await?;
     sock.set_broadcast(true).unwrap();

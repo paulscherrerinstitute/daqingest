@@ -39,6 +39,7 @@ async fn consumer(rx: Receiver<Item>) {
     while let Ok(_x) = rx.recv().await {}
 }
 
+#[allow(unused)]
 struct Item {
     x: u64,
     y: u64,

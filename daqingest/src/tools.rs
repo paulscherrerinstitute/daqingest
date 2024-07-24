@@ -21,7 +21,6 @@ use scywr::scylla::transport::errors::QueryError;
 use scywr::scylla::transport::iterator::NextRowError;
 use scywr::session::ScySession;
 use series::SeriesId;
-use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;

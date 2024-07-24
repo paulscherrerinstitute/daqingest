@@ -29,8 +29,7 @@ pub struct EnumFetch {
 impl EnumFetch {
     pub fn new(created_state: CreatedState, conn: &mut CaConn) -> Self {
         if created_state.cssid.id() == 4705698279895902114 {}
-        let name = created_state.name();
-        // info!("EnumFetch::new  name {name}");
+        // info!("EnumFetch::new  name {}", created_state.name());
         let dbr_ctrl_enum = 31;
         let ioid = conn.ioid_next();
         let ty = crate::ca::proto::CaMsgTy::ReadNotify(ReadNotify {
@@ -54,10 +53,7 @@ impl ConnFuture for EnumFetch {
     fn camsg(mut self: Pin<&mut Self>, camsg: CaMsg, conn: &mut CaConn) -> Result<(), Error> {
         let tsnow = Instant::now();
         let crst = &mut self.created_state;
-
-        let name = crst.name();
-        // info!("EnumFetch::poll  {name}");
-
+        // info!("EnumFetch::poll  name {}", crst.name());
         match camsg.ty {
             crate::ca::proto::CaMsgTy::ReadNotifyRes(msg2) => match msg2.value.meta {
                 super::proto::CaMetaValue::CaMetaVariants(meta) => {

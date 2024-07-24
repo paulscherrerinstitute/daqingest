@@ -10,7 +10,6 @@ use futures_util::FutureExt;
 #[allow(unused)]
 use netpod::log::*;
 use netpod::DtNano;
-use netpod::ScalarType;
 use netpod::Shape;
 use netpod::TsMs;
 use netpod::TsNano;
@@ -316,40 +315,6 @@ impl DataValue {
         }
     }
 
-    fn unused_scalar_type(&self) -> ScalarType {
-        match self {
-            DataValue::Scalar(x) => match x {
-                ScalarValue::U8(_) => ScalarType::U8,
-                ScalarValue::U16(_) => ScalarType::U16,
-                ScalarValue::U32(_) => ScalarType::U32,
-                ScalarValue::U64(_) => ScalarType::U64,
-                ScalarValue::I8(_) => ScalarType::I8,
-                ScalarValue::I16(_) => ScalarType::I16,
-                ScalarValue::I32(_) => ScalarType::I32,
-                ScalarValue::I64(_) => ScalarType::I64,
-                ScalarValue::F32(_) => ScalarType::F32,
-                ScalarValue::F64(_) => ScalarType::F64,
-                ScalarValue::Enum(..) => ScalarType::Enum,
-                ScalarValue::String(_) => ScalarType::STRING,
-                ScalarValue::Bool(_) => ScalarType::BOOL,
-                ScalarValue::CaStatus(_) => ScalarType::I16,
-            },
-            DataValue::Array(x) => match x {
-                ArrayValue::U8(_) => ScalarType::U8,
-                ArrayValue::U16(_) => ScalarType::U16,
-                ArrayValue::U32(_) => ScalarType::U32,
-                ArrayValue::U64(_) => ScalarType::U64,
-                ArrayValue::I8(_) => ScalarType::I8,
-                ArrayValue::I16(_) => ScalarType::I16,
-                ArrayValue::I32(_) => ScalarType::I32,
-                ArrayValue::I64(_) => ScalarType::I64,
-                ArrayValue::F32(_) => ScalarType::F32,
-                ArrayValue::F64(_) => ScalarType::F64,
-                ArrayValue::Bool(_) => ScalarType::BOOL,
-            },
-        }
-    }
-
     pub fn shape(&self) -> Shape {
         match self {
             DataValue::Scalar(_) => Shape::Scalar,
@@ -651,6 +616,7 @@ struct InsParCom {
     ts_msp: TsMs,
     ts_lsp: DtNano,
     ts_net: Instant,
+    #[allow(unused)]
     do_insert: bool,
     stats: Arc<InsertWorkerStats>,
 }
