@@ -470,6 +470,7 @@ pub enum ChannelStatus {
     AssignedToAddress,
     Opened,
     Closed(ChannelStatusClosedReason),
+    Pong,
 }
 
 impl ChannelStatus {
@@ -492,6 +493,7 @@ impl ChannelStatus {
                 ConnectFail => 11,
                 IoError => 12,
             },
+            Pong => 25,
         }
     }
 
@@ -512,6 +514,7 @@ impl ChannelStatus {
             11 => Closed(ConnectFail),
             12 => Closed(IoError),
             24 => AssignedToAddress,
+            25 => Pong,
             _ => {
                 return Err(err::Error::with_msg_no_trace(format!(
                     "unknown ChannelStatus kind {kind}"

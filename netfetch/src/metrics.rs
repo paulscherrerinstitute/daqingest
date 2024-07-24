@@ -383,6 +383,13 @@ fn make_routes(
                     Router::new()
                         .fallback(|| async { axum::Json(json!({"subcommands":["states"]})) })
                         .route(
+                            "/error_handler_test",
+                            get({
+                                let tx = connset_cmd_tx.clone();
+                                |Query(params): Query<HashMap<String, String>>| status::error_handler_test()
+                            }),
+                        )
+                        .route(
                             "/states",
                             get({
                                 let tx = connset_cmd_tx.clone();

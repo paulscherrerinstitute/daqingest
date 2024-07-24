@@ -5,11 +5,19 @@ use crate::conf::ChannelConfig;
 use async_channel::Sender;
 use chrono::DateTime;
 use chrono::Utc;
+use err::thiserror;
+use err::ThisError;
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::time::SystemTime;
+
+#[derive(Debug, ThisError)]
+#[cstm(name = "StatusError")]
+pub enum Error {
+    Internal,
+}
 
 #[derive(Debug, Serialize)]
 pub struct ChannelStates {
@@ -66,7 +74,63 @@ struct ChannelState {
     write_lt_last: SystemTime,
     #[serde(with = "humantime_serde", skip_serializing_if = "system_time_epoch")]
     updated: SystemTime,
+    #[serde(with = "humantime_serde")]
+    pong_last: Option<SystemTime>,
     private: StatePrivate,
+}
+
+impl ChannelState {
+    fn connecting(config: ChannelConfig) -> Self {
+        Self::connecting_addr(config, None, ConnectionState::Connecting)
+    }
+
+    fn connecting_addr(config: ChannelConfig, ioc_address: Option<SocketAddr>, connst: ConnectionState) -> Self {
+        Self {
+            ioc_address,
+            connection: connst,
+            archiving_configuration: config,
+            recv_count: 0,
+            recv_bytes: 0,
+            recv_last: SystemTime::UNIX_EPOCH,
+            write_st_last: SystemTime::UNIX_EPOCH,
+            write_mt_last: SystemTime::UNIX_EPOCH,
+            write_lt_last: SystemTime::UNIX_EPOCH,
+            updated: SystemTime::UNIX_EPOCH,
+            pong_last: None,
+            private: StatePrivate::default(),
+        }
+    }
+
+    fn with_chst(config: ChannelConfig, chst: crate::ca::conn::ChannelStateInfo) -> Self {
+        let private = StatePrivate {
+            status_emit_count: chst.status_emit_count,
+        };
+        let connst = {
+            use crate::ca::conn::ChannelConnectedInfo::*;
+            match chst.channel_connected_info {
+                Disconnected => ConnectionState::Disconnected,
+                Connecting => ConnectionState::Connecting,
+                Connected => ConnectionState::Connected,
+                Error => ConnectionState::Error,
+            }
+        };
+        Self {
+            ioc_address: Some(SocketAddr::V4(chst.addr)),
+            connection: connst,
+            // TODO config is stored in two places
+            // conf: chst.conf,
+            archiving_configuration: config,
+            recv_count: chst.recv_count.unwrap_or(0),
+            recv_bytes: chst.recv_bytes.unwrap_or(0),
+            recv_last: chst.recv_last,
+            write_st_last: chst.write_st_last,
+            write_mt_last: chst.write_mt_last,
+            write_lt_last: chst.write_lt_last,
+            updated: chst.stnow,
+            pong_last: chst.pong_last,
+            private,
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -93,9 +157,26 @@ enum ConnectionState {
     Error,
 }
 
+pub async fn error_handler_test() -> Result<axum::Json<ChannelStates>, axum::Json<String>> {
+    Err(axum::Json(format!("test error message")))
+}
+
 // ChannelStatusesResponse
 // BTreeMap<String, ChannelState>
-pub async fn channel_states(params: HashMap<String, String>, tx: Sender<CaConnSetEvent>) -> axum::Json<ChannelStates> {
+pub async fn channel_states(
+    params: HashMap<String, String>,
+    tx: Sender<CaConnSetEvent>,
+) -> Result<axum::Json<ChannelStates>, axum::Json<String>> {
+    match channel_states_try(params, tx).await {
+        Ok(x) => Ok(x),
+        Err(e) => Err(axum::Json(e.to_string())),
+    }
+}
+
+async fn channel_states_try(
+    params: HashMap<String, String>,
+    tx: Sender<CaConnSetEvent>,
+) -> Result<axum::Json<ChannelStates>, Error> {
     let name = params.get("name").map_or(String::new(), |x| x.clone()).to_string();
     let limit = params.get("limit").and_then(|x| x.parse().ok()).unwrap_or(40);
     let (tx2, rx2) = async_channel::bounded(1);
@@ -115,220 +196,63 @@ pub async fn channel_states(params: HashMap<String, String>, tx: Sender<CaConnSe
                 use crate::ca::statemap::ActiveChannelState;
                 match st2 {
                     ActiveChannelState::Init { .. } => {
-                        let chst = ChannelState {
-                            ioc_address: None,
-                            connection: ConnectionState::Connecting,
-                            archiving_configuration: st1.config,
-                            recv_count: 0,
-                            recv_bytes: 0,
-                            recv_last: SystemTime::UNIX_EPOCH,
-                            write_st_last: SystemTime::UNIX_EPOCH,
-                            write_mt_last: SystemTime::UNIX_EPOCH,
-                            write_lt_last: SystemTime::UNIX_EPOCH,
-                            updated: SystemTime::UNIX_EPOCH,
-                            private: StatePrivate::default(),
-                        };
+                        let chst = ChannelState::connecting(st1.config);
                         states.channels.insert(k, chst);
                     }
                     ActiveChannelState::WaitForStatusSeriesId { .. } => {
-                        let chst = ChannelState {
-                            ioc_address: None,
-                            connection: ConnectionState::Connecting,
-                            archiving_configuration: st1.config,
-                            recv_count: 0,
-                            recv_bytes: 0,
-                            recv_last: SystemTime::UNIX_EPOCH,
-                            write_st_last: SystemTime::UNIX_EPOCH,
-                            write_mt_last: SystemTime::UNIX_EPOCH,
-                            write_lt_last: SystemTime::UNIX_EPOCH,
-                            updated: SystemTime::UNIX_EPOCH,
-                            private: StatePrivate::default(),
-                        };
+                        let chst = ChannelState::connecting(st1.config);
                         states.channels.insert(k, chst);
                     }
                     ActiveChannelState::WithStatusSeriesId(st3) => {
                         use crate::ca::statemap::WithStatusSeriesIdStateInner;
                         match st3.inner {
                             WithStatusSeriesIdStateInner::AddrSearchPending { .. } => {
-                                let chst = ChannelState {
-                                    ioc_address: None,
-                                    connection: ConnectionState::Connecting,
-                                    archiving_configuration: st1.config,
-                                    recv_count: 0,
-                                    recv_bytes: 0,
-                                    recv_last: SystemTime::UNIX_EPOCH,
-                                    write_st_last: SystemTime::UNIX_EPOCH,
-                                    write_mt_last: SystemTime::UNIX_EPOCH,
-                                    write_lt_last: SystemTime::UNIX_EPOCH,
-                                    updated: SystemTime::UNIX_EPOCH,
-                                    private: StatePrivate::default(),
-                                };
+                                let chst = ChannelState::connecting(st1.config);
                                 states.channels.insert(k, chst);
                             }
                             WithStatusSeriesIdStateInner::WithAddress { addr, state: st4 } => {
                                 use crate::ca::statemap::WithAddressState;
+                                let addr2 = SocketAddr::V4(addr);
                                 match st4 {
                                     WithAddressState::Unassigned { .. } => {
-                                        let chst = ChannelState {
-                                            ioc_address: Some(SocketAddr::V4(addr)),
-                                            connection: ConnectionState::Connecting,
-                                            archiving_configuration: st1.config,
-                                            recv_count: 0,
-                                            recv_bytes: 0,
-                                            recv_last: SystemTime::UNIX_EPOCH,
-                                            write_st_last: SystemTime::UNIX_EPOCH,
-                                            write_mt_last: SystemTime::UNIX_EPOCH,
-                                            write_lt_last: SystemTime::UNIX_EPOCH,
-                                            updated: SystemTime::UNIX_EPOCH,
-                                            private: StatePrivate::default(),
-                                        };
+                                        let chst = ChannelState::connecting_addr(
+                                            st1.config,
+                                            Some(addr2),
+                                            ConnectionState::Connecting,
+                                        );
                                         states.channels.insert(k, chst);
                                     }
                                     WithAddressState::Assigned(st5) => {
                                         use crate::ca::statemap::ConnectionStateValue;
                                         match st5.value {
                                             ConnectionStateValue::Unknown => {
-                                                let chst = ChannelState {
-                                                    ioc_address: Some(SocketAddr::V4(addr)),
-                                                    connection: ConnectionState::Connecting,
-                                                    archiving_configuration: st1.config,
-                                                    recv_count: 0,
-                                                    recv_bytes: 0,
-                                                    recv_last: SystemTime::UNIX_EPOCH,
-                                                    write_st_last: SystemTime::UNIX_EPOCH,
-                                                    write_mt_last: SystemTime::UNIX_EPOCH,
-                                                    write_lt_last: SystemTime::UNIX_EPOCH,
-                                                    updated: SystemTime::UNIX_EPOCH,
-                                                    private: StatePrivate::default(),
-                                                };
+                                                let chst = ChannelState::connecting_addr(
+                                                    st1.config,
+                                                    Some(addr2),
+                                                    ConnectionState::Connecting,
+                                                );
                                                 states.channels.insert(k, chst);
                                             }
                                             ConnectionStateValue::ChannelStateInfo(st6) => {
-                                                let recv_count = st6.recv_count.unwrap_or(0);
-                                                let recv_bytes = st6.recv_bytes.unwrap_or(0);
-                                                let private = StatePrivate {
-                                                    status_emit_count: st6.status_emit_count,
-                                                };
-                                                use crate::ca::conn::ChannelConnectedInfo;
-                                                match st6.channel_connected_info {
-                                                    ChannelConnectedInfo::Disconnected => {
-                                                        let chst = ChannelState {
-                                                            ioc_address: Some(SocketAddr::V4(addr)),
-                                                            connection: ConnectionState::Disconnected,
-                                                            // TODO config is stored in two places
-                                                            // conf: st6.conf,
-                                                            archiving_configuration: st1.config,
-                                                            recv_count,
-                                                            recv_bytes,
-                                                            recv_last: st6.recv_last,
-                                                            write_st_last: st6.write_st_last,
-                                                            write_mt_last: st6.write_mt_last,
-                                                            write_lt_last: st6.write_lt_last,
-                                                            updated: st6.stnow,
-                                                            private,
-                                                        };
-                                                        states.channels.insert(k, chst);
-                                                    }
-                                                    ChannelConnectedInfo::Connecting => {
-                                                        let chst = ChannelState {
-                                                            ioc_address: Some(SocketAddr::V4(addr)),
-                                                            connection: ConnectionState::Connecting,
-                                                            archiving_configuration: st1.config,
-                                                            recv_count,
-                                                            recv_bytes,
-                                                            recv_last: st6.recv_last,
-                                                            write_st_last: st6.write_st_last,
-                                                            write_mt_last: st6.write_mt_last,
-                                                            write_lt_last: st6.write_lt_last,
-                                                            updated: st6.stnow,
-                                                            private,
-                                                        };
-                                                        states.channels.insert(k, chst);
-                                                    }
-                                                    ChannelConnectedInfo::Connected => {
-                                                        let chst = ChannelState {
-                                                            ioc_address: Some(SocketAddr::V4(addr)),
-                                                            connection: ConnectionState::Connected,
-                                                            archiving_configuration: st1.config,
-                                                            recv_count,
-                                                            recv_bytes,
-                                                            recv_last: st6.recv_last,
-                                                            write_st_last: st6.write_st_last,
-                                                            write_mt_last: st6.write_mt_last,
-                                                            write_lt_last: st6.write_lt_last,
-                                                            updated: st6.stnow,
-                                                            private,
-                                                        };
-                                                        states.channels.insert(k, chst);
-                                                    }
-                                                    ChannelConnectedInfo::Error => {
-                                                        let chst = ChannelState {
-                                                            ioc_address: Some(SocketAddr::V4(addr)),
-                                                            connection: ConnectionState::Error,
-                                                            archiving_configuration: st1.config,
-                                                            recv_count,
-                                                            recv_bytes,
-                                                            recv_last: st6.recv_last,
-                                                            write_st_last: st6.write_st_last,
-                                                            write_mt_last: st6.write_mt_last,
-                                                            write_lt_last: st6.write_lt_last,
-                                                            updated: st6.stnow,
-                                                            private,
-                                                        };
-                                                        states.channels.insert(k, chst);
-                                                    }
-                                                }
+                                                let chst = ChannelState::with_chst(st1.config, st6);
+                                                states.channels.insert(k, chst);
                                             }
                                         }
                                     }
                                 }
                             }
                             WithStatusSeriesIdStateInner::UnknownAddress { .. } => {
-                                let chst = ChannelState {
-                                    ioc_address: None,
-                                    connection: ConnectionState::Connecting,
-                                    archiving_configuration: st1.config,
-                                    recv_count: 0,
-                                    recv_bytes: 0,
-                                    recv_last: SystemTime::UNIX_EPOCH,
-                                    write_st_last: SystemTime::UNIX_EPOCH,
-                                    write_mt_last: SystemTime::UNIX_EPOCH,
-                                    write_lt_last: SystemTime::UNIX_EPOCH,
-                                    updated: SystemTime::UNIX_EPOCH,
-                                    private: StatePrivate::default(),
-                                };
+                                let chst = ChannelState::connecting(st1.config);
                                 states.channels.insert(k, chst);
                             }
                             WithStatusSeriesIdStateInner::NoAddress { .. } => {
-                                let chst = ChannelState {
-                                    ioc_address: None,
-                                    connection: ConnectionState::Unreachable,
-                                    archiving_configuration: st1.config,
-                                    recv_count: 0,
-                                    recv_bytes: 0,
-                                    recv_last: SystemTime::UNIX_EPOCH,
-                                    write_st_last: SystemTime::UNIX_EPOCH,
-                                    write_mt_last: SystemTime::UNIX_EPOCH,
-                                    write_lt_last: SystemTime::UNIX_EPOCH,
-                                    updated: SystemTime::UNIX_EPOCH,
-                                    private: StatePrivate::default(),
-                                };
+                                let chst =
+                                    ChannelState::connecting_addr(st1.config, None, ConnectionState::Unreachable);
                                 states.channels.insert(k, chst);
                             }
                             WithStatusSeriesIdStateInner::MaybeWrongAddress(..) => {
-                                let chst = ChannelState {
-                                    ioc_address: None,
-                                    connection: ConnectionState::Unreachable,
-                                    archiving_configuration: st1.config,
-                                    recv_count: 0,
-                                    recv_bytes: 0,
-                                    recv_last: SystemTime::UNIX_EPOCH,
-                                    write_st_last: SystemTime::UNIX_EPOCH,
-                                    write_mt_last: SystemTime::UNIX_EPOCH,
-                                    write_lt_last: SystemTime::UNIX_EPOCH,
-                                    updated: SystemTime::UNIX_EPOCH,
-                                    private: StatePrivate::default(),
-                                };
+                                let chst =
+                                    ChannelState::connecting_addr(st1.config, None, ConnectionState::Unreachable);
                                 states.channels.insert(k, chst);
                             }
                         }
@@ -338,5 +262,5 @@ pub async fn channel_states(params: HashMap<String, String>, tx: Sender<CaConnSe
             ChannelStateValue::ToRemove { .. } => {}
         }
     }
-    axum::Json(states)
+    Ok(axum::Json(states))
 }

@@ -200,6 +200,8 @@ pub struct ChannelStateInfo {
     pub addr: SocketAddrV4,
     pub series: Option<SeriesId>,
     pub channel_connected_info: ChannelConnectedInfo,
+    pub ping_last: Option<SystemTime>,
+    pub pong_last: Option<SystemTime>,
     pub scalar_type: Option<ScalarType>,
     pub shape: Option<Shape>,
     // NOTE: this solution can yield to the same Instant serialize to different string representations.
@@ -551,6 +553,7 @@ impl ChannelState {
         addr: SocketAddrV4,
         conf: ChannelConfig,
         stnow: SystemTime,
+        conn: &CaConn,
     ) -> ChannelStateInfo {
         let channel_connected_info = match self {
             ChannelState::Init(..) => ChannelConnectedInfo::Disconnected,
@@ -626,6 +629,8 @@ impl ChannelState {
             addr,
             series,
             channel_connected_info,
+            ping_last: conn.ioc_ping_last,
+            pong_last: conn.ioc_pong_last,
             scalar_type,
             shape,
             ts_created,
@@ -962,9 +967,10 @@ pub struct CaConn {
     conn_command_rx: Pin<Box<Receiver<ConnCommand>>>,
     conn_backoff: f32,
     conn_backoff_beg: f32,
-    ioc_ping_last: Instant,
     ioc_ping_next: Instant,
     ioc_ping_start: Option<Instant>,
+    ioc_ping_last: Option<SystemTime>,
+    ioc_pong_last: Option<SystemTime>,
     iqsp: Pin<Box<InsertSenderPolling>>,
     ca_conn_event_out_queue: VecDeque<CaConnEvent>,
     ca_conn_event_out_queue_max: usize,
@@ -1029,9 +1035,10 @@ impl CaConn {
             conn_command_rx: Box::pin(cq_rx),
             conn_backoff: 0.02,
             conn_backoff_beg: 0.02,
-            ioc_ping_last: tsnow,
             ioc_ping_next: tsnow + Self::ioc_ping_ivl_rng(&mut rng),
             ioc_ping_start: None,
+            ioc_ping_last: None,
+            ioc_pong_last: None,
             iqsp: Box::pin(InsertSenderPolling::new(iqtx)),
             ca_conn_event_out_queue: VecDeque::new(),
             ca_conn_event_out_queue_max: 2000,
@@ -1055,7 +1062,7 @@ impl CaConn {
     }
 
     fn channel_status_emit_ivl(rng: &mut Xoshiro128PlusPlus) -> Duration {
-        Duration::from_millis(6000 + (rng.next_u32() & 0x7ff) as u64)
+        Duration::from_millis(8000 + (rng.next_u32() & 0xfff) as u64)
     }
 
     fn new_self_ticker() -> Pin<Box<tokio::time::Sleep>> {
@@ -2267,6 +2274,7 @@ impl CaConn {
                 if let Some(proto) = &mut self.proto {
                     self.stats.ping_start().inc();
                     self.ioc_ping_start = Some(tsnow);
+                    self.ioc_ping_last = Some(self.tmp_ts_poll);
                     let msg = CaMsg::from_ty_ts(CaMsgTy::Echo, tsnow);
                     proto.push_out(msg);
                 } else {
@@ -2371,9 +2379,10 @@ impl CaConn {
                                     let addr = &self.remote_addr_dbg;
                                     warn!("received Echo even though we didn't asked for it  {addr:?}");
                                 }
-                                self.ioc_ping_last = tsnow;
+                                self.ioc_pong_last = Some(self.tmp_ts_poll);
                                 self.ioc_ping_next = tsnow + Self::ioc_ping_ivl_rng(&mut self.rng);
                                 self.ioc_ping_start = None;
+                                self.emit_channel_event_pong();
                             }
                             CaMsgTy::CreateChanFail(msg) => {
                                 // TODO
@@ -2790,7 +2799,7 @@ impl CaConn {
         let mut channel_statuses = BTreeMap::new();
         for (_, conf) in self.channels.iter() {
             let chst = &conf.state;
-            let chinfo = chst.to_info(chst.cssid(), self.remote_addr_dbg, conf.conf.clone(), stnow);
+            let chinfo = chst.to_info(chst.cssid(), self.remote_addr_dbg, conf.conf.clone(), stnow, self);
             channel_statuses.insert(chst.cssid(), chinfo);
         }
         // trace2!("{:?}", channel_statuses);
@@ -2864,6 +2873,30 @@ impl CaConn {
             }
         }
         Ok(())
+    }
+
+    fn emit_channel_event_pong(&mut self) {
+        for (cid, ch) in self.channels.iter() {
+            match &ch.state {
+                ChannelState::Init(_) => {}
+                ChannelState::Creating(_) => {}
+                ChannelState::FetchEnumDetails(_) => {}
+                ChannelState::FetchCaStatusSeries(_) => {}
+                ChannelState::MakingSeriesWriter(_) => {}
+                ChannelState::Writable(st1) => {
+                    let item = ChannelStatusItem {
+                        ts: self.tmp_ts_poll,
+                        cssid: st1.channel.cssid,
+                        status: ChannelStatus::Pong,
+                    };
+                    let item = QueryItem::ChannelStatus(item);
+                    self.iqdqs.st_rf3_rx.push_back(item);
+                }
+                ChannelState::Closing(_) => {}
+                ChannelState::Error(_) => {}
+                ChannelState::Ended(_) => {}
+            }
+        }
     }
 
     fn tick_writers(&mut self) -> Result<(), Error> {
