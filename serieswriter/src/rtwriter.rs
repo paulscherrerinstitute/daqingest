@@ -135,9 +135,9 @@ where
         // TODO
         // Optimize for the common case that we only write into one of the stores.
         // Make the decision first, based on ref, then clone only as required.
-        let res_st = Self::write_inner(&mut self.state_st, item.clone(), ts_net, &mut iqdqs.st_rf3_rx)?;
-        let res_mt = Self::write_inner(&mut self.state_mt, item.clone(), ts_net, &mut iqdqs.mt_rf3_rx)?;
-        let res_lt = Self::write_inner(&mut self.state_lt, item, ts_net, &mut iqdqs.lt_rf3_rx)?;
+        let res_st = Self::write_inner(&mut self.state_st, item.clone(), ts_net, &mut iqdqs.st_rf3_qu)?;
+        let res_mt = Self::write_inner(&mut self.state_mt, item.clone(), ts_net, &mut iqdqs.mt_rf3_qu)?;
+        let res_lt = Self::write_inner(&mut self.state_lt, item, ts_net, &mut iqdqs.lt_rf3_qu)?;
         let ret = WriteRes {
             st: WriteRtRes {
                 accept: res_st.accept,
@@ -168,9 +168,9 @@ where
     }
 
     pub fn tick(&mut self, iqdqs: &mut InsertDeques) -> Result<(), Error> {
-        self.state_st.writer.tick(&mut iqdqs.st_rf3_rx)?;
-        self.state_mt.writer.tick(&mut iqdqs.mt_rf3_rx)?;
-        self.state_lt.writer.tick(&mut iqdqs.lt_rf3_rx)?;
+        self.state_st.writer.tick(&mut iqdqs.st_rf3_qu)?;
+        self.state_mt.writer.tick(&mut iqdqs.mt_rf3_qu)?;
+        self.state_lt.writer.tick(&mut iqdqs.lt_rf3_qu)?;
         Ok(())
     }
 }

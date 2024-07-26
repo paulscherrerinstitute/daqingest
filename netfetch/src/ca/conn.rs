@@ -56,6 +56,9 @@ use serde::Serialize;
 use series::ChannelStatusSeriesId;
 use series::SeriesId;
 use serieswriter::binwriter::BinWriter;
+use serieswriter::fixgridwriter::ChannelStatusSeriesWriter;
+use serieswriter::fixgridwriter::ChannelStatusWriteState;
+use serieswriter::fixgridwriter::CHANNEL_STATUS_GRID;
 use serieswriter::msptool::MspSplit;
 use serieswriter::rtwriter::RtWriter;
 use serieswriter::writer::EmittableType;
@@ -156,6 +159,7 @@ pub enum Error {
     Protocol(#[from] crate::ca::proto::Error),
     RtWriter(#[from] serieswriter::rtwriter::Error),
     BinWriter(#[from] serieswriter::binwriter::Error),
+    SeriesWriter(#[from] serieswriter::writer::Error),
     // TODO remove false positive from ThisError derive
     #[allow(private_interfaces)]
     UnknownCid(Cid),
@@ -538,9 +542,24 @@ struct ClosingState {
 struct ChannelConf {
     conf: ChannelConfig,
     state: ChannelState,
+    wrst: WriterStatus,
 }
 
 impl ChannelConf {
+    fn new(conf: ChannelConfig, cssid: ChannelStatusSeriesId) -> Self {
+        Self {
+            conf,
+            state: ChannelState::Init(cssid),
+            wrst: WriterStatus {
+                writer_status: serieswriter::writer::SeriesWriter::new(SeriesId::new(cssid.id())).unwrap(),
+                writer_status_state: serieswriter::fixgridwriter::ChannelStatusWriteState::new(
+                    SeriesId::new(cssid.id()),
+                    serieswriter::fixgridwriter::CHANNEL_STATUS_GRID,
+                ),
+            },
+        }
+    }
+
     pub fn poll_conf(&self) -> Option<(u64,)> {
         self.conf.poll_conf()
     }
@@ -662,6 +681,29 @@ impl ChannelState {
             ChannelState::Ended(cssid) => cssid.clone(),
             ChannelState::Closing(st) => st.cssid.clone(),
         }
+    }
+}
+
+#[derive(Debug)]
+struct WriterStatus {
+    writer_status: ChannelStatusSeriesWriter,
+    writer_status_state: ChannelStatusWriteState,
+}
+
+impl WriterStatus {
+    fn emit_channel_status_item(
+        &mut self,
+        item: ChannelStatusItem,
+        deque: &mut VecDeque<QueryItem>,
+    ) -> Result<(), Error> {
+        let (ts, val) = item.to_ts_val();
+        self.writer_status.write(
+            serieswriter::fixgridwriter::ChannelStatusWriteValue::new(ts, val),
+            &mut self.writer_status_state,
+            Instant::now(),
+            deque,
+        )?;
+        Ok(())
     }
 }
 
@@ -1128,15 +1170,22 @@ impl CaConn {
         self.channel_state_on_shutdown(channel_reason);
         let addr = self.remote_addr_dbg.clone();
         // TODO handle Err:
-        let _ = self
-            .iqdqs
-            .emit_status_item(QueryItem::ConnectionStatus(ConnectionStatusItem {
-                ts: self.tmp_ts_poll,
-                addr,
-                // TODO map to appropriate status
-                status: ConnectionStatus::Closing,
-            }));
+        let item = ConnectionStatusItem {
+            ts: self.tmp_ts_poll,
+            addr,
+            // TODO map to appropriate status
+            status: ConnectionStatus::Closing,
+        };
+        if self.emit_connection_status_item(item).is_err() {
+            self.stats.logic_error().inc();
+        }
         self.proto = None;
+    }
+
+    fn emit_connection_status_item(&mut self, _item: ConnectionStatusItem) -> Result<(), Error> {
+        // todo!()
+        // TODO emit
+        Ok(())
     }
 
     fn cmd_channel_close(&mut self, name: String) {
@@ -1279,8 +1328,7 @@ impl CaConn {
         if let Some(conf) = self.channels.get_mut(&cid) {
             // TODO refactor, should only execute this when required:
             let conf_poll_conf = conf.poll_conf();
-            let chst = &mut conf.state;
-            if let ChannelState::MakingSeriesWriter(st2) = chst {
+            if let ChannelState::MakingSeriesWriter(st2) = &mut conf.state {
                 let dt = stnow.duration_since(SystemTime::UNIX_EPOCH).unwrap();
                 let beg = TsNano::from_ns(SEC * dt.as_secs() + dt.subsec_nanos() as u64);
                 let binwriter = BinWriter::new(
@@ -1293,12 +1341,13 @@ impl CaConn {
                 )?;
                 self.stats.get_series_id_ok.inc();
                 {
-                    let item = QueryItem::ChannelStatus(ChannelStatusItem {
+                    info!("queued Opened  {:?}", st2.channel.cssid);
+                    let item = ChannelStatusItem {
                         ts: self.tmp_ts_poll,
                         cssid: st2.channel.cssid.clone(),
                         status: ChannelStatus::Opened,
-                    });
-                    self.iqdqs.emit_status_item(item)?;
+                    };
+                    conf.wrst.emit_channel_status_item(item, &mut self.iqdqs.st_rf3_qu)?;
                 }
                 if let Some((ivl,)) = conf_poll_conf {
                     let created_state = WritableState {
@@ -1380,10 +1429,7 @@ impl CaConn {
                 error!("logic error channel already exists {conf:?}");
                 Ok(())
             } else {
-                let conf = ChannelConf {
-                    conf,
-                    state: ChannelState::Init(cssid),
-                };
+                let conf = ChannelConf::new(conf, cssid);
                 self.channels.insert(cid, conf);
                 // TODO do not count, use separate queue for those channels.
                 self.init_state_count += 1;
@@ -1472,12 +1518,15 @@ impl CaConn {
                     let cssid = st2.channel.cssid.clone();
                     // TODO should call the proper channel-close handler which in turn emits the status item.
                     // Make sure I record the reason for the "Close": user command, IOC error, etc..
-                    let item = QueryItem::ChannelStatus(ChannelStatusItem {
+                    let item = ChannelStatusItem {
                         ts: self.tmp_ts_poll,
                         cssid: cssid.clone(),
                         status: ChannelStatus::Closed(channel_reason.clone()),
-                    });
-                    self.iqdqs.emit_status_item(item);
+                    };
+                    let deque = &mut self.iqdqs.st_rf3_qu;
+                    if conf.wrst.emit_channel_status_item(item, deque).is_err() {
+                        self.stats.logic_error().inc();
+                    }
                     *chst = ChannelState::Ended(cssid);
                 }
                 ChannelState::Error(..) => {
@@ -2617,12 +2666,11 @@ impl CaConn {
                             Ok(Ok(tcp)) => {
                                 self.stats.tcp_connected.inc();
                                 let addr = addr.clone();
-                                self.iqdqs
-                                    .emit_status_item(QueryItem::ConnectionStatus(ConnectionStatusItem {
-                                        ts: self.tmp_ts_poll,
-                                        addr,
-                                        status: ConnectionStatus::Established,
-                                    }))?;
+                                self.emit_connection_status_item(ConnectionStatusItem {
+                                    ts: self.tmp_ts_poll,
+                                    addr,
+                                    status: ConnectionStatus::Established,
+                                })?;
                                 self.backoff_reset();
                                 let proto = CaProto::new(
                                     tcp,
@@ -2638,12 +2686,11 @@ impl CaConn {
                                 use std::io::ErrorKind;
                                 debug!("error connect to {addr} {e}");
                                 let addr = addr.clone();
-                                self.iqdqs
-                                    .emit_status_item(QueryItem::ConnectionStatus(ConnectionStatusItem {
-                                        ts: self.tmp_ts_poll,
-                                        addr,
-                                        status: ConnectionStatus::ConnectError,
-                                    }))?;
+                                self.emit_connection_status_item(ConnectionStatusItem {
+                                    ts: self.tmp_ts_poll,
+                                    addr,
+                                    status: ConnectionStatus::ConnectError,
+                                })?;
                                 let reason = match e.kind() {
                                     ErrorKind::ConnectionRefused => ShutdownReason::ConnectRefused,
                                     _ => ShutdownReason::IoError,
@@ -2655,12 +2702,11 @@ impl CaConn {
                                 // TODO log with exponential backoff
                                 debug!("timeout connect to {addr} {e}");
                                 let addr = addr.clone();
-                                self.iqdqs
-                                    .emit_status_item(QueryItem::ConnectionStatus(ConnectionStatusItem {
-                                        ts: self.tmp_ts_poll,
-                                        addr,
-                                        status: ConnectionStatus::ConnectTimeout,
-                                    }))?;
+                                self.emit_connection_status_item(ConnectionStatusItem {
+                                    ts: self.tmp_ts_poll,
+                                    addr,
+                                    status: ConnectionStatus::ConnectTimeout,
+                                })?;
                                 self.trigger_shutdown(ShutdownReason::ConnectTimeout);
                                 Ok(Ready(Some(())))
                             }
@@ -2876,8 +2922,8 @@ impl CaConn {
     }
 
     fn emit_channel_event_pong(&mut self) {
-        for (cid, ch) in self.channels.iter() {
-            match &ch.state {
+        for (_, ch) in self.channels.iter_mut() {
+            match &mut ch.state {
                 ChannelState::Init(_) => {}
                 ChannelState::Creating(_) => {}
                 ChannelState::FetchEnumDetails(_) => {}
@@ -2889,8 +2935,10 @@ impl CaConn {
                         cssid: st1.channel.cssid,
                         status: ChannelStatus::Pong,
                     };
-                    let item = QueryItem::ChannelStatus(item);
-                    self.iqdqs.st_rf3_rx.push_back(item);
+                    let deque = &mut self.iqdqs.st_rf3_qu;
+                    if ch.wrst.emit_channel_status_item(item, deque).is_err() {
+                        self.stats.logic_error().inc();
+                    }
                 }
                 ChannelState::Closing(_) => {}
                 ChannelState::Error(_) => {}
@@ -2906,10 +2954,6 @@ impl CaConn {
                 st2.writer.tick(&mut self.iqdqs)?;
             }
         }
-        Ok(())
-    }
-
-    fn check_ticker_connecting_timeout(&mut self, since: Instant) -> Result<(), Error> {
         Ok(())
     }
 
@@ -3024,7 +3068,6 @@ macro_rules! flush_queue_dqs {
         // let sp = std::pin::pin!(obj.iqsp.$sp);
         // let sp = &mut obj.iqsp.$sp;
         // let sp = std::pin::pin!(sp);
-        // let sp = todo!();
         let sp = obj.iqsp.as_mut().$sp();
         match Self::attempt_flush_queue(qu, sp, $batcher, $loop_max, $cx, $id, $stats) {
             Ok(Ready(Some(()))) => {
@@ -3108,7 +3151,7 @@ impl Stream for CaConn {
                 };
                 flush_queue_dqs!(
                     self,
-                    st_rf1_rx,
+                    st_rf1_qu,
                     st_rf1_sp_pin,
                     send_batched::<256, _>,
                     32,
@@ -3124,7 +3167,7 @@ impl Stream for CaConn {
                 };
                 flush_queue_dqs!(
                     self,
-                    st_rf3_rx,
+                    st_rf3_qu,
                     st_rf3_sp_pin,
                     send_batched::<256, _>,
                     32,
@@ -3140,7 +3183,7 @@ impl Stream for CaConn {
                 };
                 flush_queue_dqs!(
                     self,
-                    mt_rf3_rx,
+                    mt_rf3_qu,
                     mt_rf3_sp_pin,
                     send_batched::<256, _>,
                     32,
@@ -3156,7 +3199,7 @@ impl Stream for CaConn {
                 };
                 flush_queue_dqs!(
                     self,
-                    lt_rf3_rx,
+                    lt_rf3_qu,
                     lt_rf3_sp_pin,
                     send_batched::<256, _>,
                     32,
@@ -3489,7 +3532,7 @@ impl EmittableType for CaWriterValue {
                             ts_net,
                         )));
                     }
-                    let data_value = DataValue::Scalar(ScalarValue::CaStatus(meta.status as i16));
+                    let data_value = DataValue::Scalar(ScalarValue::I16(meta.status as i16));
                     let item = scywriiq::InsertItem {
                         series: state.series_status.clone(),
                         ts_msp: ts_msp.to_ts_ms(),

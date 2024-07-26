@@ -34,7 +34,6 @@ pub struct DataStore {
     pub qu_insert_scalar_bool: Arc<PreparedStatement>,
     pub qu_insert_scalar_string: Arc<PreparedStatement>,
     pub qu_insert_scalar_enum: Arc<PreparedStatement>,
-    pub qu_insert_scalar_castatus: Arc<PreparedStatement>,
     pub qu_insert_array_u8: Arc<PreparedStatement>,
     pub qu_insert_array_u16: Arc<PreparedStatement>,
     pub qu_insert_array_u32: Arc<PreparedStatement>,
@@ -46,9 +45,6 @@ pub struct DataStore {
     pub qu_insert_array_f32: Arc<PreparedStatement>,
     pub qu_insert_array_f64: Arc<PreparedStatement>,
     pub qu_insert_array_bool: Arc<PreparedStatement>,
-    pub qu_insert_connection_status: Arc<PreparedStatement>,
-    pub qu_insert_channel_status: Arc<PreparedStatement>,
-    pub qu_insert_channel_status_by_ts_msp: Arc<PreparedStatement>,
     pub qu_insert_binned_scalar_f32_v02: Arc<PreparedStatement>,
     pub qu_account_00: Arc<PreparedStatement>,
     pub qu_account_recv_00: Arc<PreparedStatement>,
@@ -140,7 +136,6 @@ impl DataStore {
         let qu_insert_scalar_bool = prep_qu_ins_a!("events_scalar_bool", rett, scy);
         let qu_insert_scalar_string = prep_qu_ins_a!("events_scalar_string", rett, scy);
         let qu_insert_scalar_enum = prep_qu_ins_enum!("events_scalar_enum", rett, scy);
-        let qu_insert_scalar_castatus = prep_qu_ins_a!("events_scalar_castatus", rett, scy);
 
         let qu_insert_array_u8 = prep_qu_ins_b!("events_array_u8", rett, scy);
         let qu_insert_array_u16 = prep_qu_ins_b!("events_array_u16", rett, scy);
@@ -153,31 +148,6 @@ impl DataStore {
         let qu_insert_array_f32 = prep_qu_ins_b!("events_array_f32", rett, scy);
         let qu_insert_array_f64 = prep_qu_ins_b!("events_array_f64", rett, scy);
         let qu_insert_array_bool = prep_qu_ins_b!("events_array_bool", rett, scy);
-
-        // Connection status:
-        let qu_insert_connection_status = prep_qu_ins_c!(
-            "connection_status",
-            "ts_msp, ts_lsp, kind, addr",
-            "?, ?, ?, ?",
-            rett,
-            scy
-        );
-
-        let qu_insert_channel_status = prep_qu_ins_c!(
-            "channel_status",
-            "series, ts_msp, ts_lsp, kind",
-            "?, ?, ?, ?",
-            rett,
-            scy
-        );
-
-        let qu_insert_channel_status_by_ts_msp = prep_qu_ins_c!(
-            "channel_status_by_ts_msp",
-            "ts_msp, ts_lsp, series, kind",
-            "?, ?, ?, ?",
-            rett,
-            scy
-        );
 
         let qu_insert_binned_scalar_f32_v02 = prep_qu_ins_c!(
             "binned_scalar_f32",
@@ -229,7 +199,6 @@ impl DataStore {
             qu_insert_scalar_bool,
             qu_insert_scalar_string,
             qu_insert_scalar_enum,
-            qu_insert_scalar_castatus,
             qu_insert_array_u8,
             qu_insert_array_u16,
             qu_insert_array_u32,
@@ -241,9 +210,6 @@ impl DataStore {
             qu_insert_array_f32,
             qu_insert_array_f64,
             qu_insert_array_bool,
-            qu_insert_connection_status,
-            qu_insert_channel_status,
-            qu_insert_channel_status_by_ts_msp,
             qu_insert_binned_scalar_f32_v02,
             qu_account_00,
             qu_account_recv_00,

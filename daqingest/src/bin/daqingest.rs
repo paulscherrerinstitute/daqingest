@@ -30,7 +30,7 @@ async fn main_run(opts: DaqIngestOpts) -> Result<(), Error> {
 }
 
 async fn main_run_inner(opts: DaqIngestOpts) -> Result<(), Error> {
-    let buildmark = "+0006";
+    let buildmark = "+0007";
     use daqingest::opts::ChannelAccess;
     use daqingest::opts::SubCmd;
     match opts.subcmd {

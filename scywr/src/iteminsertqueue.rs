@@ -7,8 +7,6 @@ use err::thiserror;
 use err::ThisError;
 use futures_util::Future;
 use futures_util::FutureExt;
-#[allow(unused)]
-use netpod::log::*;
 use netpod::DtNano;
 use netpod::Shape;
 use netpod::TsMs;
@@ -23,8 +21,6 @@ use scylla::transport::errors::QueryError;
 use scylla::QueryResult;
 use series::ChannelStatusSeriesId;
 use series::SeriesId;
-use smallvec::smallvec;
-use smallvec::SmallVec;
 use stats::InsertWorkerStats;
 use std::net::SocketAddrV4;
 use std::pin::Pin;
@@ -62,7 +58,6 @@ pub enum ScalarValue {
     Enum(i16, String),
     String(String),
     Bool(bool),
-    CaStatus(i16),
 }
 
 impl ScalarValue {
@@ -81,7 +76,6 @@ impl ScalarValue {
             ScalarValue::Enum(_, y) => 2 + y.len() as u32,
             ScalarValue::String(x) => x.len() as u32,
             ScalarValue::Bool(_) => 1,
-            ScalarValue::CaStatus(_) => 2,
         }
     }
 
@@ -100,7 +94,6 @@ impl ScalarValue {
             ScalarValue::Enum(x, y) => format!("({}, {})", x, y),
             ScalarValue::String(x) => x.to_string(),
             ScalarValue::Bool(x) => x.to_string(),
-            ScalarValue::CaStatus(x) => x.to_string(),
         }
     }
 }
@@ -488,6 +481,10 @@ impl ChannelStatus {
         };
         Ok(ret)
     }
+
+    pub fn to_u64(&self) -> u64 {
+        self.to_kind() as u64
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -516,6 +513,11 @@ impl ChannelStatusItem {
             cssid,
             status: ChannelStatus::Closed(ChannelStatusClosedReason::IocTimeout),
         }
+    }
+
+    pub fn to_ts_val(&self) -> (netpod::TsNano, u64) {
+        let dt = TsNano::from_system_time(self.ts);
+        (dt, self.status.to_u64())
     }
 }
 
@@ -584,10 +586,8 @@ pub struct TimeBinSimpleF32 {
 // Needs to be Clone to send it to multiple retention times if required.
 #[derive(Debug, Clone)]
 pub enum QueryItem {
-    ConnectionStatus(ConnectionStatusItem),
-    ChannelStatus(ChannelStatusItem),
-    Msp(MspItem),
     Insert(InsertItem),
+    Msp(MspItem),
     TimeBinSimpleF32(TimeBinSimpleF32),
     Accounting(Accounting),
     AccountingRecv(AccountingRecv),
@@ -757,7 +757,6 @@ pub fn insert_item_fut(
                 }
                 String(val) => insert_scalar_gen_fut(par, val, data_store.qu_insert_scalar_string.clone(), scy),
                 Bool(val) => insert_scalar_gen_fut(par, val, data_store.qu_insert_scalar_bool.clone(), scy),
-                CaStatus(val) => insert_scalar_gen_fut(par, val, data_store.qu_insert_scalar_castatus.clone(), scy),
             }
         }
         Array(val) => {
@@ -787,118 +786,6 @@ pub fn insert_item_fut(
             }
         }
     }
-}
-
-#[cfg(DISABLED)]
-pub fn insert_connection_status_fut(
-    item: ConnectionStatusItem,
-    data_store: &DataStore,
-    stats: Arc<InsertWorkerStats>,
-) -> InsertFut {
-    warn!("separate connection status table no longer used");
-    InsertFut::dummy(data_store.scy.clone(), data_store.qu_dummy.clone())
-}
-
-pub fn insert_connection_status_fut(
-    item: ConnectionStatusItem,
-    data_store: &DataStore,
-    stats: Arc<InsertWorkerStats>,
-) -> InsertFut {
-    let tsnow = TsNano::from_system_time(item.ts);
-    let (msp, lsp) = tsnow.to_ts_ms().to_grid_02(CONNECTION_STATUS_DIV);
-    // TODO is that the good tsnet to use?
-    let kind = item.status.to_kind();
-    let addr = format!("{}", item.addr);
-    let params = (msp.to_i64(), lsp.to_i64(), kind as i32, addr);
-    InsertFut::new(
-        data_store.scy.clone(),
-        data_store.qu_insert_connection_status.clone(),
-        params,
-        Instant::now(),
-        stats,
-    )
-}
-
-#[cfg(DISABLED)]
-pub fn insert_channel_status_fut(
-    item: ChannelStatusItem,
-    data_store: &DataStore,
-    stats: Arc<InsertWorkerStats>,
-) -> SmallVec<[InsertFut; 4]> {
-    warn!("separate channel status table no longer used");
-    SmallVec::new()
-}
-
-pub fn insert_channel_status_fut(
-    item: ChannelStatusItem,
-    data_store: &DataStore,
-    stats: Arc<InsertWorkerStats>,
-) -> SmallVec<[InsertFut; 4]> {
-    let tsnow = TsNano::from_system_time(item.ts);
-    let (msp, lsp) = tsnow.to_ts_ms().to_grid_02(CONNECTION_STATUS_DIV);
-    let tsnet = Instant::now();
-    let kind = item.status.to_kind();
-    let cssid = item.cssid.id();
-    let params = (cssid as i64, msp.to_i64(), lsp.to_i64(), kind as i32);
-    let fut1 = InsertFut::new(
-        data_store.scy.clone(),
-        data_store.qu_insert_channel_status.clone(),
-        params,
-        tsnet,
-        stats.clone(),
-    );
-    let params = (msp.to_i64(), lsp.to_i64(), cssid as i64, kind as i32);
-    let fut2 = InsertFut::new(
-        data_store.scy.clone(),
-        data_store.qu_insert_channel_status_by_ts_msp.clone(),
-        params,
-        tsnet,
-        stats,
-    );
-    smallvec![fut1, fut2]
-}
-
-#[cfg(DISABLED)]
-pub async fn insert_connection_status(item: ConnectionStatusItem, data_store: &DataStore) -> Result<(), Error> {
-    warn!("separate connection status table no longer used");
-    Ok(())
-}
-
-pub async fn insert_connection_status(item: ConnectionStatusItem, data_store: &DataStore) -> Result<(), Error> {
-    let ts = TsMs::from_system_time(item.ts);
-    let (msp, lsp) = ts.to_grid_02(CONNECTION_STATUS_DIV);
-    let kind = item.status.to_kind();
-    let addr = format!("{}", item.addr);
-    let params = (msp.to_i64(), lsp.to_i64(), kind as i32, addr);
-    data_store
-        .scy
-        .execute(&data_store.qu_insert_connection_status, params)
-        .await?;
-    Ok(())
-}
-
-#[cfg(DISABLED)]
-pub async fn insert_channel_status(item: ChannelStatusItem, data_store: &DataStore) -> Result<(), Error> {
-    warn!("separate channel status table no longer used");
-    Ok(())
-}
-
-pub async fn insert_channel_status(item: ChannelStatusItem, data_store: &DataStore) -> Result<(), Error> {
-    let ts = TsMs::from_system_time(item.ts);
-    let (msp, lsp) = ts.to_grid_02(CONNECTION_STATUS_DIV);
-    let kind = item.status.to_kind();
-    let cssid = item.cssid.id();
-    let params = (cssid as i64, msp.to_i64(), lsp.to_i64(), kind as i32);
-    data_store
-        .scy
-        .execute(&data_store.qu_insert_channel_status, params)
-        .await?;
-    let params = (msp.to_i64(), lsp.to_i64(), cssid as i64, kind as i32);
-    data_store
-        .scy
-        .execute(&data_store.qu_insert_channel_status_by_ts_msp, params)
-        .await?;
-    Ok(())
 }
 
 pub enum InsertFutKind {

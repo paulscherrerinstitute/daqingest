@@ -1,6 +1,4 @@
 use crate::config::ScyllaIngestConfig;
-use crate::iteminsertqueue::insert_channel_status_fut;
-use crate::iteminsertqueue::insert_connection_status_fut;
 use crate::iteminsertqueue::insert_item_fut;
 use crate::iteminsertqueue::insert_msp_fut;
 use crate::iteminsertqueue::Accounting;
@@ -275,15 +273,6 @@ where
             let futs = match item {
                 QueryItem::Insert(item) => prepare_query_insert_futs(item, &data_store, &stats, tsnow),
                 QueryItem::Msp(item) => prepare_msp_insert_futs(item, &data_store, &stats, tsnow),
-                QueryItem::ConnectionStatus(item) => {
-                    stats.inserted_connection_status().inc();
-                    let fut = insert_connection_status_fut(item, &data_store, stats.clone());
-                    smallvec![fut]
-                }
-                QueryItem::ChannelStatus(item) => {
-                    stats.inserted_channel_status().inc();
-                    insert_channel_status_fut(item, &data_store, stats.clone())
-                }
                 QueryItem::TimeBinSimpleF32(item) => prepare_timebin_insert_futs(item, &data_store, &stats, tsnow),
                 QueryItem::Accounting(item) => prepare_accounting_insert_futs(item, &data_store, &stats, tsnow),
                 QueryItem::AccountingRecv(item) => {
@@ -307,17 +296,11 @@ fn inspect_items(
     item_inp.inspect(move |batch| {
         for item in batch {
             match &item {
-                QueryItem::ConnectionStatus(_) => {
-                    trace_item_execute!("execute  {worker_name}  ConnectionStatus  {item:?}");
-                }
-                QueryItem::ChannelStatus(_) => {
-                    trace_item_execute!("execute  {worker_name}  ChannelStatus  {item:?}");
+                QueryItem::Insert(item) => {
+                    trace_item_execute!("execute  {worker_name}  Insert  {}", item.string_short());
                 }
                 QueryItem::Msp(item) => {
                     trace_item_execute!("execute  {worker_name}  Msp  {}", item.string_short());
-                }
-                QueryItem::Insert(item) => {
-                    trace_item_execute!("execute  {worker_name}  Insert  {}", item.string_short());
                 }
                 QueryItem::TimeBinSimpleF32(_) => {
                     trace_item_execute!("execute  {worker_name}  TimeBinSimpleF32");
@@ -370,9 +353,8 @@ fn prepare_query_insert_futs(
     let dt_ms = 1000 * dt.as_secs() as u32 + dt.subsec_millis();
     stats.item_lat_net_worker().ingest(dt_ms);
     let do_insert = true;
-    let mut futs = smallvec![];
     let fut = insert_item_fut(item, &data_store, do_insert, stats);
-    futs.push(fut);
+    let futs = smallvec![fut];
     futs
 }
 

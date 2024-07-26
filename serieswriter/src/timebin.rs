@@ -509,7 +509,7 @@ fn test_02() {
     ctb.tick(&mut iqdqs).unwrap();
     ctb.finish(&mut iqdqs).unwrap();
     assert_eq!(iqdqs.len(), 1);
-    for e in iqdqs.st_rf3_rx {
+    for e in iqdqs.st_rf3_qu {
         eprintln!("{e:?}");
         if let QueryItem::TimeBinSimpleF32(x) = e {
             assert!(f32_close(x.avg, 10.2));

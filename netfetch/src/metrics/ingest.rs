@@ -245,7 +245,6 @@ async fn post_v01_try(
                     })?;
                 }
                 ScalarType::Enum => return Err(Error::NotSupported),
-                ScalarType::ChannelStatus => return Err(Error::NotSupported),
             },
             Shape::Wave(_) => match &scalar_type {
                 ScalarType::U8 => {
@@ -281,7 +280,6 @@ async fn post_v01_try(
                 ScalarType::BOOL => return Err(Error::NotSupported),
                 ScalarType::STRING => return Err(Error::NotSupported),
                 ScalarType::Enum => return Err(Error::NotSupported),
-                ScalarType::ChannelStatus => return Err(Error::NotSupported),
             },
             Shape::Image(_, _) => return Err(Error::NotSupported),
         }

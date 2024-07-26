@@ -34,28 +34,28 @@ impl InsertQueuesTx {
     pub async fn send_all(&mut self, iqdqs: &mut InsertDeques) -> Result<(), Error> {
         // Send each buffer down the corresponding channel
         if false {
-            let item = core::mem::replace(&mut iqdqs.st_rf1_rx, VecDeque::new());
+            let item = core::mem::replace(&mut iqdqs.st_rf1_qu, VecDeque::new());
             self.st_rf1_tx
                 .send(item)
                 .await
                 .map_err(|_| Error::ChannelSend(RetentionTime::Short, 1))?;
         }
         {
-            let item = core::mem::replace(&mut iqdqs.st_rf3_rx, VecDeque::new());
+            let item = core::mem::replace(&mut iqdqs.st_rf3_qu, VecDeque::new());
             self.st_rf3_tx
                 .send(item)
                 .await
                 .map_err(|_| Error::ChannelSend(RetentionTime::Short, 3))?;
         }
         {
-            let item = core::mem::replace(&mut iqdqs.mt_rf3_rx, VecDeque::new());
+            let item = core::mem::replace(&mut iqdqs.mt_rf3_qu, VecDeque::new());
             self.mt_rf3_tx
                 .send(item)
                 .await
                 .map_err(|_| Error::ChannelSend(RetentionTime::Medium, 3))?;
         }
         {
-            let item = core::mem::replace(&mut iqdqs.lt_rf3_rx, VecDeque::new());
+            let item = core::mem::replace(&mut iqdqs.lt_rf3_qu, VecDeque::new());
             self.lt_rf3_tx
                 .send(item)
                 .await
@@ -108,43 +108,36 @@ pub struct InsertQueuesRx {
 }
 
 pub struct InsertDeques {
-    pub st_rf1_rx: VecDeque<QueryItem>,
-    pub st_rf3_rx: VecDeque<QueryItem>,
-    pub mt_rf3_rx: VecDeque<QueryItem>,
-    pub lt_rf3_rx: VecDeque<QueryItem>,
+    pub st_rf1_qu: VecDeque<QueryItem>,
+    pub st_rf3_qu: VecDeque<QueryItem>,
+    pub mt_rf3_qu: VecDeque<QueryItem>,
+    pub lt_rf3_qu: VecDeque<QueryItem>,
 }
 
 impl InsertDeques {
     pub fn new() -> Self {
         Self {
-            st_rf1_rx: VecDeque::new(),
-            st_rf3_rx: VecDeque::new(),
-            mt_rf3_rx: VecDeque::new(),
-            lt_rf3_rx: VecDeque::new(),
+            st_rf1_qu: VecDeque::new(),
+            st_rf3_qu: VecDeque::new(),
+            mt_rf3_qu: VecDeque::new(),
+            lt_rf3_qu: VecDeque::new(),
         }
     }
 
     /// Total number of items cumulated over all queues.
     pub fn len(&self) -> usize {
-        self.st_rf1_rx.len() + self.st_rf3_rx.len() + self.mt_rf3_rx.len() + self.lt_rf3_rx.len()
+        self.st_rf1_qu.len() + self.st_rf3_qu.len() + self.mt_rf3_qu.len() + self.lt_rf3_qu.len()
     }
 
     pub fn clear(&mut self) {
-        self.st_rf1_rx.clear();
-        self.st_rf3_rx.clear();
-        self.mt_rf3_rx.clear();
-        self.lt_rf3_rx.clear();
+        self.st_rf1_qu.clear();
+        self.st_rf3_qu.clear();
+        self.mt_rf3_qu.clear();
+        self.lt_rf3_qu.clear();
     }
 
     pub fn summary(&self) -> InsertDequesSummary {
         InsertDequesSummary { obj: self }
-    }
-
-    // Should be used only for connection and channel status items.
-    // It encapsulates the decision to which queue(s) we want to send these kind of items.
-    pub fn emit_status_item(&mut self, item: QueryItem) -> Result<(), Error> {
-        self.deque(RetentionTime::Long).push_back(item);
-        Ok(())
     }
 
     // Should be used only for connection and channel status items.
@@ -164,18 +157,18 @@ impl InsertDeques {
 
     pub fn deque(&mut self, rt: RetentionTime) -> &mut VecDeque<QueryItem> {
         match rt {
-            RetentionTime::Short => &mut self.st_rf3_rx,
-            RetentionTime::Medium => &mut self.mt_rf3_rx,
-            RetentionTime::Long => &mut self.lt_rf3_rx,
+            RetentionTime::Short => &mut self.st_rf3_qu,
+            RetentionTime::Medium => &mut self.mt_rf3_qu,
+            RetentionTime::Long => &mut self.lt_rf3_qu,
         }
     }
 
     pub fn housekeeping(&mut self) {
         let qus = [
-            &mut self.st_rf1_rx,
-            &mut self.st_rf3_rx,
-            &mut self.mt_rf3_rx,
-            &mut self.lt_rf3_rx,
+            &mut self.st_rf1_qu,
+            &mut self.st_rf3_qu,
+            &mut self.mt_rf3_qu,
+            &mut self.lt_rf3_qu,
         ];
         for qu in qus {
             if qu.len() * 2 < qu.capacity() {
@@ -195,10 +188,10 @@ impl<'a> fmt::Display for InsertDequesSummary<'a> {
         write!(
             fmt,
             "InsertDeques {{ st_rf1_len: {}, st_rf3_len: {}, mt_rf3_len: {}, lt_rf3_len: {} }}",
-            obj.st_rf1_rx.len(),
-            obj.st_rf3_rx.len(),
-            obj.mt_rf3_rx.len(),
-            obj.lt_rf3_rx.len()
+            obj.st_rf1_qu.len(),
+            obj.st_rf3_qu.len(),
+            obj.mt_rf3_qu.len(),
+            obj.lt_rf3_qu.len()
         )
     }
 }

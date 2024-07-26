@@ -4,6 +4,8 @@ use crate::daemon_common::Channel;
 use dashmap::DashMap;
 use serde::Serialize;
 use series::ChannelStatusSeriesId;
+use serieswriter::fixgridwriter::ChannelStatusSeriesWriter;
+use serieswriter::fixgridwriter::ChannelStatusWriteState;
 use std::collections::btree_map::RangeMut;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
@@ -105,11 +107,36 @@ impl MaybeWrongAddressState {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Serialize)]
 pub struct WithStatusSeriesIdState {
     pub cssid: ChannelStatusSeriesId,
     pub addr_find_backoff: u32,
     pub inner: WithStatusSeriesIdStateInner,
+    #[serde(serialize_with = "serde_ser_channel_status_writer")]
+    pub writer_status: Option<ChannelStatusSeriesWriter>,
+    #[serde(skip)]
+    pub writer_status_state: Option<ChannelStatusWriteState>,
+}
+
+// Need Clone because we use the state tree for metrics output
+// TODO use a new info struct
+impl Clone for WithStatusSeriesIdState {
+    fn clone(&self) -> Self {
+        Self {
+            cssid: self.cssid.clone(),
+            addr_find_backoff: self.addr_find_backoff.clone(),
+            inner: self.inner.clone(),
+            writer_status: None,
+            writer_status_state: None,
+        }
+    }
+}
+
+fn serde_ser_channel_status_writer<S>(_: &Option<ChannelStatusSeriesWriter>, ser: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    ser.serialize_none()
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -137,7 +164,7 @@ pub struct ChannelState {
     pub config: ChannelConfig,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Serialize)]
 pub struct ChannelStateMap {
     map: BTreeMap<Channel, ChannelState>,
     #[serde(skip)]
