@@ -3,6 +3,7 @@ use daqingest::opts::DaqIngestOpts;
 use err::Error;
 use log::*;
 use netfetch::conf::parse_config;
+use netfetch::conf::CaIngestOpts;
 use netpod::Database;
 use scywr::config::ScyllaIngestConfig;
 use taskrun::TracingMode;
@@ -30,7 +31,7 @@ async fn main_run(opts: DaqIngestOpts) -> Result<(), Error> {
 }
 
 async fn main_run_inner(opts: DaqIngestOpts) -> Result<(), Error> {
-    let buildmark = "+0007";
+    let buildmark = "+0008";
     use daqingest::opts::ChannelAccess;
     use daqingest::opts::SubCmd;
     match opts.subcmd {
@@ -88,17 +89,26 @@ async fn main_run_inner(opts: DaqIngestOpts) -> Result<(), Error> {
                 }
             }
         }
+        SubCmd::ScyllaSchemaCheck(k) => {
+            info!("daqingest version {} {}", clap::crate_version!(), buildmark);
+            let (opts, _) = parse_config(k.config.into()).await?;
+            scylla_schema_check(opts, false).await?;
+        }
+        SubCmd::ScyllaSchemaChange(k) => {
+            info!("daqingest version {} {}", clap::crate_version!(), buildmark);
+            let (opts, _) = parse_config(k.config.into()).await?;
+            scylla_schema_check(opts, true).await?;
+        }
         SubCmd::ChannelAccess(k) => match k {
-            #[cfg(DISABLED)]
-            ChannelAccess::CaSearch(k) => {
-                info!("daqingest version {}", clap::crate_version!());
-                let (conf, channels) = parse_config(k.config.into()).await?;
-                netfetch::ca::search::ca_search(conf, &channels).await?
-            }
             ChannelAccess::CaIngest(k) => {
                 info!("daqingest version {} {}", clap::crate_version!(), buildmark);
                 let (conf, channels_config) = parse_config(k.config.into()).await?;
                 daqingest::daemon::run(conf, channels_config).await?
+            }
+            ChannelAccess::CaSearch(_k) => {
+                // info!("daqingest version {}", clap::crate_version!());
+                // let (conf, channels) = parse_config(k.config.into()).await?;
+                // netfetch::ca::search::ca_search(conf, &channels).await?
             }
         },
         #[cfg(feature = "bsread")]
@@ -126,5 +136,22 @@ async fn main_run_inner(opts: DaqIngestOpts) -> Result<(), Error> {
             })
         }
     }
+    Ok(())
+}
+
+async fn scylla_schema_check(opts: CaIngestOpts, do_change: bool) -> Result<(), Error> {
+    let opstr = if do_change { "change" } else { "check" };
+    info!("start scylla schema {}", opstr);
+    use netpod::ttl::RetentionTime;
+    scywr::schema::migrate_scylla_data_schema(opts.scylla_config_st(), RetentionTime::Short, do_change)
+        .await
+        .map_err(Error::from_string)?;
+    scywr::schema::migrate_scylla_data_schema(opts.scylla_config_mt(), RetentionTime::Medium, do_change)
+        .await
+        .map_err(Error::from_string)?;
+    scywr::schema::migrate_scylla_data_schema(opts.scylla_config_lt(), RetentionTime::Long, do_change)
+        .await
+        .map_err(Error::from_string)?;
+    info!("stop scylla schema {}", opstr);
     Ok(())
 }

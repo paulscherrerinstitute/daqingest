@@ -10,6 +10,13 @@ The resulting binary is found at `target/release/daqingest` and dynamically link
 to the most basic linux system libraries.
 
 
+## Create the Scylladb Schema
+
+```
+./daqingest scylla-schema-change <CONFIG.YML>
+```
+
+
 ## Run
 
 ```

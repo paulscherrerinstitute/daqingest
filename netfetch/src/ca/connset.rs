@@ -61,6 +61,7 @@ use std::net::SocketAddr;
 use std::net::SocketAddrV4;
 use std::pin::Pin;
 
+use netpod::trigger;
 use netpod::OnDrop;
 use scywr::insertqueues::InsertQueuesTx;
 use series::SeriesId;
@@ -71,15 +72,6 @@ use std::time::Duration;
 use std::time::Instant;
 use std::time::SystemTime;
 use taskrun::tokio;
-
-#[allow(non_upper_case_globals)]
-pub const trigger: [&'static str; 5] = [
-    "S10-CMON-DIA1431:CURRENT-3-3",
-    "S10-CMON-DIA1431:CURRENT-5",
-    "S10-CMON-DIA1431:FAN-SPEED",
-    "S10-CMON-DIA1431:POWER-TOT",
-    "S10-CMON-MAG1721:TIN",
-];
 
 const CHECK_CHANS_PER_TICK: usize = 10000000;
 pub const SEARCH_BATCH_MAX: usize = 64;
@@ -622,7 +614,7 @@ impl CaConnSet {
         }
         self.stats.channel_status_series_found().inc();
         if trigger.contains(&name) {
-            debug!("handle_add_channel_with_status_id  {cmd:?}");
+            info!("handle_add_channel_with_status_id  {cmd:?}");
         }
         let ch = Channel::new(name.into());
         if let Some(chst) = self.channel_states.get_mut(&ch) {
@@ -678,7 +670,7 @@ impl CaConnSet {
             return Err(Error::with_msg_no_trace("ipv4 for epics"));
         };
         if trigger.contains(&name) {
-            debug!("handle_add_channel_with_addr  {cmd:?}");
+            info!("handle_add_channel_with_addr  {cmd:?}");
         }
         let ch = Channel::new(name.into());
         if let Some(chst) = self.channel_states.get_mut(&ch) {
@@ -772,7 +764,7 @@ impl CaConnSet {
         for res in results {
             let ch = Channel::new(res.channel.clone());
             if trigger.contains(&ch.name()) {
-                trace!("handle_ioc_query_result  {res:?}");
+                info!("handle_ioc_query_result  {res:?}");
             }
             if let Some(chst) = self.channel_states.get_mut(&ch) {
                 if let ChannelStateValue::Active(ast) = &mut chst.value {
@@ -938,7 +930,7 @@ impl CaConnSet {
     }
 
     fn handle_ca_conn_eos(&mut self, addr: SocketAddr, reason: EndOfStreamReason) -> Result<(), Error> {
-        debug!("handle_ca_conn_eos  {addr}  {reason:?}");
+        info!("handle_ca_conn_eos  {addr}  {reason:?}");
         if let Some(e) = self.ca_conn_ress.remove(&addr) {
             self.stats.ca_conn_eos_ok().inc();
             self.await_ca_conn_jhs.push_back((addr, e.jh));
@@ -946,23 +938,26 @@ impl CaConnSet {
             self.stats.ca_conn_eos_unexpected().inc();
             warn!("end-of-stream received for non-existent CaConn {addr}");
         }
-        match reason {
-            EndOfStreamReason::UnspecifiedReason => {
-                warn!("EndOfStreamReason::UnspecifiedReason");
-                self.handle_connect_fail(addr)?
+        {
+            use EndOfStreamReason::*;
+            match reason {
+                UnspecifiedReason => {
+                    warn!("EndOfStreamReason::UnspecifiedReason");
+                    self.handle_connect_fail(addr)?
+                }
+                Error(e) => {
+                    warn!("received error  {addr}  {e}");
+                    self.handle_connect_fail(addr)?
+                }
+                ConnectRefused => self.handle_connect_fail(addr)?,
+                ConnectTimeout => self.handle_connect_fail(addr)?,
+                OnCommand => {
+                    // warn!("TODO  make sure no channel is in state which could trigger health timeout")
+                }
+                RemoteClosed => self.handle_connect_fail(addr)?,
+                IocTimeout => self.handle_connect_fail(addr)?,
+                IoError => self.handle_connect_fail(addr)?,
             }
-            EndOfStreamReason::Error(e) => {
-                warn!("received error  {addr}  {e}");
-                self.handle_connect_fail(addr)?
-            }
-            EndOfStreamReason::ConnectRefused => self.handle_connect_fail(addr)?,
-            EndOfStreamReason::ConnectTimeout => self.handle_connect_fail(addr)?,
-            EndOfStreamReason::OnCommand => {
-                // warn!("TODO  make sure no channel is in state which could trigger health timeout")
-            }
-            EndOfStreamReason::RemoteClosed => self.handle_connect_fail(addr)?,
-            EndOfStreamReason::IocTimeout => self.handle_connect_fail(addr)?,
-            EndOfStreamReason::IoError => self.handle_connect_fail(addr)?,
         }
         // self.remove_channel_status_for_addr(addr)?;
         trace2!("still CaConn left  {}", self.ca_conn_ress.len());
@@ -982,24 +977,40 @@ impl CaConnSet {
                     ActiveChannelState::Init { since: _ } => {}
                     ActiveChannelState::WaitForStatusSeriesId { since: _ } => {}
                     ActiveChannelState::WithStatusSeriesId(st3) => {
-                        if let WithStatusSeriesIdStateInner::WithAddress {
-                            addr: addr_ch,
-                            state: _st4,
-                        } = &mut st3.inner
-                        {
-                            if SocketAddr::V4(*addr_ch) == addr {
+                        use WithStatusSeriesIdStateInner::*;
+                        match &mut st3.inner {
+                            AddrSearchPending { since: _ } => {}
+                            WithAddress { addr: addr2, state: _ } => {
                                 if trigger.contains(&ch.name()) {
-                                    self.connect_fail_count += 1;
-                                    debug!(" connect fail, maybe wrong address for {} {}", addr, ch.name());
+                                    info!(" connect fail, maybe wrong address for {} {}", addr, ch.name());
                                 }
-                                if self.connect_fail_count > 400 {
-                                    std::process::exit(1);
+                                if SocketAddr::V4(*addr2) == addr {
+                                    if trigger.contains(&ch.name()) {
+                                        info!("transition_channels_to_maybe_wrong_address  AA  {addr}");
+                                    }
+                                    bump_backoff(&mut st3.addr_find_backoff);
+                                    st3.inner = WithStatusSeriesIdStateInner::MaybeWrongAddress(
+                                        MaybeWrongAddressState::new(tsnow, st3.addr_find_backoff),
+                                    );
+                                    if trigger.contains(&ch.name()) {
+                                        info!("transition_channels_to_maybe_wrong_address  BB  {:?}", st1);
+                                    }
+                                } else {
+                                    if trigger.contains(&ch.name()) {
+                                        info!("transition_channels_to_maybe_wrong_address  BB  {addr}");
+                                    }
+                                    bump_backoff(&mut st3.addr_find_backoff);
+                                    st3.inner = WithStatusSeriesIdStateInner::MaybeWrongAddress(
+                                        MaybeWrongAddressState::new(tsnow, st3.addr_find_backoff),
+                                    );
+                                    if trigger.contains(&ch.name()) {
+                                        info!("transition_channels_to_maybe_wrong_address  BB  {:?}", st1);
+                                    }
                                 }
-                                bump_backoff(&mut st3.addr_find_backoff);
-                                st3.inner = WithStatusSeriesIdStateInner::MaybeWrongAddress(
-                                    MaybeWrongAddressState::new(tsnow, st3.addr_find_backoff),
-                                );
                             }
+                            UnknownAddress { since: _ } => {}
+                            NoAddress { since: _ } => {}
+                            MaybeWrongAddress(_) => {}
                         }
                     }
                 },
@@ -1399,7 +1410,7 @@ impl CaConnSet {
                                 if search_pending_count < CURRENT_SEARCH_PENDING_MAX as _ {
                                     trace!("try again channel after MaybeWrongAddress");
                                     if trigger.contains(&ch.name()) {
-                                        debug!("issue ioc search for {}", ch.name());
+                                        info!("issue ioc search for {}", ch.name());
                                     }
                                     search_pending_count += 1;
                                     st3.inner = WithStatusSeriesIdStateInner::AddrSearchPending { since: stnow };

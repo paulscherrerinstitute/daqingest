@@ -23,6 +23,8 @@ pub enum SubCmd {
     ListPulses,
     FetchEvents(FetchEvents),
     Db(Db),
+    ScyllaSchemaCheck(CaConfig),
+    ScyllaSchemaChange(CaConfig),
     #[command(subcommand)]
     ChannelAccess(ChannelAccess),
     #[cfg(feature = "bsread")]
@@ -81,7 +83,6 @@ pub struct BsreadDump {
 #[derive(Debug, clap::Parser)]
 pub enum ChannelAccess {
     CaIngest(CaConfig),
-    #[cfg(DISABLED)]
     CaSearch(CaSearch),
 }
 
@@ -113,6 +114,14 @@ pub struct Db {
     pub pg_name: String,
     #[command(subcommand)]
     pub sub: DbSub,
+}
+
+#[derive(Debug, clap::Parser)]
+pub struct ScyllaDb {
+    #[arg(long)]
+    pub scylla_host: String,
+    #[arg(long)]
+    pub scylla_keyspace: String,
 }
 
 #[derive(Debug, clap::Parser)]

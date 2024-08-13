@@ -460,9 +460,6 @@ impl FindIocStream {
                                                 addr: Some(addr),
                                                 dt,
                                             };
-                                            if super::connset::trigger.contains(&res.channel.as_str()) {
-                                                debug!("Found via UDP {res:?}");
-                                            }
                                             // trace!("udp search response {res:?}");
                                             self.stats.ca_udp_recv_result().inc();
                                             self.out_queue.push_back(res);

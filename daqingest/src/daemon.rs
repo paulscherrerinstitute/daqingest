@@ -2,7 +2,6 @@ pub mod inserthook;
 
 use async_channel::Receiver;
 use async_channel::Sender;
-use async_channel::WeakSender;
 use dbpg::seriesbychannel::ChannelInfoQuery;
 use err::Error;
 use log::*;
@@ -23,15 +22,10 @@ use scywr::config::ScyllaIngestConfig;
 use scywr::insertqueues::InsertQueuesRx;
 use scywr::insertqueues::InsertQueuesTx;
 use scywr::insertworker::InsertWorkerOpts;
-use scywr::iteminsertqueue as scywriiq;
-use scywriiq::QueryItem;
 use stats::rand_xoshiro::rand_core::RngCore;
-use stats::rand_xoshiro::Xoshiro128PlusPlus;
 use stats::DaemonStats;
 use stats::InsertWorkerStats;
 use stats::SeriesByChannelStats;
-use stats::SeriesWriterEstablishStats;
-use std::collections::VecDeque;
 use std::sync::atomic;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::AtomicUsize;
@@ -107,7 +101,7 @@ impl Daemon {
 
         let local_epics_hostname = ingest_linux::net::local_hostname();
 
-        #[cfg(DISABLED)]
+        #[cfg(target_abi = "x32")]
         let query_item_rx = {
             // TODO only testing, remove
             tokio::spawn({
@@ -345,6 +339,7 @@ impl Daemon {
     }
 
     fn check_health_connset(&mut self, ts1: Instant) -> Result<(), Error> {
+        let _ = ts1;
         let dt = self.connset_status_last.elapsed();
         if dt > CHECK_HEALTH_TIMEOUT {
             error!(
@@ -358,7 +353,7 @@ impl Daemon {
     async fn handle_timer_tick(&mut self) -> Result<(), Error> {
         if self.shutting_down {
             let nworkers = self.insert_workers_running.load(atomic::Ordering::Acquire);
-            #[cfg(DISABLED)]
+            #[cfg(target_abi = "x32")]
             {
                 let nitems = self
                     .query_item_tx_weak
@@ -424,7 +419,7 @@ impl Daemon {
         Ok(())
     }
 
-    #[cfg(DISABLED)]
+    #[cfg(target_abi = "x32")]
     async fn handle_ca_conn_done(&mut self, conn_addr: SocketAddrV4) -> Result<(), Error> {
         info!("handle_ca_conn_done {conn_addr:?}");
         self.connection_states.remove(&conn_addr);
@@ -509,7 +504,7 @@ impl Daemon {
         Ok(())
     }
 
-    #[cfg(DISABLED)]
+    #[cfg(target_abi = "x32")]
     async fn handle_shutdown(&mut self) -> Result<(), Error> {
         warn!("received shutdown event");
         if self.shutting_down {
@@ -720,13 +715,13 @@ pub async fn run(opts: CaIngestOpts, channels_config: Option<ChannelsConfig>) ->
         warn!("scylla_disable config flag enabled");
     } else {
         info!("start scylla schema check");
-        scywr::schema::migrate_scylla_data_schema(opts.scylla_config_st(), RetentionTime::Short)
+        scywr::schema::migrate_scylla_data_schema(opts.scylla_config_st(), RetentionTime::Short, false)
             .await
             .map_err(Error::from_string)?;
-        scywr::schema::migrate_scylla_data_schema(opts.scylla_config_mt(), RetentionTime::Medium)
+        scywr::schema::migrate_scylla_data_schema(opts.scylla_config_mt(), RetentionTime::Medium, false)
             .await
             .map_err(Error::from_string)?;
-        scywr::schema::migrate_scylla_data_schema(opts.scylla_config_lt(), RetentionTime::Long)
+        scywr::schema::migrate_scylla_data_schema(opts.scylla_config_lt(), RetentionTime::Long, false)
             .await
             .map_err(Error::from_string)?;
         info!("stop scylla schema check");

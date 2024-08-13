@@ -24,6 +24,7 @@ use futures_util::StreamExt;
 use hashbrown::HashMap;
 use log::*;
 use netpod::timeunits::*;
+use netpod::trigger;
 use netpod::ttl::RetentionTime;
 use netpod::ScalarType;
 use netpod::SeriesKind;
@@ -58,7 +59,6 @@ use series::SeriesId;
 use serieswriter::binwriter::BinWriter;
 use serieswriter::fixgridwriter::ChannelStatusSeriesWriter;
 use serieswriter::fixgridwriter::ChannelStatusWriteState;
-use serieswriter::fixgridwriter::CHANNEL_STATUS_GRID;
 use serieswriter::msptool::MspSplit;
 use serieswriter::rtwriter::RtWriter;
 use serieswriter::writer::EmittableType;
@@ -129,6 +129,15 @@ macro_rules! trace_flush_queue {
 
 #[allow(unused)]
 macro_rules! trace_event_incoming {
+    ($($arg:tt)*) => {
+        if false {
+            trace!($($arg)*);
+        }
+    };
+}
+
+#[allow(unused)]
+macro_rules! trace_monitor_stale {
     ($($arg:tt)*) => {
         if false {
             trace!($($arg)*);
@@ -442,14 +451,10 @@ struct CreatedState {
     // Updated on monitoring, polling or when the channel config changes to reset the timeout
     ts_activity_last: Instant,
     st_activity_last: SystemTime,
-    ts_msp_last: u64,
-    ts_msp_grid_last: u32,
-    inserted_in_ts_msp: u64,
     insert_item_ivl_ema: IntervalEma,
     item_recv_ivl_ema: IntervalEma,
     insert_recv_ivl_last: Instant,
     muted_before: u32,
-    info_store_msp_last: u32,
     recv_count: u64,
     recv_bytes: u64,
     stwin_ts: u64,
@@ -464,7 +469,6 @@ struct CreatedState {
     dw_lt_last: SystemTime,
     scalar_type: ScalarType,
     shape: Shape,
-    log_more: bool,
     name: String,
     enum_str_table: Option<Vec<String>>,
     status_emit_count: u64,
@@ -485,14 +489,10 @@ impl CreatedState {
             ts_alive_last: tsnow,
             ts_activity_last: tsnow,
             st_activity_last: stnow,
-            ts_msp_last: 0,
-            ts_msp_grid_last: 0,
-            inserted_in_ts_msp: 0,
             insert_item_ivl_ema: IntervalEma::new(),
             item_recv_ivl_ema: IntervalEma::new(),
             insert_recv_ivl_last: tsnow,
             muted_before: 0,
-            info_store_msp_last: 0,
             recv_count: 0,
             recv_bytes: 0,
             stwin_ts: 0,
@@ -507,7 +507,6 @@ impl CreatedState {
             dw_lt_last: SystemTime::UNIX_EPOCH,
             scalar_type: ScalarType::I8,
             shape: Shape::Scalar,
-            log_more: false,
             name: String::new(),
             enum_str_table: None,
             status_emit_count: 0,
@@ -1211,7 +1210,7 @@ impl CaConn {
                     trace3!("handle_conn_command received a command  {}", self.remote_addr_dbg);
                     match a.kind {
                         ConnCommandKind::ChannelAdd(conf, cssid) => {
-                            self.channel_add(conf, cssid);
+                            self.channel_add(conf, cssid)?;
                             Ok(Ready(Some(())))
                         }
                         ConnCommandKind::ChannelClose(name) => {
@@ -1237,7 +1236,6 @@ impl CaConn {
         use Poll::*;
         let mut have_progress = false;
         let mut have_pending = false;
-        let stnow = self.tmp_ts_poll;
         if self.is_shutdown() {
             Ok(Ready(None))
         } else {
@@ -1341,7 +1339,6 @@ impl CaConn {
                 )?;
                 self.stats.get_series_id_ok.inc();
                 {
-                    info!("queued Opened  {:?}", st2.channel.cssid);
                     let item = ChannelStatusItem {
                         ts: self.tmp_ts_poll,
                         cssid: st2.channel.cssid.clone(),
@@ -1420,13 +1417,17 @@ impl CaConn {
     pub fn channel_add(&mut self, conf: ChannelConfig, cssid: ChannelStatusSeriesId) -> Result<(), Error> {
         if self.cid_by_name(conf.name()).is_some() {
             self.stats.channel_add_exists.inc();
-            error!("logic error channel already exists {conf:?}");
+            if trigger.contains(&conf.name()) {
+                error!("logic error channel already exists {conf:?}");
+            }
             Ok(())
         } else {
             let cid = self.cid_by_name_or_insert(conf.name())?;
             if self.channels.contains_key(&cid) {
                 self.stats.channel_add_exists.inc();
-                error!("logic error channel already exists {conf:?}");
+                if trigger.contains(&conf.name()) {
+                    error!("logic error channel already exists {conf:?}");
+                }
                 Ok(())
             } else {
                 let conf = ChannelConf::new(conf, cssid);
@@ -1493,6 +1494,22 @@ impl CaConn {
     fn channel_state_on_shutdown(&mut self, channel_reason: ChannelStatusClosedReason) {
         // TODO  can I reuse emit_channel_info_insert_items ?
         trace!("channel_state_on_shutdown  channels {}", self.channels.len());
+        let stnow = self.tmp_ts_poll;
+        let mut item_deque = VecDeque::new();
+        for (_cid, conf) in &mut self.channels {
+            let item = ChannelStatusItem {
+                ts: stnow,
+                cssid: conf.state.cssid(),
+                status: ChannelStatus::Closed(channel_reason.clone()),
+            };
+            let deque = &mut item_deque;
+            if conf.wrst.emit_channel_status_item(item, deque).is_err() {
+                self.stats.logic_error().inc();
+            }
+        }
+        for x in item_deque {
+            self.iqdqs.st_rf3_qu.push_back(x);
+        }
         for (_cid, conf) in &mut self.channels {
             if dbg_chn_name(conf.conf.name()) {
                 info!("channel_state_on_shutdown {:?}", conf);
@@ -1515,66 +1532,18 @@ impl CaConn {
                     *chst = ChannelState::Ended(st.channel.cssid.clone());
                 }
                 ChannelState::Writable(st2) => {
-                    let cssid = st2.channel.cssid.clone();
                     // TODO should call the proper channel-close handler which in turn emits the status item.
                     // Make sure I record the reason for the "Close": user command, IOC error, etc..
-                    let item = ChannelStatusItem {
-                        ts: self.tmp_ts_poll,
-                        cssid: cssid.clone(),
-                        status: ChannelStatus::Closed(channel_reason.clone()),
-                    };
-                    let deque = &mut self.iqdqs.st_rf3_qu;
-                    if conf.wrst.emit_channel_status_item(item, deque).is_err() {
-                        self.stats.logic_error().inc();
-                    }
+                    let cssid = st2.channel.cssid.clone();
                     *chst = ChannelState::Ended(cssid);
                 }
                 ChannelState::Error(..) => {
-                    warn!("TODO emit error status");
-                    // *chst = ChannelState::Ended;
+                    // Leave state unchanged.
                 }
                 ChannelState::Ended(_) => {}
                 ChannelState::Closing(_) => {}
             }
         }
-    }
-
-    fn emit_channel_info_insert_items(&mut self) -> Result<(), Error> {
-        let timenow = self.tmp_ts_poll;
-        for (_, conf) in &mut self.channels {
-            let st = &mut conf.state;
-            match st {
-                ChannelState::Init(..) => {
-                    // TODO need last-save-ts for this state.
-                }
-                ChannelState::FetchEnumDetails(..) => {
-                    // TODO need last-save-ts for this state.
-                }
-                ChannelState::Creating(..) => {
-                    // TODO need last-save-ts for this state.
-                }
-                ChannelState::FetchCaStatusSeries(..) => {
-                    // TODO ?
-                }
-                ChannelState::MakingSeriesWriter(..) => {
-                    // TODO ?
-                }
-                ChannelState::Writable(st) => {
-                    let crst = &mut st.channel;
-                    // TODO if we don't wave a series id yet, dont' save? write-ampl.
-                    let msp = info_store_msp_from_time(timenow.clone());
-                    if msp != crst.info_store_msp_last {
-                        crst.info_store_msp_last = msp;
-                    }
-                }
-                ChannelState::Error(_) => {
-                    // TODO need last-save-ts for this state.
-                }
-                ChannelState::Ended(_) => {}
-                ChannelState::Closing(_) => {}
-            }
-        }
-        Ok(())
     }
 
     fn transition_to_polling(&mut self, subid: Subid, tsnow: Instant) -> Result<(), Error> {
@@ -2198,7 +2167,8 @@ impl CaConn {
                     ReadingState::Monitoring(st3) => match &st3.mon2state {
                         Monitoring2State::Passive(st4) => {
                             if st4.tsbeg + conf.conf.manual_poll_on_quiet_after() < tsnow {
-                                debug!("check_channels_state_poll  Monitoring2State::Passive  timeout");
+                                trace_monitor_stale!("check_channels_state_poll  Monitoring2State::Passive  timeout");
+                                self.stats.monitor_stale_read_begin().inc();
                                 // TODO encapsulate and unify with Polling handler
                                 let ioid = Ioid(self.ioid);
                                 self.ioid = self.ioid.wrapping_add(1);
@@ -2223,8 +2193,13 @@ impl CaConn {
                                 // Something is wrong with this channel.
                                 // Maybe we lost connection, maybe the IOC went down, maybe there is a bug where only
                                 // this or a subset of the subscribed channels no longer give updates.
+                                self.stats.monitor_stale_read_timeout().inc();
                                 let name = conf.conf.name();
-                                warn!("channel monitor explicit read timeout  {}  ioid {:?}", name, ioid);
+                                trace_monitor_stale!(
+                                    "channel monitor explicit read timeout  {}  ioid {:?}",
+                                    name,
+                                    ioid
+                                );
                                 if false {
                                     // Here we try to close the channel at hand.
 
@@ -2277,8 +2252,6 @@ impl CaConn {
                             if *x + Duration::from_millis(10000) <= tsnow {
                                 self.read_ioids.remove(ioid);
                                 self.stats.caget_timeout().inc();
-                                // warn!("channel caget timeout");
-                                // std::process::exit(1);
                                 st3.tick = PollTickState::Idle(tsnow);
                             }
                         }
@@ -2309,7 +2282,7 @@ impl CaConn {
         if let Some(started) = self.ioc_ping_start {
             if started + TIMEOUT_PONG_WAIT < tsnow {
                 self.stats.pong_timeout().inc();
-                warn!("pong timeout {}", self.remote_addr_dbg);
+                info!("pong timeout {}", self.remote_addr_dbg);
                 self.ioc_ping_start = None;
                 let item = CaConnEvent {
                     ts: tsnow,
@@ -2328,7 +2301,7 @@ impl CaConn {
                     proto.push_out(msg);
                 } else {
                     self.stats.ping_no_proto().inc();
-                    warn!("can not ping {}  no proto", self.remote_addr_dbg);
+                    info!("can not ping {}  no proto", self.remote_addr_dbg);
                     self.trigger_shutdown(ShutdownReason::ProtocolMissing);
                 }
             }
@@ -2537,19 +2510,6 @@ impl CaConn {
         let scalar_type = ScalarType::from_ca_id(k.data_type)?;
         let shape = Shape::from_ca_count(k.data_count)?;
 
-        let log_more = match &scalar_type {
-            ScalarType::Enum => {
-                if cssid.id() % 60 == 14 {
-                    let name = conf.conf.name();
-                    // info!("ENUM  {}", name);
-                    true
-                } else {
-                    false
-                }
-            }
-            _ => false,
-        };
-
         let (acc_msp, _) = TsMs::from_system_time(stnow).to_grid_02(EMIT_ACCOUNTING_SNAP);
         let created_state = CreatedState {
             cssid,
@@ -2561,14 +2521,10 @@ impl CaConn {
             ts_alive_last: tsnow,
             ts_activity_last: tsnow,
             st_activity_last: stnow,
-            ts_msp_last: 0,
-            ts_msp_grid_last: 0,
-            inserted_in_ts_msp: u64::MAX,
             insert_item_ivl_ema: IntervalEma::new(),
             item_recv_ivl_ema: IntervalEma::new(),
             insert_recv_ivl_last: tsnow,
             muted_before: 0,
-            info_store_msp_last: info_store_msp_from_time(self.tmp_ts_poll),
             recv_count: 0,
             recv_bytes: 0,
             stwin_ts: 0,
@@ -2583,7 +2539,6 @@ impl CaConn {
             dw_lt_last: SystemTime::UNIX_EPOCH,
             scalar_type: scalar_type.clone(),
             shape: shape.clone(),
-            log_more,
             name: conf.conf.name().into(),
             enum_str_table: None,
             status_emit_count: 0,

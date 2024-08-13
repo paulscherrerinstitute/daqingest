@@ -23,6 +23,8 @@ pub enum Error {
     ScyllaNextRow(#[from] NextRowError),
     MissingData,
     AddColumnImpossible,
+    Msg(String),
+    BadSchema,
 }
 
 impl From<crate::session::Error> for Error {
@@ -184,9 +186,9 @@ impl GenTwcsTab {
         &self.name
     }
 
-    async fn setup(&self, scy: &ScySession) -> Result<(), Error> {
+    async fn setup(&self, do_change: bool, scy: &ScySession) -> Result<(), Error> {
         self.create_if_missing(scy).await?;
-        self.check_table_options(scy).await?;
+        self.check_table_options(do_change, scy).await?;
         self.check_columns(scy).await?;
         Ok(())
     }
@@ -255,7 +257,8 @@ impl GenTwcsTab {
         map
     }
 
-    async fn check_table_options(&self, scy: &ScySession) -> Result<(), Error> {
+    async fn check_table_options(&self, do_change: bool, scy: &ScySession) -> Result<(), Error> {
+        let mut differ = false;
         let cql = concat!(
             "select default_time_to_live, gc_grace_seconds, compaction",
             " from system_schema.tables where keyspace_name = ? and table_name = ?"
@@ -270,27 +273,34 @@ impl GenTwcsTab {
         if let Some(row) = rows.get(0) {
             let mut set_opts = Vec::new();
             if row.0 != self.default_time_to_live.as_secs() {
-                if false {
+                if do_change {
                     set_opts.push(format!(
                         "default_time_to_live = {}",
                         self.default_time_to_live.as_secs()
                     ));
                 } else {
-                    info!("mismatch default_time_to_live");
-                    info!(
-                        "{:20}  vs  {:20}  {:20}  {:20}",
+                    error!(
+                        "mismatch default_time_to_live  {:10}  exp {:10}  {}  {}",
                         row.0,
                         self.default_time_to_live.as_secs(),
                         self.keyspace,
                         self.name,
                     );
+                    differ = true;
                 }
             }
             if row.1 != self.gc_grace.as_secs() {
-                if false {
+                if do_change {
                     set_opts.push(format!("gc_grace_seconds = {}", self.gc_grace.as_secs()));
                 } else {
-                    info!("mismatch gc_grace_seconds");
+                    error!(
+                        "mismatch gc_grace_seconds  {:10}  exp {:10}  {}  {}",
+                        row.1,
+                        self.gc_grace.as_secs(),
+                        self.keyspace,
+                        self.name,
+                    );
+                    differ = true;
                 }
             }
             if row.2 != self.compaction_options() {
@@ -300,22 +310,34 @@ impl GenTwcsTab {
                     .map(|(k, v)| format!("'{k}': '{v}'"))
                     .collect();
                 let params = params.join(", ");
-                if false {
+                if do_change {
                     set_opts.push(format!("compaction = {{ {} }}", params));
                 } else {
-                    info!("mismatch compaction");
+                    error!(
+                        "mismatch compaction  {:?}  exp {:?}  {}  {}",
+                        row.2,
+                        self.compaction_options(),
+                        self.keyspace,
+                        self.name,
+                    );
+                    differ = true;
                 }
             }
-            if set_opts.len() != 0 {
-                let cql = format!(concat!("alter table {} with {}"), self.name(), set_opts.join(" and "));
-                info!("{cql}");
-                scy.query(cql, ()).await?;
+            if do_change {
+                if set_opts.len() != 0 {
+                    let cql = format!(concat!("alter table {} with {}"), self.name(), set_opts.join(" and "));
+                    info!("{cql}");
+                    scy.query(cql, ()).await?;
+                }
             }
         } else {
-            let e = Error::MissingData;
-            return Err(e);
+            return Err(Error::MissingData);
         }
-        Ok(())
+        if differ {
+            Err(Error::BadSchema)
+        } else {
+            Ok(())
+        }
     }
 
     async fn check_columns(&self, scy: &ScySession) -> Result<(), Error> {
@@ -397,7 +419,12 @@ async fn get_columns(keyspace: &str, table: &str, scy: &ScySession) -> Result<Ve
     Ok(ret)
 }
 
-async fn check_event_tables(keyspace: &str, rett: RetentionTime, scy: &ScySession) -> Result<(), Error> {
+async fn check_event_tables(
+    keyspace: &str,
+    rett: RetentionTime,
+    do_change: bool,
+    scy: &ScySession,
+) -> Result<(), Error> {
     let stys = [
         "u8", "u16", "u32", "u64", "i8", "i16", "i32", "i64", "f32", "f64", "bool", "string",
     ];
@@ -423,7 +450,7 @@ async fn check_event_tables(keyspace: &str, rett: RetentionTime, scy: &ScySessio
                 ["ts_lsp"],
                 rett.ttl_events_d0(),
             );
-            tab.setup(scy).await?;
+            tab.setup(do_change, scy).await?;
         }
         {
             let tab = GenTwcsTab::new(
@@ -443,7 +470,7 @@ async fn check_event_tables(keyspace: &str, rett: RetentionTime, scy: &ScySessio
                 ["ts_lsp"],
                 rett.ttl_events_d1(),
             );
-            tab.setup(scy).await?;
+            tab.setup(do_change, scy).await?;
         }
     }
     {
@@ -462,7 +489,7 @@ async fn check_event_tables(keyspace: &str, rett: RetentionTime, scy: &ScySessio
             ["ts_lsp"],
             rett.ttl_events_d1(),
         );
-        tab.setup(scy).await?;
+        tab.setup(do_change, scy).await?;
     }
     {
         let tab = GenTwcsTab::new(
@@ -479,7 +506,7 @@ async fn check_event_tables(keyspace: &str, rett: RetentionTime, scy: &ScySessio
             ["ts_lsp"],
             rett.ttl_events_d1(),
         );
-        tab.setup(scy).await?;
+        tab.setup(do_change, scy).await?;
     }
     {
         let tab = GenTwcsTab::new(
@@ -496,37 +523,24 @@ async fn check_event_tables(keyspace: &str, rett: RetentionTime, scy: &ScySessio
             ["ts_lsp"],
             rett.ttl_events_d1(),
         );
-        tab.setup(scy).await?;
+        tab.setup(do_change, scy).await?;
     }
     Ok(())
 }
 
-pub async fn migrate_scylla_data_schema(scyconf: &ScyllaIngestConfig, rett: RetentionTime) -> Result<(), Error> {
+pub async fn migrate_scylla_data_schema(
+    scyconf: &ScyllaIngestConfig,
+    rett: RetentionTime,
+    do_change: bool,
+) -> Result<(), Error> {
     let scy2 = create_session_no_ks(scyconf).await?;
     let scy = &scy2;
     let durable = true;
 
     if !has_keyspace(scyconf.keyspace(), scy).await? {
-        // TODO
-        let replication = 3;
-        let cql = format!(
-            concat!(
-                "create keyspace {}",
-                " with replication = {{ 'class': 'SimpleStrategy', 'replication_factor': {} }}",
-                " and durable_writes = {};"
-            ),
-            scyconf.keyspace(),
-            replication,
-            durable
-        );
-        info!("scylla create keyspace  {cql}");
-        scy.query_iter(cql, ()).await?;
-        info!("keyspace created");
-    }
-
-    if let Some(ks) = scyconf.keyspace_rf1() {
-        if !has_keyspace(ks, scy).await? {
-            let replication = 1;
+        if do_change {
+            // TODO
+            let replication = 3;
             let cql = format!(
                 concat!(
                     "create keyspace {}",
@@ -540,6 +554,33 @@ pub async fn migrate_scylla_data_schema(scyconf: &ScyllaIngestConfig, rett: Rete
             info!("scylla create keyspace  {cql}");
             scy.query_iter(cql, ()).await?;
             info!("keyspace created");
+        } else {
+            error!("missing keyspace  {:?}", scyconf.keyspace());
+            return Err(Error::BadSchema);
+        }
+    }
+
+    if let Some(ks) = scyconf.keyspace_rf1() {
+        if !has_keyspace(ks, scy).await? {
+            if do_change {
+                let replication = 1;
+                let cql = format!(
+                    concat!(
+                        "create keyspace {}",
+                        " with replication = {{ 'class': 'SimpleStrategy', 'replication_factor': {} }}",
+                        " and durable_writes = {};"
+                    ),
+                    scyconf.keyspace(),
+                    replication,
+                    durable
+                );
+                info!("scylla create keyspace  {cql}");
+                scy.query_iter(cql, ()).await?;
+                info!("keyspace created");
+            } else {
+                error!("missing keyspace  {:?}", scyconf.keyspace_rf1());
+                return Err(Error::BadSchema);
+            }
         }
     }
 
@@ -547,7 +588,7 @@ pub async fn migrate_scylla_data_schema(scyconf: &ScyllaIngestConfig, rett: Rete
 
     scy.use_keyspace(ks, true).await?;
 
-    check_event_tables(ks, rett.clone(), scy).await?;
+    check_event_tables(ks, rett.clone(), do_change, scy).await?;
 
     {
         let tab = GenTwcsTab::new(
@@ -559,7 +600,7 @@ pub async fn migrate_scylla_data_schema(scyconf: &ScyllaIngestConfig, rett: Rete
             ["ts_msp"],
             rett.ttl_ts_msp(),
         );
-        tab.setup(scy).await?;
+        tab.setup(do_change, scy).await?;
     }
     {
         let tab = GenTwcsTab::new(
@@ -576,7 +617,7 @@ pub async fn migrate_scylla_data_schema(scyconf: &ScyllaIngestConfig, rett: Rete
             ["ts_lsp"],
             rett.ttl_channel_status(),
         );
-        tab.setup(scy).await?;
+        tab.setup(do_change, scy).await?;
     }
     {
         let tab = GenTwcsTab::new(
@@ -593,7 +634,7 @@ pub async fn migrate_scylla_data_schema(scyconf: &ScyllaIngestConfig, rett: Rete
             ["ts_lsp"],
             rett.ttl_channel_status(),
         );
-        tab.setup(scy).await?;
+        tab.setup(do_change, scy).await?;
     }
     {
         let tab = GenTwcsTab::new(
@@ -610,7 +651,7 @@ pub async fn migrate_scylla_data_schema(scyconf: &ScyllaIngestConfig, rett: Rete
             ["ts_lsp"],
             rett.ttl_channel_status(),
         );
-        tab.setup(scy).await?;
+        tab.setup(do_change, scy).await?;
     }
     {
         let tab = GenTwcsTab::new(
@@ -631,7 +672,7 @@ pub async fn migrate_scylla_data_schema(scyconf: &ScyllaIngestConfig, rett: Rete
             ["off"],
             rett.ttl_binned(),
         );
-        tab.setup(scy).await?;
+        tab.setup(do_change, scy).await?;
     }
     {
         let tab = GenTwcsTab::new(
@@ -649,7 +690,7 @@ pub async fn migrate_scylla_data_schema(scyconf: &ScyllaIngestConfig, rett: Rete
             ["series"],
             rett.ttl_channel_status(),
         );
-        tab.setup(scy).await?;
+        tab.setup(do_change, scy).await?;
     }
     {
         let tab = GenTwcsTab::new(
@@ -667,7 +708,7 @@ pub async fn migrate_scylla_data_schema(scyconf: &ScyllaIngestConfig, rett: Rete
             ["series"],
             rett.ttl_channel_status(),
         );
-        tab.setup(scy).await?;
+        tab.setup(do_change, scy).await?;
     }
     Ok(())
 }

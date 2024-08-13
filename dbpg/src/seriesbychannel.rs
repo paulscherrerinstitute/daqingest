@@ -51,8 +51,11 @@ pub enum Error {
     ChannelError,
     #[error("DbConsistencySeries({0})")]
     DbConsistencySeries(String),
-    ScalarType,
+    #[error("ScalarType({0})")]
+    ScalarType(i32),
     Shape,
+    #[error("SeriesKind({0})")]
+    SeriesKind(i16),
 }
 
 impl From<crate::err::Error> for Error {
@@ -355,12 +358,14 @@ impl Worker {
                         let series: i64 = row.get(1);
                         let series = SeriesId::new(series as _);
                         let shape_dims: Vec<i32> = row.get(3);
-                        let scalar_type = ScalarType::from_scylla_i32(row.get(2)).map_err(|_| Error::ScalarType)?;
+                        let scalar_type = row.get(2);
+                        let scalar_type =
+                            ScalarType::from_scylla_i32(scalar_type).map_err(|_| Error::ScalarType(scalar_type))?;
                         let shape_dims =
                             Shape::from_scylla_shape_dims(shape_dims.as_slice()).map_err(|_| Error::Shape)?;
                         let tscs: Vec<DateTime<Utc>> = row.get(4);
                         let kind: i16 = row.get(5);
-                        let kind = SeriesKind::from_db_i16(kind).map_err(|_| Error::ScalarType)?;
+                        let kind = SeriesKind::from_db_i16(kind).map_err(|_| Error::SeriesKind(kind))?;
                         if true && job.channel == "TEST:MEDIUM:WAVE-01024:F32:000000"
                             || series == SeriesId::new(1605348259462543621)
                         {

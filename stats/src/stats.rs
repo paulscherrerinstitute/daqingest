@@ -357,6 +357,8 @@ stats_proc::stats_struct!((
             recv_read_notify_while_enabling_monitoring,
             recv_read_notify_while_polling_idle,
             channel_not_alive_no_activity,
+            monitor_stale_read_begin,
+            monitor_stale_read_timeout,
         ),
         values(inter_ivl_ema, read_ioids_len, proto_out_len,),
         histolog2s(
