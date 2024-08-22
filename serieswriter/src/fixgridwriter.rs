@@ -43,10 +43,11 @@ impl EmittableType for ChannelStatusWriteValue {
     fn into_query_item(
         self,
         ts_net: Instant,
+        tsev: TsNano,
         state: &mut <Self as EmittableType>::State,
     ) -> serieswriter::writer::EmitRes {
         let mut items = serieswriter::writer::SmallVec::new();
-        let ts = self.ts();
+        let ts = tsev;
         state.last_accepted_ts = ts;
         state.last_accepted_val = Some(self.1);
         let byte_size = self.byte_size();

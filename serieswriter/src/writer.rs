@@ -11,6 +11,15 @@ use std::time::Instant;
 use core::fmt;
 pub use smallvec::SmallVec;
 
+#[allow(unused)]
+macro_rules! trace_emit {
+    ($det:expr, $($arg:tt)*) => {
+        if $det {
+            trace!($($arg)*);
+        }
+    };
+}
+
 #[derive(Debug)]
 pub struct EmitRes {
     pub items: SmallVec<[QueryItem; 4]>,
@@ -23,7 +32,7 @@ pub trait EmittableType: fmt::Debug + Clone {
     fn ts(&self) -> TsNano;
     fn has_change(&self, k: &Self) -> bool;
     fn byte_size(&self) -> u32;
-    fn into_query_item(self, ts_net: Instant, state: &mut <Self as EmittableType>::State) -> EmitRes;
+    fn into_query_item(self, ts_net: Instant, tsev: TsNano, state: &mut <Self as EmittableType>::State) -> EmitRes;
 }
 
 #[derive(Debug, ThisError)]
@@ -60,7 +69,8 @@ pub struct WriteRes {
 
 #[derive(Debug)]
 pub struct SeriesWriter<ET> {
-    sid: SeriesId,
+    series: SeriesId,
+    do_trace_detail: bool,
     _t1: PhantomData<ET>,
 }
 
@@ -68,13 +78,17 @@ impl<ET> SeriesWriter<ET>
 where
     ET: EmittableType,
 {
-    pub fn new(sid: SeriesId) -> Result<Self, Error> {
-        let res = Self { sid, _t1: PhantomData };
+    pub fn new(series: SeriesId) -> Result<Self, Error> {
+        let res = Self {
+            series,
+            do_trace_detail: netpod::TRACE_SERIES_ID.contains(&series.id()),
+            _t1: PhantomData,
+        };
         Ok(res)
     }
 
     pub fn sid(&self) -> SeriesId {
-        self.sid.clone()
+        self.series.clone()
     }
 
     pub fn write(
@@ -82,11 +96,13 @@ where
         item: ET,
         state: &mut <ET as EmittableType>::State,
         ts_net: Instant,
+        tsev: TsNano,
         deque: &mut VecDeque<QueryItem>,
     ) -> Result<WriteRes, Error> {
+        let det = self.do_trace_detail;
         let ts_main = item.ts();
-        let res = item.into_query_item(ts_net, state);
-        trace!("emit value for ts {:?}  items len {}", ts_main, res.items.len());
+        let res = item.into_query_item(ts_net, tsev, state);
+        trace_emit!(det, "emit value for ts {:?}  items len {}", ts_main, res.items.len());
         for item in res.items {
             deque.push_back(item);
         }

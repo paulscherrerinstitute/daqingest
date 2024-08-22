@@ -90,6 +90,7 @@ impl EmittableType for WritableType {
     fn into_query_item(
         self,
         ts_net: Instant,
+        tsev: TsNano,
         state: &mut <Self as EmittableType>::State,
     ) -> serieswriter::writer::EmitRes {
         todo!()
@@ -317,13 +318,16 @@ where
         .map_err(|_| Error::Decode)?;
     let evs: EventsDim0<T> = evs.into();
     trace_input!("see events {:?}", evs);
+    warn!("TODO require timestamp in input format");
+    let stnow = SystemTime::now();
+    let tsev = TsNano::from_system_time(stnow);
     let tsnow = Instant::now();
     let mut emit_state = ();
     for (i, (&ts, val)) in evs.tss.iter().zip(evs.values.iter()).enumerate() {
         let val = val.clone();
         trace_input!("ev  {:6}  {:20}  {:20?}", i, ts, val);
         let val = f1(val);
-        writer.write(WritableType(val), &mut emit_state, tsnow, deque)?;
+        writer.write(WritableType(val), &mut emit_state, tsnow, tsev, deque)?;
     }
     Ok(())
 }
@@ -345,13 +349,16 @@ where
         .map_err(|_| Error::Decode)?;
     let evs: EventsDim1<T> = evs.into();
     trace_input!("see events {:?}", evs);
+    warn!("TODO require timestamp in input format");
+    let stnow = SystemTime::now();
+    let tsev = TsNano::from_system_time(stnow);
     let tsnow = Instant::now();
     let mut emit_state = ();
     for (i, (&ts, val)) in evs.tss.iter().zip(evs.values.iter()).enumerate() {
         let val = val.clone();
         trace_input!("ev  {:6}  {:20}  {:20?}", i, ts, val);
         let val = f1(val);
-        writer.write(WritableType(val), &mut emit_state, tsnow, deque)?;
+        writer.write(WritableType(val), &mut emit_state, tsnow, tsev, deque)?;
     }
     Ok(())
 }

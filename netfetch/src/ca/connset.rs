@@ -1384,15 +1384,16 @@ impl CaConnSet {
                                             MaybeWrongAddressState::new(stnow, st3.addr_find_backoff),
                                         );
                                         let item = ChannelStatusItem::new_closed_conn_timeout(stnow, st3.cssid.clone());
-                                        let (ts, val) = item.to_ts_val();
+                                        let (tsev, val) = item.to_ts_val();
                                         let deque = &mut item_deque;
                                         st3.writer_status
                                             .as_mut()
                                             .unwrap()
                                             .write(
-                                                serieswriter::fixgridwriter::ChannelStatusWriteValue::new(ts, val),
+                                                serieswriter::fixgridwriter::ChannelStatusWriteValue::new(tsev, val),
                                                 st3.writer_status_state.as_mut().unwrap(),
                                                 tsnow,
+                                                tsev,
                                                 deque,
                                             )
                                             .map_err(|e| Error::with_msg_no_trace(e.to_string()))?;

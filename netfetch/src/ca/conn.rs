@@ -42,17 +42,17 @@ use scywr::insertqueues::InsertDeques;
 use scywr::insertqueues::InsertQueuesTx;
 use scywr::insertqueues::InsertSenderPolling;
 use scywr::iteminsertqueue as scywriiq;
-use scywr::iteminsertqueue::Accounting;
-use scywr::iteminsertqueue::AccountingRecv;
-use scywr::iteminsertqueue::MspItem;
-use scywr::iteminsertqueue::QueryItem;
-use scywr::iteminsertqueue::ShutdownReason;
 use scywr::senderpolling::SenderPolling;
+use scywriiq::Accounting;
+use scywriiq::AccountingRecv;
 use scywriiq::ChannelStatus;
 use scywriiq::ChannelStatusClosedReason;
 use scywriiq::ChannelStatusItem;
 use scywriiq::ConnectionStatus;
 use scywriiq::ConnectionStatusItem;
+use scywriiq::MspItem;
+use scywriiq::QueryItem;
+use scywriiq::ShutdownReason;
 use serde::Serialize;
 use series::ChannelStatusSeriesId;
 use series::SeriesId;
@@ -695,11 +695,13 @@ impl WriterStatus {
         item: ChannelStatusItem,
         deque: &mut VecDeque<QueryItem>,
     ) -> Result<(), Error> {
+        let tsev = TsNano::from_system_time(SystemTime::now());
         let (ts, val) = item.to_ts_val();
         self.writer_status.write(
             serieswriter::fixgridwriter::ChannelStatusWriteValue::new(ts, val),
             &mut self.writer_status_state,
             Instant::now(),
+            tsev,
             deque,
         )?;
         Ok(())
@@ -1831,8 +1833,8 @@ impl CaConn {
             }
         } else {
             if let Some(cid) = self.read_ioids.get(&ioid) {
-                let ch_s = if let Some(x) = self.channels.get_mut(cid) {
-                    &mut x.state
+                let (ch_s, ch_wrst) = if let Some(x) = self.channels.get_mut(cid) {
+                    (&mut x.state, &mut x.wrst)
                 } else {
                     warn!("handle_read_notify_res can not find channel for  {cid:?}  {ioid:?}");
                     return Ok(());
@@ -1893,6 +1895,14 @@ impl CaConn {
                                     }
                                     self.read_ioids.remove(&ioid);
                                     st2.mon2state = Monitoring2State::Passive(Monitoring2PassiveState { tsbeg: tsnow });
+                                    {
+                                        let item = ChannelStatusItem {
+                                            ts: self.tmp_ts_poll,
+                                            cssid: st.channel.cssid.clone(),
+                                            status: ChannelStatus::MonitoringSilenceReadUnchanged,
+                                        };
+                                        ch_wrst.emit_channel_status_item(item, &mut self.iqdqs.st_rf3_qu)?;
+                                    }
                                     let iqdqs = &mut self.iqdqs;
                                     let stats = self.stats.as_ref();
                                     Self::read_notify_res_for_write(ev, st, iqdqs, stnow, tsnow, stats)?;
@@ -1973,14 +1983,14 @@ impl CaConn {
         crst.recv_bytes += payload_len as u64;
         crst.acc_recv.push_written(payload_len);
         // TODO should attach these counters already to Writable state.
-        let ts_local = {
-            let epoch = stnow.duration_since(std::time::UNIX_EPOCH).unwrap_or(Duration::ZERO);
-            epoch.as_secs() * SEC + epoch.subsec_nanos() as u64
-        };
-        let ts = value.ts().ok_or_else(|| Error::MissingTimestamp)?;
-        let ts_diff = ts.abs_diff(ts_local);
-        stats.ca_ts_off().ingest((ts_diff / MS) as u32);
+        let ts_local = TsNano::from_system_time(stnow);
         {
+            let ts = value.ts().ok_or_else(|| Error::MissingTimestamp)?;
+            let ts_diff = ts.abs_diff(ts_local.ns());
+            stats.ca_ts_off().ingest((ts_diff / MS) as u32);
+        }
+        {
+            let evts = ts_local;
             Self::check_ev_value_data(&value.data, &writer.scalar_type())?;
             crst.muted_before = 0;
             crst.insert_item_ivl_ema.tick(tsnow);
@@ -1988,7 +1998,7 @@ impl CaConn {
             // let ts_local = TsNano::from_ns(ts_local);
             // binwriter.ingest(ts_ioc, ts_local, &val, iqdqs)?;
             {
-                let wres = writer.write(CaWriterValue::new(value, crst), tsnow, iqdqs)?;
+                let wres = writer.write(CaWriterValue::new(value, crst), tsnow, evts, iqdqs)?;
                 crst.status_emit_count += wres.nstatus() as u64;
                 if wres.st.accept {
                     crst.dw_st_last = stnow;
@@ -2186,6 +2196,14 @@ impl CaConn {
                                 self.proto.as_mut().ok_or_else(|| Error::NoProtocol)?.push_out(msg);
                                 st3.mon2state = Monitoring2State::ReadPending(ioid, tsnow);
                                 self.stats.caget_issued().inc();
+                                {
+                                    let item = ChannelStatusItem {
+                                        ts: self.tmp_ts_poll,
+                                        cssid: st2.channel.cssid.clone(),
+                                        status: ChannelStatus::MonitoringSilenceReadStart,
+                                    };
+                                    conf.wrst.emit_channel_status_item(item, &mut self.iqdqs.st_rf3_qu)?;
+                                }
                             }
                         }
                         Monitoring2State::ReadPending(ioid, since) => {
@@ -2200,6 +2218,14 @@ impl CaConn {
                                     name,
                                     ioid
                                 );
+                                {
+                                    let item = ChannelStatusItem {
+                                        ts: self.tmp_ts_poll,
+                                        cssid: st2.channel.cssid.clone(),
+                                        status: ChannelStatus::MonitoringSilenceReadTimeout,
+                                    };
+                                    conf.wrst.emit_channel_status_item(item, &mut self.iqdqs.st_rf3_qu)?;
+                                }
                                 if false {
                                     // Here we try to close the channel at hand.
 
@@ -3392,6 +3418,7 @@ impl EmittableType for CaWriterValue {
     fn into_query_item(
         mut self,
         ts_net: Instant,
+        tsev: TsNano,
         state: &mut <Self as EmittableType>::State,
     ) -> serieswriter::writer::EmitRes {
         let mut items = serieswriter::writer::SmallVec::new();
@@ -3409,10 +3436,7 @@ impl EmittableType for CaWriterValue {
             },
             None => true,
         };
-        let ts = TsNano::from_ns(self.0.ts().unwrap());
-        if let Some(ts) = self.0.ts() {
-            state.last_accepted_ts = TsNano::from_ns(ts);
-        }
+        let ts = tsev;
         state.last_accepted_val = Some(self.clone());
         let byte_size = self.byte_size();
         if diff_data {

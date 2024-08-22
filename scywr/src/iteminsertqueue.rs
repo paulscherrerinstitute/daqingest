@@ -429,6 +429,9 @@ pub enum ChannelStatus {
     Opened,
     Closed(ChannelStatusClosedReason),
     Pong,
+    MonitoringSilenceReadStart,
+    MonitoringSilenceReadTimeout,
+    MonitoringSilenceReadUnchanged,
 }
 
 impl ChannelStatus {
@@ -452,6 +455,9 @@ impl ChannelStatus {
                 IoError => 12,
             },
             Pong => 25,
+            MonitoringSilenceReadStart => 26,
+            MonitoringSilenceReadTimeout => 27,
+            MonitoringSilenceReadUnchanged => 28,
         }
     }
 
@@ -473,6 +479,9 @@ impl ChannelStatus {
             12 => Closed(IoError),
             24 => AssignedToAddress,
             25 => Pong,
+            26 => MonitoringSilenceReadStart,
+            27 => MonitoringSilenceReadTimeout,
+            28 => MonitoringSilenceReadUnchanged,
             _ => {
                 return Err(err::Error::with_msg_no_trace(format!(
                     "unknown ChannelStatus kind {kind}"
