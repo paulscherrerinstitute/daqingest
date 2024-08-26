@@ -638,7 +638,12 @@ impl CaMsgTy {
             AccessRightsRes(_) => {}
             EventAdd(_) => {
                 // Using flags DBE_ARCHIVE, DBE_ALARM, DBE_PROPERTY.
-                let flags = 0b1110;
+                let dbe_value = 0x01;
+                let dbe_log = 0x02;
+                let dbe_alarm = 0x04;
+                let dbe_property = 0x08;
+                let _ = dbe_value | dbe_property;
+                let flags = dbe_log | dbe_alarm;
                 buf.copy_from_slice(&[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, flags, 0, 0]);
             }
             EventAddRes(_) => {}

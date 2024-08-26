@@ -6,6 +6,7 @@ pub mod linuxhelper;
 pub mod metrics;
 pub mod netbuf;
 pub mod polltimer;
+pub mod ratelimit;
 pub mod rt;
 #[cfg(test)]
 pub mod test;

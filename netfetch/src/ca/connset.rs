@@ -63,6 +63,7 @@ use std::pin::Pin;
 
 use netpod::trigger;
 use netpod::OnDrop;
+use netpod::TsNano;
 use scywr::insertqueues::InsertQueuesTx;
 use series::SeriesId;
 use std::sync::Arc;
@@ -625,12 +626,25 @@ impl CaConnSet {
                         self.cssid_latency_max = dt + Duration::from_millis(2000);
                         debug!("slow cssid fetch  dt {:.0} ms  {:?}", 1e3 * dt.as_secs_f32(), cmd);
                     }
-                    let writer_status = serieswriter::writer::SeriesWriter::new(SeriesId::new(cmd.cssid.id()))
+                    let mut writer_status = serieswriter::writer::SeriesWriter::new(SeriesId::new(cmd.cssid.id()))
                         .map_err(|e| Error::with_msg_no_trace(e.to_string()))?;
-                    let writer_status_state = serieswriter::fixgridwriter::ChannelStatusWriteState::new(
+                    let mut writer_status_state = serieswriter::fixgridwriter::ChannelStatusWriteState::new(
                         SeriesId::new(cmd.cssid.id()),
                         serieswriter::fixgridwriter::CHANNEL_STATUS_GRID,
                     );
+                    {
+                        let status = netpod::channelstatus::ChannelStatus::HaveStatusId;
+                        let stnow = SystemTime::now();
+                        let ts = TsNano::from_system_time(stnow);
+                        let item = serieswriter::fixgridwriter::ChannelStatusWriteValue::new(ts, status.to_u64());
+                        let state = &mut writer_status_state;
+                        let ts_net = Instant::now();
+                        let mut deque = VecDeque::new();
+                        writer_status
+                            .write(item, state, ts_net, ts, &mut deque)
+                            .map_err(Error::from_string)?;
+                        self.storage_insert_queue.push_back(deque);
+                    }
                     *chst2 = ActiveChannelState::WithStatusSeriesId(WithStatusSeriesIdState {
                         cssid: cmd.cssid,
                         addr_find_backoff: 0,
@@ -679,12 +693,25 @@ impl CaConnSet {
                     trace!("handle_add_channel_with_addr  INNER  {cmd:?}");
                     self.stats.handle_add_channel_with_addr().inc();
                     let tsnow = SystemTime::now();
-                    let writer_status = serieswriter::writer::SeriesWriter::new(SeriesId::new(cmd.cssid.id()))
+                    let mut writer_status = serieswriter::writer::SeriesWriter::new(SeriesId::new(cmd.cssid.id()))
                         .map_err(|e| Error::with_msg_no_trace(e.to_string()))?;
-                    let writer_status_state = serieswriter::fixgridwriter::ChannelStatusWriteState::new(
+                    let mut writer_status_state = serieswriter::fixgridwriter::ChannelStatusWriteState::new(
                         SeriesId::new(cmd.cssid.id()),
                         serieswriter::fixgridwriter::CHANNEL_STATUS_GRID,
                     );
+                    {
+                        let status = netpod::channelstatus::ChannelStatus::HaveAddress;
+                        let stnow = SystemTime::now();
+                        let ts = TsNano::from_system_time(stnow);
+                        let item = serieswriter::fixgridwriter::ChannelStatusWriteValue::new(ts, status.to_u64());
+                        let state = &mut writer_status_state;
+                        let ts_net = Instant::now();
+                        let mut deque = VecDeque::new();
+                        writer_status
+                            .write(item, state, ts_net, ts, &mut deque)
+                            .map_err(Error::from_string)?;
+                        self.storage_insert_queue.push_back(deque);
+                    }
                     *st3 = WithStatusSeriesIdState {
                         cssid: cmd.cssid.clone(),
                         addr_find_backoff: 0,
@@ -1657,13 +1684,13 @@ impl Stream for CaConnSet {
 
             if self.storage_insert_sender.is_idle() {
                 if let Some(item) = self.storage_insert_queue.pop_front() {
-                    self.stats.logic_error().inc();
                     self.storage_insert_sender.as_mut().send_pin(item);
                 }
             }
             if self.storage_insert_sender.is_sending() {
                 match self.storage_insert_sender.poll_unpin(cx) {
                     Ready(Ok(())) => {
+                        self.stats.storage_insert_queue_send().inc();
                         have_progress = true;
                     }
                     Ready(Err(_)) => {

@@ -424,6 +424,7 @@ stats_proc::stats_struct!((
             handle_add_channel_with_addr,
             create_ca_conn,
             command_reply_fail,
+            storage_insert_queue_send,
         ),
         values(
             storage_insert_queue_len,

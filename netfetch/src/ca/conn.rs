@@ -23,6 +23,8 @@ use futures_util::Stream;
 use futures_util::StreamExt;
 use hashbrown::HashMap;
 use log::*;
+use netpod::channelstatus::ChannelStatus;
+use netpod::channelstatus::ChannelStatusClosedReason;
 use netpod::timeunits::*;
 use netpod::trigger;
 use netpod::ttl::RetentionTime;
@@ -45,8 +47,6 @@ use scywr::iteminsertqueue as scywriiq;
 use scywr::senderpolling::SenderPolling;
 use scywriiq::Accounting;
 use scywriiq::AccountingRecv;
-use scywriiq::ChannelStatus;
-use scywriiq::ChannelStatusClosedReason;
 use scywriiq::ChannelStatusItem;
 use scywriiq::ConnectionStatus;
 use scywriiq::ConnectionStatusItem;
@@ -90,6 +90,7 @@ const DO_RATE_CHECK: bool = false;
 const MONITOR_POLL_TIMEOUT: Duration = Duration::from_millis(6000);
 const TIMEOUT_CHANNEL_CLOSING: Duration = Duration::from_millis(8000);
 const TIMEOUT_PONG_WAIT: Duration = Duration::from_millis(10000);
+const READ_CHANNEL_VALUE_STATUS_EMIT_QUIET_MIN: Duration = Duration::from_millis(120000);
 
 #[allow(unused)]
 macro_rules! trace2 {
@@ -472,6 +473,7 @@ struct CreatedState {
     name: String,
     enum_str_table: Option<Vec<String>>,
     status_emit_count: u64,
+    ts_recv_value_status_emit_next: Instant,
 }
 
 impl CreatedState {
@@ -510,6 +512,7 @@ impl CreatedState {
             name: String::new(),
             enum_str_table: None,
             status_emit_count: 0,
+            ts_recv_value_status_emit_next: Instant::now(),
         }
     }
 
@@ -1599,8 +1602,8 @@ impl CaConn {
             return Ok(());
         };
         let dbg_chn = dbg_chn_cid(cid, self);
-        let ch_s = if let Some(x) = self.channels.get_mut(&cid) {
-            &mut x.state
+        let (ch_s, ch_wrst) = if let Some(x) = self.channels.get_mut(&cid) {
+            (&mut x.state, &mut x.wrst)
         } else {
             // TODO return better as error and let caller decide (with more structured errors)
             warn!("TODO handle_event_add_res can not find channel for  {cid:?}  {subid:?}");
@@ -1681,6 +1684,7 @@ impl CaConn {
                         Self::event_add_ingest(
                             ev.payload_len,
                             ev.value,
+                            ch_wrst,
                             crst,
                             writer,
                             binwriter,
@@ -1709,6 +1713,7 @@ impl CaConn {
                         Self::event_add_ingest(
                             ev.payload_len,
                             ev.value,
+                            ch_wrst,
                             crst,
                             writer,
                             binwriter,
@@ -1869,7 +1874,7 @@ impl CaConn {
                                     st2.tick = PollTickState::Idle(tsnow);
                                     let iqdqs = &mut self.iqdqs;
                                     let stats = self.stats.as_ref();
-                                    Self::read_notify_res_for_write(ev, st, iqdqs, stnow, tsnow, stats)?;
+                                    Self::read_notify_res_for_write(ev, ch_wrst, st, iqdqs, stnow, tsnow, stats)?;
                                 }
                             },
                             ReadingState::EnableMonitoring(_) => {
@@ -1905,7 +1910,7 @@ impl CaConn {
                                     }
                                     let iqdqs = &mut self.iqdqs;
                                     let stats = self.stats.as_ref();
-                                    Self::read_notify_res_for_write(ev, st, iqdqs, stnow, tsnow, stats)?;
+                                    Self::read_notify_res_for_write(ev, ch_wrst, st, iqdqs, stnow, tsnow, stats)?;
                                 }
                             },
                             ReadingState::StopMonitoringForPolling(..) => {
@@ -1928,6 +1933,7 @@ impl CaConn {
 
     fn read_notify_res_for_write(
         ev: proto::ReadNotifyRes,
+        wrst: &mut WriterStatus,
         st: &mut WritableState,
         iqdqs: &mut InsertDeques,
         stnow: SystemTime,
@@ -1940,6 +1946,7 @@ impl CaConn {
         Self::event_add_ingest(
             ev.payload_len,
             ev.value,
+            wrst,
             crst,
             writer,
             binwriter,
@@ -1954,6 +1961,7 @@ impl CaConn {
     fn event_add_ingest(
         payload_len: u32,
         value: CaEventValue,
+        wrst: &mut WriterStatus,
         crst: &mut CreatedState,
         writer: &mut CaRtWriter,
         binwriter: &mut BinWriter,
@@ -1983,6 +1991,18 @@ impl CaConn {
         crst.recv_bytes += payload_len as u64;
         crst.acc_recv.push_written(payload_len);
         // TODO should attach these counters already to Writable state.
+        if crst.ts_recv_value_status_emit_next <= tsnow {
+            crst.ts_recv_value_status_emit_next = tsnow + READ_CHANNEL_VALUE_STATUS_EMIT_QUIET_MIN;
+            let item = ChannelStatusItem {
+                ts: stnow,
+                cssid: crst.cssid,
+                status: ChannelStatus::MonitoringSilenceReadUnchanged,
+            };
+            let deque = &mut iqdqs.st_rf3_qu;
+            if wrst.emit_channel_status_item(item, deque).is_err() {
+                stats.logic_error().inc();
+            }
+        }
         let ts_local = TsNano::from_system_time(stnow);
         {
             let ts = value.ts().ok_or_else(|| Error::MissingTimestamp)?;
@@ -2568,6 +2588,7 @@ impl CaConn {
             name: conf.conf.name().into(),
             enum_str_table: None,
             status_emit_count: 0,
+            ts_recv_value_status_emit_next: Instant::now(),
         };
         if dbg_chn_name(created_state.name()) {
             info!(
