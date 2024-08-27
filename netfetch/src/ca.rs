@@ -1,5 +1,6 @@
 pub mod beacons;
 pub mod conn;
+pub mod conn2;
 pub mod connset;
 pub mod connset_input_merge;
 pub mod finder;

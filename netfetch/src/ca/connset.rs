@@ -358,6 +358,7 @@ pub struct CaConnSet {
     find_ioc_query_sender: Pin<Box<SenderPolling<IocAddrQuery>>>,
     find_ioc_res_rx: Pin<Box<Receiver<VecDeque<FindIocRes>>>>,
     iqtx: Pin<Box<InsertQueuesTx>>,
+    storage_insert_queue_l1: VecDeque<QueryItem>,
     storage_insert_queue: VecDeque<VecDeque<QueryItem>>,
     storage_insert_sender: Pin<Box<SenderPolling<VecDeque<QueryItem>>>>,
     ca_conn_res_tx: Pin<Box<Sender<(SocketAddr, CaConnEvent)>>>,
@@ -424,6 +425,7 @@ impl CaConnSet {
             find_ioc_query_sender: Box::pin(SenderPolling::new(find_ioc_query_tx)),
             find_ioc_res_rx: Box::pin(find_ioc_res_rx),
             iqtx: Box::pin(iqtx.clone()),
+            storage_insert_queue_l1: VecDeque::new(),
             storage_insert_queue: VecDeque::new(),
 
             // TODO simplify for all combinations
@@ -639,11 +641,10 @@ impl CaConnSet {
                         let item = serieswriter::fixgridwriter::ChannelStatusWriteValue::new(ts, status.to_u64());
                         let state = &mut writer_status_state;
                         let ts_net = Instant::now();
-                        let mut deque = VecDeque::new();
+                        let deque = &mut self.storage_insert_queue_l1;
                         writer_status
-                            .write(item, state, ts_net, ts, &mut deque)
+                            .write(item, state, ts_net, ts, deque)
                             .map_err(Error::from_string)?;
-                        self.storage_insert_queue.push_back(deque);
                     }
                     *chst2 = ActiveChannelState::WithStatusSeriesId(WithStatusSeriesIdState {
                         cssid: cmd.cssid,
@@ -706,11 +707,10 @@ impl CaConnSet {
                         let item = serieswriter::fixgridwriter::ChannelStatusWriteValue::new(ts, status.to_u64());
                         let state = &mut writer_status_state;
                         let ts_net = Instant::now();
-                        let mut deque = VecDeque::new();
+                        let deque = &mut self.storage_insert_queue_l1;
                         writer_status
-                            .write(item, state, ts_net, ts, &mut deque)
+                            .write(item, state, ts_net, ts, deque)
                             .map_err(Error::from_string)?;
-                        self.storage_insert_queue.push_back(deque);
                     }
                     *st3 = WithStatusSeriesIdState {
                         cssid: cmd.cssid.clone(),
@@ -1594,6 +1594,12 @@ impl CaConnSet {
             // cx.waker().wake_by_ref();
         }
         self.handle_check_health()?;
+        {
+            if self.storage_insert_queue_l1.len() != 0 {
+                let a = core::mem::replace(&mut self.storage_insert_queue_l1, VecDeque::new());
+                self.storage_insert_queue.push_back(a);
+            }
+        }
         Ok(())
     }
 }

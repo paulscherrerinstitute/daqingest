@@ -1,6 +1,7 @@
 use async_channel::Send;
 use async_channel::SendError;
 use async_channel::Sender;
+use core::fmt;
 use futures_util::Future;
 use pin_project::pin_project;
 use std::marker::PhantomPinned;
@@ -13,6 +14,23 @@ pub enum Error<T> {
     NoSendInProgress,
     Closed(T),
 }
+
+impl<T> fmt::Debug for Error<T> {
+    fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            Error::NoSendInProgress => fmt.debug_tuple("NoSendInProgress").finish(),
+            Error::Closed(_) => fmt.debug_tuple("Closed").finish(),
+        }
+    }
+}
+
+impl<T> fmt::Display for Error<T> {
+    fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+        fmt::Debug::fmt(self, fmt)
+    }
+}
+
+impl<T> std::error::Error for Error<T> {}
 
 #[pin_project]
 pub struct SenderPolling<T>

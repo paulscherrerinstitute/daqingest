@@ -84,13 +84,14 @@ use std::time::SystemTime;
 use taskrun::tokio;
 use tokio::net::TcpStream;
 
-const CONNECTING_TIMEOUT: Duration = Duration::from_millis(6000);
-const IOC_PING_IVL: Duration = Duration::from_millis(1000 * 80);
+const CONNECTING_TIMEOUT: Duration = Duration::from_millis(1000 * 6);
+const CHANNEL_STATUS_EMIT_IVL: Duration = Duration::from_millis(1000 * 8);
+const IOC_PING_IVL: Duration = Duration::from_millis(1000 * 120);
+const MONITOR_POLL_TIMEOUT: Duration = Duration::from_millis(1000 * 6);
+const TIMEOUT_CHANNEL_CLOSING: Duration = Duration::from_millis(1000 * 8);
+const TIMEOUT_PONG_WAIT: Duration = Duration::from_millis(1000 * 10);
+const READ_CHANNEL_VALUE_STATUS_EMIT_QUIET_MIN: Duration = Duration::from_millis(1000 * 120);
 const DO_RATE_CHECK: bool = false;
-const MONITOR_POLL_TIMEOUT: Duration = Duration::from_millis(6000);
-const TIMEOUT_CHANNEL_CLOSING: Duration = Duration::from_millis(8000);
-const TIMEOUT_PONG_WAIT: Duration = Duration::from_millis(10000);
-const READ_CHANNEL_VALUE_STATUS_EMIT_QUIET_MIN: Duration = Duration::from_millis(120000);
 
 #[allow(unused)]
 macro_rules! trace2 {
@@ -1055,7 +1056,6 @@ impl CaConn {
         stats: Arc<CaConnStats>,
         ca_proto_stats: Arc<CaProtoStats>,
     ) -> Self {
-        let _ = channel_info_query_tx;
         let tsnow = Instant::now();
         let (cq_tx, cq_rx) = async_channel::bounded(32);
         let mut rng = stats::xoshiro_from_time();
@@ -1063,7 +1063,7 @@ impl CaConn {
             opts,
             backend,
             state: CaConnState::Unconnected(tsnow),
-            ticker: Self::new_self_ticker(),
+            ticker: Self::new_self_ticker(&mut rng),
             proto: None,
             cid_store: CidStore::new_from_time(),
             subid_store: SubidStore::new_from_time(),
@@ -1105,19 +1105,28 @@ impl CaConn {
     }
 
     fn ioc_ping_ivl_rng(rng: &mut Xoshiro128PlusPlus) -> Duration {
-        IOC_PING_IVL * 100 / (70 + (rng.next_u32() % 60))
+        let b = IOC_PING_IVL;
+        b + b / 128 * (rng.next_u32() & 0x1f)
     }
 
     fn channel_status_emit_ivl(rng: &mut Xoshiro128PlusPlus) -> Duration {
-        Duration::from_millis(8000 + (rng.next_u32() & 0xfff) as u64)
+        let b = CHANNEL_STATUS_EMIT_IVL;
+        b + b / 128 * (rng.next_u32() & 0x1f)
     }
 
     fn silence_read_next_ivl_rng(rng: &mut Xoshiro128PlusPlus) -> Duration {
         Duration::from_millis(1000 * 300 + (rng.next_u32() & 0x3fff) as u64)
     }
 
-    fn new_self_ticker() -> Pin<Box<tokio::time::Sleep>> {
-        Box::pin(tokio::time::sleep(Duration::from_millis(1500)))
+    fn recv_value_status_emit_ivl_rng(rng: &mut Xoshiro128PlusPlus) -> Duration {
+        let b = READ_CHANNEL_VALUE_STATUS_EMIT_QUIET_MIN;
+        b + b / 128 * (rng.next_u32() & 0x1f)
+    }
+
+    fn new_self_ticker(rng: &mut Xoshiro128PlusPlus) -> Pin<Box<tokio::time::Sleep>> {
+        let b = Duration::from_millis(1500);
+        let dur = b + b / 128 * (rng.next_u32() & 0x1f);
+        Box::pin(tokio::time::sleep(dur))
     }
 
     fn proto(&mut self) -> Option<&mut CaProto> {
@@ -1700,6 +1709,7 @@ impl CaConn {
                             tsnow,
                             stnow,
                             stats,
+                            &mut self.rng,
                         )?;
                     }
                     ReadingState::Monitoring(st2) => {
@@ -1729,6 +1739,7 @@ impl CaConn {
                             tsnow,
                             stnow,
                             stats,
+                            &mut self.rng,
                         )?;
                     }
                     ReadingState::StopMonitoringForPolling(st2) => {
@@ -1882,7 +1893,16 @@ impl CaConn {
                                     st2.tick = PollTickState::Idle(tsnow);
                                     let iqdqs = &mut self.iqdqs;
                                     let stats = self.stats.as_ref();
-                                    Self::read_notify_res_for_write(ev, ch_wrst, st, iqdqs, stnow, tsnow, stats)?;
+                                    Self::read_notify_res_for_write(
+                                        ev,
+                                        ch_wrst,
+                                        st,
+                                        iqdqs,
+                                        stnow,
+                                        tsnow,
+                                        stats,
+                                        &mut self.rng,
+                                    )?;
                                 }
                             },
                             ReadingState::EnableMonitoring(_) => {
@@ -1926,7 +1946,16 @@ impl CaConn {
                                     // More involved check would be to raise a flag, wait for the expected monitor for some
                                     // timeout, and if we get nothing error out.
                                     if false {
-                                        Self::read_notify_res_for_write(ev, ch_wrst, st, iqdqs, stnow, tsnow, stats)?;
+                                        Self::read_notify_res_for_write(
+                                            ev,
+                                            ch_wrst,
+                                            st,
+                                            iqdqs,
+                                            stnow,
+                                            tsnow,
+                                            stats,
+                                            &mut self.rng,
+                                        )?;
                                     }
                                 }
                             },
@@ -1956,6 +1985,7 @@ impl CaConn {
         stnow: SystemTime,
         tsnow: Instant,
         stats: &CaConnStats,
+        rng: &mut Xoshiro128PlusPlus,
     ) -> Result<(), Error> {
         let crst = &mut st.channel;
         let writer = &mut st.writer;
@@ -1971,6 +2001,7 @@ impl CaConn {
             tsnow,
             stnow,
             stats,
+            rng,
         )?;
         Ok(())
     }
@@ -1986,6 +2017,7 @@ impl CaConn {
         tsnow: Instant,
         stnow: SystemTime,
         stats: &CaConnStats,
+        rng: &mut Xoshiro128PlusPlus,
     ) -> Result<(), Error> {
         {
             use proto::CaMetaValue::*;
@@ -2009,7 +2041,7 @@ impl CaConn {
         crst.acc_recv.push_written(payload_len);
         // TODO should attach these counters already to Writable state.
         if crst.ts_recv_value_status_emit_next <= tsnow {
-            crst.ts_recv_value_status_emit_next = tsnow + READ_CHANNEL_VALUE_STATUS_EMIT_QUIET_MIN;
+            crst.ts_recv_value_status_emit_next = tsnow + Self::recv_value_status_emit_ivl_rng(rng);
             let item = ChannelStatusItem {
                 ts: stnow,
                 cssid: crst.cssid,
@@ -2495,16 +2527,6 @@ impl CaConn {
                                     warn!("CaConn sees: {msg:?}");
                                 }
                             }
-                            #[cfg(DISABLED)]
-                            CaMsgTy::IssueDataCount(hi, stat, sev, secs, nanos) => {
-                                let cid = *self.cid_by_subid.get(&hi.param2()).unwrap();
-                                let name = self.name_by_cid.get(&cid).unwrap();
-                                debug!("ca large count for  {name}  {hi:?}  {stat}  {sev}  {secs}  {nanos}");
-                                self.weird_count += 1;
-                                if self.weird_count > 200 {
-                                    std::process::exit(13);
-                                }
-                            }
                             CaMsgTy::VersionRes(x) => {
                                 debug!("VersionRes({x})");
                                 self.weird_count += 1;
@@ -2825,7 +2847,7 @@ impl CaConn {
         // debug!("tick  CaConn  {}", self.remote_addr_dbg);
         let tsnow = Instant::now();
         if !self.is_shutdown() {
-            self.ticker = Self::new_self_ticker();
+            self.ticker = Self::new_self_ticker(&mut self.rng);
             let _ = self.ticker.poll_unpin(cx);
             // cx.waker().wake_by_ref();
         }

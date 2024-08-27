@@ -1,0 +1,3 @@
+trait Channel {}
+
+struct ChannelAny {}
