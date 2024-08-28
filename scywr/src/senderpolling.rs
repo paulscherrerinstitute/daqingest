@@ -1,7 +1,6 @@
 use async_channel::Send;
 use async_channel::SendError;
 use async_channel::Sender;
-use err::thiserror;
 use futures_util::Future;
 use pin_project::pin_project;
 use std::marker::PhantomPinned;
@@ -9,13 +8,9 @@ use std::pin::Pin;
 use std::ptr::NonNull;
 use std::task::Context;
 use std::task::Poll;
-use thiserror::Error;
 
-#[derive(Debug, Error)]
-#[cstm(name = "SenderPolling")]
 pub enum Error<T> {
     NoSendInProgress,
-    #[error("Closed")]
     Closed(T),
 }
 
