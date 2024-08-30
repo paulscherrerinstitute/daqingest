@@ -89,19 +89,20 @@ where
         scalar_type: ScalarType,
         shape: Shape,
         min_quiets: MinQuiets,
+        is_polled: bool,
         emit_state_new: &dyn Fn() -> <ET as EmittableType>::State,
     ) -> Result<Self, Error> {
         let state_st = {
             // let writer = SeriesWriter::establish_with_sid(sid, stnow)?;
-            let writer = RateLimitWriter::new(series, min_quiets.st, emit_state_new(), "st".into())?;
+            let writer = RateLimitWriter::new(series, min_quiets.st, is_polled, emit_state_new(), "st".into())?;
             State { writer }
         };
         let state_mt = {
-            let writer = RateLimitWriter::new(series, min_quiets.mt, emit_state_new(), "mt".into())?;
+            let writer = RateLimitWriter::new(series, min_quiets.mt, is_polled, emit_state_new(), "mt".into())?;
             State { writer }
         };
         let state_lt = {
-            let writer = RateLimitWriter::new(series, min_quiets.lt, emit_state_new(), "lt".into())?;
+            let writer = RateLimitWriter::new(series, min_quiets.lt, is_polled, emit_state_new(), "lt".into())?;
             State { writer }
         };
         let ret = Self {

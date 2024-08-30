@@ -91,6 +91,8 @@ const MONITOR_POLL_TIMEOUT: Duration = Duration::from_millis(1000 * 6);
 const TIMEOUT_CHANNEL_CLOSING: Duration = Duration::from_millis(1000 * 8);
 const TIMEOUT_PONG_WAIT: Duration = Duration::from_millis(1000 * 10);
 const READ_CHANNEL_VALUE_STATUS_EMIT_QUIET_MIN: Duration = Duration::from_millis(1000 * 120);
+const SILENCE_READ_NEXT_IVL: Duration = Duration::from_millis(1000 * 200);
+const POLL_READ_TIMEOUT: Duration = Duration::from_millis(1000 * 10);
 const DO_RATE_CHECK: bool = false;
 
 #[allow(unused)]
@@ -386,14 +388,36 @@ struct PollingState {
 }
 
 #[derive(Debug, Clone)]
+struct PollTickStateIdle {
+    next: Instant,
+}
+
+impl PollTickStateIdle {
+    fn decide_next(next_backup: Instant, ivl: Duration, tsnow: Instant) -> Instant {
+        let next = next_backup + ivl;
+        if next <= tsnow {
+            let mut next = next;
+            while next <= tsnow {
+                next += ivl;
+            }
+            next
+        } else {
+            next
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct PollTickStateWait {
+    next_backup: Instant,
+    since: Instant,
+    ioid: Ioid,
+}
+
+#[derive(Debug, Clone)]
 enum PollTickState {
-    // TODO use inner struct to give this Instant a name.
-    // When monitoring, update this ts on received events.
-    // It should hold the Instant when we entered this state, but a receive of some event
-    // is considered re-entering this state.
-    Idle(Instant),
-    // TODO use inner struct to give this Instant a name
-    Wait(Instant, Ioid),
+    Idle(PollTickStateIdle),
+    Wait(PollTickStateWait),
 }
 
 #[derive(Debug)]
@@ -971,8 +995,9 @@ pub enum EndOfStreamReason {
 }
 
 pub struct CaConnOpts {
-    insert_queue_max: usize,
-    array_truncate: usize,
+    // TODO make private when we don't share it anymore
+    pub(super) insert_queue_max: usize,
+    pub(super) array_truncate: usize,
 }
 
 impl CaConnOpts {
@@ -1037,6 +1062,7 @@ pub struct CaConn {
     ioid: u32,
     read_ioids: HashMap<Ioid, Cid>,
     handler_by_ioid: HashMap<Ioid, Option<Pin<Box<dyn ConnFuture>>>>,
+    trace_channel_poll: bool,
 }
 
 impl Drop for CaConn {
@@ -1101,31 +1127,33 @@ impl CaConn {
             ioid: 100,
             read_ioids: HashMap::new(),
             handler_by_ioid: HashMap::new(),
+            trace_channel_poll: false,
         }
     }
 
     fn ioc_ping_ivl_rng(rng: &mut Xoshiro128PlusPlus) -> Duration {
         let b = IOC_PING_IVL;
-        b + b / 128 * (rng.next_u32() & 0x1f)
+        b + b * (rng.next_u32() & 0x3f) / 0xff
     }
 
     fn channel_status_emit_ivl(rng: &mut Xoshiro128PlusPlus) -> Duration {
         let b = CHANNEL_STATUS_EMIT_IVL;
-        b + b / 128 * (rng.next_u32() & 0x1f)
+        b + b * (rng.next_u32() & 0x3f) / 0xff
     }
 
     fn silence_read_next_ivl_rng(rng: &mut Xoshiro128PlusPlus) -> Duration {
-        Duration::from_millis(1000 * 300 + (rng.next_u32() & 0x3fff) as u64)
+        let b = SILENCE_READ_NEXT_IVL;
+        b + b * (rng.next_u32() & 0x7f) / 0xff
     }
 
     fn recv_value_status_emit_ivl_rng(rng: &mut Xoshiro128PlusPlus) -> Duration {
         let b = READ_CHANNEL_VALUE_STATUS_EMIT_QUIET_MIN;
-        b + b / 128 * (rng.next_u32() & 0x1f)
+        b + b * (rng.next_u32() & 0x3f) / 0xff
     }
 
     fn new_self_ticker(rng: &mut Xoshiro128PlusPlus) -> Pin<Box<tokio::time::Sleep>> {
-        let b = Duration::from_millis(1500);
-        let dur = b + b / 128 * (rng.next_u32() & 0x1f);
+        let b = Duration::from_millis(110);
+        let dur = b + b * (rng.next_u32() & 0x3f) / 0xff;
         Box::pin(tokio::time::sleep(dur))
     }
 
@@ -1299,6 +1327,7 @@ impl CaConn {
                                         scalar_type,
                                         shape,
                                         ch.conf.min_quiets(),
+                                        ch.conf.is_polled(),
                                         &|| CaWriterValueState::new(st.series_status, chinfo.series.to_series()),
                                     )?;
                                     self.handle_writer_establish_inner(cid, writer)?;
@@ -1366,6 +1395,11 @@ impl CaConn {
                     conf.wrst.emit_channel_status_item(item, &mut self.iqdqs.st_rf3_qu)?;
                 }
                 if let Some((ivl,)) = conf_poll_conf {
+                    let ivl = Duration::from_millis(ivl);
+                    if self.trace_channel_poll {
+                        trace!("make poll idle state from writer establish");
+                    }
+                    let next = self.poll_tsnow + ivl * (self.rng.next_u32() & 0x1ff) / 511;
                     let created_state = WritableState {
                         tsbeg: self.poll_tsnow,
                         channel: std::mem::replace(&mut st2.channel, CreatedState::dummy()),
@@ -1373,8 +1407,8 @@ impl CaConn {
                         binwriter,
                         reading: ReadingState::Polling(PollingState {
                             tsbeg: self.poll_tsnow,
-                            poll_ivl: Duration::from_millis(ivl),
-                            tick: PollTickState::Idle(self.poll_tsnow),
+                            poll_ivl: ivl,
+                            tick: PollTickState::Idle(PollTickStateIdle { next }),
                         }),
                     };
                     conf.state = ChannelState::Writable(created_state);
@@ -1434,6 +1468,11 @@ impl CaConn {
     }
 
     pub fn channel_add(&mut self, conf: ChannelConfig, cssid: ChannelStatusSeriesId) -> Result<(), Error> {
+        if false {
+            if netpod::trigger.contains(&conf.name()) {
+                self.trace_channel_poll = true;
+            }
+        }
         if self.cid_by_name(conf.name()).is_some() {
             self.stats.channel_add_exists.inc();
             if trigger.contains(&conf.name()) {
@@ -1800,10 +1839,14 @@ impl CaConn {
         match ch_s {
             ChannelState::Writable(st) => match &mut st.reading {
                 ReadingState::StopMonitoringForPolling(..) => {
+                    if self.trace_channel_poll {
+                        trace!("make poll idle from event add empty");
+                    }
+                    let ivl = Duration::from_millis(1000);
                     st.reading = ReadingState::Polling(PollingState {
                         tsbeg: tsnow,
-                        poll_ivl: Duration::from_millis(1000),
-                        tick: PollTickState::Idle(tsnow),
+                        poll_ivl: ivl,
+                        tick: PollTickState::Idle(PollTickStateIdle { next: tsnow }),
                     });
                 }
                 ReadingState::EnableMonitoring(..) => {
@@ -1882,15 +1925,19 @@ impl CaConn {
                         }
                         match &mut st.reading {
                             ReadingState::Polling(st2) => match &mut st2.tick {
-                                PollTickState::Idle(_st3) => {
+                                PollTickState::Idle(_) => {
                                     self.stats.recv_read_notify_while_polling_idle.inc();
                                 }
-                                PollTickState::Wait(st3, ioid) => {
-                                    let dt = tsnow.saturating_duration_since(*st3);
-                                    self.stats.caget_lat().ingest((1e3 * dt.as_secs_f32()) as u32);
+                                PollTickState::Wait(st3) => {
+                                    let dt = tsnow.saturating_duration_since(st3.since);
+                                    self.stats.caget_lat().ingest_dur_dms(dt);
                                     // TODO maintain histogram of read-notify latencies
-                                    self.read_ioids.remove(ioid);
-                                    st2.tick = PollTickState::Idle(tsnow);
+                                    self.read_ioids.remove(&st3.ioid);
+                                    let next = PollTickStateIdle::decide_next(st3.next_backup, st2.poll_ivl, tsnow);
+                                    if self.trace_channel_poll {
+                                        trace!("make next poll idle at {next:?}   tsnow {tsnow:?}");
+                                    }
+                                    st2.tick = PollTickState::Idle(PollTickStateIdle { next });
                                     let iqdqs = &mut self.iqdqs;
                                     let stats = self.stats.as_ref();
                                     Self::read_notify_res_for_write(
@@ -2059,7 +2106,7 @@ impl CaConn {
             stats.ca_ts_off().ingest((ts_diff / MS) as u32);
         }
         {
-            let evts = ts_local;
+            let tsev = ts_local;
             Self::check_ev_value_data(&value.data, &writer.scalar_type())?;
             crst.muted_before = 0;
             crst.insert_item_ivl_ema.tick(tsnow);
@@ -2067,7 +2114,7 @@ impl CaConn {
             // let ts_local = TsNano::from_ns(ts_local);
             // binwriter.ingest(ts_ioc, ts_local, &val, iqdqs)?;
             {
-                let wres = writer.write(CaWriterValue::new(value, crst), tsnow, evts, iqdqs)?;
+                let wres = writer.write(CaWriterValue::new(value, crst), tsnow, tsev, iqdqs)?;
                 crst.status_emit_count += wres.nstatus() as u64;
                 if wres.st.accept {
                     crst.dw_st_last = stnow;
@@ -2323,8 +2370,8 @@ impl CaConn {
                     },
                     ReadingState::StopMonitoringForPolling(_) => {}
                     ReadingState::Polling(st3) => match &mut st3.tick {
-                        PollTickState::Idle(x) => {
-                            if *x + st3.poll_ivl <= tsnow {
+                        PollTickState::Idle(st4) => {
+                            if st4.next <= tsnow {
                                 let ioid = Ioid(self.ioid);
                                 self.ioid = self.ioid.wrapping_add(1);
                                 self.read_ioids.insert(ioid, st2.channel.cid.clone());
@@ -2339,15 +2386,23 @@ impl CaConn {
                                 );
                                 do_wake_again = true;
                                 self.proto.as_mut().unwrap().push_out(msg);
-                                st3.tick = PollTickState::Wait(tsnow, ioid);
+                                st3.tick = PollTickState::Wait(PollTickStateWait {
+                                    next_backup: st4.next,
+                                    since: tsnow,
+                                    ioid,
+                                });
                                 self.stats.caget_issued().inc();
                             }
                         }
-                        PollTickState::Wait(x, ioid) => {
-                            if *x + Duration::from_millis(10000) <= tsnow {
-                                self.read_ioids.remove(ioid);
+                        PollTickState::Wait(st4) => {
+                            if st4.since + POLL_READ_TIMEOUT <= tsnow {
+                                self.read_ioids.remove(&st4.ioid);
                                 self.stats.caget_timeout().inc();
-                                st3.tick = PollTickState::Idle(tsnow);
+                                let next = PollTickStateIdle::decide_next(st4.next_backup, st3.poll_ivl, tsnow);
+                                if self.trace_channel_poll {
+                                    trace!("make poll idle after poll timeout  {next:?}");
+                                }
+                                st3.tick = PollTickState::Idle(PollTickStateIdle { next });
                             }
                         }
                     },
@@ -2490,8 +2545,7 @@ impl CaConn {
                                 // let addr = &self.remote_addr_dbg;
                                 if let Some(started) = self.ioc_ping_start {
                                     let dt = started.elapsed();
-                                    let dt = dt.as_secs() as u32 + dt.subsec_millis();
-                                    self.stats.pong_recv_lat().ingest(dt);
+                                    self.stats.pong_recv_lat().ingest_dur_dms(dt);
                                 } else {
                                     let addr = &self.remote_addr_dbg;
                                     warn!("received Echo even though we didn't asked for it  {addr:?}");
@@ -2844,11 +2898,15 @@ impl CaConn {
     }
 
     fn handle_own_ticker(mut self: Pin<&mut Self>, cx: &mut Context) -> Result<(), Error> {
-        // debug!("tick  CaConn  {}", self.remote_addr_dbg);
         let tsnow = Instant::now();
         if !self.is_shutdown() {
             self.ticker = Self::new_self_ticker(&mut self.rng);
-            let _ = self.ticker.poll_unpin(cx);
+            match self.ticker.poll_unpin(cx) {
+                Poll::Pending => {}
+                _ => {
+                    return Err(Error::FutLogic);
+                }
+            }
             // cx.waker().wake_by_ref();
         }
         self.check_channels_state_init(tsnow, cx)?;
@@ -2932,7 +2990,6 @@ impl CaConn {
                                     count: acc.usage().count() as _,
                                     bytes: acc.usage().bytes() as _,
                                 };
-                                trace!("EMIT ITEM  {rt:?}  {item:?}");
                                 self.iqdqs.emit_accounting_item(rt, item)?;
                             }
                             acc.reset(msp);
@@ -3145,7 +3202,6 @@ impl Stream for CaConn {
         self.poll_tsnow = Instant::now();
         self.tmp_ts_poll = SystemTime::now();
         let poll_ts1 = Instant::now();
-        self.stats.poll_count().inc();
         self.stats.poll_fn_begin().inc();
         let mut reloops: u32 = 0;
         let ret = loop {
@@ -3318,7 +3374,7 @@ impl Stream for CaConn {
                 debug!("LONG OPERATION  2  {:.0} ms", 1e3 * dt.as_secs_f32());
             }
             let dt = lts3.saturating_duration_since(lts2);
-            self.stats.poll_op3_dt().ingest((1e3 * dt.as_secs_f32()) as u32);
+            self.stats.poll_op3_dt().ingest_dur_dms(dt);
             if dt > max {
                 debug!("LONG OPERATION  3  {:.0} ms", 1e3 * dt.as_secs_f32());
             }
@@ -3389,7 +3445,16 @@ impl Stream for CaConn {
         };
         let poll_ts2 = Instant::now();
         let dt = poll_ts2.saturating_duration_since(poll_ts1);
-        self.stats.poll_all_dt().ingest((1e3 * dt.as_secs_f32()) as u32);
+        if self.trace_channel_poll {
+            self.stats.poll_all_dt().ingest_dur_dms(dt);
+            if dt >= Duration::from_millis(10) {
+                trace!("long poll {dt:?}");
+            } else if dt >= Duration::from_micros(400) {
+                let v = self.stats.poll_all_dt.to_display();
+                let ip = self.remote_addr_dbg;
+                trace!("poll_all_dt  {ip}  {v}");
+            }
+        }
         self.stats.read_ioids_len().set(self.read_ioids.len() as u64);
         let n = match &self.proto {
             Some(x) => x.proto_out_len() as u64,
@@ -3442,7 +3507,7 @@ impl CaWriterValue {
                                     .map_or_else(|| String::from("undefined"), String::from)
                             },
                         );
-                        trace!("CaWriterValue  convert enum  {}  {:?}", crst.name(), conv);
+                        // trace!("CaWriterValue  convert enum  {}  {:?}", crst.name(), conv);
                         Some(conv)
                     }
                     _ => None,

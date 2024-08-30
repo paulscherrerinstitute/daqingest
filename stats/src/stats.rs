@@ -309,7 +309,6 @@ stats_proc::stats_struct!((
             channel_info_insert_done,
             ivl_insert_done,
             mute_insert_done,
-            poll_count,
             loop1_count,
             loop2_count,
             loop3_count,

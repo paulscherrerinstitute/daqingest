@@ -53,7 +53,7 @@ fn stats_struct_impl(st: &StatsStructDef) -> String {
     let init_histolog2s = st
         .histolog2s
         .iter()
-        .map(|x| format!("{:12}{}: stats_types::HistoLog2::new(0)", "", x.to_string()));
+        .map(|x| format!("{:12}{}: stats_types::HistoLog2::new()", "", x.to_string()));
     let inits: Vec<_> = inits1.into_iter().chain(inits2).chain(init_histolog2s).collect();
     let inits = inits.join(",\n");
     let incers: String = st

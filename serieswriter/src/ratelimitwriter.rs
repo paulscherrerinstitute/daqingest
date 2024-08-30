@@ -41,6 +41,7 @@ where
 {
     series: SeriesId,
     min_quiet: Duration,
+    is_polled: bool,
     emit_state: <ET as EmittableType>::State,
     last_insert_ts: TsNano,
     last_insert_val: Option<ET>,
@@ -57,6 +58,7 @@ where
     pub fn new(
         series: SeriesId,
         min_quiet: Duration,
+        is_polled: bool,
         emit_state: <ET as EmittableType>::State,
         dbgname: String,
     ) -> Result<Self, Error> {
@@ -64,6 +66,7 @@ where
         let ret = Self {
             series,
             min_quiet,
+            is_polled,
             emit_state,
             last_insert_ts: TsNano::from_ns(0),
             last_insert_val: None,
@@ -113,8 +116,14 @@ where
                     "{dbgname}  {sid}  ignore, because ts_local  rewind  {ts:?}  {tsl:?}",
                 );
                 false
-            } else if ts.ms() < tsl.ms() + min_quiet {
+            } else if !self.is_polled && ts.ms() < tsl.ms() + min_quiet {
                 trace_rt_decision!(det, "{dbgname}  {sid}  ignore, because not min quiet  {ts:?}  {tsl:?}");
+                false
+            } else if self.is_polled && ts.ms() + 800 < tsl.ms() + min_quiet {
+                trace_rt_decision!(
+                    det,
+                    "{dbgname}  {sid}  ignore, because not is-polled min quiet  {ts:?}  {tsl:?}"
+                );
                 false
             } else if ts < tsl.add_dt_nano(DtNano::from_ms(5)) {
                 trace_rt_decision!(det, "{dbgname}  {sid}  ignore, because store rate cap");

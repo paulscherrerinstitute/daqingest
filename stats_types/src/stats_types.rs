@@ -1,9 +1,11 @@
 pub use serde_json;
 
+use core::fmt;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering::AcqRel;
 use std::sync::atomic::Ordering::Acquire;
 use std::sync::atomic::Ordering::Release;
+use std::time::Duration;
 
 #[derive(Debug)]
 pub struct CounterDesc {
@@ -123,7 +125,6 @@ impl StatsAReader {}
 pub struct HistoLog2 {
     histo: [AtomicU64; 20],
     sum: AtomicU64,
-    sub: u16,
 }
 
 macro_rules! rep16 {
@@ -135,24 +136,25 @@ macro_rules! rep16 {
 }
 
 impl HistoLog2 {
-    pub fn new(sub: u16) -> Self {
+    pub fn new() -> Self {
         Self {
             histo: rep16!([AtomicU64::new(0)]),
             sum: AtomicU64::new(0),
-            sub,
         }
     }
 
     #[inline]
-    pub fn ingest(&self, mut v: u32) {
+    pub fn ingest(&self, v: u32) {
         self.sum.fetch_add(v as u64, AcqRel);
-        v >>= self.sub;
-        let mut po = 0;
-        while v != 0 && po < self.histo.len() - 1 {
-            v >>= 1;
-            po += 1;
-        }
-        self.histo[po].fetch_add(1, AcqRel);
+        let w = 32 - v.leading_zeros();
+        let i = w.min(15);
+        self.histo[i as usize].fetch_add(1, AcqRel);
+    }
+
+    #[inline]
+    pub fn ingest_dur_dms(&self, dt: Duration) {
+        let v = 10000 * dt.as_secs() as u32 + dt.subsec_micros() / 100;
+        self.ingest(v)
     }
 
     pub fn to_prometheus(&self, name: &str) -> String {
@@ -196,14 +198,30 @@ impl HistoLog2 {
         ret
     }
 
-    pub fn to_json(&self, _name: &str) -> serde_json::Value {
+    pub fn to_json(&self, name: &str) -> serde_json::Value {
+        let _ = name;
         serde_json::Value::Null
+    }
+
+    pub fn to_display(&self) -> HistoLog2Display {
+        HistoLog2Display { inner: self }
+    }
+}
+
+pub struct HistoLog2Display<'a> {
+    inner: &'a HistoLog2,
+}
+
+impl<'a> fmt::Display for HistoLog2Display<'a> {
+    fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+        let histo: Vec<_> = self.inner.histo.iter().map(|x| x.load(Acquire)).collect();
+        write!(fmt, "HistoLog2 {{ histo: {:?}, sum: {:?} }}", histo, self.inner.sum)
     }
 }
 
 #[test]
 fn histo_00() {
-    let histo = HistoLog2::new(0);
+    let histo = HistoLog2::new();
     // histo.ingest(0);
     // histo.ingest(1);
     // histo.ingest(2);
