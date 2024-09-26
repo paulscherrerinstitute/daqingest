@@ -154,6 +154,7 @@ impl Worker {
         stats: Arc<SeriesByChannelStats>,
     ) -> Result<Self, Error> {
         use tokio_postgres::types::Type;
+        debug!("Worker  make_pg_client");
         let (pg, pg_client_jh) = crate::conn::make_pg_client(db).await?;
         let sql = concat!(
             "with q1 as (",
@@ -643,6 +644,7 @@ impl HashSalter for SalterRandom {
     }
 }
 
+#[cfg(test)]
 async fn psql_play(db: &Database) -> Result<(), Error> {
     use tokio_postgres::types::ToSql;
     use tokio_postgres::types::Type;

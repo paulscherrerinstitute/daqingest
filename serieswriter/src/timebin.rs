@@ -418,7 +418,7 @@ fn store_bins(
                     .ts1s
                     .iter()
                     .zip(k.ts2s.iter())
-                    .zip(k.counts.iter())
+                    .zip(k.cnts.iter())
                     .zip(k.mins.iter())
                     .zip(k.maxs.iter())
                     .zip(k.avgs.iter())

@@ -22,7 +22,7 @@ use std::time::Instant;
 use taskrun::tokio;
 use tokio::task::JoinHandle;
 
-const SEARCH_DB_PIPELINE_LEN: usize = 4;
+const SEARCH_DB_PIPELINE_LEN: usize = 2;
 
 #[allow(unused)]
 macro_rules! debug_batch {
@@ -144,6 +144,7 @@ async fn finder_worker_single(
     db: Database,
     stats: Arc<IocFinderStats>,
 ) -> Result<(), Error> {
+    debug!("finder_worker_single  make_pg_client");
     let (pg, jh) = make_pg_client(&db)
         .await
         .map_err(|e| Error::with_msg_no_trace(e.to_string()))?;

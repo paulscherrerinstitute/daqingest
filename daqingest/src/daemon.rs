@@ -93,7 +93,7 @@ impl Daemon {
         // TODO keep join handles and await later
         let (channel_info_query_tx, jhs, jh) = dbpg::seriesbychannel::start_lookup_workers::<
             dbpg::seriesbychannel::SalterRandom,
-        >(4, &opts.pgconf, series_by_channel_stats.clone())
+        >(2, &opts.pgconf, series_by_channel_stats.clone())
         .await
         .map_err(|e| Error::with_msg_no_trace(e.to_string()))?;
 
