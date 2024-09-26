@@ -2202,18 +2202,26 @@ impl CaConn {
                         CaMsgTy::VersionRes(n) => {
                             // debug!("see incoming  {:?}  {:?}", self.remote_addr_dbg, msg);
                             if n < 12 || n > 13 {
-                                error!("See some unexpected version {n}  channel search may not work.");
+                                error!("see some unexpected version {n}  channel search may not work.");
                                 Ready(Some(Ok(())))
                             } else {
                                 if n != 13 {
-                                    warn!("Received peer version {n}");
+                                    warn!("received peer version {n}");
                                 }
                                 self.state = CaConnState::PeerReady;
                                 Ready(Some(Ok(())))
                             }
                         }
+                        CaMsgTy::CreateChanRes(k) => {
+                            warn!("got unexpected {k:?}",);
+                            Ready(Some(Ok(())))
+                        }
+                        CaMsgTy::AccessRightsRes(k) => {
+                            warn!("got unexpected {k:?}",);
+                            Ready(Some(Ok(())))
+                        }
                         k => {
-                            warn!("Got some other unhandled message: {k:?}");
+                            warn!("got some other unhandled message: {k:?}");
                             Ready(Some(Ok(())))
                         }
                     },
@@ -2585,7 +2593,7 @@ impl CaConn {
                                 debug!("VersionRes({x})");
                                 self.weird_count += 1;
                                 if self.weird_count > 200 {
-                                    std::process::exit(13);
+                                    // std::process::exit(13);
                                 }
                             }
                             CaMsgTy::ChannelCloseRes(x) => {
@@ -2824,14 +2832,20 @@ impl CaConn {
                 Ok(Ready(Some(())))
             }
             CaConnState::Handshake => {
-                match {
-                    let res = self.handle_handshake(cx);
-                    res
-                } {
-                    Ready(Some(Ok(()))) => Ok(Ready(Some(()))),
-                    Ready(Some(Err(e))) => Err(e),
-                    Ready(None) => Ok(Ready(Some(()))),
-                    Pending => Ok(Pending),
+                if true {
+                    // because of bad java clients which do not send a version, skip the handshake.
+                    self.state = CaConnState::PeerReady;
+                    self.handle_conn_state(tsnow, cx)
+                } else {
+                    match {
+                        let res = self.handle_handshake(cx);
+                        res
+                    } {
+                        Ready(Some(Ok(()))) => Ok(Ready(Some(()))),
+                        Ready(Some(Err(e))) => Err(e),
+                        Ready(None) => Ok(Ready(Some(()))),
+                        Pending => Ok(Pending),
+                    }
                 }
             }
             CaConnState::PeerReady => {

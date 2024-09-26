@@ -210,6 +210,48 @@ impl IntervalEma {
     }
 }
 
+pub struct CounterU64 {
+    sum: u64,
+}
+
+impl CounterU64 {
+    pub fn new() -> Self {
+        Self { sum: 0 }
+    }
+
+    pub fn inc(&mut self) {
+        self.sum += 1;
+    }
+
+    pub fn add(&mut self, x: u64) {
+        self.sum += x;
+    }
+}
+
+pub struct DoubleBuffer<T> {
+    back: T,
+    front: T,
+}
+
+impl<T> DoubleBuffer<T> {
+    pub fn new() -> Self
+    where
+        T: Default,
+    {
+        Self {
+            back: T::default(),
+            front: T::default(),
+        }
+    }
+
+    pub fn switch(&mut self)
+    where
+        T: Default,
+    {
+        self.back = ::core::mem::replace(&mut self.front, T::default());
+    }
+}
+
 pub struct XorShift32 {
     state: u32,
 }

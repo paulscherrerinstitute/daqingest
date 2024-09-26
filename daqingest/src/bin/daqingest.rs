@@ -135,6 +135,17 @@ async fn main_run_inner(opts: DaqIngestOpts) -> Result<(), Error> {
                 series::log_test();
             })
         }
+        SubCmd::Ca(subcmd) => {
+            use daqingest::opts::CaSubcmds::*;
+            match subcmd.subcmds {
+                Find(cmd) => {
+                    daqingest::tools::catools::find(cmd, subcmd.broadcast.unwrap_or(String::new()))
+                        .await
+                        .map_err(|e| Error::from_string(e))?;
+                }
+                Get(cmd) => todo!(),
+            }
+        }
     }
     Ok(())
 }

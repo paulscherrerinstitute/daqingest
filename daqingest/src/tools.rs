@@ -1,3 +1,5 @@
+pub mod catools;
+
 use crate::opts::FindOlder;
 use crate::opts::RemoveOlder;
 use crate::opts::RemoveOlderAll;

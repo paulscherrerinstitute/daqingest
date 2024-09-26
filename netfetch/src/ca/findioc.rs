@@ -231,10 +231,10 @@ impl FindIocStream {
                 error!("getsockname {ec}");
                 return Err("can not convert raw socket to tokio socket".into());
             } else {
-                if false {
+                if true {
                     let ipv4 = Ipv4Addr::from(addr.sin_addr.s_addr.to_ne_bytes());
                     let tcp_port = u16::from_be(addr.sin_port);
-                    info!("bound local socket to {:?} port {}", ipv4, tcp_port);
+                    debug!("bound local socket to {} port {}", ipv4, tcp_port);
                 }
             }
         }
@@ -366,7 +366,7 @@ impl FindIocStream {
             let mut good = true;
             if let CaMsgTy::VersionRes(v) = msgs[0].ty {
                 if v != 13 {
-                    warn!("bad version: {msgs:?}");
+                    warn!("bad version in search response: {v}");
                     good = false;
                 }
             } else {
@@ -375,8 +375,10 @@ impl FindIocStream {
             // trace2!("recv  {:?}  {:?}", src_addr, msgs);
             let mut res = Vec::new();
             if good {
-                for msg in &msgs[1..] {
+                // because of bad java CA implementation, consider also the first message
+                for msg in &msgs[0..] {
                     match &msg.ty {
+                        CaMsgTy::VersionRes(_) => {}
                         CaMsgTy::SearchRes(k) => {
                             let addr = SocketAddrV4::new(src_addr, k.tcp_port);
                             res.push((SearchId(k.id), addr));

@@ -33,6 +33,7 @@ pub enum SubCmd {
     BsreadDump(BsreadDump),
     Version,
     LogTest,
+    Ca(Ca),
 }
 
 #[derive(Debug, clap::Parser)]
@@ -167,3 +168,24 @@ pub struct FindOlder {
     #[arg(long)]
     pub slices: u32,
 }
+
+#[derive(Debug, clap::Parser)]
+pub struct Ca {
+    pub broadcast: Option<String>,
+    #[command(subcommand)]
+    pub subcmds: CaSubcmds,
+}
+
+#[derive(Debug, clap::Parser)]
+pub enum CaSubcmds {
+    Find(CaFind),
+    Get(CaGet),
+}
+
+#[derive(Debug, clap::Parser)]
+pub struct CaFind {
+    pub channel: String,
+}
+
+#[derive(Debug, clap::Parser)]
+pub struct CaGet {}
