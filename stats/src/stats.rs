@@ -400,6 +400,8 @@ stats_proc::stats_struct!((
             channel_not_alive_no_activity,
             monitor_stale_read_begin,
             monitor_stale_read_timeout,
+            ca_proto_no_version_as_first,
+            ca_proto_version_later,
         ),
         values(inter_ivl_ema, read_ioids_len, proto_out_len,),
         histolog2s(
