@@ -1,5 +1,6 @@
 use crate::config::ScyllaIngestConfig;
 use crate::session::create_session;
+use futures_util::StreamExt;
 use log::*;
 use scylla::transport::errors::NewSessionError;
 use scylla::transport::errors::QueryError;
@@ -38,17 +39,16 @@ pub async fn list_pkey(scylla_conf: &ScyllaIngestConfig) -> Result<(), Error> {
         let t2 = if t1 < i64::MAX - td { t1 + td } else { i64::MAX };
         let pct = (t1 - i64::MIN) as u64 / (u64::MAX / 100000);
         info!("Token range {:.2}%", pct as f32 * 1e-3);
-        let qr = scy.execute(&query, (t1, t2)).await?;
-        if let Some(rows) = qr.rows {
-            for r in rows {
-                if r.columns.len() < 2 {
-                    warn!("see {} columns", r.columns.len());
-                } else {
-                    let pulse_a_token = r.columns[0].as_ref().unwrap().as_bigint().unwrap();
-                    let pulse_a = r.columns[1].as_ref().unwrap().as_bigint().unwrap();
-                    info!("pulse_a_token {pulse_a_token}  pulse_a {pulse_a}");
-                    pulse_a_max = pulse_a_max.max(pulse_a);
-                }
+        let mut it = scy.execute_iter(query.clone(), (t1, t2)).await?;
+        while let Some(x) = it.next().await {
+            let r = x?;
+            if r.columns.len() < 2 {
+                warn!("see {} columns", r.columns.len());
+            } else {
+                let pulse_a_token = r.columns[0].as_ref().unwrap().as_bigint().unwrap();
+                let pulse_a = r.columns[1].as_ref().unwrap().as_bigint().unwrap();
+                info!("pulse_a_token {pulse_a_token}  pulse_a {pulse_a}");
+                pulse_a_max = pulse_a_max.max(pulse_a);
             }
         }
         if t2 == i64::MAX {
@@ -75,18 +75,17 @@ pub async fn list_pulses(scylla_conf: &ScyllaIngestConfig) -> Result<(), Error> 
         let t2 = if t1 < i64::MAX - td { t1 + td } else { i64::MAX };
         let pct = (t1 - i64::MIN) as u64 / (u64::MAX / 100000);
         info!("Token range {:.2}%", pct as f32 * 1e-3);
-        let qr = scy.execute(&query, (t1, t2)).await?;
-        if let Some(rows) = qr.rows {
-            for r in rows {
-                if r.columns.len() < 2 {
-                    warn!("see {} columns", r.columns.len());
-                } else {
-                    let tsa_token = r.columns[0].as_ref().unwrap().as_bigint().unwrap();
-                    let tsa = r.columns[1].as_ref().unwrap().as_int().unwrap() as u32;
-                    let tsb = r.columns[2].as_ref().unwrap().as_int().unwrap() as u32;
-                    let pulse = r.columns[3].as_ref().unwrap().as_bigint().unwrap() as u64;
-                    info!("tsa_token {tsa_token:21}  tsa {tsa:12}  tsb {tsb:12}  pulse {pulse:21}");
-                }
+        let mut it = scy.execute_iter(query.clone(), (t1, t2)).await?;
+        while let Some(x) = it.next().await {
+            let r = x?;
+            if r.columns.len() < 2 {
+                warn!("see {} columns", r.columns.len());
+            } else {
+                let tsa_token = r.columns[0].as_ref().unwrap().as_bigint().unwrap();
+                let tsa = r.columns[1].as_ref().unwrap().as_int().unwrap() as u32;
+                let tsb = r.columns[2].as_ref().unwrap().as_int().unwrap() as u32;
+                let pulse = r.columns[3].as_ref().unwrap().as_bigint().unwrap() as u64;
+                info!("tsa_token {tsa_token:21}  tsa {tsa:12}  tsb {tsb:12}  pulse {pulse:21}");
             }
         }
         if t2 == i64::MAX {
@@ -110,25 +109,25 @@ pub async fn fetch_events(backend: &str, channel: &str, scylla_conf: &ScyllaInge
             "select series, scalar_type, shape_dims from series_by_channel where facility = ? and channel_name = ?",
         )
         .await?;
-    let qres = scy.execute(&qu_series, (backend, channel)).await?;
-    if let Some(rows) = qres.rows {
-        info!("Found {} matching series", rows.len());
-        for r in &rows {
-            info!("Got row: {r:?}");
-            if false {
-                if r.columns.len() < 2 {
-                    warn!("see {} columns", r.columns.len());
-                } else {
-                    let tsa_token = r.columns[0].as_ref().unwrap().as_bigint().unwrap();
-                    let tsa = r.columns[1].as_ref().unwrap().as_int().unwrap() as u32;
-                    let tsb = r.columns[2].as_ref().unwrap().as_int().unwrap() as u32;
-                    let pulse = r.columns[3].as_ref().unwrap().as_bigint().unwrap() as u64;
-                    info!("tsa_token {tsa_token:21}  tsa {tsa:12}  tsb {tsb:12}  pulse {pulse:21}");
-                }
+    let mut rowcnt = 0;
+    let mut it = scy.execute_iter(qu_series.clone(), (backend, channel)).await?;
+    while let Some(x) = it.next().await {
+        let r = x?;
+        info!("Got row: {r:?}");
+        if false {
+            if r.columns.len() < 2 {
+                warn!("see {} columns", r.columns.len());
+            } else {
+                let tsa_token = r.columns[0].as_ref().unwrap().as_bigint().unwrap();
+                let tsa = r.columns[1].as_ref().unwrap().as_int().unwrap() as u32;
+                let tsb = r.columns[2].as_ref().unwrap().as_int().unwrap() as u32;
+                let pulse = r.columns[3].as_ref().unwrap().as_bigint().unwrap() as u64;
+                info!("tsa_token {tsa_token:21}  tsa {tsa:12}  tsb {tsb:12}  pulse {pulse:21}");
             }
         }
-        let _row = rows.into_iter().next().unwrap();
-    } else {
+        rowcnt += 1;
+    }
+    if rowcnt == 0 {
         warn!("No result from series lookup");
     }
     Ok(())

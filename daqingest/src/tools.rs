@@ -94,18 +94,12 @@ async fn remove_older_series(
         let row = e?;
         let ts_msp = row.0;
         debug!("remove ts_msp {}", ts_msp);
-        let res = scy.execute(&qu_delete, (series as i64, ts_msp)).await?;
-        {
-            // informative
-            if let Some(rows) = res.rows {
-                debug!("rows returned {}", rows.len());
-                for row in rows {
-                    debug!("{:?}", row.columns);
-                }
-            } else {
-                // debug!("delete no rows returned");
-            }
+        let mut it = scy.execute_iter(qu_delete.clone(), (series as i64, ts_msp)).await?;
+        let mut j = 0;
+        while let Some(_) = it.next().await {
+            j += 1;
         }
+        debug!("rows returned {}", j);
     }
     Ok(())
 }
@@ -279,7 +273,9 @@ async fn remove_older_all_series_msps(
         stream::iter(msps.clone())
             .map(|msp| async move {
                 let stmt = stmt.clone();
-                scy.execute(&stmt, (series.to_i64(), msp as i64)).await
+                // scy.execute_iter(&stmt, (series.to_i64(), msp as i64)).await
+                todo!();
+                Ok::<_, Error>(0i32)
             })
             .buffer_unordered(32)
             .take_while(|x| {

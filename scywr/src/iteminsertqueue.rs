@@ -17,7 +17,7 @@ use scylla::frame::value::Value;
 use scylla::frame::value::ValueList;
 use scylla::prepared_statement::PreparedStatement;
 use scylla::serialize::row::SerializeRow;
-use scylla::serialize::value::SerializeCql;
+use scylla::serialize::value::SerializeValue;
 use scylla::transport::errors::DbError;
 use scylla::transport::errors::QueryError;
 use scylla::QueryResult;
@@ -546,7 +546,7 @@ struct InsParCom {
 
 fn insert_scalar_gen_fut<ST>(par: InsParCom, val: ST, qu: Arc<PreparedStatement>, scy: Arc<ScySession>) -> InsertFut
 where
-    ST: Value + SerializeCql + Send + 'static,
+    ST: Value + SerializeValue + Send + 'static,
 {
     let params = (par.series.to_i64(), par.ts_msp.to_i64(), par.ts_lsp.to_i64(), val);
     InsertFut::new(scy, qu, params, par.ts_net, par.stats)
@@ -560,8 +560,8 @@ fn insert_scalar_enum_gen_fut<ST1, ST2>(
     scy: Arc<ScySession>,
 ) -> InsertFut
 where
-    ST1: Value + SerializeCql + Send + 'static,
-    ST2: Value + SerializeCql + Send + 'static,
+    ST1: Value + SerializeValue + Send + 'static,
+    ST2: Value + SerializeValue + Send + 'static,
 {
     let params = (
         par.series.to_i64(),
@@ -573,7 +573,7 @@ where
     InsertFut::new(scy, qu, params, par.ts_net, par.stats)
 }
 
-// val: Vec<ST>   where ST: Value + SerializeCql + Send + 'static,
+// val: Vec<ST>   where ST: Value + SerializeValue + Send + 'static,
 fn insert_array_gen_fut(par: InsParCom, val: Vec<u8>, qu: Arc<PreparedStatement>, scy: Arc<ScySession>) -> InsertFut {
     let params = (par.series.to_i64(), par.ts_msp.to_i64(), par.ts_lsp.to_i64(), val);
     InsertFut::new(scy, qu, params, par.ts_net, par.stats)
@@ -601,7 +601,7 @@ impl InsertFut {
     ) -> Self {
         let scy_ref = unsafe { NonNull::from(scy.as_ref()).as_ref() };
         let qu_ref = unsafe { NonNull::from(qu.as_ref()).as_ref() };
-        let fut = scy_ref.execute_paged(qu_ref, params, None);
+        let fut = scy_ref.execute_unpaged(qu_ref, params);
         let fut = fut.map(move |x| {
             let dt = tsnet.elapsed();
             let dt_ms = 1000 * dt.as_secs() as u32 + dt.subsec_millis();

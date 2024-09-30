@@ -65,7 +65,7 @@ pub async fn has_table(name: &str, scy: &ScySession) -> Result<bool, Error> {
 }
 
 pub async fn check_table_readable(name: &str, scy: &ScySession) -> Result<bool, Error> {
-    match scy.query(format!("select * from {} limit 1", name), ()).await {
+    match scy.query_unpaged(format!("select * from {} limit 1", name), ()).await {
         Ok(_) => Ok(true),
         Err(e) => match &e {
             QueryError::DbError(e2, msg) => match e2 {
@@ -198,7 +198,7 @@ impl GenTwcsTab {
         if !has_table(self.name(), scy).await? {
             let cql = self.cql();
             info!("scylla create table {}  {}", self.name(), cql);
-            scy.query(cql, ()).await?;
+            scy.query_unpaged(cql, ()).await?;
         }
         Ok(())
     }
@@ -327,7 +327,7 @@ impl GenTwcsTab {
                 if set_opts.len() != 0 {
                     let cql = format!(concat!("alter table {} with {}"), self.name(), set_opts.join(" and "));
                     info!("{cql}");
-                    scy.query(cql, ()).await?;
+                    scy.query_unpaged(cql, ()).await?;
                 }
             }
         } else {
@@ -390,7 +390,7 @@ impl GenTwcsTab {
     async fn add_column(&self, name: &str, ty: &str, scy: &ScySession) -> Result<(), Error> {
         let cql = format!(concat!("alter table {} add {} {}"), self.name(), name, ty);
         debug!("NOTE  add_column  CQL {}", cql);
-        scy.query(cql, ()).await?;
+        scy.query_unpaged(cql, ()).await?;
         Ok(())
     }
 }

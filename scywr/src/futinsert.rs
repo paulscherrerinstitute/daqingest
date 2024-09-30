@@ -27,7 +27,7 @@ impl<'a> ScyInsertFut<'a> {
     where
         V: ValueList + SerializeRow + Send + 'static,
     {
-        let fut = scy.execute(query, values);
+        let fut = scy.execute_unpaged(query, values);
         let fut = Box::pin(fut) as _;
         let tsnow = Instant::now();
         Self {

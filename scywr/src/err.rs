@@ -40,6 +40,7 @@ impl IntoSimplerError for QueryError {
             QueryError::UnableToAllocStreamId => Error::DbError(e.to_string()),
             QueryError::RequestTimeout(e) => Error::DbError(e.to_string()),
             QueryError::TranslationError(e) => Error::DbError(e.to_string()),
+            QueryError::CqlResponseParseError(e) => Error::DbError(e.to_string()),
         }
     }
 }

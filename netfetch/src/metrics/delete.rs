@@ -10,6 +10,7 @@ use chrono::Utc;
 use core::fmt;
 use err::thiserror;
 use err::ThisError;
+use futures_util::StreamExt;
 use netpod::log::*;
 use netpod::ttl::RetentionTime;
 use netpod::ScalarType;
@@ -58,6 +59,7 @@ pub enum Error {
     ScyllaQuery(#[from] scylla::transport::errors::QueryError),
     ScyllaRowType(#[from] scylla::transport::query_result::RowsExpectedError),
     ScyllaRowError(#[from] scylla::cql_to_rust::FromRowError),
+    ScyllaNextRow(#[from] scylla::transport::iterator::NextRowError),
     InvalidTimestamp,
 }
 
@@ -150,30 +152,19 @@ async fn delete_try(
         );
         scy.prepare(scylla::query::Query::new(cql).with_page_size(100)).await?
     };
-    let mut pst = None;
     let mut i = 0;
-    loop {
-        // debug_cql!("query iteration  {i}");
-        let z = scy.execute_paged(&qu, (series.to_i64(),), pst).await?;
-        pst = z.paging_state.clone();
-        for x in z.rows_typed::<(i64,)>()? {
-            let (msp,) = x?;
-            let msp = TsMs::from_ms_u64(msp as _);
-            let msp_ns = msp.ns_u64();
-            delete_val(series.clone(), msp, beg, end, &qu_delete_val, &scy).await?;
-        }
-        if pst.is_none() {
-            debug_cql!("last page");
-            break;
-        }
-        i += 1;
-        if false {
-            if i > 20 {
-                debug_cql!("loop limit");
-                break;
-            }
-        }
+    // debug_cql!("query iteration  {i}");
+    let mut it = scy
+        .execute_iter(qu.clone(), (series.to_i64(),))
+        .await?
+        .into_typed::<(i64,)>();
+    while let Some(x) = it.next().await {
+        let (msp,) = x?;
+        let msp = TsMs::from_ms_u64(msp as _);
+        let msp_ns = msp.ns_u64();
+        delete_val(series.clone(), msp, beg, end, &qu_delete_val, &scy).await?;
     }
+    i += 1;
     Ok(Json(serde_json::Value::Null))
 }
 
@@ -196,32 +187,13 @@ async fn delete_val(
     let o1 = DateTime::from_timestamp_millis((msp.ms() + r1 / 1000000) as i64).unwrap();
     let o2 = DateTime::from_timestamp_millis((msp.ms() + r2 / 1000000) as i64).unwrap();
     debug_cql!("  sub query  {o0:?}  {o1:?}  {o2:?}");
-    let mut pst = None;
-    let mut i = 0;
-    loop {
-        // debug_cql!("  sub query iteration  {i}");
-        let params = (series.to_i64(), msp.ms() as i64, r1 as i64, r2 as i64);
-        let z = scy.execute_paged(&qu_delete_val, params, pst).await?;
-        pst = z.paging_state.clone();
-        if z.rows_num().is_ok() {
-            for (i, x) in z.rows_typed::<(i64,)>()?.enumerate() {
-                let (lsp,) = x?;
-                if false && i < 4 {
-                    debug_cql!("  lsp {lsp}");
-                }
-            }
-        }
-        if pst.is_none() {
-            // debug_cql!("  last page");
-            break;
-        }
-        i += 1;
-        if false {
-            if i > 20 {
-                debug_cql!("  loop limit");
-                break;
-            }
-        }
+    let params = (series.to_i64(), msp.ms() as i64, r1 as i64, r2 as i64);
+    let mut it = scy
+        .execute_iter(qu_delete_val.clone(), params)
+        .await?
+        .into_typed::<(i64,)>();
+    while let Some(x) = it.next().await {
+        let (lsp,) = x?;
     }
     Ok(())
 }
