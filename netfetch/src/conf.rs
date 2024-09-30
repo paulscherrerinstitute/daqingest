@@ -259,6 +259,7 @@ async fn parse_channel_config_txt(fname: &Path, re_p: Regex, re_n: Regex) -> Res
                     medium_term: None,
                     long_term: None,
                     is_polled: false,
+                    timestamp: ChannelTimestamp::Archiver,
                 },
             };
             conf.channels.push(item);
@@ -274,8 +275,20 @@ pub struct ChannelConfigParse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ChannelTimestamp {
+    Archiver,
+    IOC,
+}
+
+impl ChannelTimestamp {
+    fn default_config() -> Self {
+        Self::Archiver
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IngestConfigArchiving {
-    #[serde(default, skip_serializing_if = "bool_is_false")]
+    #[serde(default = "bool_true")]
     #[serde(with = "serde_replication_bool")]
     replication: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -289,10 +302,20 @@ pub struct IngestConfigArchiving {
     long_term: Option<ChannelReadConfig>,
     #[serde(default, skip_serializing_if = "bool_is_false")]
     is_polled: bool,
+    #[serde(default = "ChannelTimestamp::default_config")]
+    timestamp: ChannelTimestamp,
 }
 
 fn bool_is_false(x: &bool) -> bool {
     *x == false
+}
+
+fn bool_is_true(x: &bool) -> bool {
+    *x == false
+}
+
+fn bool_true() -> bool {
+    true
 }
 
 mod serde_replication_bool {
@@ -321,7 +344,15 @@ mod serde_replication_bool {
         type Value = bool;
 
         fn expecting(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
-            write!(fmt, "a keyword `Enabled` or `None`, or not this field at all")
+            write!(fmt, "a keyword `Enabled`, `Disabled`, null, or not this field at all")
+        }
+
+        fn visit_none<E>(self) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            let e = E::custom(format!("could accept `null` value, but it's not in specification"));
+            return Err(e);
         }
 
         fn visit_bool<E>(self, _v: bool) -> Result<Self::Value, E>
@@ -530,6 +561,7 @@ impl ChannelConfig {
                 medium_term: None,
                 long_term: None,
                 is_polled: false,
+                timestamp: ChannelTimestamp::Archiver,
             },
         }
     }

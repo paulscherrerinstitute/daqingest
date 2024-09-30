@@ -407,10 +407,7 @@ impl Daemon {
         ch_cfg: ChannelConfig,
         restx: netfetch::ca::conn::CmdResTx,
     ) -> Result<(), Error> {
-        // debug!("handle_channel_add {ch:?}");
-        self.connset_ctrl
-            .add_channel(self.ingest_opts.backend().into(), ch_cfg, restx)
-            .await?;
+        self.connset_ctrl.add_channel(ch_cfg, restx).await?;
         Ok(())
     }
 

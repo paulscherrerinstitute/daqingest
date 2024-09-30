@@ -140,21 +140,19 @@ pub struct ChannelAddWithAddr {
 
 #[derive(Debug, Clone)]
 pub struct ChannelAddWithStatusId {
-    backend: String,
     ch_cfg: ChannelConfig,
     cssid: ChannelStatusSeriesId,
 }
 
 #[derive(Debug, Clone)]
 pub struct ChannelAdd {
-    backend: String,
     ch_cfg: ChannelConfig,
     restx: crate::ca::conn::CmdResTx,
 }
 
 impl ChannelAdd {
     pub fn name(&self) -> &str {
-        &self.ch_cfg.name()
+        self.ch_cfg.name()
     }
 }
 
@@ -240,13 +238,8 @@ impl CaConnSetCtrl {
         self.rx.clone()
     }
 
-    pub async fn add_channel(
-        &self,
-        backend: String,
-        ch_cfg: ChannelConfig,
-        restx: crate::ca::conn::CmdResTx,
-    ) -> Result<(), Error> {
-        let cmd = ChannelAdd { backend, ch_cfg, restx };
+    pub async fn add_channel(&self, ch_cfg: ChannelConfig, restx: crate::ca::conn::CmdResTx) -> Result<(), Error> {
+        let cmd = ChannelAdd { ch_cfg, restx };
         let cmd = ConnSetCmd::ChannelAdd(cmd);
         self.tx.send(CaConnSetEvent::ConnSetCmd(cmd)).await?;
         Ok(())
@@ -550,7 +543,7 @@ impl CaConnSet {
         let channel_name = cmd.name().into();
         let tx = self.channel_info_res_tx.as_ref().get_ref().clone();
         let item = ChannelInfoQuery {
-            backend: cmd.backend,
+            backend: self.backend.clone(),
             channel: channel_name,
             kind: SeriesKind::ChannelStatus,
             scalar_type: ScalarType::U64,
@@ -589,7 +582,6 @@ impl CaConnSet {
                     self.channel_by_cssid
                         .insert(cssid.clone(), Channel::new(res.channel.clone()));
                     let add = ChannelAddWithStatusId {
-                        backend: res.backend,
                         ch_cfg: st.config.clone(),
                         cssid,
                     };
