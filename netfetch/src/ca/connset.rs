@@ -571,31 +571,32 @@ impl CaConnSet {
     fn handle_series_lookup_result(&mut self, res: Result<ChannelInfoResult, Error>) -> Result<(), Error> {
         trace!("handle_series_lookup_result {res:?}");
         if self.shutdown_stopping {
-            return Ok(());
-        }
-        match res {
-            Ok(res) => {
-                let channel = Channel::new(res.channel.clone());
-                // TODO must not depend on purely informative `self.channel_state`
-                if let Some(st) = self.channel_states.get_mut(&channel) {
-                    let cssid = ChannelStatusSeriesId::new(res.series.to_series().id());
-                    self.channel_by_cssid
-                        .insert(cssid.clone(), Channel::new(res.channel.clone()));
-                    let add = ChannelAddWithStatusId {
-                        ch_cfg: st.config.clone(),
-                        cssid,
-                    };
-                    self.handle_add_channel_with_status_id(add)?;
-                    Ok(())
-                } else {
-                    // TODO count for metrics
-                    warn!("received series id for unknown channel");
+            Ok(())
+        } else {
+            match res {
+                Ok(res) => {
+                    let channel = Channel::new(res.channel.clone());
+                    // TODO must not depend on purely informative `self.channel_state`
+                    if let Some(st) = self.channel_states.get_mut(&channel) {
+                        let cssid = ChannelStatusSeriesId::new(res.series.to_series().id());
+                        self.channel_by_cssid
+                            .insert(cssid.clone(), Channel::new(res.channel.clone()));
+                        let add = ChannelAddWithStatusId {
+                            ch_cfg: st.config.clone(),
+                            cssid,
+                        };
+                        self.handle_add_channel_with_status_id(add)?;
+                        Ok(())
+                    } else {
+                        // TODO count for metrics
+                        warn!("received series id for unknown channel");
+                        Ok(())
+                    }
+                }
+                Err(e) => {
+                    warn!("TODO handle error {e}");
                     Ok(())
                 }
-            }
-            Err(e) => {
-                warn!("TODO handle error {e}");
-                Ok(())
             }
         }
     }
