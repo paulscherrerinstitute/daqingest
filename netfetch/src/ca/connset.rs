@@ -132,7 +132,6 @@ impl CaConnRes {
 
 #[derive(Debug, Clone)]
 pub struct ChannelAddWithAddr {
-    backend: String,
     ch_cfg: ChannelConfig,
     cssid: ChannelStatusSeriesId,
     addr: SocketAddr,
@@ -793,7 +792,6 @@ impl CaConnSet {
                             self.stats.ioc_addr_found().inc();
                             trace!("ioc found {res:?}");
                             let cmd = ChannelAddWithAddr {
-                                backend: self.backend.clone(),
                                 ch_cfg: chst.config.clone(),
                                 addr: SocketAddr::V4(addr),
                                 cssid: st2.cssid.clone(),
@@ -1085,7 +1083,7 @@ impl CaConnSet {
         self.stats.create_ca_conn().inc();
         let conn = CaConn::new(
             opts,
-            add.backend.clone(),
+            self.backend.clone(),
             addr_v4,
             self.local_epics_hostname.clone(),
             self.iqtx.clone2(),
@@ -1376,7 +1374,6 @@ impl CaConnSet {
                                         if *since + CHANNEL_UNASSIGNED_TIMEOUT < stnow {
                                             assigned_without_health_update += 1;
                                             let cmd = ChannelAddWithAddr {
-                                                backend: self.backend.clone(),
                                                 ch_cfg: st.config.clone(),
                                                 cssid: st3.cssid.clone(),
                                                 addr: SocketAddr::V4(*addr_v4),
