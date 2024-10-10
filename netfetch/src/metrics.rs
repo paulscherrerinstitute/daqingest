@@ -183,6 +183,7 @@ async fn always_error(params: HashMap<String, String>) -> Result<axum::Json<bool
 }
 
 async fn config_reload(dcom: Arc<DaemonComm>) -> Result<axum::Json<serde_json::Value>, Response> {
+    info!("api config reload request");
     let (tx, rx) = async_channel::bounded(10);
     let item = DaemonEvent::ConfigReload(tx);
     dcom.tx.send(item).await;

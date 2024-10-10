@@ -64,7 +64,7 @@ impl BinWriter {
         let margin = 1000 * 1000 * 1000 * 60 * 60 * 24 * 40;
         let end = u64::MAX - margin;
         let range = BinnedRange::from_nano_range(NanoRange::from_ns_u64(beg.ns(), end), DtMs::from_ms_u64(1000 * 10));
-        let binner = BinnedEventsTimeweight::new(range);
+        let binner = BinnedEventsTimeweight::new(range).disable_cnt_zero();
         let ret = Self {
             rt,
             cssid,
@@ -113,6 +113,7 @@ impl BinWriter {
             for ((((((&ts1, &ts2), &cnt), &min), &max), &avg), &fnl) in out.zip_iter() {
                 if fnl == false {
                     debug!("non final bin");
+                } else if cnt == 0 {
                 } else {
                     let bin_len = DtMs::from_ms_u64(ts2.delta(ts1).ms_u64());
                     let div = if bin_len == DtMs::from_ms_u64(1000 * 10) {

@@ -504,7 +504,14 @@ impl Daemon {
     async fn handle_config_reload_inner(&mut self) -> Result<(), Error> {
         let channels_dir = self.ingest_opts.channels();
         let channels = match netfetch::conf::parse_channels(channels_dir).await {
-            Ok(x) => x,
+            Ok(x) => {
+                if let Some(x) = &x {
+                    info!("parsed {} channels", x.len());
+                } else {
+                    info!("config does not specify channels");
+                }
+                x
+            }
             Err(e) => {
                 return Err(Error::with_msg_no_trace(format!(
                     "could not reload channel config  {e}"
@@ -512,9 +519,13 @@ impl Daemon {
             }
         };
         if let Some(channels) = channels {
-            debug!("channels config reloaded");
             // TODO
             // Send a marker flag-clear to CaConnSet.
+            if true {
+                let (tx, rx) = async_channel::bounded(10);
+                self.connset_ctrl.channel_config_flag_reset(tx).await?;
+                rx.recv().await??;
+            }
             // Send all the channel-add commands.
             let mut i = 0;
             for ch_cfg in channels.channels() {
@@ -523,7 +534,12 @@ impl Daemon {
                 rx.recv().await??;
                 i += 1;
             }
-            debug!("channel add send  n {i}");
+            if true {
+                let (tx, rx) = async_channel::bounded(10);
+                self.connset_ctrl.channel_config_remove_unflagged(tx).await?;
+                rx.recv().await??;
+            }
+            info!("config reload done, applied {} channels", i);
             // Send a marker remove-cleared to CaConnSet (must impl that on CaConnSet to remove those channels)
             Ok(())
         } else {
@@ -533,7 +549,7 @@ impl Daemon {
 
     async fn handle_config_reload(&mut self, tx: async_channel::Sender<u64>) -> Result<(), Error> {
         match self.handle_config_reload_inner().await {
-            Ok(x) => {
+            Ok(()) => {
                 if tx.send(0).await.is_err() {
                     self.stats.channel_send_err().inc();
                 }

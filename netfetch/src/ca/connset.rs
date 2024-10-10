@@ -190,6 +190,16 @@ pub struct ChannelAddWithStatusId {
 }
 
 #[derive(Debug, Clone)]
+pub struct ChannelConfigFlagReset {
+    restx: crate::ca::conn::CmdResTx,
+}
+
+#[derive(Debug, Clone)]
+pub struct ChannelConfigRemoveUnflagged {
+    restx: crate::ca::conn::CmdResTx,
+}
+
+#[derive(Debug, Clone)]
 pub struct ChannelAdd {
     ch_cfg: ChannelConfig,
     restx: crate::ca::conn::CmdResTx,
@@ -241,6 +251,8 @@ impl fmt::Debug for ChannelStatusesRequest {
 
 #[derive(Debug)]
 pub enum ConnSetCmd {
+    ChannelConfigFlagReset(ChannelConfigFlagReset),
+    ChannelConfigRemoveUnflagged(ChannelConfigRemoveUnflagged),
     ChannelAdd(ChannelAdd),
     ChannelRemove(ChannelRemove),
     Shutdown,
@@ -281,6 +293,20 @@ impl CaConnSetCtrl {
 
     pub fn receiver(&self) -> Receiver<CaConnSetItem> {
         self.rx.clone()
+    }
+
+    pub async fn channel_config_flag_reset(&self, restx: crate::ca::conn::CmdResTx) -> Result<(), Error> {
+        let cmd = ChannelConfigFlagReset { restx };
+        let cmd = ConnSetCmd::ChannelConfigFlagReset(cmd);
+        self.tx.send(CaConnSetEvent::ConnSetCmd(cmd)).await?;
+        Ok(())
+    }
+
+    pub async fn channel_config_remove_unflagged(&self, restx: crate::ca::conn::CmdResTx) -> Result<(), Error> {
+        let cmd = ChannelConfigRemoveUnflagged { restx };
+        let cmd = ConnSetCmd::ChannelConfigRemoveUnflagged(cmd);
+        self.tx.send(CaConnSetEvent::ConnSetCmd(cmd)).await?;
+        Ok(())
     }
 
     pub async fn add_channel(&self, ch_cfg: ChannelConfig, restx: crate::ca::conn::CmdResTx) -> Result<(), Error> {
@@ -568,6 +594,8 @@ impl CaConnSet {
     fn handle_event(&mut self, ev: CaConnSetEvent) -> Result<(), Error> {
         match ev {
             CaConnSetEvent::ConnSetCmd(cmd) => match cmd {
+                ConnSetCmd::ChannelConfigFlagReset(x) => self.handle_channel_config_flag_reset(x),
+                ConnSetCmd::ChannelConfigRemoveUnflagged(x) => self.handle_channel_config_remove_unflagged(x),
                 ConnSetCmd::ChannelAdd(x) => self.handle_add_channel(x),
                 ConnSetCmd::ChannelRemove(x) => self.handle_remove_channel(x),
                 ConnSetCmd::Shutdown => self.handle_shutdown(),
@@ -608,6 +636,7 @@ impl CaConnSet {
 
     fn handle_add_channel_existing(cmd: ChannelAdd, ress: StateTransRes) -> Result<(), Error> {
         let tsnow = Instant::now();
+        ress.chst.touched = 1;
         if cmd.ch_cfg == ress.chst.config {
             debug!("handle_add_channel_existing  config same  {}", cmd.name());
             if let Err(_) = cmd.restx.try_send(Ok(())) {
@@ -676,6 +705,36 @@ impl CaConnSet {
             }
             Ok(())
         }
+    }
+
+    fn handle_channel_config_flag_reset(&mut self, cmd: ChannelConfigFlagReset) -> Result<(), Error> {
+        for chst in self.channel_states.iter_mut() {
+            chst.1.touched = 0;
+        }
+        if let Err(_) = cmd.restx.try_send(Ok(())) {
+            self.stats.command_reply_fail().inc();
+        }
+        Ok(())
+    }
+
+    fn handle_channel_config_remove_unflagged(&mut self, cmd: ChannelConfigRemoveUnflagged) -> Result<(), Error> {
+        let mut cmds = VecDeque::new();
+        for chst in self.channel_states.iter_mut() {
+            if chst.1.touched == 0 {
+                let cmd = ChannelRemove {
+                    name: chst.0.name().into(),
+                };
+                cmds.push_back(cmd);
+            }
+        }
+        for cmd in cmds {
+            debug!("call handle_remove_channel {cmd:?}");
+            self.handle_remove_channel(cmd)?;
+        }
+        if let Err(_) = cmd.restx.try_send(Ok(())) {
+            self.stats.command_reply_fail().inc();
+        }
+        Ok(())
     }
 
     fn handle_add_channel(&mut self, cmd: ChannelAdd) -> Result<(), Error> {
@@ -895,6 +954,13 @@ impl CaConnSet {
                             k.value = ChannelStateValue::ToRemove { addr: None };
                         }
                         WithStatusSeriesIdStateInner::WithAddress { addr, state: _ } => {
+                            debug!("send remove  {ch:?}  to {addr}");
+                            let conn_ress = self
+                                .ca_conn_ress
+                                .get_mut(&SocketAddr::V4(addr.clone()))
+                                .ok_or_else(|| Error::ChannelAssignedWithoutConnRess)?;
+                            let item = ConnCommand::channel_close(ch.name().into());
+                            conn_ress.cmd_queue.push_back(item);
                             k.value = ChannelStateValue::ToRemove {
                                 addr: Some(addr.clone()),
                             };
