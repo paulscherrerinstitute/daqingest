@@ -182,6 +182,24 @@ async fn always_error(params: HashMap<String, String>) -> Result<axum::Json<bool
         .into_response())
 }
 
+async fn config_reload(dcom: Arc<DaemonComm>) -> Result<axum::Json<serde_json::Value>, Response> {
+    let (tx, rx) = async_channel::bounded(10);
+    let item = DaemonEvent::ConfigReload(tx);
+    dcom.tx.send(item).await;
+    match rx.recv().await {
+        Ok(x) => {
+            let res = serde_json::json!({"result":{"ok":x}});
+            let ret = serde_json::to_value(&res).unwrap();
+            Ok(axum::Json(ret))
+        }
+        Err(e) => {
+            let res = serde_json::json!({"result":{"err":"recverr"}});
+            let ret = serde_json::to_value(&res).unwrap();
+            Ok(axum::Json(ret))
+        }
+    }
+}
+
 async fn find_channel(
     params: HashMap<String, String>,
     dcom: Arc<DaemonComm>,
@@ -377,6 +395,19 @@ fn make_routes(
                             || async move { metrics(&stats_set) }
                         }),
                     ),
+                )
+                .nest(
+                    "/config",
+                    Router::new()
+                        .route("/", get(|| async { axum::Json(json!({"__tmp":"slashed"})) }))
+                        .route("//", get(|| async { axum::Json(json!({"__tmp":"doubleslashed"})) }))
+                        .route(
+                            "/reload",
+                            get({
+                                let dcom = dcom.clone();
+                                || config_reload(dcom)
+                            }),
+                        ),
                 )
                 .nest(
                     "/channel",

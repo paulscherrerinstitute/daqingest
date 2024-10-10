@@ -11,7 +11,7 @@ use netfetch::ca::connset::CaConnSetItem;
 use netfetch::conf::CaIngestOpts;
 use netfetch::conf::ChannelConfig;
 use netfetch::conf::ChannelsConfig;
-use netfetch::daemon_common::Channel;
+use netfetch::daemon_common::ChannelName;
 use netfetch::daemon_common::DaemonEvent;
 use netfetch::metrics::RoutesResources;
 use netfetch::metrics::StatsSet;
@@ -411,7 +411,7 @@ impl Daemon {
         Ok(())
     }
 
-    async fn handle_channel_remove(&mut self, ch: Channel) -> Result<(), Error> {
+    async fn handle_channel_remove(&mut self, ch: ChannelName) -> Result<(), Error> {
         self.connset_ctrl.remove_channel(ch.name().into()).await?;
         Ok(())
     }
@@ -501,6 +501,54 @@ impl Daemon {
         Ok(())
     }
 
+    async fn handle_config_reload_inner(&mut self) -> Result<(), Error> {
+        let channels_dir = self.ingest_opts.channels();
+        let channels = match netfetch::conf::parse_channels(channels_dir).await {
+            Ok(x) => x,
+            Err(e) => {
+                return Err(Error::with_msg_no_trace(format!(
+                    "could not reload channel config  {e}"
+                )));
+            }
+        };
+        if let Some(channels) = channels {
+            debug!("channels config reloaded");
+            // TODO
+            // Send a marker flag-clear to CaConnSet.
+            // Send all the channel-add commands.
+            let mut i = 0;
+            for ch_cfg in channels.channels() {
+                let (tx, rx) = async_channel::bounded(10);
+                self.connset_ctrl.add_channel(ch_cfg.clone(), tx).await?;
+                rx.recv().await??;
+                i += 1;
+            }
+            debug!("channel add send  n {i}");
+            // Send a marker remove-cleared to CaConnSet (must impl that on CaConnSet to remove those channels)
+            Ok(())
+        } else {
+            Err(Error::with_msg_no_trace(format!("no channel config found")))
+        }
+    }
+
+    async fn handle_config_reload(&mut self, tx: async_channel::Sender<u64>) -> Result<(), Error> {
+        match self.handle_config_reload_inner().await {
+            Ok(x) => {
+                if tx.send(0).await.is_err() {
+                    self.stats.channel_send_err().inc();
+                }
+                Ok(())
+            }
+            Err(e) => {
+                error!("{e}");
+                if tx.send(127).await.is_err() {
+                    self.stats.channel_send_err().inc();
+                }
+                Ok(())
+            }
+        }
+    }
+
     #[cfg(target_abi = "x32")]
     async fn handle_shutdown(&mut self) -> Result<(), Error> {
         warn!("received shutdown event");
@@ -539,6 +587,7 @@ impl Daemon {
             ChannelRemove(ch) => self.handle_channel_remove(ch).await,
             CaConnSetItem(item) => self.handle_ca_conn_set_item(item).await,
             Shutdown => self.handle_shutdown().await,
+            ConfigReload(tx) => self.handle_config_reload(tx).await,
         };
         let dt = ts1.elapsed();
         if dt > Duration::from_millis(200) {
@@ -635,10 +684,10 @@ impl Daemon {
                 break;
             }
             match self.rx.recv().await {
-                Ok(item) => match self.handle_event(item.clone()).await {
+                Ok(item) => match self.handle_event(item).await {
                     Ok(()) => {}
                     Err(e) => {
-                        error!("fn daemon:  error from handle_event {item:?}  {e}");
+                        error!("fn daemon:  error from handle_event  {e}");
                         break;
                     }
                 },

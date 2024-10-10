@@ -8,6 +8,7 @@ use crate::iteminsertqueue::InsertItem;
 use crate::iteminsertqueue::MspItem;
 use crate::iteminsertqueue::QueryItem;
 use crate::iteminsertqueue::TimeBinSimpleF32;
+use crate::iteminsertqueue::TimeBinSimpleF32V01;
 use crate::store::DataStore;
 use async_channel::Receiver;
 use atomic::AtomicU64;
@@ -274,6 +275,9 @@ where
                 QueryItem::Insert(item) => prepare_query_insert_futs(item, &data_store, &stats, tsnow),
                 QueryItem::Msp(item) => prepare_msp_insert_futs(item, &data_store, &stats, tsnow),
                 QueryItem::TimeBinSimpleF32(item) => prepare_timebin_insert_futs(item, &data_store, &stats, tsnow),
+                QueryItem::TimeBinSimpleF32V01(item) => {
+                    prepare_timebin_v01_insert_futs(item, &data_store, &stats, tsnow)
+                }
                 QueryItem::Accounting(item) => prepare_accounting_insert_futs(item, &data_store, &stats, tsnow),
                 QueryItem::AccountingRecv(item) => {
                     prepare_accounting_recv_insert_futs(item, &data_store, &stats, tsnow)
@@ -304,6 +308,9 @@ fn inspect_items(
                 }
                 QueryItem::TimeBinSimpleF32(_) => {
                     trace_item_execute!("execute  {worker_name}  TimeBinSimpleF32");
+                }
+                QueryItem::TimeBinSimpleF32V01(_) => {
+                    trace_item_execute!("execute  {worker_name}  TimeBinSimpleF32V01");
                 }
                 QueryItem::Accounting(_) => {
                     trace_item_execute!("execute  {worker_name}  Accounting  {item:?}");
@@ -380,6 +387,48 @@ fn prepare_timebin_insert_futs(
     let fut = InsertFut::new(
         data_store.scy.clone(),
         data_store.qu_insert_binned_scalar_f32_v02.clone(),
+        params,
+        tsnow,
+        stats.clone(),
+    );
+    let futs = smallvec![fut];
+
+    // TODO match on the query result:
+    // match qres {
+    //     Ok(_) => {
+    //         backoff = backoff_0;
+    //     }
+    //     Err(e) => {
+    //         stats_inc_for_err(&stats, &crate::iteminsertqueue::Error::QueryError(e));
+    //         back_off_sleep(&mut backoff).await;
+    //     }
+    // }
+
+    futs
+}
+
+fn prepare_timebin_v01_insert_futs(
+    item: TimeBinSimpleF32V01,
+    data_store: &Arc<DataStore>,
+    stats: &Arc<InsertWorkerStats>,
+    tsnow: Instant,
+) -> SmallVec<[InsertFut; 4]> {
+    trace!("have time bin patch to insert: {item:?}");
+    let params = (
+        item.series.id() as i64,
+        item.bin_len_ms,
+        item.ts_msp.to_i64(),
+        item.off,
+        item.count,
+        item.min,
+        item.max,
+        item.avg,
+    );
+    // TODO would be better to count inserts only on completed insert
+    stats.inserted_binned().inc();
+    let fut = InsertFut::new(
+        data_store.scy.clone(),
+        data_store.qu_insert_binned_scalar_f32_v01.clone(),
         params,
         tsnow,
         stats.clone(),

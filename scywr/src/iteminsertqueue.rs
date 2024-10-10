@@ -98,6 +98,25 @@ impl ScalarValue {
             ScalarValue::Bool(x) => x.to_string(),
         }
     }
+
+    pub fn f32_for_binning(&self) -> f32 {
+        use ScalarValue::*;
+        match self {
+            U8(x) => *x as f32,
+            U16(x) => *x as f32,
+            U32(x) => *x as f32,
+            U64(x) => *x as f32,
+            I8(x) => *x as f32,
+            I16(x) => *x as f32,
+            I32(x) => *x as f32,
+            I64(x) => *x as f32,
+            F32(x) => *x as f32,
+            F64(x) => *x as f32,
+            Enum(x, _) => *x as f32,
+            String(x) => x.len() as f32,
+            Bool(x) => f32::from(*x),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -294,6 +313,23 @@ impl ArrayValue {
             Bool(x) => format!("{}", x.get(0).map_or(false, |x| *x)),
         }
     }
+
+    pub fn f32_for_binning(&self) -> f32 {
+        use ArrayValue::*;
+        match self {
+            U8(x) => x.iter().fold(0., |a, x| a + *x as f32),
+            U16(x) => x.iter().fold(0., |a, x| a + *x as f32),
+            U32(x) => x.iter().fold(0., |a, x| a + *x as f32),
+            U64(x) => x.iter().fold(0., |a, x| a + *x as f32),
+            I8(x) => x.iter().fold(0., |a, x| a + *x as f32),
+            I16(x) => x.iter().fold(0., |a, x| a + *x as f32),
+            I32(x) => x.iter().fold(0., |a, x| a + *x as f32),
+            I64(x) => x.iter().fold(0., |a, x| a + *x as f32),
+            F32(x) => x.iter().fold(0., |a, x| a + *x as f32),
+            F64(x) => x.iter().fold(0., |a, x| a + *x as f32),
+            Bool(x) => x.iter().fold(0., |a, x| a + f32::from(*x)),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -321,6 +357,13 @@ impl DataValue {
         match self {
             DataValue::Scalar(x) => x.string_short(),
             DataValue::Array(x) => x.string_short(),
+        }
+    }
+
+    pub fn f32_for_binning(&self) -> f32 {
+        match self {
+            DataValue::Scalar(x) => x.f32_for_binning(),
+            DataValue::Array(x) => x.f32_for_binning(),
         }
     }
 }
@@ -506,12 +549,25 @@ pub struct TimeBinSimpleF32 {
     pub avg: f32,
 }
 
+#[derive(Debug, Clone)]
+pub struct TimeBinSimpleF32V01 {
+    pub series: SeriesId,
+    pub bin_len_ms: i32,
+    pub ts_msp: TsMs,
+    pub off: i32,
+    pub count: i64,
+    pub min: f32,
+    pub max: f32,
+    pub avg: f32,
+}
+
 // Needs to be Clone to send it to multiple retention times if required.
 #[derive(Debug, Clone)]
 pub enum QueryItem {
     Insert(InsertItem),
     Msp(MspItem),
     TimeBinSimpleF32(TimeBinSimpleF32),
+    TimeBinSimpleF32V01(TimeBinSimpleF32V01),
     Accounting(Accounting),
     AccountingRecv(AccountingRecv),
 }

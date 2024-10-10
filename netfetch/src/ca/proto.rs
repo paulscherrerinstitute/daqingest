@@ -330,6 +330,35 @@ impl CaEventValue {
             CaMetaValue::CaMetaVariants(_) => None,
         }
     }
+
+    pub fn f32_for_binning(&self) -> f32 {
+        match &self.data {
+            CaDataValue::Scalar(val) => {
+                use super::proto::CaDataScalarValue::*;
+                match val {
+                    I8(x) => *x as f32,
+                    I16(x) => *x as f32,
+                    I32(x) => *x as f32,
+                    F32(x) => *x as f32,
+                    F64(x) => *x as f32,
+                    Enum(x) => *x as f32,
+                    String(x) => x.len() as f32,
+                    Bool(x) => f32::from(*x),
+                }
+            }
+            CaDataValue::Array(val) => {
+                use super::proto::CaDataArrayValue::*;
+                match val {
+                    I8(x) => x.iter().fold(0., |a, x| a + *x as f32),
+                    I16(x) => x.iter().fold(0., |a, x| a + *x as f32),
+                    I32(x) => x.iter().fold(0., |a, x| a + *x as f32),
+                    F32(x) => x.iter().fold(0., |a, x| a + *x as f32),
+                    F64(x) => x.iter().fold(0., |a, x| a + *x as f32),
+                    Bool(x) => x.iter().fold(0., |a, x| a + f32::from(*x)),
+                }
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]

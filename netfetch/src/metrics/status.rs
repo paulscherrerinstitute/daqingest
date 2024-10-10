@@ -255,11 +255,16 @@ async fn channel_states_try(
                                     ChannelState::connecting_addr(st1.config, None, ConnectionState::Unreachable);
                                 states.channels.insert(k, chst);
                             }
+                            WithStatusSeriesIdStateInner::UnassigningForConfigChange(_) => {
+                                let chst = ChannelState::connecting_addr(st1.config, None, ConnectionState::Connecting);
+                                states.channels.insert(k, chst);
+                            }
                         }
                     }
                 }
             }
             ChannelStateValue::ToRemove { .. } => {}
+            ChannelStateValue::InitDummy { .. } => {}
         }
     }
     Ok(axum::Json(states))

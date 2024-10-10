@@ -37,4 +37,15 @@ impl ThrottleTrace {
             }
         }
     }
+
+    pub fn is_action(&mut self) -> bool {
+        self.count += 1;
+        let tsnow = Instant::now();
+        if self.next <= tsnow {
+            self.next = tsnow + self.ivl;
+            true
+        } else {
+            false
+        }
+    }
 }

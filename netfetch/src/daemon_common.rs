@@ -4,11 +4,11 @@ use async_channel::Sender;
 use serde::Serialize;
 
 #[derive(Clone, Debug, Serialize, PartialEq, PartialOrd, Eq, Ord, Hash)]
-pub struct Channel {
+pub struct ChannelName {
     name: String,
 }
 
-impl Channel {
+impl ChannelName {
     pub fn new(name: String) -> Self {
         Self { name }
     }
@@ -18,13 +18,14 @@ impl Channel {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub enum DaemonEvent {
     TimerTick(u32, Sender<u32>),
     ChannelAdd(ChannelConfig, crate::ca::conn::CmdResTx),
-    ChannelRemove(Channel),
+    ChannelRemove(ChannelName),
     CaConnSetItem(CaConnSetItem),
     Shutdown,
+    ConfigReload(async_channel::Sender<u64>),
 }
 
 impl DaemonEvent {
@@ -36,6 +37,7 @@ impl DaemonEvent {
             ChannelRemove(x) => format!("ChannelRemove {x:?}"),
             CaConnSetItem(_) => format!("CaConnSetItem"),
             Shutdown => format!("Shutdown"),
+            ConfigReload(..) => format!("ConfigReload"),
         }
     }
 }

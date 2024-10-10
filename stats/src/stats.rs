@@ -308,6 +308,7 @@ stats_proc::stats_struct!((
             insert_worker_join_ok_err,
             insert_worker_join_err,
             caconnset_health_response,
+            channel_send_err,
         ),
         values(
             channel_unknown_address,
@@ -402,6 +403,7 @@ stats_proc::stats_struct!((
             monitor_stale_read_timeout,
             ca_proto_no_version_as_first,
             ca_proto_version_later,
+            no_cid_for_subid,
         ),
         values(inter_ivl_ema, read_ioids_len, proto_out_len,),
         histolog2s(

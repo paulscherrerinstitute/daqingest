@@ -54,6 +54,10 @@ impl CaIngestOpts {
         self.api_bind.clone()
     }
 
+    pub fn channels(&self) -> Option<PathBuf> {
+        self.channels.clone()
+    }
+
     pub fn udp_broadcast_bind(&self) -> Option<&str> {
         self.udp_broadcast_bind.as_ref().map(String::as_str)
     }
@@ -178,61 +182,9 @@ fn test_duration_parse() {
     assert_eq!(a.dur, Duration::from_millis(3170));
 }
 
-pub async fn parse_config(config: PathBuf) -> Result<(CaIngestOpts, Option<ChannelsConfig>), Error> {
-    let mut file = OpenOptions::new().read(true).open(config).await?;
-    let mut buf = Vec::new();
-    file.read_to_end(&mut buf).await?;
-    let conf: CaIngestOpts = serde_yaml::from_slice(&buf).map_err(Error::from_string)?;
-    drop(file);
-    let re_p = regex::Regex::new(&conf.whitelist.clone().unwrap_or("--nothing-ur9nc23ur98c--".into()))?;
-    let re_n = regex::Regex::new(&conf.blacklist.clone().unwrap_or("--nothing-ksm2u98rcm28--".into()))?;
-    let channels = if let Some(fname) = conf.channels.as_ref() {
-        let meta = tokio::fs::metadata(fname).await?;
-        if meta.is_file() {
-            if fname.ends_with(".txt") {
-                Some(parse_channel_config_txt(fname, re_p, re_n).await?)
-            } else {
-                let e = Error::with_msg_no_trace(format!("unsupported channel config file {:?}", fname));
-                return Err(e);
-            }
-        } else if meta.is_dir() {
-            Some(parse_config_dir(&fname).await?)
-        } else {
-            let e = Error::with_msg_no_trace(format!("unsupported channel config input {:?}", fname));
-            return Err(e);
-        }
-    } else {
-        None
-    };
-    Ok((conf, channels))
-}
-
-async fn parse_config_dir(dir: &Path) -> Result<ChannelsConfig, Error> {
-    let mut ret = ChannelsConfig::new();
-    let mut rd = tokio::fs::read_dir(dir).await?;
-    loop {
-        let e = rd.next_entry().await?;
-        let e = if let Some(x) = e {
-            x
-        } else {
-            break;
-        };
-        let fnp = e.path();
-        let fns = fnp.to_str().unwrap();
-        if fns.ends_with(".yml") || fns.ends_with(".yaml") {
-            let buf = tokio::fs::read(e.path()).await?;
-            let conf: BTreeMap<String, ChannelConfigParse> =
-                serde_yaml::from_slice(&buf).map_err(Error::from_string)?;
-            info!("parsed {} channels from {}", conf.len(), fns);
-            ret.push_from_parsed(&conf);
-        } else {
-            debug!("ignore channel config file {:?}", e.path());
-        }
-    }
-    Ok(ret)
-}
-
-async fn parse_channel_config_txt(fname: &Path, re_p: Regex, re_n: Regex) -> Result<ChannelsConfig, Error> {
+async fn parse_channel_config_txt(fname: &Path) -> Result<ChannelsConfig, Error> {
+    let re_p = Regex::new("--------------------------").unwrap();
+    let re_n = Regex::new("--------------------------").unwrap();
     let mut file = OpenOptions::new().read(true).open(fname).await?;
     let mut buf = Vec::new();
     file.read_to_end(&mut buf).await?;
@@ -269,12 +221,70 @@ async fn parse_channel_config_txt(fname: &Path, re_p: Regex, re_n: Regex) -> Res
     Ok(conf)
 }
 
+pub async fn parse_channels(channels_dir: Option<PathBuf>) -> Result<Option<ChannelsConfig>, Error> {
+    if let Some(fname) = channels_dir.as_ref() {
+        let meta = tokio::fs::metadata(fname).await?;
+        if meta.is_file() {
+            if fname.ends_with(".txt") {
+                Ok(Some(parse_channel_config_txt(fname).await?))
+            } else {
+                let e = Error::with_msg_no_trace(format!("unsupported channel config file {:?}", fname));
+                return Err(e);
+            }
+        } else if meta.is_dir() {
+            Ok(Some(parse_config_dir(&fname).await?))
+        } else {
+            let e = Error::with_msg_no_trace(format!("unsupported channel config input {:?}", fname));
+            return Err(e);
+        }
+    } else {
+        Ok(None)
+    }
+}
+
+pub async fn parse_config(config: PathBuf) -> Result<(CaIngestOpts, Option<ChannelsConfig>), Error> {
+    let mut file = OpenOptions::new().read(true).open(config).await?;
+    let mut buf = Vec::new();
+    file.read_to_end(&mut buf).await?;
+    let conf: CaIngestOpts = serde_yaml::from_slice(&buf).map_err(Error::from_string)?;
+    drop(file);
+    // let re_p = regex::Regex::new(&conf.whitelist.clone().unwrap_or("--nothing-ur9nc23ur98c--".into()))?;
+    // let re_n = regex::Regex::new(&conf.blacklist.clone().unwrap_or("--nothing-ksm2u98rcm28--".into()))?;
+    let channels = parse_channels(conf.channels.clone()).await?;
+    Ok((conf, channels))
+}
+
+async fn parse_config_dir(dir: &Path) -> Result<ChannelsConfig, Error> {
+    let mut ret = ChannelsConfig::new();
+    let mut rd = tokio::fs::read_dir(dir).await?;
+    loop {
+        let e = rd.next_entry().await?;
+        let e = if let Some(x) = e {
+            x
+        } else {
+            break;
+        };
+        let fnp = e.path();
+        let fns = fnp.to_str().unwrap();
+        if fns.ends_with(".yml") || fns.ends_with(".yaml") {
+            let buf = tokio::fs::read(e.path()).await?;
+            let conf: BTreeMap<String, ChannelConfigParse> =
+                serde_yaml::from_slice(&buf).map_err(Error::from_string)?;
+            info!("parsed {} channels from {}", conf.len(), fns);
+            ret.push_from_parsed(&conf);
+        } else {
+            debug!("ignore channel config file {:?}", e.path());
+        }
+    }
+    Ok(ret)
+}
+
 #[derive(Debug, Deserialize)]
 pub struct ChannelConfigParse {
     archiving_configuration: IngestConfigArchiving,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ChannelTimestamp {
     Archiver,
     IOC,
@@ -286,7 +296,7 @@ impl ChannelTimestamp {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct IngestConfigArchiving {
     #[serde(default = "bool_true")]
     #[serde(with = "serde_replication_bool")]
@@ -304,6 +314,20 @@ pub struct IngestConfigArchiving {
     is_polled: bool,
     #[serde(default = "ChannelTimestamp::default_config")]
     timestamp: ChannelTimestamp,
+}
+
+impl IngestConfigArchiving {
+    // TODO remove when no longer needed
+    pub fn dummy() -> Self {
+        Self {
+            replication: false,
+            short_term: None,
+            medium_term: None,
+            long_term: None,
+            is_polled: false,
+            timestamp: ChannelTimestamp::Archiver,
+        }
+    }
 }
 
 fn bool_is_false(x: &bool) -> bool {
@@ -545,7 +569,7 @@ impl From<BTreeMap<String, ChannelConfigParse>> for ChannelsConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ChannelConfig {
     name: String,
     arch: IngestConfigArchiving,
@@ -638,6 +662,14 @@ impl ChannelConfig {
                 Some(ChannelReadConfig::Poll(x)) => x,
                 None => Duration::MAX,
             },
+        }
+    }
+
+    // TODO remove when no longer needed.
+    pub fn dummy() -> Self {
+        Self {
+            name: String::from("dummy"),
+            arch: IngestConfigArchiving::dummy(),
         }
     }
 }

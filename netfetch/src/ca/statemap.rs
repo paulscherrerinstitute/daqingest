@@ -1,6 +1,6 @@
 use crate::ca::conn::ChannelStateInfo;
 use crate::conf::ChannelConfig;
-use crate::daemon_common::Channel;
+use crate::daemon_common::ChannelName;
 use dashmap::DashMap;
 use serde::Serialize;
 use series::ChannelStatusSeriesId;
@@ -9,6 +9,7 @@ use serieswriter::fixgridwriter::ChannelStatusWriteState;
 use std::collections::btree_map::RangeMut;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::net::SocketAddrV4;
 use std::ops::RangeBounds;
 use std::time::Duration;
@@ -69,6 +70,14 @@ pub struct UnassignedState {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct UnassigningForConfigChangeState {
+    pub config_new: ChannelConfig,
+    pub addr: SocketAddr,
+    #[serde(with = "serde_helper::serde_Instant")]
+    pub since: Instant,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub enum WithStatusSeriesIdStateInner {
     AddrSearchPending {
         #[serde(with = "humantime_serde")]
@@ -87,6 +96,7 @@ pub enum WithStatusSeriesIdStateInner {
         since: SystemTime,
     },
     MaybeWrongAddress(MaybeWrongAddressState),
+    UnassigningForConfigChange(UnassigningForConfigChangeState),
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -156,22 +166,35 @@ pub enum ActiveChannelState {
 pub enum ChannelStateValue {
     Active(ActiveChannelState),
     ToRemove { addr: Option<SocketAddrV4> },
+    InitDummy,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ChannelState {
     pub value: ChannelStateValue,
     pub config: ChannelConfig,
+    pub touched: u8,
+}
+
+impl ChannelState {
+    // TODO remove when no longer needed
+    pub fn is_dummy(&self) -> bool {
+        if let ChannelStateValue::InitDummy = self.value {
+            true
+        } else {
+            false
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
 pub struct ChannelStateMap {
-    map: BTreeMap<Channel, ChannelState>,
+    map: BTreeMap<ChannelName, ChannelState>,
     #[serde(skip)]
-    map2: HashMap<Channel, ChannelState>,
+    map2: HashMap<ChannelName, ChannelState>,
     // TODO implement same interface via dashmap and compare
     #[serde(skip)]
-    map3: DashMap<Channel, ChannelState>,
+    map3: DashMap<ChannelName, ChannelState>,
 }
 
 impl ChannelStateMap {
@@ -183,20 +206,31 @@ impl ChannelStateMap {
         }
     }
 
-    pub fn insert(&mut self, k: Channel, v: ChannelState) -> Option<ChannelState> {
+    pub fn insert(&mut self, k: ChannelName, v: ChannelState) -> Option<ChannelState> {
         self.map.insert(k, v)
     }
 
-    pub fn get_mut(&mut self, k: &Channel) -> Option<&mut ChannelState> {
-        self.map.iter_mut();
+    pub fn get_mut(&mut self, k: &ChannelName) -> Option<&mut ChannelState> {
         self.map.get_mut(k)
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = (&Channel, &ChannelState)> {
+    pub fn get_mut_or_dummy_init(&mut self, k: &ChannelName) -> &mut ChannelState {
+        if !self.map.contains_key(k) {
+            let dummy = ChannelState {
+                value: ChannelStateValue::InitDummy,
+                config: ChannelConfig::dummy(),
+                touched: 0,
+            };
+            self.map.insert(k.clone(), dummy);
+        }
+        self.map.get_mut(k).unwrap()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&ChannelName, &ChannelState)> {
         self.map.iter()
     }
 
-    pub fn iter_mut(&mut self) -> impl Iterator<Item = (&Channel, &mut ChannelState)> {
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = (&ChannelName, &mut ChannelState)> {
         self.map.iter_mut()
     }
 
@@ -204,11 +238,15 @@ impl ChannelStateMap {
         todo!()
     }
 
-    pub fn range_mut<R>(&mut self, range: R) -> RangeMut<Channel, ChannelState>
+    pub fn range_mut<R>(&mut self, range: R) -> RangeMut<ChannelName, ChannelState>
     where
-        R: RangeBounds<Channel>,
+        R: RangeBounds<ChannelName>,
     {
         self.map.range_mut(range)
+    }
+
+    pub fn remove(&mut self, k: &ChannelName) -> Option<ChannelState> {
+        self.map.remove(k)
     }
 }
 
