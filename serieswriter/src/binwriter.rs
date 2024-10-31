@@ -1,5 +1,6 @@
 use err::thiserror;
 use err::ThisError;
+use items_2::binning::container_bins::ContainerBins;
 use items_2::binning::container_events::ContainerEvents;
 use items_2::binning::timeweight::timeweight_events::BinnedEventsTimeweight;
 use netpod::log::*;
@@ -32,7 +33,6 @@ macro_rules! trace_tick_verbose { ($($arg:tt)*) => ( if false { trace!($($arg)*)
 pub enum Error {
     SeriesLookupError,
     SeriesWriter(#[from] crate::writer::Error),
-    Timebin(#[from] crate::timebin::Error),
     Binning(#[from] items_2::binning::timeweight::timeweight_events::Error),
     UnsupportedBinGrid(DtMs),
 }
@@ -96,6 +96,42 @@ impl BinWriter {
         Ok(())
     }
 
+    fn handle_output_ready(&mut self, out: ContainerBins<f32>, iqdqs: &mut InsertDeques) -> Result<(), Error> {
+        let selfname = "handle_output_ready";
+        trace_tick!("{selfname}  bins ready len {}", out.len());
+        for e in out.iter_debug() {
+            trace_tick_verbose!("{e:?}");
+        }
+        for ((((((&ts1, &ts2), &cnt), &min), &max), &avg), &fnl) in out.zip_iter() {
+            if fnl == false {
+                debug!("non final bin");
+            } else if cnt == 0 {
+            } else {
+                let bin_len = DtMs::from_ms_u64(ts2.delta(ts1).ms_u64());
+                let div = if bin_len == DtMs::from_ms_u64(1000 * 10) {
+                    DtMs::from_ms_u64(1000 * 60 * 60 * 2)
+                } else {
+                    // TODO
+                    return Err(Error::UnsupportedBinGrid(bin_len));
+                };
+                let ts_msp = TsMs::from_ms_u64(ts1.ms() / div.ms() * div.ms());
+                let off = (ts1.ms() - ts_msp.ms()) / bin_len.ms();
+                let item = QueryItem::TimeBinSimpleF32V01(TimeBinSimpleF32V01 {
+                    series: self.sid.clone(),
+                    bin_len_ms: bin_len.ms() as i32,
+                    ts_msp,
+                    off: off as i32,
+                    count: cnt as i64,
+                    min,
+                    max,
+                    avg,
+                });
+                iqdqs.lt_rf3_qu.push_back(item);
+            }
+        }
+        Ok(())
+    }
+
     pub fn tick(&mut self, iqdqs: &mut InsertDeques) -> Result<(), Error> {
         if self.evbuf.len() != 0 {
             trace_tick!("tick  evbuf len {}", self.evbuf.len());
@@ -106,37 +142,7 @@ impl BinWriter {
         }
         let out = self.binner.output();
         if out.len() != 0 {
-            trace_tick!("bins ready len {}", out.len());
-            for e in out.iter_debug() {
-                trace_tick_verbose!("{e:?}");
-            }
-            for ((((((&ts1, &ts2), &cnt), &min), &max), &avg), &fnl) in out.zip_iter() {
-                if fnl == false {
-                    debug!("non final bin");
-                } else if cnt == 0 {
-                } else {
-                    let bin_len = DtMs::from_ms_u64(ts2.delta(ts1).ms_u64());
-                    let div = if bin_len == DtMs::from_ms_u64(1000 * 10) {
-                        DtMs::from_ms_u64(1000 * 60 * 60 * 2)
-                    } else {
-                        // TODO
-                        return Err(Error::UnsupportedBinGrid(bin_len));
-                    };
-                    let ts_msp = TsMs::from_ms_u64(ts1.ms() / div.ms() * div.ms());
-                    let off = (ts1.ms() - ts_msp.ms()) / bin_len.ms();
-                    let item = QueryItem::TimeBinSimpleF32V01(TimeBinSimpleF32V01 {
-                        series: self.sid.clone(),
-                        bin_len_ms: bin_len.ms() as i32,
-                        ts_msp,
-                        off: off as i32,
-                        count: cnt as i64,
-                        min,
-                        max,
-                        avg,
-                    });
-                    iqdqs.lt_rf3_qu.push_back(item);
-                }
-            }
+            self.handle_output_ready(out, iqdqs)?;
         } else {
             trace_tick_verbose!("tick  NO BINS YET");
         }
