@@ -1,23 +1,19 @@
+use crate::binwritergrid::BinWriterGrid;
+use crate::rtwriter::MinQuiets;
 use err::thiserror;
 use err::ThisError;
-use items_2::binning::container_bins::ContainerBins;
 use items_2::binning::container_events::ContainerEvents;
-use items_2::binning::timeweight::timeweight_events::BinnedEventsTimeweight;
 use netpod::log::*;
-use netpod::range::evrange::NanoRange;
 use netpod::ttl::RetentionTime;
-use netpod::BinnedRange;
 use netpod::DtMs;
 use netpod::ScalarType;
 use netpod::Shape;
-use netpod::TsMs;
 use netpod::TsNano;
 use scywr::insertqueues::InsertDeques;
-use scywr::iteminsertqueue::QueryItem;
-use scywr::iteminsertqueue::TimeBinSimpleF32V01;
 use series::ChannelStatusSeriesId;
 use series::SeriesId;
 use std::mem;
+use std::time::Duration;
 
 macro_rules! trace_ingest { ($($arg:tt)*) => ( if false { trace!($($arg)*); } ) }
 macro_rules! trace_tick { ($($arg:tt)*) => ( if false { trace!($($arg)*); } ) }
@@ -30,45 +26,60 @@ pub enum Error {
     SeriesWriter(#[from] crate::writer::Error),
     Binning(#[from] items_2::binning::timeweight::timeweight_events::Error),
     UnsupportedBinGrid(DtMs),
+    BinWriterGrid(#[from] crate::binwritergrid::Error),
 }
 
 #[derive(Debug)]
 pub struct BinWriter {
-    rt: RetentionTime,
     cssid: ChannelStatusSeriesId,
     sid: SeriesId,
     scalar_type: ScalarType,
     shape: Shape,
     evbuf: ContainerEvents<f32>,
-    binner: BinnedEventsTimeweight<f32>,
+    writers: Vec<BinWriterGrid>,
 }
 
 impl BinWriter {
     pub fn new(
         beg: TsNano,
-        rt: RetentionTime,
-        // channel_info_tx: Sender<ChannelInfoQuery>,
+        min_quiets: MinQuiets,
         cssid: ChannelStatusSeriesId,
         sid: SeriesId,
         scalar_type: ScalarType,
         shape: Shape,
     ) -> Result<Self, Error> {
-        // TODO select the desired bin width based on channel configuration:
-        // that's user knowledge, it really depends on what users want.
-        // For the moment, assume a fixed value.
-        let margin = 1000 * 1000 * 1000 * 60 * 60 * 24 * 40;
-        let end = u64::MAX - margin;
-        let range = BinnedRange::from_nano_range(NanoRange::from_ns_u64(beg.ns(), end), DtMs::from_ms_u64(1000 * 10));
-        let binner = BinnedEventsTimeweight::new(range).disable_cnt_zero();
+        let mut writers = Vec::new();
+        for (rt, dur) in [RetentionTime::Short, RetentionTime::Medium, RetentionTime::Long]
+            .into_iter()
+            .zip([min_quiets.st.clone(), min_quiets.mt.clone(), min_quiets.lt.clone()].into_iter())
+        {
+            if dur > Duration::ZERO && dur < Duration::from_millis(1000 * 60 * 60 * 24) {
+                let bin_len = if dur < Duration::from_millis(1000 * 2) {
+                    DtMs::from_ms_u64(1000 * 1)
+                } else if dur < Duration::from_millis(1000 * 20) {
+                    DtMs::from_ms_u64(1000 * 10)
+                } else if dur < Duration::from_millis(1000 * 60 * 2) {
+                    DtMs::from_ms_u64(1000 * 60 * 1)
+                } else if dur < Duration::from_millis(1000 * 60 * 20) {
+                    DtMs::from_ms_u64(1000 * 60 * 10)
+                } else if dur < Duration::from_millis(1000 * 60 * 60 * 2) {
+                    DtMs::from_ms_u64(1000 * 60 * 60 * 1)
+                } else {
+                    DtMs::from_ms_u64(1000 * 60 * 60 * 1)
+                };
+                let writer = BinWriterGrid::new(beg, rt, bin_len, cssid, sid, scalar_type.clone(), shape.clone())?;
+                writers.push(writer);
+            }
+        }
         let ret = Self {
-            rt,
             cssid,
             sid,
             scalar_type,
             shape,
             evbuf: ContainerEvents::new(),
-            binner,
+            writers,
         };
+        let _ = ret.cssid;
         Ok(ret)
     }
 
@@ -91,55 +102,19 @@ impl BinWriter {
         Ok(())
     }
 
-    fn handle_output_ready(&mut self, out: ContainerBins<f32>, iqdqs: &mut InsertDeques) -> Result<(), Error> {
-        let selfname = "handle_output_ready";
-        trace_tick!("{selfname}  bins ready len {}", out.len());
-        for e in out.iter_debug() {
-            trace_tick_verbose!("{e:?}");
-        }
-        for ((((((&ts1, &ts2), &cnt), &min), &max), &avg), &fnl) in out.zip_iter() {
-            if fnl == false {
-                debug!("non final bin");
-            } else if cnt == 0 {
-            } else {
-                let bin_len = DtMs::from_ms_u64(ts2.delta(ts1).ms_u64());
-                let div = if bin_len == DtMs::from_ms_u64(1000 * 10) {
-                    DtMs::from_ms_u64(1000 * 60 * 60 * 2)
-                } else {
-                    // TODO
-                    return Err(Error::UnsupportedBinGrid(bin_len));
-                };
-                let ts_msp = TsMs::from_ms_u64(ts1.ms() / div.ms() * div.ms());
-                let off = (ts1.ms() - ts_msp.ms()) / bin_len.ms();
-                let item = QueryItem::TimeBinSimpleF32V01(TimeBinSimpleF32V01 {
-                    series: self.sid.clone(),
-                    bin_len_ms: bin_len.ms() as i32,
-                    ts_msp,
-                    off: off as i32,
-                    count: cnt as i64,
-                    min,
-                    max,
-                    avg,
-                });
-                iqdqs.lt_rf3_qu.push_back(item);
-            }
-        }
-        Ok(())
-    }
-
     pub fn tick(&mut self, iqdqs: &mut InsertDeques) -> Result<(), Error> {
         if self.evbuf.len() != 0 {
             trace_tick!("tick  evbuf len {}", self.evbuf.len());
             let buf = mem::replace(&mut self.evbuf, ContainerEvents::new());
-            self.binner.ingest(buf)?;
+            // TODO bin the more fine grid from the coarse grid, do not clone events
+            for writer in self.writers.iter_mut() {
+                writer.ingest(buf.clone(), iqdqs)?;
+            }
         } else {
             trace_tick_verbose!("tick  NOTHING TO INGEST");
         }
-        let out = self.binner.output();
-        if out.len() != 0 {
-            self.handle_output_ready(out, iqdqs)?;
-        } else {
-            trace_tick_verbose!("tick  NO BINS YET");
+        for writer in self.writers.iter_mut() {
+            writer.tick(iqdqs)?;
         }
         Ok(())
     }

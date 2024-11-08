@@ -1424,10 +1424,9 @@ impl CaConn {
             if let ChannelState::MakingSeriesWriter(st2) = &mut conf.state {
                 let dt = stnow.duration_since(SystemTime::UNIX_EPOCH).unwrap();
                 let beg = TsNano::from_ns(SEC * dt.as_secs() + dt.subsec_nanos() as u64);
-                let a = &conf.conf.min_quiets();
                 let binwriter = BinWriter::new(
                     beg,
-                    RetentionTime::Short,
+                    conf.conf.min_quiets(),
                     st2.channel.cssid,
                     writer.series(),
                     st2.channel.scalar_type.clone(),

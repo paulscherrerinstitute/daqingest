@@ -1,24 +1,16 @@
+use core::fmt;
 use err::thiserror;
 use err::ThisError;
 use log::*;
 use netpod::TsNano;
 use scywr::iteminsertqueue::QueryItem;
 use series::SeriesId;
+pub use smallvec::SmallVec;
 use std::collections::VecDeque;
 use std::marker::PhantomData;
 use std::time::Instant;
 
-use core::fmt;
-pub use smallvec::SmallVec;
-
-#[allow(unused)]
-macro_rules! trace_emit {
-    ($det:expr, $($arg:tt)*) => {
-        if $det {
-            trace!($($arg)*);
-        }
-    };
-}
+macro_rules! trace_emit { ($det:expr, $($arg:tt)*) => ( if $det { trace!($($arg)*); } ) }
 
 #[derive(Debug)]
 pub struct EmitRes {
@@ -113,7 +105,7 @@ where
         Ok(res)
     }
 
-    pub fn tick(&mut self, deque: &mut VecDeque<QueryItem>) -> Result<(), Error> {
+    pub fn tick(&mut self, _deque: &mut VecDeque<QueryItem>) -> Result<(), Error> {
         Ok(())
     }
 }
