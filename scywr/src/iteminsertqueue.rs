@@ -548,6 +548,7 @@ pub struct TimeBinSimpleF32V02 {
     pub max: f32,
     pub avg: f32,
     pub dev: f32,
+    pub lst: f32,
 }
 
 // Needs to be Clone to send it to multiple retention times if required.

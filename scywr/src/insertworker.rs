@@ -364,6 +364,7 @@ fn prepare_timebin_v02_insert_futs(
         item.max,
         item.avg,
         item.dev,
+        item.lst,
     );
     // TODO would be better to count inserts only on completed insert
     stats.inserted_binned().inc();

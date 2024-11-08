@@ -151,8 +151,8 @@ impl DataStore {
 
         let qu_insert_binned_scalar_f32_v02 = prep_qu_ins_c!(
             "binned_scalar_f32_v02",
-            "series, binlen, msp, off, cnt, min, max, avg, dev",
-            "?, ?, ?, ?, ?, ?, ?, ?, ?",
+            "series, binlen, msp, off, cnt, min, max, avg, dev, lst",
+            "?, ?, ?, ?, ?, ?, ?, ?, ?, ?",
             rett,
             scy
         );

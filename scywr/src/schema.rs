@@ -668,12 +668,13 @@ pub async fn migrate_scylla_data_schema(
                 ("max", "float"),
                 ("avg", "float"),
                 ("dev", "float"),
+                ("lst", "float"),
             ],
             ["series", "binlen", "msp"],
             ["off"],
             rett.ttl_binned(),
         );
-        let do_change = true;
+        // let do_change = true;
         tab.setup(do_change, scy).await?;
     }
     {

@@ -92,7 +92,7 @@ impl BinWriterGrid {
         for e in out.iter_debug() {
             trace_tick_verbose!("{e:?}");
         }
-        for ((((((&ts1, &ts2), &cnt), &min), &max), &avg), &fnl) in out.zip_iter() {
+        for (((((((&ts1, &ts2), &cnt), &min), &max), &avg), &lst), &fnl) in out.zip_iter() {
             if fnl == false {
                 info!("non final bin");
             } else if cnt == 0 {
@@ -127,6 +127,7 @@ impl BinWriterGrid {
                     max,
                     avg,
                     dev: f32::NAN,
+                    lst,
                 });
                 match &self.rt {
                     RetentionTime::Short => {
