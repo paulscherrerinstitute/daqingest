@@ -15,8 +15,8 @@ bytes = "1.7.1"
 serde = { version = "1", features = ["derive"] }
 log = { path = "../log" }
 stats = { path = "../stats" }
-series = { path = "../series" }
-err = { path = "../../daqbuffer/crates/err" }
-netpod = { path = "../../daqbuffer/crates/netpod" }
+series = { path = "../../daqbuf-series", package = "daqbuf-series" }
+err = { path = "../../daqbuf-err", package = "daqbuf-err" }
+netpod = { path = "../../daqbuf-netpod", package = "daqbuf-netpod" }
 taskrun = { path = "../../daqbuffer/crates/taskrun" }
 #bitshuffle = { path = "../../daqbuffer/crates/bitshuffle" }

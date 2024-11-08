@@ -15,16 +15,16 @@ hex = "0.4.3"
 pin-project = "1"
 slidebuf = "0.0.1"
 log = { path = "../log" }
-series = { path = "../series" }
+series = { path = "../../daqbuf-series", package = "daqbuf-series" }
 stats = { path = "../stats" }
 scywr = { path = "../scywr" }
 dbpg = { path = "../dbpg" }
 ingest-linux = { path = "../ingest-linux" }
-err = { path = "../../daqbuffer/crates/err" }
-netpod = { path = "../../daqbuffer/crates/netpod" }
+err = { path = "../../daqbuf-err", package = "daqbuf-err" }
+netpod = { path = "../../daqbuf-netpod", package = "daqbuf-netpod" }
 taskrun = { path = "../../daqbuffer/crates/taskrun" }
 batchtools = { path = "../batchtools" }
-items_0 = { path = "../../daqbuffer/crates/items_0" }
-items_2 = { path = "../../daqbuffer/crates/items_2" }
-streams = { path = "../../daqbuffer/crates/streams" }
+items_0 = { path = "../../daqbuf-items-0", package = "daqbuf-items-0" }
+items_2 = { path = "../../daqbuf-items-2", package = "daqbuf-items-2" }
+streams = { path = "../../daqbuf-streams", package = "daqbuf-streams" }
 bitshuffle = { path = "../../daqbuffer/crates/bitshuffle" }

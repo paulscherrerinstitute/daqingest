@@ -144,14 +144,6 @@ pub async fn spawn_scylla_insert_workers(
     }
     for worker_ix in 0..insert_worker_count {
         let data_store = data_stores[worker_ix * data_stores.len() / insert_worker_count].clone();
-        #[cfg(DISABLED)]
-        let jh = tokio::spawn(worker(
-            worker_ix,
-            item_inp.clone(),
-            insert_worker_opts.clone(),
-            data_store,
-            store_stats.clone(),
-        ));
         let jh = tokio::spawn(worker_streamed(
             worker_ix,
             insert_worker_concurrency,

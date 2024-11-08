@@ -1,6 +1,6 @@
 [package]
 name = "batchtools"
-version = "0.0.1"
+version = "0.0.2"
 authors = ["Dominik Werder <dominik.werder@gmail.com>"]
 edition = "2021"
 
@@ -9,6 +9,6 @@ doctest = false
 
 [dependencies]
 log = { path = "../log" }
-err = { path = "../../daqbuffer/crates/err" }
+err = { path = "../../daqbuf-err", package = "daqbuf-err" }
 taskrun = { path = "../../daqbuffer/crates/taskrun" }
 async-channel = "2.1.0"

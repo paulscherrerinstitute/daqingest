@@ -27,7 +27,9 @@ pub fn main() -> Result<(), Error> {
 }
 
 async fn main_run(opts: DaqIngestOpts) -> Result<(), Error> {
-    taskrun::tokio::spawn(main_run_inner(opts)).await?
+    taskrun::tokio::spawn(main_run_inner(opts))
+        .await
+        .map_err(Error::from_string)?
 }
 
 async fn main_run_inner(opts: DaqIngestOpts) -> Result<(), Error> {
@@ -129,10 +131,10 @@ async fn main_run_inner(opts: DaqIngestOpts) -> Result<(), Error> {
             error!("log-test");
             debug!("log-test");
             trace!("log-test");
-            series::log_test();
+            netfetch::log_test();
             let _spg = tracing::span!(tracing::Level::INFO, "log_span_debug");
             _spg.in_scope(|| {
-                series::log_test();
+                netfetch::log_test();
             })
         }
         SubCmd::Ca(subcmd) => {
@@ -143,7 +145,7 @@ async fn main_run_inner(opts: DaqIngestOpts) -> Result<(), Error> {
                         .await
                         .map_err(|e| Error::from_string(e))?;
                 }
-                Get(cmd) => todo!(),
+                Get(_cmd) => todo!(),
             }
         }
     }

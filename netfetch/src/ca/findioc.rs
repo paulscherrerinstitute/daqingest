@@ -3,7 +3,6 @@ use crate::ca::proto::CaMsgTy;
 use crate::ca::proto::HeadInfo;
 use crate::throttletrace::ThrottleTrace;
 use async_channel::Receiver;
-use err::Error;
 use futures_util::Future;
 use futures_util::FutureExt;
 use futures_util::Stream;
@@ -25,13 +24,20 @@ use std::time::Instant;
 use taskrun::tokio;
 use tokio::io::unix::AsyncFd;
 
-#[allow(unused)]
-macro_rules! trace2 {
-    ($($arg:tt)*) => {
-        if true {
-            trace!($($arg)*);
-        }
-    };
+#[derive(Debug, thiserror::Error)]
+#[cstm(name = "FindIoc")]
+pub enum Error {
+    SocketCreate,
+    SocketConvertTokio,
+    BroadcastEnable,
+    NonblockEnable,
+    SocketBind,
+    SendFailure,
+    ReadFailure,
+    ReadEmpty,
+    Proto(#[from] crate::ca::proto::Error),
+    Slidebuf(#[from] slidebuf::Error),
+    IO(#[from] std::io::Error),
 }
 
 struct SockBox(c_int);
@@ -182,7 +188,7 @@ impl FindIocStream {
     unsafe fn create_socket() -> Result<SockBox, Error> {
         let ec = libc::socket(libc::AF_INET, libc::SOCK_DGRAM, 0);
         if ec == -1 {
-            return Err("can not create socket".into());
+            return Err(Error::SocketCreate);
         }
         let sock = SockBox(ec);
         {
@@ -195,13 +201,13 @@ impl FindIocStream {
                 std::mem::size_of::<libc::c_int>() as _,
             );
             if ec == -1 {
-                return Err("can not enable broadcast".into());
+                return Err(Error::BroadcastEnable);
             }
         }
         {
             let ec = libc::fcntl(sock.0, libc::F_SETFL, libc::O_NONBLOCK);
             if ec == -1 {
-                return Err("can not set nonblock".into());
+                return Err(Error::NonblockEnable);
             }
         }
         let ip: [u8; 4] = [0, 0, 0, 0];
@@ -216,7 +222,7 @@ impl FindIocStream {
         let addr_len = std::mem::size_of::<libc::sockaddr_in>();
         let ec = libc::bind(sock.0, &addr as *const _ as _, addr_len as _);
         if ec == -1 {
-            return Err("can not bind socket".into());
+            return Err(Error::SocketBind);
         }
         {
             let mut addr = libc::sockaddr_in {
@@ -229,7 +235,7 @@ impl FindIocStream {
             let ec = libc::getsockname(sock.0, &mut addr as *mut _ as _, &mut addr_len as *mut _ as _);
             if ec == -1 {
                 error!("getsockname {ec}");
-                return Err("can not convert raw socket to tokio socket".into());
+                return Err(Error::SocketConvertTokio);
             } else {
                 if true {
                     let ipv4 = Ipv4Addr::from(addr.sin_addr.s_addr.to_ne_bytes());
@@ -266,7 +272,7 @@ impl FindIocStream {
             if errno == libc::EAGAIN {
                 return Poll::Pending;
             } else {
-                return Poll::Ready(Err("FindIocStream can not send".into()));
+                return Poll::Ready(Err(Error::SendFailure));
             }
         }
         Poll::Ready(Ok(()))
@@ -293,15 +299,15 @@ impl FindIocStream {
             if errno == libc::EAGAIN {
                 return Poll::Pending;
             } else {
-                return Poll::Ready(Err("FindIocStream can not read".into()));
+                return Poll::Ready(Err(Error::ReadFailure));
             }
         } else if ec < 0 {
             stats.ca_udp_io_error().inc();
             error!("unexpected received {ec}");
-            Poll::Ready(Err(Error::with_msg_no_trace(format!("try_read  ec {ec}"))))
+            Poll::Ready(Err(Error::ReadFailure))
         } else if ec == 0 {
             stats.ca_udp_io_empty().inc();
-            Poll::Ready(Err(Error::with_msg_no_trace(format!("try_read  ec {ec}"))))
+            Poll::Ready(Err(Error::ReadEmpty))
         } else {
             stats.ca_udp_io_recv().inc();
             let saddr2: libc::sockaddr_in = std::mem::transmute_copy(&saddr_mem);
@@ -324,7 +330,7 @@ impl FindIocStream {
                 panic!();
             }
             let mut nb = slidebuf::SlideBuf::new(2048);
-            nb.put_slice(&buf[..ec as usize]).map_err(|e| e.to_string())?;
+            nb.put_slice(&buf[..ec as usize])?;
             let mut msgs = Vec::new();
             let mut accounted = 0;
             loop {
@@ -336,7 +342,7 @@ impl FindIocStream {
                     error!("incomplete message, not enough for header");
                     break;
                 }
-                let hi = HeadInfo::from_netbuf(&mut nb).map_err(|e| e.to_string())?;
+                let hi = HeadInfo::from_netbuf(&mut nb)?;
                 if hi.cmdid() == 0 && hi.payload_len() == 0 {
                 } else if hi.cmdid() == 6 && hi.payload_len() == 8 {
                 } else {
@@ -346,8 +352,8 @@ impl FindIocStream {
                     error!("incomplete message, missing payload");
                     break;
                 }
-                let msg = CaMsg::from_proto_infos(&hi, nb.data(), tsnow, 32).map_err(|e| e.to_string())?;
-                nb.adv(hi.payload_len() as usize).map_err(|e| e.to_string())?;
+                let msg = CaMsg::from_proto_infos(&hi, nb.data(), tsnow, 32)?;
+                nb.adv(hi.payload_len() as usize)?;
                 msgs.push(msg);
                 accounted += 16 + hi.payload_len();
             }
@@ -612,7 +618,7 @@ impl Stream for FindIocStream {
                     },
                     Ready(Err(e)) => {
                         error!("poll_write_ready {e}");
-                        let e = Error::from_string(e);
+                        // TODO should we abort?
                     }
                     Pending => {}
                 }
@@ -711,9 +717,8 @@ impl Stream for FindIocStream {
                     }
                 }
                 Ready(Err(e)) => {
-                    let e = Error::with_msg_no_trace(format!("{e:?}"));
                     error!("poll_read_ready {e:?}");
-                    Ready(Some(Err(e)))
+                    Ready(Some(Err(e.into())))
                 }
                 Pending => {
                     // debug!("BLOCK BB");

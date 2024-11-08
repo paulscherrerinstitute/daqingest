@@ -1,9 +1,7 @@
-use super::findioc::FindIocRes;
 use crate::ca::findioc::FindIocStream;
 use crate::conf::CaIngestOpts;
 use async_channel::Receiver;
 use async_channel::Sender;
-use err::Error;
 use futures_util::StreamExt;
 use log::*;
 use stats::IocFinderStats;
@@ -15,6 +13,13 @@ use std::sync::Arc;
 use std::time::Duration;
 use taskrun::tokio;
 use tokio::task::JoinHandle;
+
+#[derive(Debug, thiserror::Error)]
+#[cstm(name = "IocSearch")]
+pub enum Error {
+    LookupFailure(String),
+    IO(#[from] std::io::Error),
+}
 
 async fn resolve_address(addr_str: &str) -> Result<SocketAddr, Error> {
     const PORT_DEFAULT: u16 = 5064;
@@ -41,7 +46,7 @@ async fn resolve_address(addr_str: &str) -> Result<SocketAddr, Error> {
                             .into_iter()
                             .filter(|addr| if let SocketAddr::V4(_) = addr { true } else { false })
                             .next()
-                            .ok_or_else(|| Error::with_msg_no_trace(format!("can not lookup host {host}")))?,
+                            .ok_or_else(|| Error::LookupFailure(host))?,
                         Err(e) => return Err(e.into()),
                     }
                 }
@@ -57,7 +62,7 @@ pub async fn ca_search_workers_start(
 ) -> Result<
     (
         Sender<String>,
-        Receiver<Result<VecDeque<FindIocRes>, Error>>,
+        Receiver<Result<VecDeque<crate::ca::findioc::FindIocRes>, crate::ca::findioc::Error>>,
         JoinHandle<Result<(), Error>>,
     ),
     Error,
@@ -116,7 +121,10 @@ async fn search_tgts_from_opts(opts: &CaIngestOpts) -> Result<(Vec<SocketAddrV4>
     Ok((addrs, blacklist))
 }
 
-async fn finder_run(finder: FindIocStream, tx: Sender<Result<VecDeque<FindIocRes>, Error>>) -> Result<(), Error> {
+async fn finder_run(
+    finder: FindIocStream,
+    tx: Sender<Result<VecDeque<crate::ca::findioc::FindIocRes>, crate::ca::findioc::Error>>,
+) -> Result<(), Error> {
     let mut finder = Box::pin(finder);
     while let Some(item) = finder.next().await {
         if let Err(_) = tx.send(item).await {

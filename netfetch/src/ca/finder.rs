@@ -10,7 +10,6 @@ use dbpg::conn::make_pg_client;
 use dbpg::iocindex::IocItem;
 use dbpg::iocindex::IocSearchIndexWorker;
 use dbpg::postgres::Row as PgRow;
-use err::Error;
 use hashbrown::HashMap;
 use log::*;
 use netpod::Database;
@@ -24,18 +23,17 @@ use tokio::task::JoinHandle;
 
 const SEARCH_DB_PIPELINE_LEN: usize = 2;
 
-#[allow(unused)]
-macro_rules! debug_batch {
-    ($($arg:tt)*) => (if false {
-        debug!($($arg)*);
-    });
-}
+macro_rules! debug_batch { ($($arg:tt)*) => ( if false { debug!($($arg)*); } ) }
 
-#[allow(unused)]
-macro_rules! trace_batch {
-    ($($arg:tt)*) => (if false {
-        trace!($($arg)*);
-    });
+macro_rules! trace_batch { ($($arg:tt)*) => ( if false { trace!($($arg)*); } ) }
+
+#[derive(Debug, thiserror::Error)]
+#[cstm(name = "Finder")]
+pub enum Error {
+    Join(#[from] tokio::task::JoinError),
+    DbPg(#[from] dbpg::err::Error),
+    Postgres(#[from] dbpg::postgres::Error),
+    IocSearch(#[from] crate::ca::search::Error),
 }
 
 fn transform_pgres(rows: Vec<PgRow>) -> VecDeque<FindIocRes> {
@@ -145,19 +143,14 @@ async fn finder_worker_single(
     stats: Arc<IocFinderStats>,
 ) -> Result<(), Error> {
     debug!("finder_worker_single  make_pg_client");
-    let (pg, jh) = make_pg_client(&db)
-        .await
-        .map_err(|e| Error::with_msg_no_trace(e.to_string()))?;
+    let (pg, jh) = make_pg_client(&db).await?;
     let sql = concat!(
         "with q1 as (select * from unnest($2::text[]) as unn (ch))",
         " select distinct on (tt.facility, tt.channel) tt.channel, tt.addr",
         " from ioc_by_channel_log tt join q1 on tt.channel = q1.ch and tt.facility = $1 and tt.addr is not null",
         " order by tt.facility, tt.channel, tsmod desc",
     );
-    let qu_select_multi = pg
-        .prepare(sql)
-        .await
-        .map_err(|e| Error::with_msg_no_trace(e.to_string()))?;
+    let qu_select_multi = pg.prepare(sql).await?;
     let mut resdiff = 0;
     loop {
         match inp.recv().await {
@@ -235,7 +228,7 @@ async fn finder_worker_single(
         }
     }
     drop(pg);
-    jh.await?.map_err(|e| Error::from_string(e))?;
+    jh.await??;
     trace!("finder_worker_single done");
     Ok(())
 }
@@ -281,7 +274,7 @@ async fn finder_network_if_not_found(
 }
 
 async fn process_net_result(
-    net_rx: Receiver<Result<VecDeque<FindIocRes>, Error>>,
+    net_rx: Receiver<Result<VecDeque<FindIocRes>, crate::ca::findioc::Error>>,
     tx: Sender<VecDeque<FindIocRes>>,
     opts: CaIngestOpts,
 ) -> Result<(), Error> {
@@ -291,13 +284,9 @@ async fn process_net_result(
     let mut index_worker_pg_jh = Vec::new();
     for _ in 0..IOC_SEARCH_INDEX_WORKER_COUNT {
         let backend = opts.backend().into();
-        let (pg, jh) = dbpg::conn::make_pg_client(opts.postgresql_config())
-            .await
-            .map_err(Error::from_string)?;
+        let (pg, jh) = dbpg::conn::make_pg_client(opts.postgresql_config()).await?;
         index_worker_pg_jh.push(jh);
-        let worker = IocSearchIndexWorker::prepare(dbrx.clone(), backend, pg)
-            .await
-            .map_err(Error::from_string)?;
+        let worker = IocSearchIndexWorker::prepare(dbrx.clone(), backend, pg).await?;
         let jh = tokio::spawn(async move { worker.worker().await });
         ioc_search_index_worker_jhs.push(jh);
     }
@@ -332,8 +321,7 @@ async fn process_net_result(
     Ok(())
 }
 
-#[cfg(DISABLED)]
-#[allow(unused)]
+#[cfg(feature = "disabled")]
 fn start_finder_ca(tx: Sender<DaemonEvent>, tgts: Vec<SocketAddrV4>) -> (Sender<String>, JoinHandle<()>) {
     let (qtx, qrx) = async_channel::bounded(32);
     let (atx, arx) = async_channel::bounded(32);

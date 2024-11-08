@@ -19,13 +19,8 @@ use series::ChannelStatusSeriesId;
 use series::SeriesId;
 use std::mem;
 
-#[allow(unused)]
 macro_rules! trace_ingest { ($($arg:tt)*) => ( if false { trace!($($arg)*); } ) }
-
-#[allow(unused)]
 macro_rules! trace_tick { ($($arg:tt)*) => ( if false { trace!($($arg)*); } ) }
-
-#[allow(unused)]
 macro_rules! trace_tick_verbose { ($($arg:tt)*) => ( if false { trace!($($arg)*); } ) }
 
 #[derive(Debug, ThisError)]

@@ -716,7 +716,7 @@ impl Daemon {
         debug!("wait for metrics handler");
         self.metrics_shutdown_tx.send(1).await?;
         if let Some(jh) = self.metrics_jh.take() {
-            jh.await??;
+            jh.await.map_err(Error::from_string)??;
         }
         debug!("joined metrics handler");
         debug!("wait for insert workers");
@@ -771,7 +771,7 @@ pub async fn run(opts: CaIngestOpts, channels_config: Option<ChannelsConfig>) ->
             .map_err(Error::from_string)?;
         dbpg::schema::schema_check(&pg).await.map_err(Error::from_string)?;
         drop(pg);
-        jh.await?.map_err(Error::from_string)?;
+        jh.await.map_err(Error::from_string)?.map_err(Error::from_string)?;
     }
     if opts.scylla_disable() {
         warn!("scylla_disable config flag enabled");

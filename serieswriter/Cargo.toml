@@ -10,12 +10,12 @@ async-channel = "2.1.1"
 futures-util = "0.3.30"
 smallvec = "1.13.2"
 log = { path = "../log" }
-err = { path = "../../daqbuffer/crates/err" }
-netpod = { path = "../../daqbuffer/crates/netpod" }
-items_0 = { path = "../../daqbuffer/crates/items_0" }
-items_2 = { path = "../../daqbuffer/crates/items_2" }
+err = { path = "../../daqbuf-err", package = "daqbuf-err" }
+netpod = { path = "../../daqbuf-netpod", package = "daqbuf-netpod" }
+items_0 = { path = "../../daqbuf-items-0", package = "daqbuf-items-0" }
+items_2 = { path = "../../daqbuf-items-2", package = "daqbuf-items-2" }
 dbpg = { path = "../dbpg" }
 scywr = { path = "../scywr" }
-series = { path = "../series" }
+series = { path = "../../daqbuf-series", package = "daqbuf-series" }
 stats = { path = "../stats" }
 taskrun = { path = "../../daqbuffer/crates/taskrun" }

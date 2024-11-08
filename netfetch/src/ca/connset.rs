@@ -136,7 +136,7 @@ pub enum Error {
     PushCmdsNoSendInProgress(SocketAddr),
     SenderPollingSend,
     NoProgressNoPending,
-    IocFinder(::err::Error),
+    IocFinder(#[from] crate::ca::finder::Error),
     ChannelAssignedWithoutConnRess,
 }
 
@@ -453,7 +453,7 @@ pub struct CaConnSet {
     chan_check_next: Option<ChannelName>,
     stats: Arc<CaConnSetStats>,
     ca_conn_stats: Arc<CaConnStats>,
-    ioc_finder_jh: JoinHandle<Result<(), ::err::Error>>,
+    ioc_finder_jh: JoinHandle<Result<(), crate::ca::finder::Error>>,
     await_ca_conn_jhs: VecDeque<(SocketAddr, JoinHandle<Result<(), Error>>)>,
     thr_msg_poll_1: ThrottleTrace,
     thr_msg_storage_len: ThrottleTrace,
@@ -582,7 +582,7 @@ impl CaConnSet {
         trace!("join ioc_finder_jh A  {:?}", this.find_ioc_query_sender.len());
         this.find_ioc_query_sender.as_mut().drop();
         trace!("join ioc_finder_jh B  {:?}", this.find_ioc_query_sender.len());
-        this.ioc_finder_jh.await?.map_err(|e| Error::IocFinder(e))?;
+        this.ioc_finder_jh.await??;
         trace!("joined ioc_finder_jh");
         this.connset_out_tx.close();
         this.connset_inp_rx.close();
