@@ -10,11 +10,10 @@ use netpod::BinnedRange;
 use netpod::DtMs;
 use netpod::ScalarType;
 use netpod::Shape;
-use netpod::TsMs;
 use netpod::TsNano;
 use scywr::insertqueues::InsertDeques;
 use scywr::iteminsertqueue::QueryItem;
-use scywr::iteminsertqueue::TimeBinSimpleF32V01;
+use scywr::iteminsertqueue::TimeBinSimpleF32V02;
 use series::ChannelStatusSeriesId;
 use series::SeriesId;
 
@@ -114,17 +113,21 @@ impl BinWriterGrid {
                     // TODO
                     return Err(Error::UnsupportedBinGrid(bin_len));
                 };
-                let ts_msp = TsMs::from_ms_u64(ts1.ms() / div.ms() * div.ms());
-                let off = (ts1.ms() - ts_msp.ms()) / bin_len.ms();
-                let item = QueryItem::TimeBinSimpleF32V01(TimeBinSimpleF32V01 {
+                if div.ns() % bin_len.ns() != 0 {
+                    panic!("divisor not a multiple  {:?}  {:?}", bin_len, div);
+                }
+                let msp = ts1.ms() / div.ms();
+                let off = (ts1.ms() - div.ms() * msp) / bin_len.ms();
+                let item = QueryItem::TimeBinSimpleF32V02(TimeBinSimpleF32V02 {
                     series: self.sid.clone(),
-                    bin_len_ms: bin_len.ms() as i32,
-                    ts_msp,
+                    binlen: bin_len.ms() as i32,
+                    msp: msp as i64,
                     off: off as i32,
-                    count: cnt as i64,
+                    cnt: cnt as i64,
                     min,
                     max,
                     avg,
+                    dev: f32::NAN,
                 });
                 match &self.rt {
                     RetentionTime::Short => {

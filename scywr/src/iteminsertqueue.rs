@@ -538,27 +538,16 @@ impl InsertItem {
 }
 
 #[derive(Debug, Clone)]
-pub struct TimeBinSimpleF32 {
+pub struct TimeBinSimpleF32V02 {
     pub series: SeriesId,
-    pub bin_len_ms: i32,
-    pub ts_msp: TsMs,
+    pub binlen: i32,
+    pub msp: i64,
     pub off: i32,
-    pub count: i64,
+    pub cnt: i64,
     pub min: f32,
     pub max: f32,
     pub avg: f32,
-}
-
-#[derive(Debug, Clone)]
-pub struct TimeBinSimpleF32V01 {
-    pub series: SeriesId,
-    pub bin_len_ms: i32,
-    pub ts_msp: TsMs,
-    pub off: i32,
-    pub count: i64,
-    pub min: f32,
-    pub max: f32,
-    pub avg: f32,
+    pub dev: f32,
 }
 
 // Needs to be Clone to send it to multiple retention times if required.
@@ -566,8 +555,7 @@ pub struct TimeBinSimpleF32V01 {
 pub enum QueryItem {
     Insert(InsertItem),
     Msp(MspItem),
-    TimeBinSimpleF32(TimeBinSimpleF32),
-    TimeBinSimpleF32V01(TimeBinSimpleF32V01),
+    TimeBinSimpleF32V02(TimeBinSimpleF32V02),
     Accounting(Accounting),
     AccountingRecv(AccountingRecv),
 }

@@ -657,39 +657,19 @@ pub async fn migrate_scylla_data_schema(
         let tab = GenTwcsTab::new(
             ks,
             rett.table_prefix(),
-            "binned_scalar_f32",
+            "binned_scalar_f32_v02",
             &[
                 ("series", "bigint"),
-                ("bin_len_ms", "int"),
-                ("ts_msp", "bigint"),
+                ("binlen", "int"),
+                ("msp", "bigint"),
                 ("off", "int"),
-                ("count", "bigint"),
+                ("cnt", "bigint"),
                 ("min", "float"),
                 ("max", "float"),
                 ("avg", "float"),
+                ("dev", "float"),
             ],
-            ["series", "bin_len_ms", "ts_msp"],
-            ["off"],
-            rett.ttl_binned(),
-        );
-        tab.setup(do_change, scy).await?;
-    }
-    {
-        let tab = GenTwcsTab::new(
-            ks,
-            rett.table_prefix(),
-            "binned_scalar_f32_v01",
-            &[
-                ("series", "bigint"),
-                ("bin_len_ms", "int"),
-                ("ts_msp", "bigint"),
-                ("off", "int"),
-                ("count", "bigint"),
-                ("min", "float"),
-                ("max", "float"),
-                ("avg", "float"),
-            ],
-            ["series", "bin_len_ms", "ts_msp"],
+            ["series", "binlen", "msp"],
             ["off"],
             rett.ttl_binned(),
         );
