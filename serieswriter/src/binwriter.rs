@@ -62,8 +62,6 @@ impl BinWriter {
                     DtMs::from_ms_u64(1000 * 60 * 1)
                 } else if dur < Duration::from_millis(1000 * 60 * 20) {
                     DtMs::from_ms_u64(1000 * 60 * 10)
-                } else if dur < Duration::from_millis(1000 * 60 * 60 * 2) {
-                    DtMs::from_ms_u64(1000 * 60 * 60 * 1)
                 } else {
                     DtMs::from_ms_u64(1000 * 60 * 60 * 1)
                 };

@@ -202,10 +202,6 @@ async fn worker_streamed(
         let stream = stream
             .map(|x| futures_util::stream::iter(x))
             .flatten_unordered(Some(1))
-            // .map(|x| async move {
-            //     drop(x);
-            //     Ok(())
-            // })
             .buffer_unordered(concurrency);
         let mut stream = Box::pin(stream);
         debug_setup!("waiting for item");

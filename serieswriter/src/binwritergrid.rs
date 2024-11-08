@@ -110,7 +110,6 @@ impl BinWriterGrid {
                 } else if bin_len == DtMs::from_ms_u64(1000 * 60 * 60 * 1) {
                     DtMs::from_ms_u64(1000 * 60 * 60 * 24 * 28)
                 } else {
-                    // TODO
                     return Err(Error::UnsupportedBinGrid(bin_len));
                 };
                 if div.ns() % bin_len.ns() != 0 {
