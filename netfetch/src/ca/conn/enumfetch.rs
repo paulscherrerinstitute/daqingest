@@ -1,12 +1,13 @@
 use super::CaConn;
 use super::CreatedState;
 use super::Ioid;
-use crate::ca::proto::CaMsg;
-use crate::ca::proto::ReadNotify;
+use ca_proto::ca::proto;
 use dbpg::seriesbychannel::ChannelInfoQuery;
 use err::thiserror;
 use err::ThisError;
 use log::*;
+use proto::CaMsg;
+use proto::ReadNotify;
 use series::SeriesId;
 use std::pin::Pin;
 use std::time::Instant;
@@ -32,7 +33,7 @@ impl EnumFetch {
         // info!("EnumFetch::new  name {}", created_state.name());
         let dbr_ctrl_enum = 31;
         let ioid = conn.ioid_next();
-        let ty = crate::ca::proto::CaMsgTy::ReadNotify(ReadNotify {
+        let ty = proto::CaMsgTy::ReadNotify(ReadNotify {
             data_type: dbr_ctrl_enum,
             data_count: 0,
             sid: created_state.sid.to_u32(),
@@ -53,10 +54,9 @@ impl ConnFuture for EnumFetch {
     fn camsg(mut self: Pin<&mut Self>, camsg: CaMsg, conn: &mut CaConn) -> Result<(), Error> {
         let tsnow = Instant::now();
         let crst = &mut self.created_state;
-        // info!("EnumFetch::poll  name {}", crst.name());
         match camsg.ty {
-            crate::ca::proto::CaMsgTy::ReadNotifyRes(msg2) => match msg2.value.meta {
-                super::proto::CaMetaValue::CaMetaVariants(meta) => {
+            proto::CaMsgTy::ReadNotifyRes(msg2) => match msg2.value.meta {
+                proto::CaMetaValue::CaMetaVariants(meta) => {
                     crst.enum_str_table = Some(meta.variants);
                 }
                 _ => {

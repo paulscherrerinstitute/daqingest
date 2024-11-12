@@ -51,6 +51,7 @@ netpod = { path = "../../daqbuf-netpod", package = "daqbuf-netpod" }
 items_0 = { path = "../../daqbuf-items-0", package = "daqbuf-items-0" }
 items_2 = { path = "../../daqbuf-items-2", package = "daqbuf-items-2" }
 streams = { path = "../../daqbuf-streams", package = "daqbuf-streams" }
+ca_proto = { path = "../../daqbuf-ca-proto", package = "daqbuf-ca-proto" }
 taskrun = { path = "../../daqbuffer/crates/taskrun" }
 #bitshuffle = { path = "../../daqbuffer/crates/bitshuffle" }
 mrucache = { path = "../mrucache" }

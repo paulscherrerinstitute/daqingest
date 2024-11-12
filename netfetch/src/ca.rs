@@ -5,7 +5,6 @@ pub mod connset;
 pub mod connset_input_merge;
 pub mod finder;
 pub mod findioc;
-pub mod proto;
 pub mod search;
 pub mod statemap;
 

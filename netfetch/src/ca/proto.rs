@@ -1,27 +1,19 @@
-use crate::netbuf;
-use err::thiserror;
-use err::ThisError;
+use futures_util::AsyncRead;
+use futures_util::AsyncWrite;
 use futures_util::Stream;
 use log::*;
 use netpod::timeunits::*;
 use slidebuf::SlideBuf;
-use stats::CaProtoStats;
 use std::collections::VecDeque;
 use std::io;
 use std::pin::Pin;
-use std::sync::Arc;
 use std::task::Context;
 use std::task::Poll;
 use std::time::Instant;
-use taskrun::tokio;
-use tokio::io::AsyncRead;
-use tokio::io::AsyncWrite;
-use tokio::io::ReadBuf;
 
-#[derive(Debug, ThisError)]
-#[cstm(name = "NetfetchCaProto")]
+#[derive(Debug, thiserror::Error)]
+#[cstm(name = "CaProto")]
 pub enum Error {
-    NetBuf(#[from] netbuf::Error),
     SlideBuf(#[from] slidebuf::Error),
     #[error("BufferTooSmallForNeedMin({0}, {1})")]
     BufferTooSmallForNeedMin(usize, usize),
@@ -58,6 +50,85 @@ const TESTING_EVENT_ADD_RES_MAX: u32 = 3;
 
 const TESTING_PROTOCOL_ERROR_TODO_REMOVE: bool = false;
 const TESTING_PROTOCOL_ERROR_AFTER_BYTES: u32 = 400;
+
+pub trait StatsCounter {
+    fn inc(&mut self);
+}
+
+pub trait StatsCumulative {
+    fn add(&mut self, v: u64);
+}
+
+pub trait StatsHisto {
+    fn ingest(&mut self, v: u32);
+}
+
+impl StatsCounter for () {
+    fn inc(&mut self) {}
+}
+
+impl StatsCumulative for () {
+    fn add(&mut self, _v: u64) {}
+}
+
+impl StatsHisto for () {
+    fn ingest(&mut self, _v: u32) {}
+}
+
+pub trait CaProtoStatsRecv: Unpin {
+    fn out_msg_placed(&mut self) -> &mut dyn StatsCounter;
+    fn out_bytes(&mut self) -> &mut dyn StatsCumulative;
+    fn outbuf_len(&mut self) -> &mut dyn StatsHisto;
+    fn tcp_recv_count(&mut self) -> &mut dyn StatsCounter;
+    fn tcp_recv_bytes(&mut self) -> &mut dyn StatsCumulative;
+    fn payload_ext_very_large(&mut self) -> &mut dyn StatsCounter;
+    fn payload_ext_but_small(&mut self) -> &mut dyn StatsCounter;
+    fn payload_size(&mut self) -> &mut dyn StatsHisto;
+    fn protocol_issue(&mut self) -> &mut dyn StatsCounter;
+    fn data_count(&mut self) -> &mut dyn StatsHisto;
+}
+
+impl CaProtoStatsRecv for () {
+    fn out_msg_placed(&mut self) -> &mut dyn StatsCounter {
+        self
+    }
+
+    fn out_bytes(&mut self) -> &mut dyn StatsCumulative {
+        self
+    }
+
+    fn outbuf_len(&mut self) -> &mut dyn StatsHisto {
+        self
+    }
+
+    fn tcp_recv_count(&mut self) -> &mut dyn StatsCounter {
+        self
+    }
+
+    fn tcp_recv_bytes(&mut self) -> &mut dyn StatsCumulative {
+        self
+    }
+
+    fn payload_ext_very_large(&mut self) -> &mut dyn StatsCounter {
+        self
+    }
+
+    fn payload_ext_but_small(&mut self) -> &mut dyn StatsCounter {
+        self
+    }
+
+    fn payload_size(&mut self) -> &mut dyn StatsHisto {
+        self
+    }
+
+    fn protocol_issue(&mut self) -> &mut dyn StatsCounter {
+        self
+    }
+
+    fn data_count(&mut self) -> &mut dyn StatsHisto {
+        self
+    }
+}
 
 #[derive(Debug)]
 pub struct Search {
@@ -1173,7 +1244,7 @@ pub trait AsyncWriteRead: AsyncWrite + AsyncRead + Send + 'static {}
 
 impl<T> AsyncWriteRead for T where T: AsyncWrite + AsyncRead + Send + 'static {}
 
-pub struct CaProto {
+pub struct CaProto<STATS = ()> {
     tcp: Pin<Box<dyn AsyncWriteRead>>,
     tcp_eof: bool,
     remote_name: String,
@@ -1182,19 +1253,17 @@ pub struct CaProto {
     outbuf: SlideBuf,
     out: VecDeque<CaMsg>,
     array_truncate: usize,
-    stats: Arc<CaProtoStats>,
+    stats: STATS,
     resqu: VecDeque<CaItem>,
     event_add_res_cnt: u32,
     bytes_recv_testing: u32,
 }
 
-impl CaProto {
-    pub fn new<T: AsyncWriteRead>(
-        tcp: T,
-        remote_name: String,
-        array_truncate: usize,
-        stats: Arc<CaProtoStats>,
-    ) -> Self {
+impl<STATS> CaProto<STATS>
+where
+    STATS: CaProtoStatsRecv,
+{
+    pub fn new<T: AsyncWriteRead>(tcp: T, remote_name: String, array_truncate: usize, stats: STATS) -> Self {
         Self {
             tcp: Box::pin(tcp),
             tcp_eof: false,
@@ -1310,23 +1379,22 @@ impl CaProto {
             let this = self.as_mut().get_mut();
             let tcp = Pin::new(&mut this.tcp);
             let buf = this.buf.available_writable_area(need_min)?;
-            let mut rbuf = ReadBuf::new(buf);
-            if rbuf.remaining() == 0 {
+            if buf.len() == 0 {
                 return Err(Error::NoReadBufferSpace);
             }
-            break match tcp.poll_read(cx, &mut rbuf) {
+            break match tcp.poll_read(cx, buf) {
                 Ready(k) => match k {
-                    Ok(()) => {
-                        let nf = rbuf.filled().len();
+                    Ok(nf) => {
+                        // let nf = rbuf.filled().len();
                         if nf == 0 {
                             debug!("peer done  {:?}  {:?}", self.remote_name, self.state);
                             self.tcp_eof = true;
                         } else {
-                            if false {
-                                debug!("received {} bytes", rbuf.filled().len());
-                                let t = rbuf.filled().len().min(32);
-                                debug!("received data  {:?}", &rbuf.filled()[0..t]);
-                            }
+                            // if false {
+                            //     debug!("received {} bytes", nf);
+                            //     let t = nf.min(32);
+                            //     debug!("received data  {:?}", &rbuf.filled()[0..t]);
+                            // }
                             if TESTING_PROTOCOL_ERROR_TODO_REMOVE {
                                 self.bytes_recv_testing = self.bytes_recv_testing.saturating_add(nf as u32);
                                 if self.bytes_recv_testing <= TESTING_PROTOCOL_ERROR_AFTER_BYTES {
@@ -1343,8 +1411,8 @@ impl CaProto {
                                 self.buf.wadv(nf)?;
                             }
                             have_progress = true;
-                            self.stats.tcp_recv_bytes().add(nf as _);
                             self.stats.tcp_recv_count().inc();
+                            self.stats.tcp_recv_bytes().add(nf as _);
                             continue;
                         }
                     }

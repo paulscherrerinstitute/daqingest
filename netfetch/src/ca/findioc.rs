@@ -1,13 +1,14 @@
-use crate::ca::proto::CaMsg;
-use crate::ca::proto::CaMsgTy;
-use crate::ca::proto::HeadInfo;
 use crate::throttletrace::ThrottleTrace;
 use async_channel::Receiver;
+use ca_proto::ca::proto;
 use futures_util::Future;
 use futures_util::FutureExt;
 use futures_util::Stream;
 use libc::c_int;
 use log::*;
+use proto::CaMsg;
+use proto::CaMsgTy;
+use proto::HeadInfo;
 use stats::IocFinderStats;
 use std::collections::BTreeMap;
 use std::collections::VecDeque;
@@ -35,7 +36,7 @@ pub enum Error {
     SendFailure,
     ReadFailure,
     ReadEmpty,
-    Proto(#[from] crate::ca::proto::Error),
+    Proto(#[from] proto::Error),
     Slidebuf(#[from] slidebuf::Error),
     IO(#[from] std::io::Error),
 }
@@ -669,21 +670,10 @@ impl Stream for FindIocStream {
             }
             if !self.channels_input.is_closed() {
                 while self.in_flight.len() < self.in_flight_max {
-                    #[cfg(DISABLED)]
-                    {
-                        let n1 = self.in_flight.len();
-                        self.thr_msg_1.trigger("FindIocStream while A  {}", &[&n1]);
-                    }
                     let chns = self.get_input_up_to_batch_max(cx);
                     if chns.len() == 0 {
                         break;
                     } else {
-                        #[cfg(DISABLED)]
-                        {
-                            let n1 = self.in_flight.len();
-                            let n2 = chns.len();
-                            self.thr_msg_2.trigger("FindIocStream while B  {}  {}", &[&n1, &n2]);
-                        }
                         self.create_in_flight(chns);
                         have_progress = true;
                     }

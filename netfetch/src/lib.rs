@@ -8,6 +8,7 @@ pub mod netbuf;
 pub mod polltimer;
 pub mod ratelimit;
 pub mod rt;
+pub mod tcpasyncwriteread;
 #[cfg(test)]
 pub mod test;
 pub mod throttletrace;

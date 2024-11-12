@@ -1,16 +1,12 @@
 mod enumfetch;
 
-use super::proto;
-use super::proto::CaDataValue;
-use super::proto::CaEventValue;
-use super::proto::ReadNotify;
-use crate::ca::proto::ChannelClose;
-use crate::ca::proto::EventCancel;
 use crate::conf::ChannelConfig;
 use crate::metrics::status::StorageUsage;
+use crate::tcpasyncwriteread::TcpAsyncWriteRead;
 use crate::throttletrace::ThrottleTrace;
 use async_channel::Receiver;
 use async_channel::Sender;
+use ca_proto::ca::proto;
 use core::fmt;
 use dbpg::seriesbychannel::ChannelInfoQuery;
 use dbpg::seriesbychannel::ChannelInfoResult;
@@ -34,12 +30,17 @@ use netpod::Shape;
 use netpod::TsMs;
 use netpod::TsNano;
 use netpod::EMIT_ACCOUNTING_SNAP;
+use proto::CaDataValue;
+use proto::CaEventValue;
 use proto::CaItem;
 use proto::CaMsg;
 use proto::CaMsgTy;
 use proto::CaProto;
+use proto::ChannelClose;
 use proto::CreateChan;
 use proto::EventAdd;
+use proto::EventCancel;
+use proto::ReadNotify;
 use scywr::insertqueues::InsertDeques;
 use scywr::insertqueues::InsertQueuesTx;
 use scywr::insertqueues::InsertSenderPolling;
@@ -169,7 +170,7 @@ pub enum Error {
     NoProtocol,
     ProtocolError,
     IocIssue,
-    Protocol(#[from] crate::ca::proto::Error),
+    Protocol(#[from] proto::Error),
     RtWriter(#[from] serieswriter::rtwriter::Error),
     BinWriter(#[from] serieswriter::binwriter::Error),
     SeriesWriter(#[from] serieswriter::writer::Error),
@@ -2200,7 +2201,7 @@ impl CaConn {
         rng: &mut Xoshiro128PlusPlus,
     ) -> Result<(), Error> {
         {
-            use proto::CaMetaValue::*;
+            use ca_proto::ca::proto::CaMetaValue::*;
             match &value.meta {
                 CaMetaTime(meta) => {
                     if meta.status != 0 {
@@ -2286,8 +2287,8 @@ impl CaConn {
     }
 
     fn check_ev_value_data(data: &proto::CaDataValue, scalar_type: &ScalarType) -> Result<(), Error> {
-        use crate::ca::proto::CaDataScalarValue;
-        use crate::ca::proto::CaDataValue;
+        use ca_proto::ca::proto::CaDataScalarValue;
+        use ca_proto::ca::proto::CaDataValue;
         match data {
             CaDataValue::Scalar(x) => match &x {
                 CaDataScalarValue::F32(..) => match &scalar_type {
@@ -2921,10 +2922,11 @@ impl CaConn {
                                     })?;
                                     self.backoff_reset();
                                     let proto = CaProto::new(
-                                        tcp,
+                                        TcpAsyncWriteRead::from(tcp),
                                         self.remote_addr_dbg.to_string(),
                                         self.opts.array_truncate,
-                                        self.ca_proto_stats.clone(),
+                                        // self.ca_proto_stats.clone(),
+                                        (),
                                     );
                                     self.state = CaConnState::Init;
                                     self.proto = Some(proto);
@@ -3675,7 +3677,7 @@ impl CaWriterValue {
     fn new(val: CaEventValue, crst: &CreatedState) -> Self {
         let valstr = match &val.data {
             CaDataValue::Scalar(val) => {
-                use super::proto::CaDataScalarValue;
+                use ca_proto::ca::proto::CaDataScalarValue;
                 match val {
                     CaDataScalarValue::Enum(x) => {
                         let x = *x;
@@ -3748,11 +3750,11 @@ impl EmittableType for CaWriterValue {
             // debug!("diff_data    emit {:?}", state.series_data);
             let (ts_msp, ts_lsp, ts_msp_chg) = state.msp_split_data.split(ts, self.byte_size());
             let data_value = {
-                use super::proto::CaDataValue;
+                use ca_proto::ca::proto::CaDataValue;
                 use scywr::iteminsertqueue::DataValue;
                 let ret = match self.0.data {
                     CaDataValue::Scalar(val) => DataValue::Scalar({
-                        use super::proto::CaDataScalarValue;
+                        use ca_proto::ca::proto::CaDataScalarValue;
                         use scywr::iteminsertqueue::ScalarValue;
                         match val {
                             CaDataScalarValue::I8(x) => ScalarValue::I8(x),
@@ -3772,7 +3774,7 @@ impl EmittableType for CaWriterValue {
                         }
                     }),
                     CaDataValue::Array(val) => DataValue::Array({
-                        use super::proto::CaDataArrayValue;
+                        use ca_proto::ca::proto::CaDataArrayValue;
                         use scywr::iteminsertqueue::ArrayValue;
                         match val {
                             CaDataArrayValue::I8(x) => ArrayValue::I8(x),
