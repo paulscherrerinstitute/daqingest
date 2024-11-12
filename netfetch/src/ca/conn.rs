@@ -1778,8 +1778,8 @@ impl CaConn {
             return Ok(());
         };
         let dbg_chn = dbg_chn_cid(cid, self);
-        let (ch_s, ch_wrst) = if let Some(x) = self.channels.get_mut(&cid) {
-            (&mut x.state, &mut x.wrst)
+        let (ch_s, ch_wrst, ch_conf) = if let Some(x) = self.channels.get_mut(&cid) {
+            (&mut x.state, &mut x.wrst, &x.conf)
         } else {
             // TODO return better as error and let caller decide (with more structured errors)
             warn!("TODO handle_event_add_res can not find channel for  {cid:?}  {subid:?}");
@@ -1870,6 +1870,7 @@ impl CaConn {
                             iqdqs,
                             tsnow,
                             stnow,
+                            ch_conf.use_ioc_time(),
                             stats,
                             &mut self.rng,
                         )?;
@@ -1900,6 +1901,7 @@ impl CaConn {
                             iqdqs,
                             tsnow,
                             stnow,
+                            ch_conf.use_ioc_time(),
                             stats,
                             &mut self.rng,
                         )?;
@@ -2026,8 +2028,8 @@ impl CaConn {
             }
         } else {
             if let Some(cid) = self.read_ioids.get(&ioid) {
-                let (ch_s, ch_wrst) = if let Some(x) = self.channels.get_mut(cid) {
-                    (&mut x.state, &mut x.wrst)
+                let (ch_s, ch_wrst, ch_conf) = if let Some(x) = self.channels.get_mut(cid) {
+                    (&mut x.state, &mut x.wrst, &x.conf)
                 } else {
                     warn!("handle_read_notify_res can not find channel for  {cid:?}  {ioid:?}");
                     return Ok(());
@@ -2073,6 +2075,7 @@ impl CaConn {
                                         iqdqs,
                                         stnow,
                                         tsnow,
+                                        ch_conf.use_ioc_time(),
                                         stats,
                                         &mut self.rng,
                                     )?;
@@ -2126,6 +2129,7 @@ impl CaConn {
                                             iqdqs,
                                             stnow,
                                             tsnow,
+                                            ch_conf.use_ioc_time(),
                                             stats,
                                             &mut self.rng,
                                         )?;
@@ -2157,6 +2161,7 @@ impl CaConn {
         iqdqs: &mut InsertDeques,
         stnow: SystemTime,
         tsnow: Instant,
+        use_ioc_time: bool,
         stats: &CaConnStats,
         rng: &mut Xoshiro128PlusPlus,
     ) -> Result<(), Error> {
@@ -2173,6 +2178,7 @@ impl CaConn {
             iqdqs,
             tsnow,
             stnow,
+            use_ioc_time,
             stats,
             rng,
         )?;
@@ -2189,6 +2195,7 @@ impl CaConn {
         iqdqs: &mut InsertDeques,
         tsnow: Instant,
         stnow: SystemTime,
+        use_ioc_time: bool,
         stats: &CaConnStats,
         rng: &mut Xoshiro128PlusPlus,
     ) -> Result<(), Error> {
@@ -2232,13 +2239,19 @@ impl CaConn {
             stats.ca_ts_off().ingest((ts_diff / MS) as u32);
         }
         {
-            let tsev = tsev_local;
+            let tsev = if use_ioc_time {
+                if let Some(x) = value.ts() {
+                    TsNano::from_ns(x)
+                } else {
+                    tsev_local
+                }
+            } else {
+                tsev_local
+            };
             Self::check_ev_value_data(&value.data, &writer.scalar_type())?;
             crst.muted_before = 0;
             crst.insert_item_ivl_ema.tick(tsnow);
-            // let ts_ioc = TsNano::from_ns(ts);
-            // let ts_local = TsNano::from_ns(ts_local);
-            binwriter.ingest(tsev_local, value.f32_for_binning(), iqdqs)?;
+            binwriter.ingest(tsev, value.f32_for_binning(), iqdqs)?;
             {
                 let wres = writer.write(CaWriterValue::new(value, crst), tsnow, tsev, iqdqs)?;
                 crst.status_emit_count += wres.nstatus() as u64;

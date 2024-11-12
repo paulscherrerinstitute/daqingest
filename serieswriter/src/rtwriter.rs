@@ -65,6 +65,16 @@ pub struct WriteRtRes {
     pub status: u8,
 }
 
+impl Default for WriteRtRes {
+    fn default() -> Self {
+        Self {
+            accept: false,
+            bytes: 0,
+            status: 0,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct RtWriter<ET>
 where
@@ -146,25 +156,22 @@ where
         // TODO
         // Optimize for the common case that we only write into one of the stores.
         // Make the decision first, based on ref, then clone only as required.
-        let res_st = Self::write_inner(&mut self.state_st, item.clone(), ts_net, tsev, &mut iqdqs.st_rf3_qu)?;
-        let res_mt = Self::write_inner(&mut self.state_mt, item.clone(), ts_net, tsev, &mut iqdqs.mt_rf3_qu)?;
-        let res_lt = Self::write_inner(&mut self.state_lt, item, ts_net, tsev, &mut iqdqs.lt_rf3_qu)?;
+        let mut res_lt = WriteRtRes::default();
+        let mut res_mt = WriteRtRes::default();
+        let mut res_st = WriteRtRes::default();
+        if true {
+            res_lt = Self::write_inner(&mut self.state_lt, item.clone(), ts_net, tsev, &mut iqdqs.lt_rf3_qu)?;
+        }
+        if !res_lt.accept {
+            res_mt = Self::write_inner(&mut self.state_mt, item.clone(), ts_net, tsev, &mut iqdqs.mt_rf3_qu)?;
+        }
+        if !res_mt.accept {
+            res_st = Self::write_inner(&mut self.state_st, item.clone(), ts_net, tsev, &mut iqdqs.st_rf3_qu)?;
+        }
         let ret = WriteRes {
-            st: WriteRtRes {
-                accept: res_st.accept,
-                bytes: res_st.bytes,
-                status: res_st.status,
-            },
-            mt: WriteRtRes {
-                accept: res_mt.accept,
-                bytes: res_mt.bytes,
-                status: res_mt.status,
-            },
-            lt: WriteRtRes {
-                accept: res_lt.accept,
-                bytes: res_lt.bytes,
-                status: res_lt.status,
-            },
+            st: res_st,
+            mt: res_mt,
+            lt: res_lt,
         };
         Ok(ret)
     }
@@ -175,8 +182,14 @@ where
         ts_net: Instant,
         tsev: TsNano,
         deque: &mut VecDeque<QueryItem>,
-    ) -> Result<crate::ratelimitwriter::WriteRes, Error> {
-        Ok(state.writer.write(item, ts_net, tsev, deque)?)
+    ) -> Result<WriteRtRes, Error> {
+        let x = state.writer.write(item, ts_net, tsev, deque)?;
+        let ret = WriteRtRes {
+            accept: x.accept,
+            bytes: x.bytes,
+            status: x.status,
+        };
+        Ok(ret)
     }
 
     pub fn tick(&mut self, iqdqs: &mut InsertDeques) -> Result<(), Error> {

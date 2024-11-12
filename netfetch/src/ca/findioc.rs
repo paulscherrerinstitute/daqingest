@@ -734,7 +734,7 @@ impl Stream for FindIocStream {
                             if let Some(fut) = self.sleeper.as_mut() {
                                 match fut.poll_unpin(cx) {
                                     Ready(()) => {
-                                        if self.sleep_count < 0 {
+                                        if false && self.sleep_count < 10 {
                                             self.sleeper =
                                                 Some(Box::pin(tokio::time::sleep(Duration::from_millis(100))));
                                             self.sleep_count += 1;

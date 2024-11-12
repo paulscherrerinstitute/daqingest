@@ -334,10 +334,6 @@ fn bool_is_false(x: &bool) -> bool {
     *x == false
 }
 
-fn bool_is_true(x: &bool) -> bool {
-    *x == false
-}
-
 fn bool_true() -> bool {
     true
 }
@@ -662,6 +658,13 @@ impl ChannelConfig {
                 Some(ChannelReadConfig::Poll(x)) => x,
                 None => Duration::MAX,
             },
+        }
+    }
+
+    pub fn use_ioc_time(&self) -> bool {
+        match &self.arch.timestamp {
+            ChannelTimestamp::Archiver => false,
+            ChannelTimestamp::IOC => true,
         }
     }
 
