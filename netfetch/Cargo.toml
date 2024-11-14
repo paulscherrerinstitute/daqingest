@@ -26,7 +26,6 @@ regex = "1.8.4"
 axum = "0.7.5"
 http-body = "1"
 url = "2.2"
-#hyper = "1.3.1"
 chrono = "0.4"
 humantime = "2.1.0"
 humantime-serde = "1.1.1"
@@ -52,8 +51,8 @@ items_0 = { path = "../../daqbuf-items-0", package = "daqbuf-items-0" }
 items_2 = { path = "../../daqbuf-items-2", package = "daqbuf-items-2" }
 streams = { path = "../../daqbuf-streams", package = "daqbuf-streams" }
 ca_proto = { path = "../../daqbuf-ca-proto", package = "daqbuf-ca-proto" }
+ca-proto-tokio = { path = "../../daqbuf-ca-proto-tokio", package = "daqbuf-ca-proto-tokio" }
 taskrun = { path = "../../daqbuffer/crates/taskrun" }
-#bitshuffle = { path = "../../daqbuffer/crates/bitshuffle" }
 mrucache = { path = "../mrucache" }
 batchtools = { path = "../batchtools" }
 

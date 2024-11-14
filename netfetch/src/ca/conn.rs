@@ -2,11 +2,11 @@ mod enumfetch;
 
 use crate::conf::ChannelConfig;
 use crate::metrics::status::StorageUsage;
-use crate::tcpasyncwriteread::TcpAsyncWriteRead;
 use crate::throttletrace::ThrottleTrace;
 use async_channel::Receiver;
 use async_channel::Sender;
 use ca_proto::ca::proto;
+use ca_proto_tokio::tcpasyncwriteread::TcpAsyncWriteRead;
 use core::fmt;
 use dbpg::seriesbychannel::ChannelInfoQuery;
 use dbpg::seriesbychannel::ChannelInfoResult;
@@ -246,7 +246,6 @@ pub struct ChannelStateInfo {
 mod ser_instant {
     use super::*;
     use netpod::DATETIME_FMT_3MS;
-    use serde::Deserializer;
     use serde::Serializer;
 
     pub fn serialize<S>(val: &Option<Instant>, ser: S) -> Result<S::Ok, S::Error>
@@ -279,14 +278,6 @@ mod ser_instant {
             }
             None => ser.serialize_none(),
         }
-    }
-
-    pub fn deserialize<'de, D>(_de: D) -> Result<Option<Instant>, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let e = serde::de::Error::custom("todo deserialize for ser_instant");
-        Err(e)
     }
 }
 
@@ -1822,7 +1813,7 @@ impl CaConn {
                                 match x.mon2state {
                                     // actually, no differing behavior needed so far.
                                     Monitoring2State::Passive(_) => {}
-                                    Monitoring2State::ReadPending(ioid, since) => {}
+                                    Monitoring2State::ReadPending(_, _) => {}
                                 }
                                 Some(x.subid.clone())
                             }
@@ -1988,7 +1979,7 @@ impl CaConn {
                         Monitoring2State::Passive(st3) => {
                             st3.tsbeg = tsnow;
                         }
-                        Monitoring2State::ReadPending(ioid, since) => {}
+                        Monitoring2State::ReadPending(_, _) => {}
                     }
                     let name = self.name_by_cid(cid);
                     warn!("received event-cancel but channel {name:?} in wrong state");
@@ -2882,16 +2873,6 @@ impl CaConn {
     fn handle_channel_close_res(&mut self, k: proto::ChannelCloseRes, tsnow: Instant) -> Result<(), Error> {
         debug!("{:?}", k);
         Ok(())
-    }
-
-    // `?` works not in here.
-    fn _test_control_flow(&mut self, _cx: &mut Context) -> ControlFlow<Poll<Result<(), Error>>> {
-        use ControlFlow::*;
-        use Poll::*;
-        let e = Error::CreateChannelBadState;
-        // Err(e)?;
-        let _ = e;
-        Break(Pending)
     }
 
     fn handle_conn_state(&mut self, tsnow: Instant, cx: &mut Context) -> Result<Poll<Option<()>>, Error> {
