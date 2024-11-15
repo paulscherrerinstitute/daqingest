@@ -79,7 +79,7 @@ impl BinWriterGrid {
         self.shape.clone()
     }
 
-    pub fn ingest(&mut self, evs: ContainerEvents<f32>, iqdqs: &mut InsertDeques) -> Result<(), Error> {
+    pub fn ingest(&mut self, evs: &ContainerEvents<f32>, iqdqs: &mut InsertDeques) -> Result<(), Error> {
         let _ = iqdqs;
         trace_ingest!("{:?}  {:?}", self, evs);
         self.binner.ingest(evs)?;

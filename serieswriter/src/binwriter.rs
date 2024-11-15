@@ -106,7 +106,7 @@ impl BinWriter {
             let buf = mem::replace(&mut self.evbuf, ContainerEvents::new());
             // TODO bin the more fine grid from the coarse grid, do not clone events
             for writer in self.writers.iter_mut() {
-                writer.ingest(buf.clone(), iqdqs)?;
+                writer.ingest(&buf, iqdqs)?;
             }
         } else {
             trace_tick_verbose!("tick  NOTHING TO INGEST");
