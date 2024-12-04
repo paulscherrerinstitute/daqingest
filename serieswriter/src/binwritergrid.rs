@@ -86,13 +86,13 @@ impl BinWriterGrid {
         Ok(())
     }
 
-    fn handle_output_ready(&mut self, out: ContainerBins<f32>, iqdqs: &mut InsertDeques) -> Result<(), Error> {
+    fn handle_output_ready(&mut self, out: ContainerBins<f32, f32>, iqdqs: &mut InsertDeques) -> Result<(), Error> {
         let selfname = "handle_output_ready";
         trace_tick!("{selfname}  bins ready len {}", out.len());
         for e in out.iter_debug() {
             trace_tick_verbose!("{e:?}");
         }
-        for (((((((&ts1, &ts2), &cnt), &min), &max), &avg), &lst), &fnl) in out.zip_iter() {
+        for (((((((&ts1, &ts2), &cnt), min), max), avg), lst), &fnl) in out.zip_iter() {
             if fnl == false {
                 info!("non final bin");
             } else if cnt == 0 {

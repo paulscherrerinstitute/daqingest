@@ -10,11 +10,8 @@ use err::thiserror;
 use err::ThisError;
 use futures_util::StreamExt;
 use futures_util::TryStreamExt;
-use items_2::eventsdim0::EventsDim0;
-use items_2::eventsdim0::EventsDim0NoPulse;
-use items_2::eventsdim0enum::EventsDim0Enum;
-use items_2::eventsdim1::EventsDim1;
-use items_2::eventsdim1::EventsDim1NoPulse;
+use items_2::binning::container_events::ContainerEvents;
+use items_2::binning::container_events::EventValueType;
 use netpod::log::*;
 use netpod::ttl::RetentionTime;
 use netpod::EnumVariant;
@@ -283,7 +280,7 @@ async fn post_v01_try(
                 }
                 ScalarType::STRING => {
                     evpush_dim0::<String, _>(&frame, deque, &mut writer, |x| {
-                        DataValue::Scalar(ScalarValue::String(x))
+                        DataValue::Scalar(ScalarValue::String(x.into()))
                     })?;
                 }
                 ScalarType::Enum => {
@@ -351,22 +348,20 @@ fn evpush_dim0<T, F1>(
     f1: F1,
 ) -> Result<(), Error>
 where
-    T: for<'a> Deserialize<'a> + fmt::Debug + Clone,
-    F1: Fn(T) -> DataValue,
+    T: EventValueType,
+    F1: Fn(<T as EventValueType>::IterTy1<'_>) -> DataValue,
 {
-    let evs: EventsDim0NoPulse<T> = ciborium::de::from_reader(Cursor::new(frame))
+    let evs: ContainerEvents<T> = ciborium::de::from_reader(Cursor::new(frame))
         .map_err(|e| {
             error!("cbor decode error {e}");
         })
         .map_err(|_| Error::Decode)?;
-    let evs: EventsDim0<T> = evs.into();
     // trace_input!("see events {:?}", evs);
     let stnow = SystemTime::now();
     let tsev = TsNano::from_system_time(stnow);
     let tsnow = Instant::now();
     let mut emit_state = WritableTypeState::new(writer.sid());
-    for (i, (&ts, val)) in evs.tss.iter().zip(evs.values.iter()).enumerate() {
-        let ts = TsNano::from_ns(ts);
+    for (i, (ts, val)) in evs.iter_zip().enumerate() {
         let val = val.clone();
         trace_input!("ev  {:6}  {:20}  {:20?}", i, ts, val);
         let val = f1(val);
@@ -381,7 +376,7 @@ fn evpush_dim0_enum(
     deque: &mut VecDeque<QueryItem>,
     writer: &mut ValueSeriesWriter,
 ) -> Result<(), Error> {
-    let evs: EventsDim0Enum = ciborium::de::from_reader(Cursor::new(frame))
+    let evs: ContainerEvents<EnumVariant> = ciborium::de::from_reader(Cursor::new(frame))
         .map_err(|e| {
             error!("cbor decode error {e}");
         })
@@ -391,17 +386,10 @@ fn evpush_dim0_enum(
     let tsev = TsNano::from_system_time(stnow);
     let tsnow = Instant::now();
     let mut emit_state = WritableTypeState::new(writer.sid());
-    for (i, ((&ts, val), vals)) in evs
-        .tss
-        .iter()
-        .zip(evs.values.iter())
-        .zip(evs.valuestrs.iter())
-        .enumerate()
-    {
-        let ts = TsNano::from_ns(ts);
+    for (i, (ts, val)) in evs.iter_zip().enumerate() {
         let val = val.clone();
         trace_input!("ev  {:6}  {:20}  {:20?}", i, ts, val);
-        let val = DataValue::Scalar(ScalarValue::Enum(val as i16, vals.clone()));
+        let val = DataValue::Scalar(ScalarValue::Enum(val.ix as i16, val.name.into()));
         writer.write(WritableType(ts, val), &mut emit_state, tsnow, tsev, deque)?;
     }
     Ok(())
@@ -414,23 +402,21 @@ fn evpush_dim1<T, F1>(
     f1: F1,
 ) -> Result<(), Error>
 where
-    T: for<'a> Deserialize<'a> + fmt::Debug + Clone,
-    F1: Fn(Vec<T>) -> DataValue,
+    Vec<T>: EventValueType,
+    F1: Fn(<Vec<T> as EventValueType>::IterTy1<'_>) -> DataValue,
 {
-    let evs: EventsDim1NoPulse<T> = ciborium::de::from_reader(Cursor::new(frame))
+    let evs: ContainerEvents<Vec<T>> = ciborium::de::from_reader(Cursor::new(frame))
         .map_err(|e| {
             error!("cbor decode error {e}");
         })
         .map_err(|_| Error::Decode)?;
-    let evs: EventsDim1<T> = evs.into();
     trace_input!("see events {:?}", evs);
     warn!("TODO require timestamp in input format");
     let stnow = SystemTime::now();
     let tsev = TsNano::from_system_time(stnow);
     let tsnow = Instant::now();
     let mut emit_state = WritableTypeState::new(writer.sid());
-    for (i, (&ts, val)) in evs.tss.iter().zip(evs.values.iter()).enumerate() {
-        let ts = TsNano::from_ns(ts);
+    for (i, (ts, val)) in evs.iter_zip().enumerate() {
         let val = val.clone();
         trace_input!("ev  {:6}  {:20}  {:20?}", i, ts, val);
         let val = f1(val);

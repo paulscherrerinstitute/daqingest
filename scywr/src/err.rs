@@ -21,7 +21,7 @@ pub trait IntoSimplerError {
 
 impl IntoSimplerError for QueryError {
     fn into_simpler(self) -> Error {
-        let e = self;
+        let e = &self;
         match e {
             QueryError::DbError(e, msg) => match e {
                 DbError::Unavailable { .. } => Error::DbUnavailable,
@@ -31,16 +31,8 @@ impl IntoSimplerError for QueryError {
                 DbError::WriteTimeout { .. } => Error::DbTimeout,
                 _ => Error::DbError(format!("{e} {msg}")),
             },
-            QueryError::BadQuery(e) => Error::DbError(e.to_string()),
-            QueryError::IoError(e) => Error::DbError(e.to_string()),
-            QueryError::ProtocolError(e) => Error::DbError(e.to_string()),
-            QueryError::InvalidMessage(e) => Error::DbError(e.to_string()),
             QueryError::TimeoutError => Error::DbTimeout,
-            QueryError::TooManyOrphanedStreamIds(e) => Error::DbError(e.to_string()),
-            QueryError::UnableToAllocStreamId => Error::DbError(e.to_string()),
-            QueryError::RequestTimeout(e) => Error::DbError(e.to_string()),
-            QueryError::TranslationError(e) => Error::DbError(e.to_string()),
-            QueryError::CqlResponseParseError(e) => Error::DbError(e.to_string()),
+            _ => Error::DbError(e.to_string()),
         }
     }
 }

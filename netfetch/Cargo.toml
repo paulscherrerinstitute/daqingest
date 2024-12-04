@@ -34,7 +34,7 @@ lazy_static = "1"
 libc = "0.2"
 slidebuf = "0.0.1"
 dashmap = "6.0.1"
-hashbrown = "0.14.3"
+hashbrown = "0.15.2"
 smallvec = "1.13.2"
 thiserror = "=0.0.1"
 log = { path = "../log" }

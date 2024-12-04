@@ -663,7 +663,7 @@ impl InsertFut {
         Self {
             scy,
             qu,
-            fut: Box::pin(async { Err(QueryError::InvalidMessage("no longer used".into())) }),
+            fut: Box::pin(async { Err(QueryError::TimeoutError) }),
         }
     }
 }

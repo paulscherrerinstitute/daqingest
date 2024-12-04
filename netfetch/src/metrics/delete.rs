@@ -11,6 +11,7 @@ use core::fmt;
 use err::thiserror;
 use err::ThisError;
 use futures_util::StreamExt;
+use futures_util::TryStreamExt;
 use netpod::log::*;
 use netpod::ttl::RetentionTime;
 use netpod::ScalarType;
@@ -57,9 +58,9 @@ pub enum Error {
     MissingEndDate,
     ScyllaTransport(#[from] scylla::transport::errors::NewSessionError),
     ScyllaQuery(#[from] scylla::transport::errors::QueryError),
-    ScyllaRowType(#[from] scylla::transport::query_result::RowsExpectedError),
     ScyllaRowError(#[from] scylla::cql_to_rust::FromRowError),
     ScyllaNextRow(#[from] scylla::transport::iterator::NextRowError),
+    ScyllaTypeCheck(#[from] scylla::deserialize::TypeCheckError),
     InvalidTimestamp,
 }
 
@@ -157,9 +158,8 @@ async fn delete_try(
     let mut it = scy
         .execute_iter(qu.clone(), (series.to_i64(),))
         .await?
-        .into_typed::<(i64,)>();
-    while let Some(x) = it.next().await {
-        let (msp,) = x?;
+        .rows_stream::<(i64,)>()?;
+    while let Some((msp,)) = it.try_next().await? {
         let msp = TsMs::from_ms_u64(msp as _);
         let msp_ns = msp.ns_u64();
         delete_val(series.clone(), msp, beg, end, &qu_delete_val, &scy).await?;
@@ -191,10 +191,8 @@ async fn delete_val(
     let mut it = scy
         .execute_iter(qu_delete_val.clone(), params)
         .await?
-        .into_typed::<(i64,)>();
-    while let Some(x) = it.next().await {
-        let (lsp,) = x?;
-    }
+        .rows_stream::<(i64,)>()?;
+    while let Some((lsp,)) = it.try_next().await? {}
     Ok(())
 }
 

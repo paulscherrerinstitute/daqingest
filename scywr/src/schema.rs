@@ -4,11 +4,10 @@ use crate::session::ScySession;
 use err::thiserror;
 use err::ThisError;
 use futures_util::StreamExt;
+use futures_util::TryStreamExt;
 use log::*;
 use netpod::ttl::RetentionTime;
 use scylla::transport::errors::DbError;
-use scylla::transport::errors::QueryError;
-use scylla::transport::iterator::NextRowError;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::time::Duration;
@@ -18,9 +17,10 @@ use std::time::Duration;
 pub enum Error {
     NoKeyspaceChosen,
     Fmt(#[from] fmt::Error),
-    Query(#[from] QueryError),
+    Query(#[from] scylla::transport::errors::QueryError),
     NewSession(String),
-    ScyllaNextRow(#[from] NextRowError),
+    ScyllaNextRow(#[from] scylla::transport::iterator::NextRowError),
+    ScyllaTypecheck(#[from] scylla::deserialize::TypeCheckError),
     MissingData,
     AddColumnImpossible,
     BadSchema,
@@ -87,13 +87,10 @@ impl Changeset {
 
 pub async fn has_keyspace(name: &str, scy: &ScySession) -> Result<bool, Error> {
     let cql = "select keyspace_name from system_schema.keyspaces where keyspace_name = ?";
-    let mut res = scy.query_iter(cql, (name,)).await?;
-    while let Some(k) = res.next().await {
-        let row = k?;
-        if let Some(table_name) = row.columns[0].as_ref().unwrap().as_text() {
-            if table_name == name {
-                return Ok(true);
-            }
+    let mut res = scy.query_iter(cql, (name,)).await?.rows_stream::<(String,)>()?;
+    while let Some((table_name,)) = res.try_next().await? {
+        if table_name == name {
+            return Ok(true);
         }
     }
     Ok(false)
@@ -102,19 +99,17 @@ pub async fn has_keyspace(name: &str, scy: &ScySession) -> Result<bool, Error> {
 pub async fn has_table(name: &str, scy: &ScySession) -> Result<bool, Error> {
     let cql = "select table_name from system_schema.tables where keyspace_name = ?";
     let ks = scy.get_keyspace().ok_or_else(|| Error::NoKeyspaceChosen)?;
-    let mut res = scy.query_iter(cql, (ks.as_ref(),)).await?;
-    while let Some(k) = res.next().await {
-        let row = k?;
-        if let Some(table_name) = row.columns[0].as_ref().unwrap().as_text() {
-            if table_name == name {
-                return Ok(true);
-            }
+    let mut res = scy.query_iter(cql, (ks.as_ref(),)).await?.rows_stream::<(String,)>()?;
+    while let Some((table_name,)) = res.try_next().await? {
+        if table_name == name {
+            return Ok(true);
         }
     }
     Ok(false)
 }
 
 pub async fn check_table_readable(name: &str, scy: &ScySession) -> Result<bool, Error> {
+    use crate::scylla::transport::errors::QueryError;
     match scy.query_unpaged(format!("select * from {} limit 1", name), ()).await {
         Ok(_) => Ok(true),
         Err(e) => match &e {
@@ -318,7 +313,8 @@ impl GenTwcsTab {
             " from system_schema.tables where keyspace_name = ? and table_name = ?"
         );
         let x = scy.query_iter(cql, (self.keyspace(), self.name())).await?;
-        let mut it = x.into_typed::<(i32, i32, BTreeMap<String, String>)>();
+        let mut it = x.rows_stream::<(i32, i32, BTreeMap<String, String>)>()?;
+        // let mut it = x.into_typed::<(i32, i32, BTreeMap<String, String>)>();
         let mut rows = Vec::new();
         while let Some(u) = it.next().await {
             let row = u?;
@@ -369,13 +365,12 @@ impl GenTwcsTab {
         let mut it = scy
             .query_iter(cql, (self.keyspace(), self.name()))
             .await?
-            .into_typed::<(String, String)>();
+            .rows_stream::<(String, String)>()?;
         let mut names_exist = Vec::new();
         let mut types_exist = Vec::new();
-        while let Some(x) = it.next().await {
-            let row = x?;
-            names_exist.push(row.0);
-            types_exist.push(row.1);
+        while let Some((name, ty)) = it.try_next().await? {
+            names_exist.push(name);
+            types_exist.push(ty);
         }
         debug!("names_exist {:?}  types_exist {:?}", names_exist, types_exist);
         for (cn, ct) in self.col_names.iter().zip(self.col_types.iter()) {
@@ -433,13 +428,12 @@ async fn get_columns(keyspace: &str, table: &str, scy: &ScySession) -> Result<Ve
     let mut it = scy
         .query_iter(cql, (keyspace, table))
         .await?
-        .into_typed::<(String, String, String, i32, String)>();
-    while let Some(x) = it.next().await {
-        let row = x?;
+        .rows_stream::<(String, String, String, i32, String)>()?;
+    while let Some((name, ..)) = it.try_next().await? {
         // columns:
         // column_name (text)
         // type (text): text, blob, int, ...
-        ret.push(row.0);
+        ret.push(name);
     }
     Ok(ret)
 }

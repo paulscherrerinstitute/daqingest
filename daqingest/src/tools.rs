@@ -11,6 +11,7 @@ use err::ThisError;
 use futures_util::future;
 use futures_util::stream;
 use futures_util::StreamExt;
+use futures_util::TryStreamExt;
 use log::*;
 use netpod::ttl::RetentionTime;
 use netpod::Database;
@@ -36,6 +37,7 @@ pub enum Error {
     ScyllaQuery(#[from] QueryError),
     ScyllaNextRowError(#[from] NextRowError),
     ScyllaSchema(#[from] scywr::schema::Error),
+    ScyllaTypeCheck(#[from] scywr::scylla::deserialize::TypeCheckError),
     ParseError(String),
     InvalidValue,
 }
@@ -89,14 +91,15 @@ async fn remove_older_series(
         )
         .await?;
     type RowType = (i64,);
-    let mut it = it.into_typed::<RowType>();
-    while let Some(e) = it.next().await {
-        let row = e?;
-        let ts_msp = row.0;
+    let mut it = it.rows_stream::<RowType>()?;
+    while let Some((ts_msp,)) = it.try_next().await? {
         debug!("remove ts_msp {}", ts_msp);
-        let mut it = scy.execute_iter(qu_delete.clone(), (series as i64, ts_msp)).await?;
+        let mut it = scy
+            .execute_iter(qu_delete.clone(), (series as i64, ts_msp))
+            .await?
+            .rows_stream::<()>()?;
         let mut j = 0;
-        while let Some(_) = it.next().await {
+        while let Some(_) = it.try_next().await? {
             j += 1;
         }
         debug!("rows returned {}", j);
@@ -182,12 +185,11 @@ pub async fn remove_older_all_rt(ts_cut: TsMs, ks: &str, rt: RetentionTime, scy:
     let stmts = Stmts::new(ks, rt.clone(), &scy).await?;
     type RowType = (i64,);
     let it = scy.execute_iter(stmts.qu_select_series.as_ref().clone(), ()).await?;
-    let mut it = it.into_typed::<RowType>();
+    let mut it = it.rows_stream::<RowType>()?;
     let mut series_ids = Vec::with_capacity(1000000);
     let print_dt = Duration::from_millis(2000);
     let mut print_next = Instant::now() + print_dt;
-    while let Some(e) = it.next().await {
-        let row = e?;
+    while let Some(row) = it.try_next().await? {
         let series = SeriesId::new(row.0 as u64);
         series_ids.push(series);
         let tsnow = Instant::now();
@@ -219,14 +221,13 @@ async fn remove_older_all_series(ts_cut: TsMs, series: SeriesId, stmts: &Stmts, 
     let mut it = scy
         .execute_iter(stmts.qu_select_msp.clone(), (series.to_i64(),))
         .await?
-        .into_typed::<RowType>();
+        .rows_stream::<RowType>()?;
     let mut msp_last = 0;
     let mut to_remove = Vec::new();
     let mut n_keep = 0;
     let mut n_remove = 0;
     let ts2 = Instant::now();
-    while let Some(e) = it.next().await {
-        let row = e?;
+    while let Some(row) = it.try_next().await? {
         let msp = row.0 as u64;
         if msp < msp_last {
             panic!("msp ordering error  {:?}", series);
@@ -319,10 +320,9 @@ pub async fn find_older_msp(
         let mut it = scy
             .execute_iter(qu.clone(), (trbeg, trend))
             .await?
-            .into_typed::<(i64, i64)>();
+            .rows_stream::<(i64, i64)>()?;
         let mut c = 0;
-        while let Some(u) = it.next().await {
-            let row = u?;
+        while let Some(row) = it.try_next().await? {
             let series = row.0 as u64;
             let ts_msp = row.1 as u64;
             if series == 9033627543553833740 {

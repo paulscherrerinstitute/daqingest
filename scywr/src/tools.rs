@@ -1,6 +1,6 @@
 use crate::config::ScyllaIngestConfig;
 use crate::session::create_session;
-use futures_util::StreamExt;
+use futures_util::TryStreamExt;
 use log::*;
 use scylla::transport::errors::NewSessionError;
 use scylla::transport::errors::QueryError;
@@ -25,6 +25,12 @@ impl From<QueryError> for Error {
     }
 }
 
+impl From<scylla::deserialize::TypeCheckError> for Error {
+    fn from(e: scylla::deserialize::TypeCheckError) -> Self {
+        Self(err::Error::with_msg_no_trace(format!("{e:?}")))
+    }
+}
+
 pub async fn list_pkey(scylla_conf: &ScyllaIngestConfig) -> Result<(), Error> {
     let scy = create_session(scylla_conf)
         .await
@@ -39,17 +45,13 @@ pub async fn list_pkey(scylla_conf: &ScyllaIngestConfig) -> Result<(), Error> {
         let t2 = if t1 < i64::MAX - td { t1 + td } else { i64::MAX };
         let pct = (t1 - i64::MIN) as u64 / (u64::MAX / 100000);
         info!("Token range {:.2}%", pct as f32 * 1e-3);
-        let mut it = scy.execute_iter(query.clone(), (t1, t2)).await?;
-        while let Some(x) = it.next().await {
-            let r = x?;
-            if r.columns.len() < 2 {
-                warn!("see {} columns", r.columns.len());
-            } else {
-                let pulse_a_token = r.columns[0].as_ref().unwrap().as_bigint().unwrap();
-                let pulse_a = r.columns[1].as_ref().unwrap().as_bigint().unwrap();
-                info!("pulse_a_token {pulse_a_token}  pulse_a {pulse_a}");
-                pulse_a_max = pulse_a_max.max(pulse_a);
-            }
+        let mut it = scy
+            .execute_iter(query.clone(), (t1, t2))
+            .await?
+            .rows_stream::<(i64, i64)>()?;
+        while let Some((pulse_a_token, pulse_a)) = it.try_next().await? {
+            info!("pulse_a_token {pulse_a_token}  pulse_a {pulse_a}");
+            pulse_a_max = pulse_a_max.max(pulse_a);
         }
         if t2 == i64::MAX {
             info!("end of token range");
@@ -75,18 +77,12 @@ pub async fn list_pulses(scylla_conf: &ScyllaIngestConfig) -> Result<(), Error> 
         let t2 = if t1 < i64::MAX - td { t1 + td } else { i64::MAX };
         let pct = (t1 - i64::MIN) as u64 / (u64::MAX / 100000);
         info!("Token range {:.2}%", pct as f32 * 1e-3);
-        let mut it = scy.execute_iter(query.clone(), (t1, t2)).await?;
-        while let Some(x) = it.next().await {
-            let r = x?;
-            if r.columns.len() < 2 {
-                warn!("see {} columns", r.columns.len());
-            } else {
-                let tsa_token = r.columns[0].as_ref().unwrap().as_bigint().unwrap();
-                let tsa = r.columns[1].as_ref().unwrap().as_int().unwrap() as u32;
-                let tsb = r.columns[2].as_ref().unwrap().as_int().unwrap() as u32;
-                let pulse = r.columns[3].as_ref().unwrap().as_bigint().unwrap() as u64;
-                info!("tsa_token {tsa_token:21}  tsa {tsa:12}  tsb {tsb:12}  pulse {pulse:21}");
-            }
+        let mut it = scy
+            .execute_iter(query.clone(), (t1, t2))
+            .await?
+            .rows_stream::<(i64, i32, i32, i64)>()?;
+        while let Some((tsa_token, tsa, tsb, pulse)) = it.try_next().await? {
+            info!("tsa_token {tsa_token:21}  tsa {tsa:12}  tsb {tsb:12}  pulse {pulse:21}");
         }
         if t2 == i64::MAX {
             info!("end of token range");
@@ -110,20 +106,13 @@ pub async fn fetch_events(backend: &str, channel: &str, scylla_conf: &ScyllaInge
         )
         .await?;
     let mut rowcnt = 0;
-    let mut it = scy.execute_iter(qu_series.clone(), (backend, channel)).await?;
-    while let Some(x) = it.next().await {
-        let r = x?;
-        info!("Got row: {r:?}");
+    let mut it = scy
+        .execute_iter(qu_series.clone(), (backend, channel))
+        .await?
+        .rows_stream::<(i64, i32, i32, i64)>()?;
+    while let Some((tsa_token, tsa, tsb, pulse)) = it.try_next().await? {
         if false {
-            if r.columns.len() < 2 {
-                warn!("see {} columns", r.columns.len());
-            } else {
-                let tsa_token = r.columns[0].as_ref().unwrap().as_bigint().unwrap();
-                let tsa = r.columns[1].as_ref().unwrap().as_int().unwrap() as u32;
-                let tsb = r.columns[2].as_ref().unwrap().as_int().unwrap() as u32;
-                let pulse = r.columns[3].as_ref().unwrap().as_bigint().unwrap() as u64;
-                info!("tsa_token {tsa_token:21}  tsa {tsa:12}  tsb {tsb:12}  pulse {pulse:21}");
-            }
+            info!("tsa_token {tsa_token:21}  tsa {tsa:12}  tsb {tsb:12}  pulse {pulse:21}");
         }
         rowcnt += 1;
     }
