@@ -1,6 +1,5 @@
 pub mod access;
 pub mod config;
-pub mod err;
 pub mod fut;
 pub mod futbatch;
 pub mod futbatchgen;

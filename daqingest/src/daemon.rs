@@ -66,7 +66,7 @@ pub struct Daemon {
     count_unassigned: usize,
     count_assigned: usize,
     last_status_print: SystemTime,
-    insert_workers_jh: Vec<JoinHandle<Result<(), Error>>>,
+    insert_workers_jhs: Vec<JoinHandle<Result<(), scywr::insertworker::Error>>>,
     stats: Arc<DaemonStats>,
     insert_worker_stats: Arc<InsertWorkerStats>,
     series_by_channel_stats: Arc<SeriesByChannelStats>,
@@ -197,7 +197,8 @@ impl Daemon {
                 insert_worker_opts.clone(),
                 insert_worker_stats.clone(),
             )
-            .await?;
+            .await
+            .map_err(Error::from_string)?;
             insert_worker_jhs.extend(jh);
             let jh = scywr::insertworker::spawn_scylla_insert_workers_dummy(
                 ingest_opts.insert_worker_count(),
@@ -206,7 +207,8 @@ impl Daemon {
                 insert_worker_opts.clone(),
                 insert_worker_stats.clone(),
             )
-            .await?;
+            .await
+            .map_err(Error::from_string)?;
             insert_worker_jhs.extend(jh);
             let jh = scywr::insertworker::spawn_scylla_insert_workers_dummy(
                 ingest_opts.insert_worker_count(),
@@ -215,7 +217,8 @@ impl Daemon {
                 insert_worker_opts.clone(),
                 insert_worker_stats.clone(),
             )
-            .await?;
+            .await
+            .map_err(Error::from_string)?;
             insert_worker_jhs.extend(jh);
         } else {
             let jh = scywr::insertworker::spawn_scylla_insert_workers(
@@ -229,7 +232,8 @@ impl Daemon {
                 insert_worker_stats.clone(),
                 ingest_opts.use_rate_limit_queue(),
             )
-            .await?;
+            .await
+            .map_err(Error::from_string)?;
             insert_worker_jhs.extend(jh);
 
             let jh = scywr::insertworker::spawn_scylla_insert_workers(
@@ -243,7 +247,8 @@ impl Daemon {
                 insert_worker_stats.clone(),
                 ingest_opts.use_rate_limit_queue(),
             )
-            .await?;
+            .await
+            .map_err(Error::from_string)?;
             insert_worker_jhs.extend(jh);
 
             let jh = scywr::insertworker::spawn_scylla_insert_workers(
@@ -257,7 +262,8 @@ impl Daemon {
                 insert_worker_stats.clone(),
                 ingest_opts.use_rate_limit_queue(),
             )
-            .await?;
+            .await
+            .map_err(Error::from_string)?;
             insert_worker_jhs.extend(jh);
         };
         let stats = Arc::new(DaemonStats::new());
@@ -311,7 +317,7 @@ impl Daemon {
             count_unassigned: 0,
             count_assigned: 0,
             last_status_print: SystemTime::now(),
-            insert_workers_jh: insert_worker_jhs,
+            insert_workers_jhs: insert_worker_jhs,
             stats,
             insert_worker_stats,
             series_by_channel_stats,
@@ -720,7 +726,7 @@ impl Daemon {
         }
         debug!("joined metrics handler");
         debug!("wait for insert workers");
-        while let Some(jh) = self.insert_workers_jh.pop() {
+        while let Some(jh) = self.insert_workers_jhs.pop() {
             match jh.await.map_err(Error::from_string) {
                 Ok(x) => match x {
                     Ok(()) => {

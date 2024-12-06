@@ -10,14 +10,11 @@ async-channel = "2.3.1"
 scylla = "0.15.0"
 smallvec = "1.11.0"
 pin-project = "1.1.5"
-stackfuture = "0.3.0"
 bytes = "1.7.1"
 autoerr = "0.0.3"
 serde = { version = "1", features = ["derive"] }
 log = { path = "../log" }
 stats = { path = "../stats" }
 series = { path = "../../daqbuf-series", package = "daqbuf-series" }
-err = { path = "../../daqbuf-err", package = "daqbuf-err" }
 netpod = { path = "../../daqbuf-netpod", package = "daqbuf-netpod" }
 taskrun = { path = "../../daqbuffer/crates/taskrun" }
-#bitshuffle = { path = "../../daqbuffer/crates/bitshuffle" }

@@ -2,18 +2,17 @@ pub use scylla::Session;
 pub use Session as ScySession;
 
 use crate::config::ScyllaIngestConfig;
-use err::thiserror;
-use err::ThisError;
 use scylla::execution_profile::ExecutionProfileBuilder;
 use scylla::statement::Consistency;
 use scylla::transport::errors::NewSessionError;
 use std::sync::Arc;
 
-#[derive(Debug, ThisError)]
-#[cstm(name = "ScyllaSession")]
-pub enum Error {
-    NewSession(String),
-}
+autoerr::create_error_v1!(
+    name(Error, "ScyllaSession"),
+    enum variants {
+        NewSession(String),
+    },
+);
 
 impl From<NewSessionError> for Error {
     fn from(value: NewSessionError) -> Self {

@@ -47,7 +47,7 @@ where
 fn _require_unpin<T: Unpin>(_: &T) {}
 
 fn _check_unpin() {
-    let _r: &SenderPolling<String> = err::todoval();
+    let _r: &SenderPolling<String> = todo!();
     // _require_unpin(_r);
 }
 

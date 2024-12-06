@@ -5,21 +5,18 @@ use crate::senderpolling::SenderPolling;
 use async_channel::Receiver;
 use async_channel::Sender;
 use core::fmt;
-use err::thiserror;
-use err::ThisError;
-use netpod::log::*;
 use netpod::ttl::RetentionTime;
 use pin_project::pin_project;
 use std::collections::VecDeque;
 use std::pin::Pin;
 
-#[derive(Debug, ThisError)]
-#[cstm(name = "ScyllaInsertQueue")]
-pub enum Error {
-    QueuePush,
-    #[error("ChannelSend({0}, {1})")]
-    ChannelSend(RetentionTime, u8),
-}
+autoerr::create_error_v1!(
+    name(Error, "ScyllaInsertQueue"),
+    enum variants {
+        QueuePush,
+        ChannelSend(RetentionTime, u8),
+    },
+);
 
 #[derive(Clone)]
 pub struct InsertQueuesTx {

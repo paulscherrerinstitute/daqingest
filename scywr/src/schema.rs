@@ -1,8 +1,6 @@
 use crate::config::ScyllaIngestConfig;
 use crate::session::create_session_no_ks;
 use crate::session::ScySession;
-use err::thiserror;
-use err::ThisError;
 use futures_util::StreamExt;
 use futures_util::TryStreamExt;
 use log::*;
@@ -12,19 +10,20 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::time::Duration;
 
-#[derive(Debug, ThisError)]
-#[cstm(name = "ScyllaSchema")]
-pub enum Error {
-    NoKeyspaceChosen,
-    Fmt(#[from] fmt::Error),
-    Query(#[from] scylla::transport::errors::QueryError),
-    NewSession(String),
-    ScyllaNextRow(#[from] scylla::transport::iterator::NextRowError),
-    ScyllaTypecheck(#[from] scylla::deserialize::TypeCheckError),
-    MissingData,
-    AddColumnImpossible,
-    BadSchema,
-}
+autoerr::create_error_v1!(
+    name(Error, "ScyllaSchema"),
+    enum variants {
+        NoKeyspaceChosen,
+        Fmt(#[from] fmt::Error),
+        Query(#[from] scylla::transport::errors::QueryError),
+        NewSession(String),
+        ScyllaNextRow(#[from] scylla::transport::iterator::NextRowError),
+        ScyllaTypecheck(#[from] scylla::deserialize::TypeCheckError),
+        MissingData,
+        AddColumnImpossible,
+        BadSchema,
+    },
+);
 
 impl From<crate::session::Error> for Error {
     fn from(value: crate::session::Error) -> Self {

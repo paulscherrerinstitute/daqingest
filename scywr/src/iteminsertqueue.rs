@@ -3,8 +3,6 @@ pub use netpod::CONNECTION_STATUS_DIV;
 use crate::session::ScySession;
 use crate::store::DataStore;
 use bytes::BufMut;
-use err::thiserror;
-use err::ThisError;
 use futures_util::Future;
 use futures_util::FutureExt;
 use netpod::channelstatus::ChannelStatus;
@@ -33,17 +31,19 @@ use std::task::Poll;
 use std::time::Instant;
 use std::time::SystemTime;
 
-#[derive(Debug, ThisError)]
-#[cstm(name = "ScyllaItemInsertQueue")]
-pub enum Error {
-    DbTimeout,
-    DbOverload,
-    DbUnavailable,
-    DbError(#[from] DbError),
-    QueryError(#[from] QueryError),
-    GetValHelpTodoWaveform,
-    GetValHelpInnerTypeMismatch,
-}
+autoerr::create_error_v1!(
+    name(Error, "ScyllaItemInsertQueue"),
+    enum variants {
+        DbTimeout,
+        DbOverload,
+        DbUnavailable,
+        DbError(#[from] DbError),
+        QueryError(#[from] QueryError),
+        GetValHelpTodoWaveform,
+        GetValHelpInnerTypeMismatch,
+        UnknownConnectionStatus,
+    },
+);
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum ScalarValue {
@@ -427,7 +427,7 @@ impl ConnectionStatus {
         }
     }
 
-    pub fn from_kind(kind: u32) -> Result<Self, err::Error> {
+    pub fn from_kind(kind: u32) -> Result<Self, Error> {
         use ConnectionStatus::*;
         let ret = match kind {
             1 => ConnectError,
@@ -437,9 +437,7 @@ impl ConnectionStatus {
             5 => ClosedUnexpected,
             6 => ConnectionHandlerDone,
             _ => {
-                return Err(err::Error::with_msg_no_trace(format!(
-                    "unknown ConnectionStatus kind {kind}"
-                )));
+                return Err(Error::UnknownConnectionStatus);
             }
         };
         Ok(ret)

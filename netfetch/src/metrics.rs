@@ -569,37 +569,16 @@ pub async fn metrics_service(
 }
 
 pub async fn metrics_agg_task(local_stats: Arc<CaConnStats>, store_stats: Arc<CaConnStats>) -> Result<(), Error> {
+    use stats::rand_xoshiro::rand_core::RngCore;
+    let mut rng = stats::xoshiro_from_time();
     let mut agg_last = CaConnStatsAgg::new();
     loop {
-        tokio::time::sleep(Duration::from_millis(671)).await;
+        let dt = rng.next_u32();
+        tokio::time::sleep(Duration::from_millis(500 + (dt as u64 & 0x7f))).await;
         let agg = CaConnStatsAgg::new();
         agg.push(&local_stats);
         agg.push(&store_stats);
         trace!("TODO metrics_agg_task");
-        // TODO when a CaConn is closed, I'll lose the so far collected counts, which creates a jump
-        // in the metrics.
-        // To make this sound:
-        // Let CaConn keep a stats and just count.
-        // At the tick, create a snapshot: all atomics are copied after each other.
-        // Diff this new snapshot with an older snapshot and send that.
-        // Note: some stats are counters, but some are current values.
-        // e.g. the number of active channels should go down when a CaConn stops.
-        #[cfg(DISABLED)]
-        {
-            let conn_stats_guard = ingest_commons.ca_conn_set.ca_conn_ress().lock().await;
-            for (_, g) in conn_stats_guard.iter() {
-                agg.push(g.stats());
-            }
-        }
-        #[cfg(DISABLED)]
-        {
-            let mut m = METRICS.lock().unwrap();
-            *m = Some(agg.clone());
-            if false {
-                let diff = CaConnStatsAggDiff::diff_from(&agg_last, &agg);
-                info!("{}", diff.display());
-            }
-        }
         agg_last = agg;
     }
 }

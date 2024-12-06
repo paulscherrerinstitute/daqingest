@@ -11,7 +11,6 @@ use crate::iteminsertqueue::TimeBinSimpleF32V02;
 use crate::store::DataStore;
 use async_channel::Receiver;
 use atomic::AtomicU64;
-use err::Error;
 use futures_util::Stream;
 use futures_util::StreamExt;
 use log::*;
@@ -27,7 +26,6 @@ use std::time::Instant;
 use taskrun::tokio;
 use tokio::task::JoinHandle;
 
-#[allow(unused)]
 macro_rules! trace2 {
     ($($arg:tt)*) => {
         if false {
@@ -36,16 +34,6 @@ macro_rules! trace2 {
     };
 }
 
-#[allow(unused)]
-macro_rules! trace3 {
-    ($($arg:tt)*) => {
-        if false {
-            trace!($($arg)*);
-        }
-    };
-}
-
-#[allow(unused)]
 macro_rules! trace_item_execute {
     ($($arg:tt)*) => {
         if false {
@@ -54,7 +42,6 @@ macro_rules! trace_item_execute {
     };
 }
 
-#[allow(unused)]
 macro_rules! debug_setup {
     ($($arg:tt)*) => {
         if false {
@@ -62,6 +49,13 @@ macro_rules! debug_setup {
         }
     };
 }
+
+autoerr::create_error_v1!(
+    name(Error, "ScyllaInsertWorker"),
+    enum variants {
+        Store(#[from] crate::store::Error),
+    },
+);
 
 fn stats_inc_for_err(stats: &stats::InsertWorkerStats, err: &crate::iteminsertqueue::Error) {
     use crate::iteminsertqueue::Error;
@@ -88,6 +82,9 @@ fn stats_inc_for_err(stats: &stats::InsertWorkerStats, err: &crate::iteminsertqu
             stats.logic_error().inc();
         }
         Error::GetValHelpInnerTypeMismatch => {
+            stats.logic_error().inc();
+        }
+        Error::UnknownConnectionStatus => {
             stats.logic_error().inc();
         }
     }
@@ -134,11 +131,7 @@ pub async fn spawn_scylla_insert_workers(
     let mut jhs = Vec::new();
     let mut data_stores = Vec::new();
     for _ in 0..insert_scylla_sessions {
-        let data_store = Arc::new(
-            DataStore::new(&scyconf, rett.clone())
-                .await
-                .map_err(|e| Error::from(e.to_string()))?,
-        );
+        let data_store = Arc::new(DataStore::new(&scyconf, rett.clone()).await?);
         data_stores.push(data_store);
     }
     for worker_ix in 0..insert_worker_count {

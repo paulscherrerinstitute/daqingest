@@ -2,39 +2,19 @@ use crate::config::ScyllaIngestConfig;
 use crate::session::create_session;
 use futures_util::TryStreamExt;
 use log::*;
-use scylla::transport::errors::NewSessionError;
-use scylla::transport::errors::QueryError;
 
-pub struct Error(err::Error);
-
-impl err::ToErr for Error {
-    fn to_err(self) -> err::Error {
-        self.0
-    }
-}
-
-impl From<NewSessionError> for Error {
-    fn from(e: NewSessionError) -> Self {
-        Self(err::Error::with_msg_no_trace(format!("{e:?}")))
-    }
-}
-
-impl From<QueryError> for Error {
-    fn from(e: QueryError) -> Self {
-        Self(err::Error::with_msg_no_trace(format!("{e:?}")))
-    }
-}
-
-impl From<scylla::deserialize::TypeCheckError> for Error {
-    fn from(e: scylla::deserialize::TypeCheckError) -> Self {
-        Self(err::Error::with_msg_no_trace(format!("{e:?}")))
-    }
-}
+autoerr::create_error_v1!(
+    name(Error, "ScyllaTools"),
+    enum variants {
+        Session(#[from] crate::session::Error),
+        ScyllaNewSession(#[from] scylla::transport::errors::NewSessionError),
+        ScyllaQueryError(#[from] scylla::transport::errors::QueryError),
+        ScyllaTypeCheck(#[from] scylla::deserialize::TypeCheckError),
+    },
+);
 
 pub async fn list_pkey(scylla_conf: &ScyllaIngestConfig) -> Result<(), Error> {
-    let scy = create_session(scylla_conf)
-        .await
-        .map_err(|e| Error(err::Error::with_msg_no_trace(e.to_string())))?;
+    let scy = create_session(scylla_conf).await?;
     let query = scy
         .prepare("select distinct token(pulse_a), pulse_a from pulse where token(pulse_a) >= ? and token(pulse_a) <= ?")
         .await?;
@@ -65,9 +45,7 @@ pub async fn list_pkey(scylla_conf: &ScyllaIngestConfig) -> Result<(), Error> {
 }
 
 pub async fn list_pulses(scylla_conf: &ScyllaIngestConfig) -> Result<(), Error> {
-    let scy = create_session(scylla_conf)
-        .await
-        .map_err(|e| Error(err::Error::with_msg_no_trace(e.to_string())))?;
+    let scy = create_session(scylla_conf).await?;
     let query = scy
         .prepare("select token(tsa) as tsatok, tsa, tsb, pulse from pulse where token(tsa) >= ? and token(tsa) <= ?")
         .await?;
@@ -96,10 +74,10 @@ pub async fn list_pulses(scylla_conf: &ScyllaIngestConfig) -> Result<(), Error> 
 
 pub async fn fetch_events(backend: &str, channel: &str, scylla_conf: &ScyllaIngestConfig) -> Result<(), Error> {
     // TODO use the keyspace from commandline.
-    err::todo();
-    let scy = create_session(scylla_conf)
-        .await
-        .map_err(|e| Error(err::Error::with_msg_no_trace(e.to_string())))?;
+    if true {
+        todo!();
+    }
+    let scy = create_session(scylla_conf).await?;
     let qu_series = scy
         .prepare(
             "select series, scalar_type, shape_dims from series_by_channel where facility = ? and channel_name = ?",

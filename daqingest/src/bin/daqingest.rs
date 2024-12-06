@@ -33,24 +33,30 @@ async fn main_run(opts: DaqIngestOpts) -> Result<(), Error> {
 }
 
 async fn main_run_inner(opts: DaqIngestOpts) -> Result<(), Error> {
-    let buildmark = "+0008";
+    let buildmark = "+0009";
     use daqingest::opts::ChannelAccess;
     use daqingest::opts::SubCmd;
     match opts.subcmd {
         SubCmd::ListPkey => {
             // TODO must take scylla config from CLI
             let scylla_conf = err::todoval();
-            scywr::tools::list_pkey(&scylla_conf).await?
+            scywr::tools::list_pkey(&scylla_conf)
+                .await
+                .map_err(Error::from_string)?
         }
         SubCmd::ListPulses => {
             // TODO must take scylla config from CLI
             let scylla_conf = err::todoval();
-            scywr::tools::list_pulses(&scylla_conf).await?
+            scywr::tools::list_pulses(&scylla_conf)
+                .await
+                .map_err(Error::from_string)?
         }
         SubCmd::FetchEvents(k) => {
             // TODO must take scylla config from CLI
             let scylla_conf = err::todoval();
-            scywr::tools::fetch_events(&k.backend, &k.channel, &scylla_conf).await?
+            scywr::tools::fetch_events(&k.backend, &k.channel, &scylla_conf)
+                .await
+                .map_err(Error::from_string)?
         }
         SubCmd::Db(k) => {
             use daqingest::opts::DbSub;
