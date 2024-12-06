@@ -156,17 +156,17 @@ where
         // TODO
         // Optimize for the common case that we only write into one of the stores.
         // Make the decision first, based on ref, then clone only as required.
-        let mut res_lt = WriteRtRes::default();
+        let res_lt;
         let mut res_mt = WriteRtRes::default();
         let mut res_st = WriteRtRes::default();
-        if true {
+        {
             res_lt = Self::write_inner(&mut self.state_lt, item.clone(), ts_net, tsev, &mut iqdqs.lt_rf3_qu)?;
-        }
-        if !res_lt.accept {
-            res_mt = Self::write_inner(&mut self.state_mt, item.clone(), ts_net, tsev, &mut iqdqs.mt_rf3_qu)?;
-        }
-        if !res_mt.accept {
-            res_st = Self::write_inner(&mut self.state_st, item.clone(), ts_net, tsev, &mut iqdqs.st_rf3_qu)?;
+            if !res_lt.accept {
+                res_mt = Self::write_inner(&mut self.state_mt, item.clone(), ts_net, tsev, &mut iqdqs.mt_rf3_qu)?;
+                if !res_mt.accept {
+                    res_st = Self::write_inner(&mut self.state_st, item.clone(), ts_net, tsev, &mut iqdqs.st_rf3_qu)?;
+                }
+            }
         }
         let ret = WriteRes {
             st: res_st,

@@ -1,7 +1,5 @@
 use crate::config::ScyllaIngestConfig;
 use crate::session::create_session;
-use err::thiserror;
-use err::ThisError;
 use netpod::ttl::RetentionTime;
 use scylla::prepared_statement::PreparedStatement;
 use scylla::transport::errors::NewSessionError;
@@ -9,13 +7,14 @@ use scylla::transport::errors::QueryError;
 use scylla::Session as ScySession;
 use std::sync::Arc;
 
-#[derive(Debug, ThisError)]
-#[cstm(name = "ScyllaStore")]
-pub enum Error {
-    NewSessionError(#[from] NewSessionError),
-    QueryError(#[from] QueryError),
-    NewSession,
-}
+autoerr::create_error_v1!(
+    name(Error, "ScyllaStore"),
+    enum variants {
+        NewSessionError(#[from] NewSessionError),
+        QueryError(#[from] QueryError),
+        NewSession,
+    },
+);
 
 pub struct DataStore {
     pub rett: RetentionTime,

@@ -195,7 +195,7 @@ pub enum Error {
     MissingTimestamp,
     EnumFetch(#[from] enumfetch::Error),
     SeriesLookup(#[from] dbpg::seriesbychannel::Error),
-    Netpod(#[from] netpod::NetpodError),
+    Netpod(#[from] netpod::Error),
 }
 
 impl err::ToErr for Error {
