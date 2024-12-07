@@ -6,3 +6,7 @@ pub mod msptool;
 pub mod ratelimitwriter;
 pub mod rtwriter;
 pub mod writer;
+
+mod log {
+    pub use log::*;
+}

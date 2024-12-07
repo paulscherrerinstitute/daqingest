@@ -1,8 +1,6 @@
 use crate::writer::EmittableType;
 use crate::writer::SeriesWriter;
 use core::fmt;
-use err::thiserror;
-use err::ThisError;
 use netpod::log::*;
 use netpod::DtNano;
 use netpod::TsNano;
@@ -13,7 +11,6 @@ use std::marker::PhantomData;
 use std::time::Duration;
 use std::time::Instant;
 
-#[allow(unused)]
 macro_rules! trace_rt_decision {
     ($det:expr, $($arg:tt)*) => {
         if $det {
@@ -22,11 +19,12 @@ macro_rules! trace_rt_decision {
     };
 }
 
-#[derive(Debug, ThisError)]
-#[cstm(name = "RateLimitWriter")]
-pub enum Error {
-    SeriesWriter(#[from] crate::writer::Error),
-}
+autoerr::create_error_v1!(
+    name(Error, "RateLimitWriter"),
+    enum variants {
+        SeriesWriter(#[from] crate::writer::Error),
+    },
+);
 
 #[derive(Debug)]
 pub struct WriteRes {

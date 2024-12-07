@@ -9,8 +9,8 @@ serde = { version = "1.0", features = ["derive"] }
 async-channel = "2.1.1"
 futures-util = "0.3.30"
 smallvec = "1.13.2"
+autoerr = "0.0.3"
 log = { path = "../log" }
-err = { path = "../../daqbuf-err", package = "daqbuf-err" }
 netpod = { path = "../../daqbuf-netpod", package = "daqbuf-netpod" }
 items_0 = { path = "../../daqbuf-items-0", package = "daqbuf-items-0" }
 items_2 = { path = "../../daqbuf-items-2", package = "daqbuf-items-2" }

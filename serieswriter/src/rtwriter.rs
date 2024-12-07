@@ -1,8 +1,6 @@
+use crate::log::*;
 use crate::ratelimitwriter::RateLimitWriter;
 use crate::writer::EmittableType;
-use err::thiserror;
-use err::ThisError;
-use netpod::log::*;
 use netpod::ScalarType;
 use netpod::Shape;
 use netpod::TsNano;
@@ -13,7 +11,6 @@ use std::collections::VecDeque;
 use std::time::Duration;
 use std::time::Instant;
 
-#[allow(unused)]
 macro_rules! trace_emit {
     ($det:expr, $($arg:tt)*) => {
         if $det {
@@ -22,13 +19,14 @@ macro_rules! trace_emit {
     };
 }
 
-#[derive(Debug, ThisError)]
-#[cstm(name = "SerieswriterRtwriter")]
-pub enum Error {
-    SeriesLookupError,
-    SeriesWriter(#[from] crate::writer::Error),
-    RateLimitWriter(#[from] crate::ratelimitwriter::Error),
-}
+autoerr::create_error_v1!(
+    name(Error, "SerieswriterRtwriter"),
+    enum variants {
+        SeriesLookupError,
+        SeriesWriter(#[from] crate::writer::Error),
+        RateLimitWriter(#[from] crate::ratelimitwriter::Error),
+    },
+);
 
 #[derive(Debug, Clone)]
 pub struct MinQuiets {

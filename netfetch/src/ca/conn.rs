@@ -1414,8 +1414,7 @@ impl CaConn {
             // TODO refactor, should only execute this when required:
             let conf_poll_conf = conf.poll_conf();
             if let ChannelState::MakingSeriesWriter(st2) = &mut conf.state {
-                let dt = stnow.duration_since(SystemTime::UNIX_EPOCH).unwrap();
-                let beg = TsNano::from_ns(SEC * dt.as_secs() + dt.subsec_nanos() as u64);
+                let beg = TsNano::from_system_time(stnow);
                 let binwriter = BinWriter::new(
                     beg,
                     conf.conf.min_quiets(),

@@ -1,9 +1,7 @@
 use crate::binwritergrid::BinWriterGrid;
+use crate::log::*;
 use crate::rtwriter::MinQuiets;
-use err::thiserror;
-use err::ThisError;
 use items_2::binning::container_events::ContainerEvents;
-use netpod::log::*;
 use netpod::ttl::RetentionTime;
 use netpod::DtMs;
 use netpod::ScalarType;
@@ -19,15 +17,16 @@ macro_rules! trace_ingest { ($($arg:tt)*) => ( if false { trace!($($arg)*); } ) 
 macro_rules! trace_tick { ($($arg:tt)*) => ( if false { trace!($($arg)*); } ) }
 macro_rules! trace_tick_verbose { ($($arg:tt)*) => ( if false { trace!($($arg)*); } ) }
 
-#[derive(Debug, ThisError)]
-#[cstm(name = "SerieswriterBinwriter")]
-pub enum Error {
-    SeriesLookupError,
-    SeriesWriter(#[from] crate::writer::Error),
-    Binning(#[from] items_2::binning::timeweight::timeweight_events::Error),
-    UnsupportedBinGrid(DtMs),
-    BinWriterGrid(#[from] crate::binwritergrid::Error),
-}
+autoerr::create_error_v1!(
+    name(Error, "SerieswriterBinwriter"),
+    enum variants {
+        SeriesLookupError,
+        SeriesWriter(#[from] crate::writer::Error),
+        Binning(#[from] items_2::binning::timeweight::timeweight_events::Error),
+        UnsupportedBinGrid(DtMs),
+        BinWriterGrid(#[from] crate::binwritergrid::Error),
+    },
+);
 
 #[derive(Debug)]
 pub struct BinWriter {

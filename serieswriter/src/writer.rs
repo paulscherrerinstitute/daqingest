@@ -1,6 +1,4 @@
 use core::fmt;
-use err::thiserror;
-use err::ThisError;
 use log::*;
 use netpod::TsNano;
 use scywr::iteminsertqueue::QueryItem;
@@ -11,6 +9,21 @@ use std::marker::PhantomData;
 use std::time::Instant;
 
 macro_rules! trace_emit { ($det:expr, $($arg:tt)*) => ( if $det { trace!($($arg)*); } ) }
+
+autoerr::create_error_v1!(
+    name(Error, "SerieswriterWriter"),
+    enum variants {
+        DbPgSid(#[from] dbpg::seriesid::Error),
+        ChannelSendError,
+        ChannelRecvError,
+        SeriesLookupError,
+        Db(#[from] dbpg::err::Error),
+        DbSchema(#[from] dbpg::schema::Error),
+        Scy(#[from] scywr::session::Error),
+        ScySchema(#[from] scywr::schema::Error),
+        Series(#[from] dbpg::seriesbychannel::Error),
+    },
+);
 
 #[derive(Debug)]
 pub struct EmitRes {
@@ -25,20 +38,6 @@ pub trait EmittableType: fmt::Debug + Clone {
     fn has_change(&self, k: &Self) -> bool;
     fn byte_size(&self) -> u32;
     fn into_query_item(self, ts_net: Instant, tsev: TsNano, state: &mut <Self as EmittableType>::State) -> EmitRes;
-}
-
-#[derive(Debug, ThisError)]
-#[cstm(name = "SerieswriterWriter")]
-pub enum Error {
-    DbPgSid(#[from] dbpg::seriesid::Error),
-    ChannelSendError,
-    ChannelRecvError,
-    SeriesLookupError,
-    Db(#[from] dbpg::err::Error),
-    DbSchema(#[from] dbpg::schema::Error),
-    Scy(#[from] scywr::session::Error),
-    ScySchema(#[from] scywr::schema::Error),
-    Series(#[from] dbpg::seriesbychannel::Error),
 }
 
 impl<T> From<async_channel::SendError<T>> for Error {

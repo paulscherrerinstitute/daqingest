@@ -1,5 +1,3 @@
-use err::thiserror;
-use err::ThisError;
 use items_2::binning::container_bins::ContainerBins;
 use items_2::binning::container_events::ContainerEvents;
 use items_2::binning::timeweight::timeweight_events::BinnedEventsTimeweight;
@@ -21,14 +19,15 @@ macro_rules! trace_ingest { ($($arg:tt)*) => ( if false { trace!($($arg)*); } ) 
 macro_rules! trace_tick { ($($arg:tt)*) => ( if false { trace!($($arg)*); } ) }
 macro_rules! trace_tick_verbose { ($($arg:tt)*) => ( if false { trace!($($arg)*); } ) }
 
-#[derive(Debug, ThisError)]
-#[cstm(name = "SerieswriterBinwriterGrid")]
-pub enum Error {
-    SeriesLookupError,
-    SeriesWriter(#[from] crate::writer::Error),
-    Binning(#[from] items_2::binning::timeweight::timeweight_events::Error),
-    UnsupportedBinGrid(DtMs),
-}
+autoerr::create_error_v1!(
+    name(Error, "SerieswriterBinwriterGrid"),
+    enum variants {
+        SeriesLookupError,
+        SeriesWriter(#[from] crate::writer::Error),
+        Binning(#[from] items_2::binning::timeweight::timeweight_events::Error),
+        UnsupportedBinGrid(DtMs),
+    },
+);
 
 #[derive(Debug)]
 pub struct BinWriterGrid {
