@@ -171,6 +171,7 @@ pub struct FindOlder {
 
 #[derive(Debug, clap::Parser)]
 pub struct Ca {
+    #[arg(long)]
     pub broadcast: Option<String>,
     #[command(subcommand)]
     pub subcmds: CaSubcmds,

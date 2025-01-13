@@ -37,6 +37,7 @@ dashmap = "6.0.1"
 hashbrown = "0.15.2"
 smallvec = "1.13.2"
 thiserror = "=0.0.1"
+autoerr = "0.0.3"
 log = { path = "../log" }
 series = { path = "../../daqbuf-series", package = "daqbuf-series" }
 serieswriter = { path = "../serieswriter" }

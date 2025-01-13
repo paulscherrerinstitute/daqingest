@@ -21,3 +21,8 @@ pub fn log_test() {
     debug!("log-test");
     trace!("log-test");
 }
+
+pub fn dbg_chn(chn: &str) -> bool {
+    let chns = ["SINEG01:QE-B1-OP"];
+    chns.contains(&chn)
+}

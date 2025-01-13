@@ -25,21 +25,22 @@ use std::time::Instant;
 use taskrun::tokio;
 use tokio::io::unix::AsyncFd;
 
-#[derive(Debug, thiserror::Error)]
-#[cstm(name = "FindIoc")]
-pub enum Error {
-    SocketCreate,
-    SocketConvertTokio,
-    BroadcastEnable,
-    NonblockEnable,
-    SocketBind,
-    SendFailure,
-    ReadFailure,
-    ReadEmpty,
-    Proto(#[from] proto::Error),
-    Slidebuf(#[from] slidebuf::Error),
-    IO(#[from] std::io::Error),
-}
+autoerr::create_error_v1!(
+    name(Error, "FindIoc"),
+    enum variants {
+        SocketCreate,
+        SocketConvertTokio,
+        BroadcastEnable,
+        NonblockEnable,
+        SocketBind,
+        SendFailure,
+        ReadFailure,
+        ReadEmpty,
+        Proto(#[from] proto::Error),
+        Slidebuf(#[from] slidebuf::Error),
+        IO(#[from] std::io::Error),
+    },
+);
 
 struct SockBox(c_int);
 

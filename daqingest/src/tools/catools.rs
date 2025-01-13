@@ -11,16 +11,21 @@ use std::time::Duration;
 pub enum Error {}
 
 pub async fn find(cmd: CaFind, broadcast: String) -> Result<(), Error> {
+    eprintln!("{:?}", broadcast);
     let brd = broadcast.split(",");
+    let tgts = brd
+        .inspect(|x| eprintln!("try to parse: [{:?}]", x))
+        .map(|x| x.parse().unwrap())
+        .collect();
+    eprintln!("{:?}", tgts);
     let (channels_input_tx, channels_input_rx) = async_channel::bounded(10);
-    let tgts = brd.map(|x| x.parse().unwrap()).collect();
     let blacklist = Vec::new();
     let batch_run_max = Duration::from_millis(1200);
     let in_flight_max = 1;
     let batch_size = 1;
     let stats = Arc::new(IocFinderStats::new());
     channels_input_tx.send(cmd.channel).await.unwrap();
-    let mut stream = netfetch::ca::findioc::FindIocStream::new(
+    let stream = netfetch::ca::findioc::FindIocStream::new(
         channels_input_rx,
         tgts,
         blacklist,
@@ -29,6 +34,8 @@ pub async fn find(cmd: CaFind, broadcast: String) -> Result<(), Error> {
         batch_size,
         stats,
     );
+    let deadline = taskrun::tokio::time::sleep(Duration::from_millis(2000));
+    let mut stream = Box::pin(stream.take_until(deadline));
     while let Some(e) = stream.next().await {
         eprintln!("{e:?}");
     }

@@ -108,8 +108,8 @@ pub struct MaybeWrongAddressState {
 
 impl MaybeWrongAddressState {
     pub fn new(since: SystemTime, backoff_cnt: u32) -> Self {
-        let f = 1. + 10. * (backoff_cnt as f32 / 4.).tanh();
-        let dtms = 4e3_f32 * f;
+        let f = 2. + 60. * (backoff_cnt as f32 / 5.).tanh();
+        let dtms = 1e-3 * f;
         Self {
             since,
             backoff_dt: Duration::from_millis(dtms as u64),

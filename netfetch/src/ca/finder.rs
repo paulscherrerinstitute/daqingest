@@ -27,14 +27,15 @@ macro_rules! debug_batch { ($($arg:tt)*) => ( if false { debug!($($arg)*); } ) }
 
 macro_rules! trace_batch { ($($arg:tt)*) => ( if false { trace!($($arg)*); } ) }
 
-#[derive(Debug, thiserror::Error)]
-#[cstm(name = "Finder")]
-pub enum Error {
-    Join(#[from] tokio::task::JoinError),
-    DbPg(#[from] dbpg::err::Error),
-    Postgres(#[from] dbpg::postgres::Error),
-    IocSearch(#[from] crate::ca::search::Error),
-}
+autoerr::create_error_v1!(
+    name(Error, "Finder"),
+    enum variants {
+        Join(#[from] tokio::task::JoinError),
+        DbPg(#[from] dbpg::err::Error),
+        Postgres(#[from] dbpg::postgres::Error),
+        IocSearch(#[from] crate::ca::search::Error),
+    },
+);
 
 fn transform_pgres(rows: Vec<PgRow>) -> VecDeque<FindIocRes> {
     let mut ret = VecDeque::new();
@@ -147,7 +148,7 @@ async fn finder_worker_single(
     let sql = concat!(
         "with q1 as (select * from unnest($2::text[]) as unn (ch))",
         " select distinct on (tt.facility, tt.channel) tt.channel, tt.addr",
-        " from ioc_by_channel_log tt join q1 on tt.channel = q1.ch and tt.facility = $1 and tt.addr is not null",
+        " from ioc_by_channel_log tt join q1 on tt.channel = q1.ch and tt.facility = $1 and tt.archived = 0 and tt.addr is not null",
         " order by tt.facility, tt.channel, tsmod desc",
     );
     let qu_select_multi = pg.prepare(sql).await?;
@@ -155,6 +156,9 @@ async fn finder_worker_single(
     loop {
         match inp.recv().await {
             Ok(batch) => {
+                if batch.iter().filter(|x| crate::dbg_chn(x.name())).next().is_some() {
+                    info!("SEARCHING FOR DBG");
+                };
                 stats.dbsearcher_batch_recv().inc();
                 stats.dbsearcher_item_recv().add(batch.len() as _);
                 let ts1 = Instant::now();
@@ -202,6 +206,11 @@ async fn finder_worker_single(
                         let items = items;
                         for e in &items {
                             trace!("found in database: {e:?}");
+                        }
+                        for e in items.iter() {
+                            if crate::dbg_chn(&e.channel) {
+                                info!("FOUND {e:?}");
+                            }
                         }
                         let items_len = items.len();
                         if items_len != nbatch {
