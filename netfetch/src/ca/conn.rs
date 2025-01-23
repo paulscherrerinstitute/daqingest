@@ -11,8 +11,6 @@ use core::fmt;
 use dbpg::seriesbychannel::ChannelInfoQuery;
 use dbpg::seriesbychannel::ChannelInfoResult;
 use enumfetch::ConnFuture;
-use err::thiserror;
-use err::ThisError;
 use futures_util::Future;
 use futures_util::FutureExt;
 use futures_util::Stream;
@@ -22,7 +20,6 @@ use log::*;
 use netpod::channelstatus::ChannelStatus;
 use netpod::channelstatus::ChannelStatusClosedReason;
 use netpod::timeunits::*;
-use netpod::trigger;
 use netpod::ttl::RetentionTime;
 use netpod::ScalarType;
 use netpod::SeriesKind;
@@ -72,7 +69,6 @@ use stats::IntervalEma;
 use std::collections::BTreeMap;
 use std::collections::VecDeque;
 use std::net::SocketAddrV4;
-use std::ops::ControlFlow;
 use std::pin::Pin;
 use std::sync::atomic;
 use std::sync::atomic::AtomicUsize;
@@ -150,13 +146,9 @@ macro_rules! trace_monitor_stale {
     };
 }
 
-fn dbg_chn_name(name: impl AsRef<str>) -> bool {
-    name.as_ref() == "SINSB02-KCOL-ACT:V-EY21700-MAN-ON-SP"
-}
-
 fn dbg_chn_cid(cid: Cid, conn: &CaConn) -> bool {
     if let Some(name) = conn.name_by_cid(cid) {
-        dbg_chn_name(name)
+        series::dbg::dbg_chn(name)
     } else {
         false
     }
@@ -164,39 +156,37 @@ fn dbg_chn_cid(cid: Cid, conn: &CaConn) -> bool {
 
 type CaRtWriter = RtWriter<CaWriterValue>;
 
-#[derive(Debug, ThisError)]
-#[cstm(name = "NetfetchConn")]
-pub enum Error {
-    NoProtocol,
-    ProtocolError,
-    IocIssue,
-    Protocol(#[from] proto::Error),
-    RtWriter(#[from] serieswriter::rtwriter::Error),
-    BinWriter(#[from] serieswriter::binwriter::Error),
-    SeriesWriter(#[from] serieswriter::writer::Error),
-    // TODO remove false positive from ThisError derive
-    #[allow(private_interfaces)]
-    UnknownCid(Cid),
-    #[allow(private_interfaces)]
-    NoNameForCid(Cid),
-    CreateChannelBadState,
-    CommonError(#[from] err::Error),
-    LoopInnerLogicError,
-    NoSender,
-    NotSending,
-    ClosedSending,
-    NoProgressNoPending,
-    ShutdownWithQueuesNoProgressNoPending,
-    Error,
-    DurationOutOfBounds,
-    NoFreeCid,
-    InsertQueues(#[from] scywr::insertqueues::Error),
-    FutLogic,
-    MissingTimestamp,
-    EnumFetch(#[from] enumfetch::Error),
-    SeriesLookup(#[from] dbpg::seriesbychannel::Error),
-    Netpod(#[from] netpod::Error),
-}
+autoerr::create_error_v1!(
+    name(Error, "NetfetchConn"),
+    enum variants {
+        NoProtocol,
+        ProtocolError,
+        IocIssue,
+        Protocol(#[from] proto::Error),
+        RtWriter(#[from] serieswriter::rtwriter::Error),
+        BinWriter(#[from] serieswriter::binwriter::Error),
+        SeriesWriter(#[from] serieswriter::writer::Error),
+        UnknownCid(Cid),
+        NoNameForCid(Cid),
+        CreateChannelBadState,
+        CommonError(#[from] err::Error),
+        LoopInnerLogicError,
+        NoSender,
+        NotSending,
+        ClosedSending,
+        NoProgressNoPending,
+        ShutdownWithQueuesNoProgressNoPending,
+        Error,
+        DurationOutOfBounds,
+        NoFreeCid,
+        InsertQueues(#[from] scywr::insertqueues::Error),
+        FutLogic,
+        MissingTimestamp,
+        EnumFetch(#[from] enumfetch::Error),
+        SeriesLookup(#[from] dbpg::seriesbychannel::Error),
+        Netpod(#[from] netpod::Error),
+    },
+);
 
 impl err::ToErr for Error {
     fn to_err(self) -> err::Error {
@@ -1508,13 +1498,13 @@ impl CaConn {
     pub fn channel_add(&mut self, conf: ChannelConfig, cssid: ChannelStatusSeriesId) -> Result<(), Error> {
         debug!("channel_add  {conf:?}  {cssid:?}");
         if false {
-            if netpod::trigger.contains(&conf.name()) {
+            if series::dbg::dbg_chn(&conf.name()) {
                 self.trace_channel_poll = true;
             }
         }
         if self.cid_by_name(conf.name()).is_some() {
             self.stats.channel_add_exists.inc();
-            if trigger.contains(&conf.name()) {
+            if series::dbg::dbg_chn(&conf.name()) {
                 error!("logic error channel already exists {conf:?}");
             }
             Ok(())
@@ -1522,7 +1512,7 @@ impl CaConn {
             let cid = self.cid_by_name_or_insert(conf.name())?;
             if self.channels.contains_key(&cid) {
                 self.stats.channel_add_exists.inc();
-                if trigger.contains(&conf.name()) {
+                if series::dbg::dbg_chn(&conf.name()) {
                     error!("logic error channel already exists {conf:?}");
                 }
                 Ok(())
@@ -1680,7 +1670,7 @@ impl CaConn {
             self.iqdqs.st_rf3_qu.push_back(x);
         }
         for (_cid, conf) in &mut self.channels {
-            if dbg_chn_name(conf.conf.name()) {
+            if series::dbg::dbg_chn(conf.conf.name()) {
                 info!("channel_state_on_shutdown {:?}", conf);
             }
             let chst = &mut conf.state;
@@ -2701,7 +2691,9 @@ impl CaConn {
                                 let cid = Cid(msg.cid);
                                 if let Some(conf) = self.channels.get(&cid) {
                                     let name = conf.conf.name();
-                                    debug!("queue event to notive channel create fail {name}");
+                                    if series::dbg::dbg_chn(&name) {
+                                        info!("queue event to notice channel create fail {name}");
+                                    }
                                     let item = CaConnEvent {
                                         ts: tsnow,
                                         value: CaConnEventValue::ChannelCreateFail(name.into()),
@@ -2826,7 +2818,7 @@ impl CaConn {
             status_emit_count: 0,
             ts_recv_value_status_emit_next: Instant::now(),
         };
-        if dbg_chn_name(created_state.name()) {
+        if series::dbg::dbg_chn(created_state.name()) {
             info!(
                 "handle_create_chan_res  {:?}  {}",
                 created_state.cid,

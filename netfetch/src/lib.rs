@@ -6,6 +6,7 @@ pub mod linuxhelper;
 pub mod metrics;
 pub mod netbuf;
 pub mod polltimer;
+pub mod queueset;
 pub mod ratelimit;
 pub mod rt;
 #[cfg(test)]
@@ -20,9 +21,4 @@ pub fn log_test() {
     error!("log-test");
     debug!("log-test");
     trace!("log-test");
-}
-
-pub fn dbg_chn(chn: &str) -> bool {
-    let chns = ["SINEG01:QE-B1-OP"];
-    chns.contains(&chn)
 }

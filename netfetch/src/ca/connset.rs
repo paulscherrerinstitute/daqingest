@@ -25,8 +25,6 @@ use dbpg::seriesbychannel::BoxedSend;
 use dbpg::seriesbychannel::CanSendChannelInfoResult;
 use dbpg::seriesbychannel::ChannelInfoQuery;
 use dbpg::seriesbychannel::ChannelInfoResult;
-use err::thiserror;
-use err::ThisError;
 use futures_util::FutureExt;
 use futures_util::Stream;
 use futures_util::StreamExt;
@@ -61,7 +59,7 @@ use std::net::SocketAddr;
 use std::net::SocketAddrV4;
 use std::pin::Pin;
 
-use netpod::trigger;
+use crate::queueset::QueueSet;
 use netpod::OnDrop;
 use netpod::TsNano;
 use scywr::insertqueues::InsertQueuesTx;
@@ -76,7 +74,7 @@ use taskrun::tokio;
 
 const CHECK_CHANS_PER_TICK: usize = 10000000;
 pub const SEARCH_BATCH_MAX: usize = 64;
-pub const CURRENT_SEARCH_PENDING_MAX: usize = SEARCH_BATCH_MAX * 2;
+pub const CURRENT_SEARCH_PENDING_MAX: usize = SEARCH_BATCH_MAX * 4;
 const UNKNOWN_ADDRESS_STAY: Duration = Duration::from_millis(15000);
 const NO_ADDRESS_STAY: Duration = Duration::from_millis(20000);
 const MAYBE_WRONG_ADDRESS_STAY: Duration = Duration::from_millis(4000);
@@ -86,59 +84,37 @@ const CHANNEL_UNASSIGNED_TIMEOUT: Duration = Duration::from_millis(0);
 const UNASSIGN_FOR_CONFIG_CHANGE_TIMEOUT: Duration = Duration::from_millis(1000 * 10);
 const CHANNEL_MAX_WITHOUT_HEALTH_UPDATE: usize = 3000000;
 
-#[allow(unused)]
-macro_rules! trace2 {
-    ($($arg:tt)*) => {
-        if false {
-            trace!($($arg)*);
-        }
-    };
-}
+macro_rules! trace2 { ($($arg:tt)*) => { if false { trace!($($arg)*); } }; }
 
-#[allow(unused)]
-macro_rules! trace3 {
-    ($($arg:tt)*) => {
-        if false {
-            trace!($($arg)*);
-        }
-    };
-}
+macro_rules! trace3 { ($($arg:tt)*) => { if false { trace!($($arg)*); } }; }
 
-#[allow(unused)]
-macro_rules! trace4 {
-    ($($arg:tt)*) => {
-        if false {
-            trace!($($arg)*);
-        }
-    };
-}
+macro_rules! trace4 { ($($arg:tt)*) => { if false { trace!($($arg)*); } }; }
 
-#[allow(unused)]
-macro_rules! trace_health_update { ($($arg:tt)*) => ( if false { trace!($($arg)*); } ) }
+macro_rules! trace_health_update { ($($arg:tt)*) => { if false { trace!($($arg)*); } }; }
 
-#[allow(unused)]
-macro_rules! trace_channel_state { ($($arg:tt)*) => ( if false { trace!($($arg)*); } ) }
+macro_rules! trace_channel_state { ($($arg:tt)*) => { if false { trace!($($arg)*); } }; }
 
-#[derive(Debug, ThisError)]
-#[cstm(name = "CaConnSet")]
-pub enum Error {
-    ChannelSend,
-    TaskJoin(#[from] tokio::task::JoinError),
-    SeriesLookup(#[from] dbpg::seriesbychannel::Error),
-    Beacons(#[from] crate::ca::beacons::Error),
-    SeriesWriter(#[from] serieswriter::writer::Error),
-    ExpectIpv4,
-    UnknownCssid,
-    Regex(#[from] regex::Error),
-    MissingChannelInfoChannelTx,
-    UnexpectedChannelDummyState,
-    CaConnEndWithoutReason,
-    PushCmdsNoSendInProgress(SocketAddr),
-    SenderPollingSend,
-    NoProgressNoPending,
-    IocFinder(#[from] crate::ca::finder::Error),
-    ChannelAssignedWithoutConnRess,
-}
+autoerr::create_error_v1!(
+    name(Error, "CaConnSet"),
+    enum variants {
+        ChannelSend,
+        TaskJoin(#[from] tokio::task::JoinError),
+        SeriesLookup(#[from] dbpg::seriesbychannel::Error),
+        Beacons(#[from] crate::ca::beacons::Error),
+        SeriesWriter(#[from] serieswriter::writer::Error),
+        ExpectIpv4,
+        UnknownCssid,
+        Regex(#[from] regex::Error),
+        MissingChannelInfoChannelTx,
+        UnexpectedChannelDummyState,
+        CaConnEndWithoutReason,
+        PushCmdsNoSendInProgress(SocketAddr),
+        SenderPollingSend,
+        NoProgressNoPending,
+        IocFinder(#[from] crate::ca::finder::Error),
+        ChannelAssignedWithoutConnRess,
+    },
+);
 
 impl<T> From<async_channel::SendError<T>> for Error {
     fn from(_value: async_channel::SendError<T>) -> Self {
@@ -440,6 +416,7 @@ pub struct CaConnSet {
     find_ioc_query_queue: VecDeque<IocAddrQuery>,
     find_ioc_query_sender: Pin<Box<SenderPolling<IocAddrQuery>>>,
     find_ioc_res_rx: Pin<Box<Receiver<VecDeque<FindIocRes>>>>,
+    find_ioc_queue_set: QueueSet<ChannelName>,
     iqtx: Pin<Box<InsertQueuesTx>>,
     storage_insert_queue_l1: VecDeque<QueryItem>,
     storage_insert_queue: VecDeque<VecDeque<QueryItem>>,
@@ -507,6 +484,7 @@ impl CaConnSet {
             find_ioc_query_queue: VecDeque::new(),
             find_ioc_query_sender: Box::pin(SenderPolling::new(find_ioc_query_tx)),
             find_ioc_res_rx: Box::pin(find_ioc_res_rx),
+            find_ioc_queue_set: QueueSet::new(),
             iqtx: Box::pin(iqtx.clone()),
             storage_insert_queue_l1: VecDeque::new(),
             storage_insert_queue: VecDeque::new(),
@@ -691,6 +669,9 @@ impl CaConnSet {
                         WithStatusSeriesIdStateInner::UnassigningForConfigChange(st4) => {
                             st4.config_new = cmd.ch_cfg;
                         }
+                        WithStatusSeriesIdStateInner::AddrSearchPlanned { .. } => {
+                            ress.chst.config = cmd.ch_cfg;
+                        }
                     },
                 },
                 ChannelStateValue::ToRemove { .. } => {
@@ -809,7 +790,7 @@ impl CaConnSet {
             return Ok(());
         }
         self.stats.channel_status_series_found().inc();
-        if trigger.contains(&name) {
+        if series::dbg::dbg_chn(&name) {
             info!("handle_add_channel_with_status_id  {cmd:?}");
         }
         let ch = ChannelName::new(name.into());
@@ -874,7 +855,7 @@ impl CaConnSet {
         } else {
             return Err(Error::ExpectIpv4);
         };
-        if trigger.contains(&name) {
+        if series::dbg::dbg_chn(&name) {
             info!("handle_add_channel_with_addr  {cmd:?}");
         }
         let ch = ChannelName::new(name.into());
@@ -974,6 +955,9 @@ impl CaConnSet {
                         WithStatusSeriesIdStateInner::UnassigningForConfigChange(..) => {
                             k.value = ChannelStateValue::ToRemove { addr: None };
                         }
+                        WithStatusSeriesIdStateInner::AddrSearchPlanned { .. } => {
+                            k.value = ChannelStateValue::ToRemove { addr: None };
+                        }
                     },
                 },
                 ChannelStateValue::ToRemove { .. } => {}
@@ -990,7 +974,7 @@ impl CaConnSet {
         }
         for res in results {
             let ch = ChannelName::new(res.channel.clone());
-            if trigger.contains(&ch.name()) {
+            if series::dbg::dbg_chn(&ch.name()) {
                 info!("handle_ioc_query_result  {res:?}");
             }
             if let Some(chst) = self.channel_states.get_mut(&ch) {
@@ -1140,18 +1124,34 @@ impl CaConnSet {
     }
 
     fn handle_channel_create_fail(&mut self, addr: SocketAddr, name: String) -> Result<(), Error> {
-        trace!("handle_channel_create_fail {addr} {name}");
-        let tsnow = SystemTime::now();
+        if series::dbg::dbg_chn(&name) {
+            info!("handle_channel_create_fail {:?} {:?}", name, addr);
+        } else {
+            trace!("handle_channel_create_fail {:?} {:?}", name, addr);
+        }
+        let stnow = SystemTime::now();
         let ch = ChannelName::new(name);
         if let Some(st1) = self.channel_states.get_mut(&ch) {
             if let ChannelStateValue::Active(st2) = &mut st1.value {
                 if let ActiveChannelState::WithStatusSeriesId(st3) = st2 {
-                    trace!("handle_channel_create_fail {addr} {ch:?}  set to MaybeWrongAddress");
+                    if series::dbg::dbg_chn(ch.name()) {
+                        info!(
+                            "handle_channel_create_fail  {:?}  {:?}  set to MaybeWrongAddress",
+                            ch, addr
+                        );
+                    } else {
+                        trace!(
+                            "handle_channel_create_fail  {:?}  {:?}  set to MaybeWrongAddress",
+                            ch,
+                            addr
+                        );
+                    }
                     bump_backoff(&mut st3.addr_find_backoff);
-                    st3.inner = WithStatusSeriesIdStateInner::MaybeWrongAddress(MaybeWrongAddressState::new(
-                        tsnow,
-                        st3.addr_find_backoff,
-                    ));
+                    let snew = MaybeWrongAddressState::new(stnow, st3.addr_find_backoff);
+                    if series::dbg::dbg_chn(ch.name()) {
+                        info!("handle_channel_create_fail  update state  {:?}", snew);
+                    }
+                    st3.inner = WithStatusSeriesIdStateInner::MaybeWrongAddress(snew);
                 }
             }
         }
@@ -1218,6 +1218,7 @@ impl CaConnSet {
                             self.handle_add_channel_with_addr(cmd)?;
                             Ok(())
                         }
+                        WithStatusSeriesIdStateInner::AddrSearchPlanned { .. } => Ok(()),
                     },
                 },
                 ChannelStateValue::ToRemove { .. } => {
@@ -1238,7 +1239,8 @@ impl CaConnSet {
     }
 
     fn transition_channels_to_maybe_wrong_address(&mut self, addr: SocketAddr) -> Result<(), Error> {
-        let tsnow = SystemTime::now();
+        // TODO take a "reason" as parameter for status emit.
+        let stnow = SystemTime::now();
         for (ch, st1) in self.channel_states.iter_mut() {
             match &mut st1.value {
                 ChannelStateValue::Active(st2) => match st2 {
@@ -1249,37 +1251,25 @@ impl CaConnSet {
                         match &mut st3.inner {
                             AddrSearchPending { since: _ } => {}
                             WithAddress { addr: addr2, state: _ } => {
-                                if trigger.contains(&ch.name()) {
-                                    info!(" connect fail, maybe wrong address for {} {}", addr, ch.name());
-                                }
                                 if SocketAddr::V4(*addr2) == addr {
-                                    if trigger.contains(&ch.name()) {
-                                        info!("transition_channels_to_maybe_wrong_address  AA  {addr}");
-                                    }
                                     bump_backoff(&mut st3.addr_find_backoff);
-                                    st3.inner = WithStatusSeriesIdStateInner::MaybeWrongAddress(
-                                        MaybeWrongAddressState::new(tsnow, st3.addr_find_backoff),
-                                    );
-                                    if trigger.contains(&ch.name()) {
-                                        info!("transition_channels_to_maybe_wrong_address  BB  {:?}", st1);
+                                    let snew = MaybeWrongAddressState::new(stnow, st3.addr_find_backoff);
+                                    st3.inner = WithStatusSeriesIdStateInner::MaybeWrongAddress(snew.clone());
+                                    if series::dbg::dbg_chn(&ch.name()) {
+                                        info!(
+                                            "transition_channels_to_maybe_wrong_address  BB  {:?}  {:?}  {:?}  {:?}",
+                                            ch, addr, snew, st1
+                                        );
                                     }
                                 } else {
-                                    if trigger.contains(&ch.name()) {
-                                        info!("transition_channels_to_maybe_wrong_address  BB  {addr}");
-                                    }
-                                    bump_backoff(&mut st3.addr_find_backoff);
-                                    st3.inner = WithStatusSeriesIdStateInner::MaybeWrongAddress(
-                                        MaybeWrongAddressState::new(tsnow, st3.addr_find_backoff),
-                                    );
-                                    if trigger.contains(&ch.name()) {
-                                        info!("transition_channels_to_maybe_wrong_address  BB  {:?}", st1);
-                                    }
+                                    // nothing to do
                                 }
                             }
                             UnknownAddress { since: _ } => {}
                             NoAddress { since: _ } => {}
                             MaybeWrongAddress(_) => {}
                             UnassigningForConfigChange(_) => {}
+                            AddrSearchPlanned { .. } => {}
                         }
                     }
                 },
@@ -1516,34 +1506,14 @@ impl CaConnSet {
                         }
                     }
                     ActiveChannelState::WithStatusSeriesId(st3) => match &mut st3.inner {
-                        WithStatusSeriesIdStateInner::UnknownAddress { since } => {
-                            if search_pending_count < CURRENT_SEARCH_PENDING_MAX as _ {
-                                if since.checked_add(UNKNOWN_ADDRESS_STAY).unwrap() < stnow {
-                                    if false {
-                                        error!("TODO trigger address search from state UnknownAddress");
-                                        if true {
-                                            std::process::exit(1);
-                                        }
-                                        if false {
-                                            // TODO
-                                            search_pending_count += 1;
-                                            st3.inner =
-                                                WithStatusSeriesIdStateInner::AddrSearchPending { since: stnow };
-                                        }
-                                    } else {
-                                        search_pending_count += 1;
-                                        st3.inner = WithStatusSeriesIdStateInner::AddrSearchPending { since: stnow };
-                                        let qu = IocAddrQuery::uncached(ch.name().into());
-                                        self.find_ioc_query_queue.push_back(qu);
-                                        self.stats.ioc_search_start().inc();
-                                    }
-                                }
-                            }
+                        WithStatusSeriesIdStateInner::UnknownAddress { .. } => {
+                            self.find_ioc_queue_set.push_back(ch.clone());
+                            st3.inner = WithStatusSeriesIdStateInner::AddrSearchPlanned { since: stnow };
                         }
                         WithStatusSeriesIdStateInner::AddrSearchPending { since } => {
                             let dt = stnow.duration_since(*since).unwrap_or(Duration::ZERO);
                             if dt > SEARCH_PENDING_TIMEOUT {
-                                debug!("TODO should receive some error indication instead of timeout for {ch:?}");
+                                info!("should receive some error indication instead of timeout for {ch:?}");
                                 st3.inner = WithStatusSeriesIdStateInner::NoAddress { since: stnow };
                                 search_pending_count -= 1;
                             }
@@ -1582,9 +1552,14 @@ impl CaConnSet {
                                         let addr = SocketAddr::V4(*addr_v4);
                                         cmd_remove_channel.push((addr, ch.clone()));
                                         bump_backoff(&mut st3.addr_find_backoff);
-                                        st3.inner = WithStatusSeriesIdStateInner::MaybeWrongAddress(
-                                            MaybeWrongAddressState::new(stnow, st3.addr_find_backoff),
-                                        );
+                                        let snew = MaybeWrongAddressState::new(stnow, st3.addr_find_backoff);
+                                        if series::dbg::dbg_chn(ch.name()) {
+                                            info!(
+                                                "check_channel_states  update state  {:?}  {:?}  {:?}",
+                                                ch, addr, snew
+                                            );
+                                        }
+                                        st3.inner = WithStatusSeriesIdStateInner::MaybeWrongAddress(snew);
                                         let item = ChannelStatusItem::new_closed_conn_timeout(stnow, st3.cssid.clone());
                                         let (tsev, val) = item.to_ts_val();
                                         let deque = &mut item_deque;
@@ -1606,22 +1581,29 @@ impl CaConnSet {
                         }
                         WithStatusSeriesIdStateInner::MaybeWrongAddress(st4) => {
                             if st4.since + st4.backoff_dt < stnow {
-                                if search_pending_count < CURRENT_SEARCH_PENDING_MAX as _ {
-                                    trace!("try again channel after MaybeWrongAddress");
-                                    if trigger.contains(&ch.name()) {
-                                        info!("issue ioc search for {}", ch.name());
-                                    }
-                                    search_pending_count += 1;
-                                    st3.inner = WithStatusSeriesIdStateInner::AddrSearchPending { since: stnow };
-                                    let qu = IocAddrQuery::uncached(ch.name().into());
-                                    self.find_ioc_query_queue.push_back(qu);
-                                    self.stats.ioc_search_start().inc();
+                                if series::dbg::dbg_chn(ch.name()) {
+                                    info!(
+                                        "check_channel_states  MaybeWrongAddress  set to  AddrSearchPlanned  {:?}",
+                                        ch
+                                    );
+                                }
+                                self.find_ioc_queue_set.push_back(ch.clone());
+                                st3.inner = WithStatusSeriesIdStateInner::AddrSearchPlanned { since: stnow };
+                            } else {
+                                if series::dbg::dbg_chn(ch.name()) {
+                                    // info!("MaybeWrongAddress  back off  {:?}", ch);
                                 }
                             }
                         }
                         WithStatusSeriesIdStateInner::UnassigningForConfigChange(st4) => {
                             if tsnow.saturating_duration_since(st4.since) >= UNASSIGN_FOR_CONFIG_CHANGE_TIMEOUT {
                                 debug!("timeout unassign for config change");
+                            }
+                        }
+                        WithStatusSeriesIdStateInner::AddrSearchPlanned { since: _ } => {
+                            // TODO record elapsed from since for metrics
+                            if series::dbg::dbg_chn(ch.name()) {
+                                info!("AddrSearchPlanned  {:?}  {:?}", ch, search_pending_count);
                             }
                         }
                     },
@@ -1637,6 +1619,34 @@ impl CaConnSet {
                 self.chan_check_next = Some(ch.clone());
                 break;
             }
+        }
+        loop {
+            break if search_pending_count >= CURRENT_SEARCH_PENDING_MAX as _ {
+            } else {
+                if let Some(ch) = self.find_ioc_queue_set.pop_front() {
+                    if let Some(st1) = self.channel_states.get_mut(&ch) {
+                        match &mut st1.value {
+                            ChannelStateValue::Active(st2) => match st2 {
+                                ActiveChannelState::WithStatusSeriesId(st3) => {
+                                    if series::dbg::dbg_chn(ch.name()) {
+                                        info!("issue ioc search  {:?}", ch);
+                                    } else {
+                                        trace!("issue ioc search  {:?}", ch);
+                                    }
+                                    search_pending_count += 1;
+                                    st3.inner = WithStatusSeriesIdStateInner::AddrSearchPending { since: stnow };
+                                    let qu = IocAddrQuery::uncached(ch.name().into());
+                                    self.find_ioc_query_queue.push_back(qu);
+                                    self.stats.ioc_search_start().inc();
+                                }
+                                _ => {}
+                            },
+                            _ => {}
+                        }
+                    }
+                    continue;
+                }
+            };
         }
         self.storage_insert_queue.push_back(item_deque);
         for (addr, ch) in cmd_remove_channel {
@@ -1705,6 +1715,9 @@ impl CaConnSet {
                         }
                         WithStatusSeriesIdStateInner::UnassigningForConfigChange(_) => {
                             assigned += 1;
+                        }
+                        WithStatusSeriesIdStateInner::AddrSearchPlanned { .. } => {
+                            no_address += 1;
                         }
                     },
                 },

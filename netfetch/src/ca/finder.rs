@@ -21,7 +21,7 @@ use std::time::Instant;
 use taskrun::tokio;
 use tokio::task::JoinHandle;
 
-const SEARCH_DB_PIPELINE_LEN: usize = 2;
+const SEARCH_DB_WORKER_CNT: usize = 2;
 
 macro_rules! debug_batch { ($($arg:tt)*) => ( if false { debug!($($arg)*); } ) }
 
@@ -40,28 +40,35 @@ autoerr::create_error_v1!(
 fn transform_pgres(rows: Vec<PgRow>) -> VecDeque<FindIocRes> {
     let mut ret = VecDeque::new();
     for row in rows {
-        let ch: Result<String, _> = row.try_get(0);
-        if let Ok(ch) = ch {
-            if let Some(addr) = row.get::<_, Option<String>>(1) {
-                let addr = addr.parse().map_or(None, |x| Some(x));
-                let item = FindIocRes {
-                    channel: ch,
-                    response_addr: None,
-                    addr,
-                    dt: Duration::from_millis(0),
-                };
-                ret.push_back(item);
-            } else {
-                let item = FindIocRes {
-                    channel: ch,
-                    response_addr: None,
-                    addr: None,
-                    dt: Duration::from_millis(0),
-                };
-                ret.push_back(item);
+        let n: Result<i32, _> = row.try_get(0);
+        let ch: Result<String, _> = row.try_get(1);
+        match (n, ch) {
+            (Ok(n), Ok(ch)) => {
+                if let Some(addr) = row.get::<_, Option<String>>(3) {
+                    let addr = addr.parse().map_or(None, |x| Some(x));
+                    let item = FindIocRes {
+                        channel: ch,
+                        response_addr: None,
+                        addr,
+                        dt: Duration::from_millis(0),
+                    };
+                    ret.push_back(item);
+                } else {
+                    let item = FindIocRes {
+                        channel: ch,
+                        response_addr: None,
+                        addr: None,
+                        dt: Duration::from_millis(0),
+                    };
+                    ret.push_back(item);
+                }
             }
-        } else if let Err(e) = ch {
-            error!("bad string from pg: {e:?}");
+            (_, Err(e)) => {
+                error!("bad string from pg: {}", e);
+            }
+            (Err(e), _) => {
+                error!("bad int from pg: {}", e);
+            }
         }
     }
     ret
@@ -110,14 +117,10 @@ async fn finder_worker(
     stats: Arc<IocFinderStats>,
 ) -> Result<(), Error> {
     // TODO do something with join handle
-    let (batch_rx, jh_batch) = batchtools::batcher::batch(
-        SEARCH_BATCH_MAX,
-        Duration::from_millis(200),
-        SEARCH_DB_PIPELINE_LEN,
-        qrx,
-    );
+    let (batch_rx, jh_batch) =
+        batchtools::batcher::batch(SEARCH_BATCH_MAX, Duration::from_millis(200), SEARCH_DB_WORKER_CNT, qrx);
     let mut jhs = Vec::new();
-    for _ in 0..SEARCH_DB_PIPELINE_LEN {
+    for _ in 0..SEARCH_DB_WORKER_CNT {
         let jh = tokio::spawn(finder_worker_single(
             batch_rx.clone(),
             tx.clone(),
@@ -146,25 +149,37 @@ async fn finder_worker_single(
     debug!("finder_worker_single  make_pg_client");
     let (pg, jh) = make_pg_client(&db).await?;
     let sql = concat!(
-        "with q1 as (select * from unnest($2::text[]) as unn (ch))",
-        " select distinct on (tt.facility, tt.channel) tt.channel, tt.addr",
-        " from ioc_by_channel_log tt join q1 on tt.channel = q1.ch and tt.facility = $1 and tt.archived = 0 and tt.addr is not null",
-        " order by tt.facility, tt.channel, tsmod desc",
+        "with q1 as (select * from unnest($2::int[], $3::text[]) as unn (n, ch))",
+        " select distinct on (q1.n) q1.n, q1.ch, tt.channel, tt.addr, tt.tsmod",
+        " from q1 left join ioc_by_channel_log tt",
+        " on tt.channel = q1.ch and tt.facility = $1 and tt.archived = 0 and tt.addr is not null",
+        " order by q1.n, tsmod desc",
     );
     let qu_select_multi = pg.prepare(sql).await?;
-    let mut resdiff = 0;
     loop {
         match inp.recv().await {
             Ok(batch) => {
-                if batch.iter().filter(|x| crate::dbg_chn(x.name())).next().is_some() {
-                    info!("SEARCHING FOR DBG");
-                };
+                for e in batch.iter().filter(|x| series::dbg::dbg_chn(x.name())) {
+                    info!("searching database for  {:?}", e);
+                }
                 stats.dbsearcher_batch_recv().inc();
                 stats.dbsearcher_item_recv().add(batch.len() as _);
                 let ts1 = Instant::now();
+                let (batch, pass_through) = batch.into_iter().fold((Vec::new(), Vec::new()), |(mut a, mut b), x| {
+                    if x.use_cache() {
+                        a.push(x);
+                    } else {
+                        b.push(x);
+                    }
+                    (a, b)
+                });
                 debug_batch!("run  query batch  len {}", batch.len());
-                let names: Vec<_> = batch.iter().filter(|x| x.use_cache()).map(|x| x.name()).collect();
-                let qres = pg.query(&qu_select_multi, &[&backend, &names]).await;
+                let names: Vec<_> = batch
+                    .iter()
+                    .map(|x| if x.use_cache() { x.name() } else { "---------------" })
+                    .collect();
+                let ns: Vec<_> = names.iter().enumerate().map(|(i, _)| i as i32).collect();
+                let qres = pg.query(&qu_select_multi, &[&backend, &ns, &names]).await;
                 let dt = ts1.elapsed();
                 debug_batch!(
                     "done query batch  len {}: {}  {:.3}ms",
@@ -178,57 +193,42 @@ async fn finder_worker_single(
                 match qres {
                     Ok(rows) => {
                         stats.dbsearcher_select_res_0().add(rows.len() as _);
-                        if rows.len() > batch.len() {
+                        if rows.len() != batch.len() {
                             stats.dbsearcher_select_error_len_mismatch().inc();
-                        } else if rows.len() < batch.len() {
-                            resdiff += batch.len() - rows.len();
+                            error!("query result len {}  batch len {}", rows.len(), batch.len());
+                            tokio::time::sleep(Duration::from_millis(1000)).await;
+                            continue;
                         }
-                        let nbatch = batch.len();
-                        trace_batch!("received results {}  resdiff {}", rows.len(), resdiff);
                         let items = transform_pgres(rows);
-                        let mut to_add = Vec::new();
-                        {
-                            let names: HashMap<_, _> = items.iter().map(|x| (&x.channel, true)).collect();
-                            for e in batch {
-                                if !names.contains_key(e.name_string()) {
-                                    let item = FindIocRes {
-                                        channel: e.name().into(),
-                                        response_addr: None,
-                                        addr: None,
-                                        dt: Duration::from_millis(0),
-                                    };
-                                    to_add.push(item);
-                                }
+                        for e in items.iter() {
+                            if series::dbg::dbg_chn(&e.channel) {
+                                info!("found in database {:?}", e);
                             }
                         }
                         let mut items = items;
-                        items.extend(to_add.into_iter());
-                        let items = items;
-                        for e in &items {
-                            trace!("found in database: {e:?}");
-                        }
-                        for e in items.iter() {
-                            if crate::dbg_chn(&e.channel) {
-                                info!("FOUND {e:?}");
-                            }
+                        for e in pass_through {
+                            let x = FindIocRes {
+                                channel: e.name().into(),
+                                response_addr: None,
+                                addr: None,
+                                dt: Duration::from_millis(0),
+                            };
+                            items.push_back(x);
                         }
                         let items_len = items.len();
-                        if items_len != nbatch {
-                            stats.dbsearcher_select_error_len_mismatch().inc();
-                        }
                         match tx.send(items).await {
                             Ok(_) => {
                                 stats.dbsearcher_batch_send().inc();
                                 stats.dbsearcher_item_send().add(items_len as _);
                             }
                             Err(e) => {
-                                error!("finder sees: {e}");
+                                error!("finder sees: {}", e);
                                 break;
                             }
                         }
                     }
                     Err(e) => {
-                        error!("finder sees error: {e}");
+                        error!("finder sees error: {}", e);
                         tokio::time::sleep(Duration::from_millis(1000)).await;
                     }
                 }

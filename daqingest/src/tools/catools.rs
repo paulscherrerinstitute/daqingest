@@ -6,9 +6,12 @@ use stats::IocFinderStats;
 use std::sync::Arc;
 use std::time::Duration;
 
-#[derive(Debug, ThisError)]
-#[cstm(name = "CaTools")]
-pub enum Error {}
+autoerr::create_error_v1!(
+    name(Error, "CaTools"),
+    enum variants {
+        Test,
+    },
+);
 
 pub async fn find(cmd: CaFind, broadcast: String) -> Result<(), Error> {
     eprintln!("{:?}", broadcast);

@@ -149,9 +149,15 @@ fn system_time_epoch(x: &SystemTime) -> bool {
 }
 
 #[derive(Debug, Serialize)]
+enum Unreachable {
+    NoAddress,
+    MaybeWrongAddress,
+}
+
+#[derive(Debug, Serialize)]
 enum ConnectionState {
     Connecting,
-    Unreachable,
+    Unreachable(Unreachable),
     Disconnected,
     Connected,
     Error,
@@ -246,17 +252,27 @@ async fn channel_states_try(
                                 states.channels.insert(k, chst);
                             }
                             WithStatusSeriesIdStateInner::NoAddress { .. } => {
-                                let chst =
-                                    ChannelState::connecting_addr(st1.config, None, ConnectionState::Unreachable);
+                                let chst = ChannelState::connecting_addr(
+                                    st1.config,
+                                    None,
+                                    ConnectionState::Unreachable(Unreachable::NoAddress),
+                                );
                                 states.channels.insert(k, chst);
                             }
                             WithStatusSeriesIdStateInner::MaybeWrongAddress(..) => {
-                                let chst =
-                                    ChannelState::connecting_addr(st1.config, None, ConnectionState::Unreachable);
+                                let chst = ChannelState::connecting_addr(
+                                    st1.config,
+                                    None,
+                                    ConnectionState::Unreachable(Unreachable::MaybeWrongAddress),
+                                );
                                 states.channels.insert(k, chst);
                             }
                             WithStatusSeriesIdStateInner::UnassigningForConfigChange(_) => {
                                 let chst = ChannelState::connecting_addr(st1.config, None, ConnectionState::Connecting);
+                                states.channels.insert(k, chst);
+                            }
+                            WithStatusSeriesIdStateInner::AddrSearchPlanned { .. } => {
+                                let chst = ChannelState::connecting(st1.config);
                                 states.channels.insert(k, chst);
                             }
                         }

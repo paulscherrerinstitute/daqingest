@@ -97,6 +97,10 @@ pub enum WithStatusSeriesIdStateInner {
     },
     MaybeWrongAddress(MaybeWrongAddressState),
     UnassigningForConfigChange(UnassigningForConfigChangeState),
+    AddrSearchPlanned {
+        #[serde(with = "humantime_serde")]
+        since: SystemTime,
+    },
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -109,7 +113,7 @@ pub struct MaybeWrongAddressState {
 impl MaybeWrongAddressState {
     pub fn new(since: SystemTime, backoff_cnt: u32) -> Self {
         let f = 2. + 60. * (backoff_cnt as f32 / 5.).tanh();
-        let dtms = 1e-3 * f;
+        let dtms = 1e3 * f;
         Self {
             since,
             backoff_dt: Duration::from_millis(dtms as u64),
