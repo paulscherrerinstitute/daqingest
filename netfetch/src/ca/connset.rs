@@ -362,7 +362,7 @@ impl IocAddrQuery {
 }
 
 fn bump_backoff(x: &mut u32) {
-    *x = (1 + *x).min(10);
+    *x = (1 + *x).min(20);
 }
 
 struct SeriesLookupSender {

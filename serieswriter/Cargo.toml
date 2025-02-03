@@ -10,6 +10,7 @@ async-channel = "2.1.1"
 futures-util = "0.3.30"
 smallvec = "1.13.2"
 autoerr = "0.0.3"
+itertools = "0.14"
 log = { path = "../log" }
 netpod = { path = "../../daqbuf-netpod", package = "daqbuf-netpod" }
 items_0 = { path = "../../daqbuf-items-0", package = "daqbuf-items-0" }

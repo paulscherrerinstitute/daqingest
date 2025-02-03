@@ -1412,6 +1412,7 @@ impl CaConn {
                     writer.series(),
                     st2.channel.scalar_type.clone(),
                     st2.channel.shape.clone(),
+                    conf.conf.name().into(),
                 )?;
                 self.stats.get_series_id_ok.inc();
                 {
@@ -1773,13 +1774,13 @@ impl CaConn {
             // return Err(Error::with_msg_no_trace());
             return Ok(());
         };
-        if dbg_chn {
-            info!("handle_event_add_res  {:?}  {:?}", cid, ev);
+        if false && dbg_chn {
+            trace!("handle_event_add_res  {:?}  {:?}", cid, ev);
         }
         match ch_s {
             ChannelState::Writable(st) => {
-                if dbg_chn {
-                    info!("handle_event_add_res  Writable  {:?}  {:?}", cid, ev);
+                if false && dbg_chn {
+                    trace!("handle_event_add_res  Writable  {:?}  {:?}", cid, ev);
                 }
                 // debug!(
                 //     "CaConn sees  data_count {}  payload_len {}",
@@ -3061,7 +3062,12 @@ impl CaConn {
         }
         if self.tick_last_writer + Duration::from_millis(2000) <= tsnow {
             self.tick_last_writer = tsnow;
-            self.tick_writers()?;
+            match self.tick_writers() {
+                Ok(()) => {}
+                Err(e) => {
+                    error!("error in writers: {e}");
+                }
+            }
         }
         match &self.state {
             CaConnState::Unconnected(_) => {}

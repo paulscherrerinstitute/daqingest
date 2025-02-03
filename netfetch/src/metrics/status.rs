@@ -13,11 +13,12 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::time::SystemTime;
 
-#[derive(Debug, ThisError)]
-#[cstm(name = "StatusError")]
-pub enum Error {
-    Internal,
-}
+autoerr::create_error_v1!(
+    name(Error, "StatusError"),
+    enum variants {
+        Internal,
+    },
+);
 
 #[derive(Debug, Serialize)]
 pub struct ChannelStates {

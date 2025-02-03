@@ -11,13 +11,7 @@ use std::marker::PhantomData;
 use std::time::Duration;
 use std::time::Instant;
 
-macro_rules! trace_rt_decision {
-    ($det:expr, $($arg:tt)*) => {
-        if $det {
-            trace!($($arg)*);
-        }
-    };
-}
+macro_rules! trace_rt_decision { ($det:expr, $($arg:tt)*) => { if $det { trace!($($arg)*); } }; }
 
 autoerr::create_error_v1!(
     name(Error, "RateLimitWriter"),

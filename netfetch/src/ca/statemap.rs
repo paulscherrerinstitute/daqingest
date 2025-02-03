@@ -112,7 +112,17 @@ pub struct MaybeWrongAddressState {
 
 impl MaybeWrongAddressState {
     pub fn new(since: SystemTime, backoff_cnt: u32) -> Self {
-        let f = 2. + 60. * (backoff_cnt as f32 / 5.).tanh();
+        // print(", ".join(["{:.5}".format(tanh(i/10)) for i in range(24)]))
+        const TANH: [f32; 24] = [
+            0.0, 0.099668, 0.19738, 0.29131, 0.37995, 0.46212, 0.53705, 0.60437, 0.66404, 0.7163, 0.76159, 0.8005,
+            0.83365, 0.86172, 0.88535, 0.90515, 0.92167, 0.93541, 0.94681, 0.95624, 0.96403, 0.97045, 0.97574, 0.9801,
+        ];
+        const Y1: f32 = 30.;
+        const Y20: f32 = 300.;
+        const B: f32 = (Y20 - Y1) / (TANH[20] - TANH[1]);
+        const A: f32 = Y1 - B * TANH[1];
+        let backoff_cnt = backoff_cnt.max(1).min(20);
+        let f = A + B * TANH[backoff_cnt as usize];
         let dtms = 1e3 * f;
         Self {
             since,
