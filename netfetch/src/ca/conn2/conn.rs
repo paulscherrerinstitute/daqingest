@@ -1,9 +1,13 @@
+mod connecting;
+
 use super::conncmd::ConnCommand;
 use super::connevent::CaConnEvent;
 use super::connevent::EndOfStreamReason;
 use crate::ca::conn::CaConnOpts;
+use crate::ca::conn2::progpend::HaveProgressPending;
 use async_channel::Sender;
 use ca_proto::ca::proto;
+use connecting::Connecting;
 use dbpg::seriesbychannel::ChannelInfoQuery;
 use futures_util::Future;
 use futures_util::FutureExt;
@@ -19,6 +23,7 @@ use stats::rand_xoshiro::Xoshiro128PlusPlus;
 use stats::CaConnStats;
 use stats::CaProtoStats;
 use std::collections::VecDeque;
+use std::fmt;
 use std::net::SocketAddrV4;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -28,6 +33,13 @@ use std::time::Duration;
 use std::time::Instant;
 use taskrun::tokio;
 use tokio::net::TcpStream;
+
+autoerr::create_error_v1!(
+    name(Error, "Conn"),
+    enum variants {
+        TickerPoll,
+    },
+);
 
 struct DurationMeasureSteps {
     ts: Instant,
@@ -50,22 +62,15 @@ impl DurationMeasureSteps {
     }
 }
 
-#[derive(Debug)]
-pub enum Error {
-    TickerPoll,
-}
-
-type ConnectingFut =
-    Pin<Box<dyn Future<Output = Result<Result<TcpStream, std::io::Error>, tokio::time::error::Elapsed>> + Send>>;
-
 enum ConnectedState {
     Init(CaProto),
     Handshake(CaProto),
     PeerReady(CaProto),
 }
 
+#[derive(Debug)]
 enum CaConnState {
-    Connecting(Instant, SocketAddrV4, ConnectingFut),
+    Connecting(Connecting),
     Connected(CaProto),
     Shutdown(EndOfStreamReason),
     Done,
@@ -95,11 +100,11 @@ impl CaConn {
     ) -> Self {
         let tsnow = Instant::now();
         let (cq_tx, cq_rx) = async_channel::bounded::<ConnCommand>(32);
-        let mut rng = stats::xoshiro_from_time();
+        let rng = stats::xoshiro_from_time();
         Self {
             opts,
             backend,
-            state: CaConnState::Connecting(tsnow, remote_addr, err::todoval()),
+            state: CaConnState::Connecting(Connecting::dummy_new(remote_addr, tsnow)),
             iqdqs: InsertDeques::new(),
             ca_conn_event_out_queue: VecDeque::new(),
             ca_conn_event_out_queue_max: 2000,
@@ -120,6 +125,29 @@ impl CaConn {
     }
 }
 
+macro_rules! handle_poll_res {
+    ($res:expr, $hpp:expr) => {
+        match $res {
+            Ready(x) => match x {
+                Ok(x) => match x {
+                    Some(x) => {
+                        $hpp.have_progress();
+                    }
+                    None => {}
+                },
+                Err(e) => {
+                    // TODO how to handle error:
+                    // Transition state, emit item.
+                    error!("{}", e);
+                }
+            },
+            Pending => {
+                $hpp.have_pending();
+            }
+        }
+    };
+}
+
 impl Stream for CaConn {
     type Item = CaConnEvent;
 
@@ -129,17 +157,14 @@ impl Stream for CaConn {
         self.stats.poll_fn_begin().inc();
         let ret = loop {
             self.stats.poll_loop_begin().inc();
-
             let qlen = self.iqdqs.len();
             if qlen >= self.opts.insert_queue_max * 2 / 3 {
                 self.stats.insert_item_queue_pressure().inc();
             } else if qlen >= self.opts.insert_queue_max {
                 self.stats.insert_item_queue_full().inc();
             }
-
-            let mut have_pending = false;
-            let mut have_progress = false;
-
+            let mut hppv = HaveProgressPending::new();
+            let hpp = &mut hppv;
             if let CaConnState::Done = self.state {
                 break Ready(None);
             } else if let Some(item) = self.ca_conn_event_out_queue.pop_front() {
@@ -149,10 +174,10 @@ impl Stream for CaConn {
             // TODO add up duration of this scope
             match self.as_mut().poll_own_ticker(cx) {
                 Ok(Ready(())) => {
-                    have_progress = true;
+                    hpp.have_progress();
                 }
                 Ok(Pending) => {
-                    have_pending = true;
+                    hpp.have_pending();
                 }
                 Err(e) => {
                     self.shutdown_on_error(e);
@@ -282,8 +307,8 @@ impl Stream for CaConn {
             //     }
             // }
 
-            break match self.state {
-                CaConnState::Connecting(_, _, _) => todo!(),
+            match &mut self.state {
+                CaConnState::Connecting(st2) => handle_poll_res!(st2.poll_unpin(cx), hpp),
                 CaConnState::Connected(_) => todo!(),
                 CaConnState::Shutdown(_) => {
                     // TODO still attempt to flush queues.
@@ -291,7 +316,7 @@ impl Stream for CaConn {
                     todo!()
                 }
                 CaConnState::Done => todo!(),
-            };
+            }
 
             // break if self.is_shutdown() {
             //     if self.queues_out_flushed() {
@@ -340,6 +365,14 @@ impl Stream for CaConn {
             //         Ready(Some(CaConnEvent::err_now(e)))
             //     }
             // };
+
+            break if hpp.is_progress() {
+                continue;
+            } else if hpp.is_pending() {
+                Pending
+            } else {
+                Ready(None)
+            };
         };
 
         durs.step();

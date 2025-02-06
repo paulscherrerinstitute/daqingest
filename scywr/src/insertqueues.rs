@@ -24,13 +24,13 @@ pub struct InsertQueuesTx {
     pub st_rf3_tx: Sender<VecDeque<QueryItem>>,
     pub mt_rf3_tx: Sender<VecDeque<QueryItem>>,
     pub lt_rf3_tx: Sender<VecDeque<QueryItem>>,
+    pub lt_rf3_lat5_tx: Sender<VecDeque<QueryItem>>,
 }
 
 impl InsertQueuesTx {
     /// Send all accumulated batches
     pub async fn send_all(&mut self, iqdqs: &mut InsertDeques) -> Result<(), Error> {
-        // Send each buffer down the corresponding channel
-        if false {
+        {
             let item = core::mem::replace(&mut iqdqs.st_rf1_qu, VecDeque::new());
             self.st_rf1_tx
                 .send(item)
@@ -58,6 +58,13 @@ impl InsertQueuesTx {
                 .await
                 .map_err(|_| Error::ChannelSend(RetentionTime::Long, 3))?;
         }
+        {
+            let item = core::mem::replace(&mut iqdqs.lt_rf3_lat5_qu, VecDeque::new());
+            self.lt_rf3_tx
+                .send(item)
+                .await
+                .map_err(|_| Error::ChannelSend(RetentionTime::Long, 3))?;
+        }
         Ok(())
     }
 
@@ -79,7 +86,7 @@ impl<'a> fmt::Display for InsertQueuesTxSummary<'a> {
         let obj = self.obj;
         write!(
             fmt,
-            "InsertQueuesTx {{ st_rf1_tx: {} {} {}, st_rf3_tx: {} {} {}, mt_rf3_tx: {} {} {}, lt_rf3_tx: {} {} {} }}",
+            "InsertQueuesTx {{ st_rf1_tx: {} {} {}, st_rf3_tx: {} {} {}, mt_rf3_tx: {} {} {}, lt_rf3_tx: {} {} {}, lt_rf3_lat5_tx: {} {} {} }}",
             obj.st_rf1_tx.is_closed(),
             obj.st_rf1_tx.is_full(),
             obj.st_rf1_tx.len(),
@@ -92,6 +99,9 @@ impl<'a> fmt::Display for InsertQueuesTxSummary<'a> {
             obj.lt_rf3_tx.is_closed(),
             obj.lt_rf3_tx.is_full(),
             obj.lt_rf3_tx.len(),
+            obj.lt_rf3_lat5_tx.is_closed(),
+            obj.lt_rf3_lat5_tx.is_full(),
+            obj.lt_rf3_lat5_tx.len(),
         )
     }
 }
@@ -102,6 +112,7 @@ pub struct InsertQueuesRx {
     pub st_rf3_rx: Receiver<VecDeque<QueryItem>>,
     pub mt_rf3_rx: Receiver<VecDeque<QueryItem>>,
     pub lt_rf3_rx: Receiver<VecDeque<QueryItem>>,
+    pub lt_rf3_lat5_rx: Receiver<VecDeque<QueryItem>>,
 }
 
 pub struct InsertDeques {
@@ -109,6 +120,7 @@ pub struct InsertDeques {
     pub st_rf3_qu: VecDeque<QueryItem>,
     pub mt_rf3_qu: VecDeque<QueryItem>,
     pub lt_rf3_qu: VecDeque<QueryItem>,
+    pub lt_rf3_lat5_qu: VecDeque<QueryItem>,
 }
 
 impl InsertDeques {
@@ -118,12 +130,17 @@ impl InsertDeques {
             st_rf3_qu: VecDeque::new(),
             mt_rf3_qu: VecDeque::new(),
             lt_rf3_qu: VecDeque::new(),
+            lt_rf3_lat5_qu: VecDeque::new(),
         }
     }
 
     /// Total number of items cumulated over all queues.
     pub fn len(&self) -> usize {
-        self.st_rf1_qu.len() + self.st_rf3_qu.len() + self.mt_rf3_qu.len() + self.lt_rf3_qu.len()
+        self.st_rf1_qu.len()
+            + self.st_rf3_qu.len()
+            + self.mt_rf3_qu.len()
+            + self.lt_rf3_qu.len()
+            + self.lt_rf3_lat5_qu.len()
     }
 
     pub fn clear(&mut self) {
@@ -131,6 +148,7 @@ impl InsertDeques {
         self.st_rf3_qu.clear();
         self.mt_rf3_qu.clear();
         self.lt_rf3_qu.clear();
+        self.lt_rf3_lat5_qu.clear();
     }
 
     pub fn summary(&self) -> InsertDequesSummary {
@@ -166,6 +184,7 @@ impl InsertDeques {
             &mut self.st_rf3_qu,
             &mut self.mt_rf3_qu,
             &mut self.lt_rf3_qu,
+            &mut self.lt_rf3_lat5_qu,
         ];
         for qu in qus {
             if qu.len() * 2 < qu.capacity() {
@@ -203,6 +222,8 @@ pub struct InsertSenderPolling {
     pub mt_rf3_sp: SenderPolling<VecDeque<QueryItem>>,
     #[pin]
     pub lt_rf3_sp: SenderPolling<VecDeque<QueryItem>>,
+    #[pin]
+    pub lt_rf3_lat5_sp: SenderPolling<VecDeque<QueryItem>>,
 }
 
 impl InsertSenderPolling {
@@ -212,6 +233,7 @@ impl InsertSenderPolling {
             st_rf3_sp: SenderPolling::new(iqtx.st_rf3_tx),
             mt_rf3_sp: SenderPolling::new(iqtx.mt_rf3_tx),
             lt_rf3_sp: SenderPolling::new(iqtx.lt_rf3_tx),
+            lt_rf3_lat5_sp: SenderPolling::new(iqtx.lt_rf3_lat5_tx),
         }
     }
 
@@ -235,6 +257,10 @@ impl InsertSenderPolling {
         self.project().lt_rf3_sp
     }
 
+    pub fn lt_rf3_lat5_sp_pin(self: Pin<&mut Self>) -> Pin<&mut SenderPolling<VecDeque<QueryItem>>> {
+        self.project().lt_rf3_lat5_sp
+    }
+
     pub fn __st_rf1_sp_pin(self: Pin<&mut Self>) -> Pin<&mut SenderPolling<VecDeque<QueryItem>>> {
         if true {
             panic!("encapsulated by pin_project");
@@ -256,7 +282,7 @@ impl<'a> fmt::Display for InsertSenderPollingSummary<'a> {
         let obj = self.obj;
         write!(
             fmt,
-            "InsertSenderPolling {{ st_rf1_idle_len: {:?} {:?}, st_rf3_idle_len: {:?} {:?}, mt_rf3_idle_len: {:?} {:?}, lt_rf3_idle_len: {:?} {:?} }}",
+            "InsertSenderPolling {{ st_rf1_idle_len: {:?} {:?}, st_rf3_idle_len: {:?} {:?}, mt_rf3_idle_len: {:?} {:?}, lt_rf3_idle_len: {:?} {:?}, lt_rf3_lat5_idle_len: {:?} {:?} }}",
             obj.st_rf1_sp.is_idle(),
             obj.st_rf1_sp.len(),
             obj.st_rf3_sp.is_idle(),
@@ -265,6 +291,8 @@ impl<'a> fmt::Display for InsertSenderPollingSummary<'a> {
             obj.mt_rf3_sp.len(),
             obj.lt_rf3_sp.is_idle(),
             obj.lt_rf3_sp.len(),
+            obj.lt_rf3_lat5_sp.is_idle(),
+            obj.lt_rf3_lat5_sp.len(),
         )
     }
 }

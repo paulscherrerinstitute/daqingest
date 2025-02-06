@@ -2,6 +2,7 @@ pub mod inserthook;
 
 use async_channel::Receiver;
 use async_channel::Sender;
+use channeltools::channel_combine_ab::ChannelCombineAB;
 use dbpg::seriesbychannel::ChannelInfoQuery;
 use err::Error;
 use log::*;
@@ -135,17 +136,20 @@ impl Daemon {
             let (st_rf1_tx, st_rf1_rx) = async_channel::bounded(ingest_opts.insert_item_queue_cap());
             let (mt_rf3_tx, mt_rf3_rx) = async_channel::bounded(ingest_opts.insert_item_queue_cap());
             let (lt_rf3_tx, lt_rf3_rx) = async_channel::bounded(ingest_opts.insert_item_queue_cap());
+            let (lt_rf3_lat5_tx, lt_rf3_lat5_rx) = async_channel::bounded(ingest_opts.insert_item_queue_cap());
             let iqtx = InsertQueuesTx {
                 st_rf3_tx,
                 st_rf1_tx,
                 mt_rf3_tx,
                 lt_rf3_tx,
+                lt_rf3_lat5_tx,
             };
             let iqrx = InsertQueuesRx {
                 st_rf3_rx,
                 st_rf1_rx,
                 mt_rf3_rx,
                 lt_rf3_rx,
+                lt_rf3_lat5_rx,
             };
             (iqtx, iqrx)
         };
@@ -251,13 +255,15 @@ impl Daemon {
             .map_err(Error::from_string)?;
             insert_worker_jhs.extend(jh);
 
+            let lt_rx_combined = ChannelCombineAB::new(iqrx.lt_rf3_rx, iqrx.lt_rf3_lat5_rx);
+
             let jh = scywr::insertworker::spawn_scylla_insert_workers(
                 RetentionTime::Long,
                 opts.scyconf_lt.clone(),
                 ingest_opts.insert_scylla_sessions(),
                 ingest_opts.insert_worker_count().min(2),
                 ingest_opts.insert_worker_concurrency().min(8),
-                iqrx.lt_rf3_rx,
+                lt_rx_combined,
                 insert_worker_opts.clone(),
                 insert_worker_stats.clone(),
                 ingest_opts.use_rate_limit_queue(),

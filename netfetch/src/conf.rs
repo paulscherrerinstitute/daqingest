@@ -107,7 +107,7 @@ impl CaIngestOpts {
     }
 
     pub fn insert_item_queue_cap(&self) -> usize {
-        self.insert_item_queue_cap.unwrap_or(1000 * 1000)
+        self.insert_item_queue_cap.unwrap_or(1000 * 1000) * 2
     }
 
     pub fn store_workers_rate(&self) -> u64 {

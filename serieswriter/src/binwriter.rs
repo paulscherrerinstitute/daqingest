@@ -26,7 +26,8 @@ macro_rules! trace_ingest { ($($arg:tt)*) => ( if false { trace!($($arg)*); } ) 
 macro_rules! trace_tick { ($($arg:tt)*) => ( if false { trace!($($arg)*); } ) }
 macro_rules! trace_tick_verbose { ($($arg:tt)*) => ( if false { trace!($($arg)*); } ) }
 
-macro_rules! debug_bin2 { ($t:expr, $($arg:tt)*) => ( if $t { debug!($($arg)*); } ) }
+macro_rules! debug_bin2 { ($t:expr, $($arg:tt)*) => ( if true { if $t { debug!($($arg)*); } } ) }
+macro_rules! trace_bin2 { ($t:expr, $($arg:tt)*) => ( if false { if $t { trace!($($arg)*); } } ) }
 
 autoerr::create_error_v1!(
     name(Error, "SerieswriterBinwriter"),
@@ -101,7 +102,11 @@ impl BinWriter {
         if let Some(last) = combs.last_mut() {
             if last.1 >= DtMs::from_ms_u64(1000 * 60 * 60 * 24) {
                 last.0 = RetentionTime::Long;
+            } else if last.1 >= DtMs::from_ms_u64(1000 * 60 * 60 * 1) {
+                last.0 = RetentionTime::Long;
+                combs.push((RetentionTime::Long, DtMs::from_ms_u64(1000 * 60 * 60 * 24)));
             } else {
+                combs.push((RetentionTime::Long, DtMs::from_ms_u64(1000 * 60 * 60 * 1)));
                 combs.push((RetentionTime::Long, DtMs::from_ms_u64(1000 * 60 * 60 * 24)));
             }
         }

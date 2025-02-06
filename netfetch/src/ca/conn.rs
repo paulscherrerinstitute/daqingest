@@ -83,7 +83,7 @@ use tokio::net::TcpStream;
 
 const CONNECTING_TIMEOUT: Duration = Duration::from_millis(1000 * 6);
 const CHANNEL_STATUS_EMIT_IVL: Duration = Duration::from_millis(1000 * 8);
-const IOC_PING_IVL: Duration = Duration::from_millis(1000 * 120);
+const IOC_PING_IVL: Duration = Duration::from_millis(1000 * 180);
 const MONITOR_POLL_TIMEOUT: Duration = Duration::from_millis(1000 * 6);
 const TIMEOUT_CHANNEL_CLOSING: Duration = Duration::from_millis(1000 * 8);
 const TIMEOUT_PONG_WAIT: Duration = Duration::from_millis(1000 * 10);
@@ -2084,16 +2084,27 @@ impl CaConn {
                                     } else {
                                         self.stats.recv_read_notify_state_read_pending.inc();
                                     }
-                                    self.read_ioids.remove(&ioid);
+                                    let read_expected = if let Some(cid) = self.read_ioids.remove(&ioid) {
+                                        true
+                                    } else {
+                                        false
+                                    };
                                     st2.mon2state = Monitoring2State::Passive(Monitoring2PassiveState {
                                         tsbeg: tsnow,
                                         ts_silence_read_next: tsnow + Self::silence_read_next_ivl_rng(&mut self.rng),
                                     });
-                                    {
+                                    if read_expected {
                                         let item = ChannelStatusItem {
                                             ts: self.tmp_ts_poll,
                                             cssid: st.channel.cssid.clone(),
-                                            status: ChannelStatus::MonitoringSilenceReadUnchanged,
+                                            status: ChannelStatus::MonitoringReadResultExpected,
+                                        };
+                                        ch_wrst.emit_channel_status_item(item, &mut self.iqdqs.st_rf3_qu)?;
+                                    } else {
+                                        let item = ChannelStatusItem {
+                                            ts: self.tmp_ts_poll,
+                                            cssid: st.channel.cssid.clone(),
+                                            status: ChannelStatus::MonitoringReadResultUnexpected,
                                         };
                                         ch_wrst.emit_channel_status_item(item, &mut self.iqdqs.st_rf3_qu)?;
                                     }
@@ -2103,6 +2114,7 @@ impl CaConn {
                                     // But there is still a small chance that the monitor will just received slightly later.
                                     // More involved check would be to raise a flag, wait for the expected monitor for some
                                     // timeout, and if we get nothing error out.
+                                    // TODO read-result-after-monitor-silence
                                     if false {
                                         Self::read_notify_res_for_write(
                                             ev,
@@ -2204,14 +2216,17 @@ impl CaConn {
         // TODO should attach these counters already to Writable state.
         if crst.ts_recv_value_status_emit_next <= tsnow {
             crst.ts_recv_value_status_emit_next = tsnow + Self::recv_value_status_emit_ivl_rng(rng);
-            let item = ChannelStatusItem {
-                ts: stnow,
-                cssid: crst.cssid,
-                status: ChannelStatus::MonitoringSilenceReadUnchanged,
-            };
-            let deque = &mut iqdqs.st_rf3_qu;
-            if wrst.emit_channel_status_item(item, deque).is_err() {
-                stats.logic_error().inc();
+            // TODO was only for debugging
+            if false {
+                let item = ChannelStatusItem {
+                    ts: stnow,
+                    cssid: crst.cssid,
+                    status: ChannelStatus::MonitoringSilenceReadUnchanged,
+                };
+                let deque = &mut iqdqs.st_rf3_qu;
+                if wrst.emit_channel_status_item(item, deque).is_err() {
+                    stats.logic_error().inc();
+                }
             }
         }
         let tsev_local = TsNano::from_system_time(stnow);
@@ -3302,6 +3317,9 @@ macro_rules! flush_queue {
     ($self:expr, $qu:ident, $sp:ident, $batcher:expr, $loop_max:expr, $have:expr, $id:expr, $cx:expr, $stats:expr) => {
         let obj = $self.as_mut().get_mut();
         let qu = &mut obj.$qu;
+        if qu.len() < qu.capacity() * 4 / 10 {
+            qu.shrink_to(qu.capacity() * 7 / 10);
+        }
         let sp = obj.$sp.as_mut();
         match Self::attempt_flush_queue(qu, sp, $batcher, $loop_max, $cx, $id, $stats) {
             Ok(Ready(Some(()))) => {
@@ -3462,6 +3480,22 @@ impl Stream for CaConn {
                     32,
                     (&mut have_progress, &mut have_pending),
                     "lt_rf3_rx",
+                    cx,
+                    stats_fn
+                );
+
+                let stats2 = self.stats.clone();
+                let stats_fn = move |item: &VecDeque<QueryItem>| {
+                    stats2.iiq_batch_len().ingest(item.len() as u32);
+                };
+                flush_queue_dqs!(
+                    self,
+                    lt_rf3_lat5_qu,
+                    lt_rf3_lat5_sp_pin,
+                    send_batched::<256, _>,
+                    32,
+                    (&mut have_progress, &mut have_pending),
+                    "lt_rf3_lat5_rx",
                     cx,
                     stats_fn
                 );
