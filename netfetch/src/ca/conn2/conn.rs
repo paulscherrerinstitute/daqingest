@@ -1,3 +1,4 @@
+mod connected;
 mod connecting;
 
 use super::conncmd::ConnCommand;
@@ -7,6 +8,7 @@ use crate::ca::conn::CaConnOpts;
 use crate::ca::conn2::progpend::HaveProgressPending;
 use async_channel::Sender;
 use ca_proto::ca::proto;
+use connected::Connected;
 use connecting::Connecting;
 use dbpg::seriesbychannel::ChannelInfoQuery;
 use futures_util::Future;
@@ -33,6 +35,10 @@ use std::time::Duration;
 use std::time::Instant;
 use taskrun::tokio;
 use tokio::net::TcpStream;
+
+macro_rules! conn_err {
+    ($($arg:expr),*) => { if true { info!($($arg),*); } };
+}
 
 autoerr::create_error_v1!(
     name(Error, "Conn"),
@@ -104,7 +110,7 @@ impl CaConn {
         Self {
             opts,
             backend,
-            state: CaConnState::Connecting(Connecting::dummy_new(remote_addr, tsnow)),
+            state: CaConnState::Connecting(Connecting::new(remote_addr, tsnow)),
             iqdqs: InsertDeques::new(),
             ca_conn_event_out_queue: VecDeque::new(),
             ca_conn_event_out_queue_max: 2000,
@@ -308,7 +314,25 @@ impl Stream for CaConn {
             // }
 
             match &mut self.state {
-                CaConnState::Connecting(st2) => handle_poll_res!(st2.poll_unpin(cx), hpp),
+                CaConnState::Connecting(st2) => match st2.poll_unpin(cx) {
+                    Ready(x) => match x {
+                        Ok(Some(x)) => {
+                            hpp.have_progress();
+                            self.state = CaConnState::Connected(Connected::new(x));
+                        }
+                        Ok(None) => {
+                            // TODO
+                            // In this case, should probably be treated like error.
+                        }
+                        Err(e) => {
+                            // TODO handle or propagate the error, change state.
+                            conn_err!("{}", e);
+                        }
+                    },
+                    Pending => {
+                        hpp.have_pending();
+                    }
+                },
                 CaConnState::Connected(_) => todo!(),
                 CaConnState::Shutdown(_) => {
                     // TODO still attempt to flush queues.

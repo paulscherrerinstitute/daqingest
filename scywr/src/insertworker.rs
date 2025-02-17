@@ -122,6 +122,7 @@ pub async fn spawn_scylla_insert_workers(
     insert_worker_opts: Arc<InsertWorkerOpts>,
     store_stats: Arc<stats::InsertWorkerStats>,
     use_rate_limit_queue: bool,
+    ignore_writes: bool,
 ) -> Result<Vec<JoinHandle<Result<(), Error>>>, Error> {
     let item_inp = if use_rate_limit_queue {
         crate::ratelimit::rate_limiter(insert_worker_opts.store_workers_rate.clone(), item_inp)
@@ -142,6 +143,7 @@ pub async fn spawn_scylla_insert_workers(
             item_inp.clone(),
             insert_worker_opts.clone(),
             Some(data_store),
+            ignore_writes,
             store_stats.clone(),
         ));
         jhs.push(jh);
@@ -165,6 +167,7 @@ pub async fn spawn_scylla_insert_workers_dummy(
             item_inp.clone(),
             insert_worker_opts.clone(),
             data_store,
+            true,
             store_stats.clone(),
         ));
         jhs.push(jh);
@@ -178,6 +181,7 @@ async fn worker_streamed(
     item_inp: Receiver<VecDeque<QueryItem>>,
     insert_worker_opts: Arc<InsertWorkerOpts>,
     data_store: Option<Arc<DataStore>>,
+    ignore_writes: bool,
     stats: Arc<InsertWorkerStats>,
 ) -> Result<(), Error> {
     debug_setup!("worker_streamed  begin");
@@ -191,7 +195,7 @@ async fn worker_streamed(
         .map_or_else(|| format!("dummy"), |x| x.rett.debug_tag().to_string());
     let stream = inspect_items(stream, worker_name.clone());
     if let Some(data_store) = data_store {
-        let stream = transform_to_db_futures(stream, data_store, stats.clone());
+        let stream = transform_to_db_futures(stream, data_store, ignore_writes, stats.clone());
         let stream = stream
             .map(|x| futures_util::stream::iter(x))
             .flatten_unordered(Some(1))
@@ -237,6 +241,7 @@ async fn worker_streamed(
 fn transform_to_db_futures<S>(
     item_inp: S,
     data_store: Arc<DataStore>,
+    ignore_writes: bool,
     stats: Arc<InsertWorkerStats>,
 ) -> impl Stream<Item = Vec<InsertFut>>
 where
@@ -252,14 +257,40 @@ where
         let mut res = Vec::with_capacity(32);
         for item in batch {
             let futs = match item {
-                QueryItem::Insert(item) => prepare_query_insert_futs(item, &data_store, &stats, tsnow),
-                QueryItem::Msp(item) => prepare_msp_insert_futs(item, &data_store, &stats, tsnow),
-                QueryItem::TimeBinSimpleF32V02(item) => {
-                    prepare_timebin_v02_insert_futs(item, &data_store, &stats, tsnow)
+                QueryItem::Insert(item) => {
+                    if ignore_writes {
+                        SmallVec::new()
+                    } else {
+                        prepare_query_insert_futs(item, &data_store, &stats, tsnow)
+                    }
                 }
-                QueryItem::Accounting(item) => prepare_accounting_insert_futs(item, &data_store, &stats, tsnow),
+                QueryItem::Msp(item) => {
+                    if ignore_writes {
+                        SmallVec::new()
+                    } else {
+                        prepare_msp_insert_futs(item, &data_store, &stats, tsnow)
+                    }
+                }
+                QueryItem::TimeBinSimpleF32V02(item) => {
+                    if ignore_writes {
+                        SmallVec::new()
+                    } else {
+                        prepare_timebin_v02_insert_futs(item, &data_store, &stats, tsnow)
+                    }
+                }
+                QueryItem::Accounting(item) => {
+                    if ignore_writes {
+                        SmallVec::new()
+                    } else {
+                        prepare_accounting_insert_futs(item, &data_store, &stats, tsnow)
+                    }
+                }
                 QueryItem::AccountingRecv(item) => {
-                    prepare_accounting_recv_insert_futs(item, &data_store, &stats, tsnow)
+                    if ignore_writes {
+                        SmallVec::new()
+                    } else {
+                        prepare_accounting_recv_insert_futs(item, &data_store, &stats, tsnow)
+                    }
                 }
             };
             trace!("prepared futs  len {}", futs.len());

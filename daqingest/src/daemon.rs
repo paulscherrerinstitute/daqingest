@@ -191,6 +191,8 @@ impl Daemon {
         // Insert queue hook
         // let query_item_rx = inserthook::active_channel_insert_hook(query_item_rx);
 
+        let ignore_writes = ingest_opts.scylla_ignore_writes();
+
         let mut insert_worker_jhs = Vec::new();
 
         if ingest_opts.scylla_disable() {
@@ -235,6 +237,7 @@ impl Daemon {
                 insert_worker_opts.clone(),
                 insert_worker_stats.clone(),
                 ingest_opts.use_rate_limit_queue(),
+                ignore_writes,
             )
             .await
             .map_err(Error::from_string)?;
@@ -250,6 +253,7 @@ impl Daemon {
                 insert_worker_opts.clone(),
                 insert_worker_stats.clone(),
                 ingest_opts.use_rate_limit_queue(),
+                ignore_writes,
             )
             .await
             .map_err(Error::from_string)?;
@@ -267,6 +271,7 @@ impl Daemon {
                 insert_worker_opts.clone(),
                 insert_worker_stats.clone(),
                 ingest_opts.use_rate_limit_queue(),
+                ignore_writes,
             )
             .await
             .map_err(Error::from_string)?;

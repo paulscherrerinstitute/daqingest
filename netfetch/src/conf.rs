@@ -43,6 +43,7 @@ pub struct CaIngestOpts {
     pub test_bsread_addr: Option<String>,
     #[serde(default)]
     scylla_disable: bool,
+    scylla_ignore_writes: bool,
 }
 
 impl CaIngestOpts {
@@ -124,6 +125,10 @@ impl CaIngestOpts {
 
     pub fn scylla_disable(&self) -> bool {
         self.scylla_disable
+    }
+
+    pub fn scylla_ignore_writes(&self) -> bool {
+        self.scylla_ignore_writes
     }
 }
 

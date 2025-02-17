@@ -12,54 +12,48 @@ use tokio::net::TcpStream;
 use tokio::time::error::Elapsed;
 
 autoerr::create_error_v1!(
-    name(Error, "Connecting"),
+    name(Error, "Connected"),
     enum variants {
         Timeout,
         IO(#[from] std::io::Error),
     },
 );
 
-type PollType = TcpStream;
+type PollType = ();
 
 type ReturnType = Result<Result<TcpStream, std::io::Error>, Elapsed>;
 
-type ConnectingFut = Pin<Box<dyn Future<Output = ReturnType> + Send>>;
+// type ConnectingFut = Pin<Box<dyn Future<Output = ReturnType> + Send>>;
 
-pub struct Connecting {
+pub struct Connected {
     tsbeg: Instant,
     addr: SocketAddrV4,
-    fut: ConnectingFut,
+    tcp: TcpStream,
+    // fut: ConnectingFut,
 }
 
-impl fmt::Debug for Connecting {
+impl fmt::Debug for Connected {
     fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
-        fmt.debug_struct("Connecting")
+        fmt.debug_struct("Connected")
             .field("tsbeg", &self.tsbeg)
             .field("addr", &self.addr)
             .finish()
     }
 }
 
-impl Connecting {
-    pub fn new(remote_addr: SocketAddrV4, tsnow: Instant) -> Self {
-        let fut = tokio::time::timeout(Duration::from_millis(1800), tokio::net::TcpStream::connect(remote_addr));
+impl Connected {
+    pub fn new(tcp: TcpStream) -> Self {
         Self {
             tsbeg: tsnow,
             addr: remote_addr,
-            fut: Box::pin(fut),
+            tcp,
+            // fut: Box::pin(fut),
         }
     }
 
     pub fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<Option<PollType>, Error>> {
         use Poll::*;
-        match self.fut.poll_unpin(cx) {
-            Ready(x) => match x {
-                Ok(Ok(x)) => Ready(Ok(Some(x))),
-                Ok(Err(e)) => Ready(Err(e.into())),
-                Err(_) => Ready(Err(Error::Timeout)),
-            },
-            Pending => Pending,
-        }
+        Pending
     }
 
     pub fn poll_unpin(&mut self, cx: &mut Context) -> Poll<Result<Option<PollType>, Error>> {
