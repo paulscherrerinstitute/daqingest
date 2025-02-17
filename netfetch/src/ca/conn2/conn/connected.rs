@@ -42,7 +42,7 @@ impl fmt::Debug for Connected {
 }
 
 impl Connected {
-    pub fn new(tcp: TcpStream) -> Self {
+    pub fn new(remote_addr: SocketAddrV4, tcp: TcpStream, tsnow: Instant) -> Self {
         Self {
             tsbeg: tsnow,
             addr: remote_addr,

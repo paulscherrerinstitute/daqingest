@@ -50,6 +50,10 @@ impl Connecting {
         }
     }
 
+    pub fn addr(&self) -> SocketAddrV4 {
+        self.addr
+    }
+
     pub fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<Option<PollType>, Error>> {
         use Poll::*;
         match self.fut.poll_unpin(cx) {

@@ -77,7 +77,7 @@ enum ConnectedState {
 #[derive(Debug)]
 enum CaConnState {
     Connecting(Connecting),
-    Connected(CaProto),
+    Connected(Connected),
     Shutdown(EndOfStreamReason),
     Done,
 }
@@ -313,12 +313,14 @@ impl Stream for CaConn {
             //     }
             // }
 
+            let tsnow4 = Instant::now();
+
             match &mut self.state {
                 CaConnState::Connecting(st2) => match st2.poll_unpin(cx) {
                     Ready(x) => match x {
                         Ok(Some(x)) => {
                             hpp.have_progress();
-                            self.state = CaConnState::Connected(Connected::new(x));
+                            self.state = CaConnState::Connected(Connected::new(st2.addr(), x, tsnow4));
                         }
                         Ok(None) => {
                             // TODO
