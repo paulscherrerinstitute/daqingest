@@ -20,7 +20,6 @@ use conn::ChannelStateInfo;
 use conn::ChannelStatusPartial;
 use conn::ConnCommand;
 use conn::ConnCommandResult;
-use core::fmt;
 use dbpg::seriesbychannel::BoxedSend;
 use dbpg::seriesbychannel::CanSendChannelInfoResult;
 use dbpg::seriesbychannel::ChannelInfoQuery;
@@ -55,6 +54,7 @@ use stats::CaProtoStats;
 use stats::IocFinderStats;
 use std::collections::BTreeMap;
 use std::collections::VecDeque;
+use std::fmt;
 use std::net::SocketAddr;
 use std::net::SocketAddrV4;
 use std::pin::Pin;
@@ -584,13 +584,7 @@ impl CaConnSet {
 
     fn handle_add_channel_new(cmd: ChannelAdd, ress: StateTransRes) -> Result<(), Error> {
         {
-            let item = ChannelState {
-                value: ChannelStateValue::Active(ActiveChannelState::WaitForStatusSeriesId {
-                    since: SystemTime::now(),
-                }),
-                config: cmd.ch_cfg.clone(),
-                touched: 1,
-            };
+            let item = ChannelState::new_wait_for_cssid(&cmd.ch_cfg);
             *ress.chst = item;
         }
         {

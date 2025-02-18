@@ -215,7 +215,7 @@ async fn find_channel(
 async fn channel_add_inner(params: HashMap<String, String>, dcom: Arc<DaemonComm>) -> Result<(), Error> {
     if let Some(name) = params.get("name") {
         // let ch = crate::daemon_common::Channel::new(name.into());
-        let ch_cfg = ChannelConfig::st_monitor(name);
+        let ch_cfg = ChannelConfig::st_monitor(name, "api");
         let (tx, rx) = async_channel::bounded(1);
         let ev = DaemonEvent::ChannelAdd(ch_cfg, tx);
         dcom.tx.send(ev).await?;

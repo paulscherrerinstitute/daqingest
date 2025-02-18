@@ -188,6 +188,7 @@ pub struct ChannelState {
     pub value: ChannelStateValue,
     pub config: ChannelConfig,
     pub touched: u8,
+    config_file_basename: String,
 }
 
 impl ChannelState {
@@ -197,6 +198,26 @@ impl ChannelState {
             true
         } else {
             false
+        }
+    }
+
+    pub fn new_dummy() -> Self {
+        Self {
+            value: ChannelStateValue::InitDummy,
+            config: ChannelConfig::dummy(),
+            touched: 0,
+            config_file_basename: String::new(),
+        }
+    }
+
+    pub fn new_wait_for_cssid(ch_cfg: &crate::conf::ChannelConfig) -> Self {
+        Self {
+            value: ChannelStateValue::Active(ActiveChannelState::WaitForStatusSeriesId {
+                since: SystemTime::now(),
+            }),
+            config: ch_cfg.clone(),
+            touched: 1,
+            config_file_basename: ch_cfg.config_file_basename().into(),
         }
     }
 }
@@ -230,11 +251,7 @@ impl ChannelStateMap {
 
     pub fn get_mut_or_dummy_init(&mut self, k: &ChannelName) -> &mut ChannelState {
         if !self.map.contains_key(k) {
-            let dummy = ChannelState {
-                value: ChannelStateValue::InitDummy,
-                config: ChannelConfig::dummy(),
-                touched: 0,
-            };
+            let dummy = ChannelState::new_dummy();
             self.map.insert(k.clone(), dummy);
         }
         self.map.get_mut(k).unwrap()

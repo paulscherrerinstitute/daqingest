@@ -2,6 +2,7 @@ use crate::ca::connset::CaConnSetEvent;
 use crate::ca::connset::ChannelStatusesRequest;
 use crate::ca::connset::ConnSetCmd;
 use crate::conf::ChannelConfig;
+use crate::conf::ChannelConfigForStatesApi;
 use async_channel::Sender;
 use chrono::DateTime;
 use chrono::Utc;
@@ -62,7 +63,7 @@ impl StorageUsage {
 struct ChannelState {
     ioc_address: Option<SocketAddr>,
     connection: ConnectionState,
-    archiving_configuration: ChannelConfig,
+    archiving_configuration: ChannelConfigForStatesApi,
     recv_count: u64,
     recv_bytes: u64,
     #[serde(with = "humantime_serde", skip_serializing_if = "system_time_epoch")]
@@ -87,9 +88,10 @@ impl ChannelState {
 
     fn connecting_addr(config: ChannelConfig, ioc_address: Option<SocketAddr>, connst: ConnectionState) -> Self {
         Self {
+            private: StatePrivate::default(config.config_file_basename()),
             ioc_address,
             connection: connst,
-            archiving_configuration: config,
+            archiving_configuration: config.into(),
             recv_count: 0,
             recv_bytes: 0,
             recv_last: SystemTime::UNIX_EPOCH,
@@ -98,13 +100,13 @@ impl ChannelState {
             write_lt_last: SystemTime::UNIX_EPOCH,
             updated: SystemTime::UNIX_EPOCH,
             pong_last: None,
-            private: StatePrivate::default(),
         }
     }
 
     fn with_chst(config: ChannelConfig, chst: crate::ca::conn::ChannelStateInfo) -> Self {
         let private = StatePrivate {
             status_emit_count: chst.status_emit_count,
+            config_file_basename: config.config_file_basename().into(),
         };
         let connst = {
             use crate::ca::conn::ChannelConnectedInfo::*;
@@ -120,7 +122,7 @@ impl ChannelState {
             connection: connst,
             // TODO config is stored in two places
             // conf: chst.conf,
-            archiving_configuration: config,
+            archiving_configuration: config.into(),
             recv_count: chst.recv_count.unwrap_or(0),
             recv_bytes: chst.recv_bytes.unwrap_or(0),
             recv_last: chst.recv_last,
@@ -137,11 +139,15 @@ impl ChannelState {
 #[derive(Debug, Serialize)]
 struct StatePrivate {
     status_emit_count: u64,
+    config_file_basename: String,
 }
 
-impl Default for StatePrivate {
-    fn default() -> Self {
-        Self { status_emit_count: 0 }
+impl StatePrivate {
+    fn default(config_file_basename: &str) -> Self {
+        Self {
+            status_emit_count: 0,
+            config_file_basename: config_file_basename.into(),
+        }
     }
 }
 

@@ -43,6 +43,7 @@ pub struct CaIngestOpts {
     pub test_bsread_addr: Option<String>,
     #[serde(default)]
     scylla_disable: bool,
+    #[serde(default)]
     scylla_ignore_writes: bool,
 }
 
@@ -188,6 +189,7 @@ fn test_duration_parse() {
 }
 
 async fn parse_channel_config_txt(fname: &Path) -> Result<ChannelsConfig, Error> {
+    let basename = fname.file_stem().unwrap().to_str().unwrap();
     let re_p = Regex::new("--------------------------").unwrap();
     let re_n = Regex::new("--------------------------").unwrap();
     let mut file = OpenOptions::new().read(true).open(fname).await?;
@@ -218,6 +220,7 @@ async fn parse_channel_config_txt(fname: &Path) -> Result<ChannelsConfig, Error>
                     is_polled: false,
                     timestamp: ChannelTimestamp::Archiver,
                 },
+                config_file_basename: basename.to_string(),
             };
             conf.channels.push(item);
         }
@@ -272,11 +275,12 @@ async fn parse_config_dir(dir: &Path) -> Result<ChannelsConfig, Error> {
         let fnp = e.path();
         let fns = fnp.to_str().unwrap();
         if fns.ends_with(".yml") || fns.ends_with(".yaml") {
+            let basename = fnp.file_stem().unwrap().to_str().unwrap();
             let buf = tokio::fs::read(e.path()).await?;
             let conf: BTreeMap<String, ChannelConfigParse> =
                 serde_yaml::from_slice(&buf).map_err(Error::from_string)?;
             info!("parsed {} channels from {}", conf.len(), fns);
-            ret.push_from_parsed(&conf);
+            ret.push_from_parsed(&conf, basename);
         } else {
             debug!("ignore channel config file {:?}", e.path());
         }
@@ -299,23 +303,31 @@ impl ChannelTimestamp {
     fn default_config() -> Self {
         Self::Archiver
     }
+
+    fn is_default(&self) -> bool {
+        if let ChannelTimestamp::Archiver = self {
+            true
+        } else {
+            false
+        }
+    }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct IngestConfigArchiving {
     #[serde(default = "bool_true")]
     #[serde(with = "serde_replication_bool")]
     replication: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     #[serde(with = "serde_option_channel_read_config")]
     short_term: Option<ChannelReadConfig>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     #[serde(with = "serde_option_channel_read_config")]
     medium_term: Option<ChannelReadConfig>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     #[serde(with = "serde_option_channel_read_config")]
     long_term: Option<ChannelReadConfig>,
-    #[serde(default, skip_serializing_if = "bool_is_false")]
+    #[serde(default)]
     is_polled: bool,
     #[serde(default = "ChannelTimestamp::default_config")]
     timestamp: ChannelTimestamp,
@@ -341,6 +353,71 @@ fn bool_is_false(x: &bool) -> bool {
 
 fn bool_true() -> bool {
     true
+}
+
+mod serde_ingest_config_archiving {
+    use super::ChannelReadConfigApiFormat;
+    use super::IngestConfigArchiving;
+    use serde::de;
+    use serde::ser;
+    use serde::ser::SerializeMap;
+    use serde::Deserializer;
+    use serde::Serializer;
+    use std::fmt;
+
+    impl ser::Serialize for IngestConfigArchiving {
+        fn serialize<S>(&self, ser: S) -> Result<S::Ok, S::Error>
+        where
+            S: Serializer,
+        {
+            let mut map = ser.serialize_map(None)?;
+            // ser.is_human_readable()
+            if !self.replication {
+                map.serialize_entry("replication", &self.replication)?;
+            }
+            if let Some(v) = self.short_term.as_ref() {
+                map.serialize_entry("short_term", &ChannelReadConfigApiFormat(&v))?;
+            }
+            if let Some(v) = self.medium_term.as_ref() {
+                map.serialize_entry("medium_term", &ChannelReadConfigApiFormat(&v))?;
+            }
+            if let Some(v) = self.long_term.as_ref() {
+                map.serialize_entry("long_term", &ChannelReadConfigApiFormat(&v))?;
+            }
+            let anymon = [&self.short_term, &self.medium_term, &self.long_term]
+                .into_iter()
+                .map(|c| c.as_ref().map_or(false, |x| x.is_monitor()))
+                .fold(false, |a, x| a || x);
+            if anymon && self.is_polled || !anymon && !self.is_polled {
+                map.serialize_entry("is_polled", &self.is_polled)?;
+            }
+            if !self.timestamp.is_default() {
+                map.serialize_entry("timestamp", &self.timestamp)?;
+            }
+            map.end()
+        }
+    }
+}
+
+struct ChannelReadConfigApiFormat<'a>(&'a ChannelReadConfig);
+
+#[allow(non_snake_case)]
+mod serde_ChannelReadConfigApiFormat {
+    use super::ChannelReadConfig;
+    use super::ChannelReadConfigApiFormat;
+    use serde::ser;
+
+    impl<'a> ser::Serialize for ChannelReadConfigApiFormat<'a> {
+        fn serialize<S>(&self, ser: S) -> Result<S::Ok, S::Error>
+        where
+            S: ser::Serializer,
+        {
+            match &self.0 {
+                ChannelReadConfig::Monitor => ser.serialize_str("Monitor"),
+                ChannelReadConfig::Poll(n) => ser.serialize_u32(n.as_secs() as u32),
+            }
+        }
+    }
 }
 
 mod serde_replication_bool {
@@ -489,6 +566,16 @@ pub enum ChannelReadConfig {
     Poll(Duration),
 }
 
+impl ChannelReadConfig {
+    pub fn is_monitor(&self) -> bool {
+        if let Self::Monitor = self {
+            true
+        } else {
+            false
+        }
+    }
+}
+
 #[test]
 fn test_channel_config_00() {
     let inp = r###"
@@ -546,27 +633,15 @@ impl ChannelsConfig {
         &self.channels
     }
 
-    fn push_from_parsed(&mut self, rhs: &BTreeMap<String, ChannelConfigParse>) {
+    fn push_from_parsed(&mut self, rhs: &BTreeMap<String, ChannelConfigParse>, config_file_basename: &str) {
         for (k, v) in rhs.iter() {
             let item = ChannelConfig {
                 name: k.into(),
                 arch: v.archiving_configuration.clone(),
+                config_file_basename: config_file_basename.into(),
             };
             self.channels.push(item);
         }
-    }
-}
-
-impl From<BTreeMap<String, ChannelConfigParse>> for ChannelsConfig {
-    fn from(value: BTreeMap<String, ChannelConfigParse>) -> Self {
-        let channels = value
-            .into_iter()
-            .map(|(k, v)| ChannelConfig {
-                name: k,
-                arch: v.archiving_configuration,
-            })
-            .collect();
-        ChannelsConfig { channels }
     }
 }
 
@@ -574,10 +649,11 @@ impl From<BTreeMap<String, ChannelConfigParse>> for ChannelsConfig {
 pub struct ChannelConfig {
     name: String,
     arch: IngestConfigArchiving,
+    config_file_basename: String,
 }
 
 impl ChannelConfig {
-    pub fn st_monitor<S: Into<String>>(name: S) -> Self {
+    pub fn st_monitor<S: Into<String>>(name: S, config_file_basename: &str) -> Self {
         Self {
             name: name.into(),
             arch: IngestConfigArchiving {
@@ -588,11 +664,16 @@ impl ChannelConfig {
                 is_polled: false,
                 timestamp: ChannelTimestamp::Archiver,
             },
+            config_file_basename: config_file_basename.into(),
         }
     }
 
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    pub fn config_file_basename(&self) -> &str {
+        &self.config_file_basename
     }
 
     pub fn is_polled(&self) -> bool {
@@ -678,6 +759,18 @@ impl ChannelConfig {
         Self {
             name: String::from("dummy"),
             arch: IngestConfigArchiving::dummy(),
+            config_file_basename: String::new(),
         }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ChannelConfigForStatesApi {
+    arch: IngestConfigArchiving,
+}
+
+impl From<ChannelConfig> for ChannelConfigForStatesApi {
+    fn from(value: ChannelConfig) -> Self {
+        Self { arch: value.arch }
     }
 }
