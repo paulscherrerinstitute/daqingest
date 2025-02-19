@@ -14,12 +14,13 @@ use std::time::Duration;
 use taskrun::tokio;
 use tokio::task::JoinHandle;
 
-#[derive(Debug, thiserror::Error)]
-#[cstm(name = "IocSearch")]
-pub enum Error {
-    LookupFailure(String),
-    IO(#[from] std::io::Error),
-}
+autoerr::create_error_v1!(
+    name(Error, "IocSearch"),
+    enum variants {
+        LookupFailure(String),
+        IO(#[from] std::io::Error),
+    },
+);
 
 async fn resolve_address(addr_str: &str) -> Result<SocketAddr, Error> {
     const PORT_DEFAULT: u16 = 5064;

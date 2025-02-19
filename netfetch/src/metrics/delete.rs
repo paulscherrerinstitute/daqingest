@@ -8,8 +8,6 @@ use bytes::Bytes;
 use chrono::DateTime;
 use chrono::Utc;
 use core::fmt;
-use err::thiserror;
-use err::ThisError;
 use futures_util::StreamExt;
 use futures_util::TryStreamExt;
 use netpod::log::*;
@@ -47,22 +45,22 @@ macro_rules! debug_cql {
     };
 }
 
-#[derive(Debug, ThisError)]
-#[cstm(name = "HttpDelete")]
-pub enum Error {
-    Logic,
-    MissingRetentionTime,
-    MissingSeriesId,
-    MissingScalarType,
-    MissingBegDate,
-    MissingEndDate,
-    ScyllaTransport(#[from] scylla::transport::errors::NewSessionError),
-    ScyllaQuery(#[from] scylla::transport::errors::QueryError),
-    ScyllaRowError(#[from] scylla::cql_to_rust::FromRowError),
-    ScyllaNextRow(#[from] scylla::transport::iterator::NextRowError),
-    ScyllaTypeCheck(#[from] scylla::deserialize::TypeCheckError),
-    InvalidTimestamp,
-}
+autoerr::create_error_v1!(
+    name(Error, "HttpDelete"),
+    enum variants {
+        Logic,
+        MissingRetentionTime,
+        MissingSeriesId,
+        MissingScalarType,
+        MissingBegDate,
+        MissingEndDate,
+        ScyllaTransport(#[from] scylla::transport::errors::NewSessionError),
+        ScyllaQuery(#[from] scylla::transport::errors::QueryError),
+        ScyllaNextRow(#[from] scylla::transport::iterator::NextRowError),
+        ScyllaTypeCheck(#[from] scylla::deserialize::TypeCheckError),
+        InvalidTimestamp,
+    },
+);
 
 pub async fn delete(
     (headers, Query(params), body): (HeaderMap, Query<HashMap<String, String>>, axum::body::Body),

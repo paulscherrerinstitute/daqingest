@@ -412,36 +412,7 @@ fn make_routes(
                 )
                 .nest(
                     "/channel",
-                    Router::new()
-                        .fallback(|| async { axum::Json(json!({"subcommands":["states"]})) })
-                        .route(
-                            "/error_handler_test",
-                            get({
-                                let tx = connset_cmd_tx.clone();
-                                |Query(params): Query<HashMap<String, String>>| status::error_handler_test()
-                            }),
-                        )
-                        .route(
-                            "/states",
-                            get({
-                                let tx = connset_cmd_tx.clone();
-                                |Query(params): Query<HashMap<String, String>>| status::channel_states(params, tx)
-                            }),
-                        )
-                        .route(
-                            "/add",
-                            get({
-                                let dcom = dcom.clone();
-                                |Query(params): Query<HashMap<String, String>>| channel_add(params, dcom)
-                            }),
-                        )
-                        .route(
-                            "/remove",
-                            get({
-                                let dcom = dcom.clone();
-                                |Query(params): Query<HashMap<String, String>>| channel_remove(params, dcom)
-                            }),
-                        ),
+                    make_routes_channel(rres.clone(), dcom.clone(), connset_cmd_tx.clone(), stats_set.clone()),
                 )
                 .nest(
                     "/ingest",
@@ -543,6 +514,48 @@ fn make_routes(
             put({
                 let dcom = dcom.clone();
                 |v: extract::Json<u64>| async move {}
+            }),
+        )
+}
+
+fn make_routes_channel(
+    rres: Arc<RoutesResources>,
+    dcom: Arc<DaemonComm>,
+    connset_cmd_tx: Sender<CaConnSetEvent>,
+    stats_set: StatsSet,
+) -> axum::Router {
+    use axum::extract;
+    use axum::routing::{get, post, put};
+    use axum::Router;
+    use http::StatusCode;
+    Router::new()
+        .fallback(|| async { axum::Json(json!({"subcommands":["states"]})) })
+        .route(
+            "/error_handler_test",
+            get({
+                let tx = connset_cmd_tx.clone();
+                |Query(params): Query<HashMap<String, String>>| status::error_handler_test()
+            }),
+        )
+        .route(
+            "/states",
+            get({
+                let tx = connset_cmd_tx.clone();
+                |Query(params): Query<HashMap<String, String>>| status::channel_states(params, tx)
+            }),
+        )
+        .route(
+            "/add",
+            get({
+                let dcom = dcom.clone();
+                |Query(params): Query<HashMap<String, String>>| channel_add(params, dcom)
+            }),
+        )
+        .route(
+            "/remove",
+            get({
+                let dcom = dcom.clone();
+                |Query(params): Query<HashMap<String, String>>| channel_remove(params, dcom)
             }),
         )
 }

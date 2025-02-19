@@ -1,8 +1,6 @@
 use async_channel::Sender;
 use bytes::Buf;
 use dbpg::seriesbychannel::ChannelInfoQuery;
-use err::thiserror;
-use err::ThisError;
 use log::*;
 use netpod::ScalarType;
 use netpod::SeriesKind;
@@ -17,15 +15,16 @@ use std::net::Ipv4Addr;
 use std::time::SystemTime;
 use taskrun::tokio::net::UdpSocket;
 
-#[derive(Debug, ThisError)]
-#[cstm(name = "NetfetchBeacons")]
-pub enum Error {
-    Io(#[from] std::io::Error),
-    SeriesWriter(#[from] serieswriter::writer::Error),
-    ChannelSend,
-    ChannelRecv,
-    ChannelLookup(#[from] dbpg::seriesbychannel::Error),
-}
+autoerr::create_error_v1!(
+    name(Error, "NetfetchBeacons"),
+    enum variants {
+        Io(#[from] std::io::Error),
+        SeriesWriter(#[from] serieswriter::writer::Error),
+        ChannelSend,
+        ChannelRecv,
+        ChannelLookup(#[from] dbpg::seriesbychannel::Error),
+    },
+);
 
 impl<T> From<async_channel::SendError<T>> for Error {
     fn from(_value: async_channel::SendError<T>) -> Self {

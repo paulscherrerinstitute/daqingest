@@ -6,8 +6,6 @@ use axum::Json;
 use bytes::Bytes;
 use core::fmt;
 use dbpg::seriesbychannel::ChannelInfoQuery;
-use err::thiserror;
-use err::ThisError;
 use futures_util::StreamExt;
 use futures_util::TryStreamExt;
 use items_2::binning::container_events::ContainerEvents;
@@ -133,24 +131,24 @@ impl EmittableType for WritableType {
     }
 }
 
-#[derive(Debug, ThisError)]
-#[cstm(name = "MetricsIngest")]
-pub enum Error {
-    UnsupportedContentType,
-    Logic,
-    SeriesWriter(#[from] serieswriter::writer::Error),
-    MissingChannelName,
-    MissingScalarType,
-    MissingShape,
-    SendError,
-    Decode,
-    FramedBytes(#[from] streams::framed_bytes::Error),
-    InsertQueues(#[from] scywr::insertqueues::Error),
-    Serde(#[from] serde_json::Error),
-    #[error("Parse({0})")]
-    Parse(String),
-    NotSupported,
-}
+autoerr::create_error_v1!(
+    name(Error, "MetricsIngest"),
+    enum variants {
+        UnsupportedContentType,
+        Logic,
+        SeriesWriter(#[from] serieswriter::writer::Error),
+        MissingChannelName,
+        MissingScalarType,
+        MissingShape,
+        SendError,
+        Decode,
+        FramedBytes(#[from] streams::framed_bytes::Error),
+        InsertQueues(#[from] scywr::insertqueues::Error),
+        Serde(#[from] serde_json::Error),
+        Parse(String),
+        NotSupported,
+    },
+);
 
 pub async fn post_v01(
     (headers, Query(params), body): (HeaderMap, Query<HashMap<String, String>>, axum::body::Body),

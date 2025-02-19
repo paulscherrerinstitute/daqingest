@@ -3,8 +3,6 @@ use super::CreatedState;
 use super::Ioid;
 use ca_proto::ca::proto;
 use dbpg::seriesbychannel::ChannelInfoQuery;
-use err::thiserror;
-use err::ThisError;
 use log::*;
 use proto::CaMsg;
 use proto::ReadNotify;
@@ -12,11 +10,12 @@ use series::SeriesId;
 use std::pin::Pin;
 use std::time::Instant;
 
-#[derive(Debug, ThisError)]
-#[cstm(name = "NetfetchEnumfetch")]
-pub enum Error {
-    MissingState,
-}
+autoerr::create_error_v1!(
+    name(Error, "NetfetchEnumfetch"),
+    enum variants {
+        MissingState,
+    },
+);
 
 pub trait ConnFuture: Send {
     fn camsg(self: Pin<&mut Self>, camsg: CaMsg, conn: &mut CaConn) -> Result<(), Error>;

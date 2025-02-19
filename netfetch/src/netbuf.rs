@@ -1,18 +1,16 @@
-use err::thiserror;
 use std::array::TryFromSliceError;
 use std::mem;
 use taskrun::tokio;
 use tokio::io::ReadBuf;
 
-#[derive(Debug, thiserror::Error)]
-pub enum Error {
-    #[error("read {0}  have {1}")]
-    AdvanceOver(usize, usize),
-    #[error("write {0}  have {1}")]
-    WriteAdvanceOver(usize, usize),
-    #[error("TryFromSliceError")]
-    Slice(#[from] TryFromSliceError),
-}
+autoerr::create_error_v1!(
+    name(Error, "Error"),
+    enum variants {
+        AdvanceOver(usize, usize),
+        WriteAdvanceOver(usize, usize),
+        Slice(#[from] TryFromSliceError),
+    },
+);
 
 pub struct NetBuf {
     buf: Vec<u8>,
