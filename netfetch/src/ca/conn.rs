@@ -1408,6 +1408,7 @@ impl CaConn {
                 let binwriter = BinWriter::new(
                     beg,
                     conf.conf.min_quiets(),
+                    conf.conf.is_polled(),
                     st2.channel.cssid,
                     writer.series(),
                     st2.channel.scalar_type.clone(),
