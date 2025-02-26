@@ -2,7 +2,7 @@
 name = "dbpg"
 version = "0.0.1"
 authors = ["Dominik Werder <dominik.werder@gmail.com>"]
-edition = "2021"
+edition = "2024"
 
 [lib]
 doctest = false
@@ -22,3 +22,4 @@ async-channel = "2.1.1"
 md-5 = "0.10.6"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1"
+autoerr = "0.0.3"

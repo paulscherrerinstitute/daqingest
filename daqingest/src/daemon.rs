@@ -81,6 +81,8 @@ pub struct Daemon {
     metrics_shutdown_rx: Receiver<u32>,
     metrics_jh: Option<JoinHandle<Result<(), Error>>>,
     channel_info_query_tx: Sender<ChannelInfoQuery>,
+    // TODO
+    series_conf_by_id_tx: Sender<()>,
     iqtx: Option<InsertQueuesTx>,
 }
 
@@ -97,6 +99,9 @@ impl Daemon {
         >(2, &opts.pgconf, series_by_channel_stats.clone())
         .await
         .map_err(|e| Error::with_msg_no_trace(e.to_string()))?;
+
+        // TODO so far a dummy
+        let (series_conf_by_id_tx, _series_conf_by_id_rx) = async_channel::bounded(16);
 
         let insert_queue_counter = Arc::new(AtomicUsize::new(0));
 
@@ -341,6 +346,7 @@ impl Daemon {
             metrics_shutdown_rx,
             metrics_jh: None,
             channel_info_query_tx,
+            series_conf_by_id_tx,
             iqtx: Some(iqtx2),
         };
         Ok(ret)
@@ -675,12 +681,14 @@ impl Daemon {
         let rres = RoutesResources::new(
             self.ingest_opts.backend().into(),
             self.channel_info_query_tx.clone(),
+            self.series_conf_by_id_tx.clone(),
             self.iqtx
                 .take()
                 .ok_or_else(|| Error::with_msg_no_trace("no iqtx available"))?,
             self.ingest_opts.scylla_config_st().clone(),
             self.ingest_opts.scylla_config_mt().clone(),
             self.ingest_opts.scylla_config_lt().clone(),
+            self.ingest_opts.postgresql_config().clone(),
         );
         let rres = Arc::new(rres);
         let metrics_jh = {

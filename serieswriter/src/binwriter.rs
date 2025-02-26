@@ -1,4 +1,4 @@
-use crate::log::*;
+use crate::log;
 use crate::rtwriter::MinQuiets;
 use items_0::timebin::BinnedBinsTimeweightTrait;
 use items_0::timebin::BinnedEventsTimeweightTrait;
@@ -9,26 +9,28 @@ use items_2::binning::timeweight::timeweight_bins::BinnedBinsTimeweight;
 use items_2::binning::timeweight::timeweight_bins_lazy::BinnedBinsTimeweightLazy;
 use items_2::binning::timeweight::timeweight_events::BinnedEventsTimeweight;
 use items_2::binning::timeweight::timeweight_events_dyn::BinnedEventsTimeweightLazy;
-use netpod::ttl::RetentionTime;
 use netpod::BinnedRange;
 use netpod::DtMs;
 use netpod::ScalarType;
 use netpod::Shape;
 use netpod::TsNano;
+use netpod::ttl::RetentionTime;
 use scywr::insertqueues::InsertDeques;
 use scywr::iteminsertqueue::QueryItem;
 use scywr::iteminsertqueue::TimeBinSimpleF32V02;
-use series::msp::PrebinnedPartitioning;
 use series::ChannelStatusSeriesId;
 use series::SeriesId;
+use series::msp::PrebinnedPartitioning;
 use std::time::Duration;
 
-macro_rules! trace_ingest { ($($arg:expr),*) => ( if false { trace!($($arg),*); } ) }
-macro_rules! trace_tick { ($($arg:expr),*) => ( if false { trace!($($arg),*); } ) }
-macro_rules! trace_tick_verbose { ($($arg:expr),*) => ( if false { trace!($($arg),*); } ) }
+macro_rules! info { ($($arg:expr),*) => ( if true { log::info!($($arg),*); } ) }
 
-macro_rules! debug_bin2 { ($t:expr, $($arg:expr),*) => ( if true { if $t { debug!($($arg),*); } } ) }
-macro_rules! trace_bin2 { ($t:expr, $($arg:expr),*) => ( if false { if $t { trace!($($arg),*); } } ) }
+macro_rules! trace_ingest { ($($arg:expr),*) => ( if false { log::trace!($($arg),*); } ) }
+macro_rules! trace_tick { ($($arg:expr),*) => ( if false { log::trace!($($arg),*); } ) }
+macro_rules! trace_tick_verbose { ($($arg:expr),*) => ( if false { log::trace!($($arg),*); } ) }
+
+macro_rules! debug_bin { ($t:expr, $($arg:expr),*) => ( if true { if $t { log::debug!($($arg),*); } } ) }
+macro_rules! trace_bin { ($t:expr, $($arg:expr),*) => ( if false { if $t { log::trace!($($arg),*); } } ) }
 
 autoerr::create_error_v1!(
     name(Error, "SerieswriterBinwriter"),
@@ -62,11 +64,6 @@ fn bin_len_clamp(dur: DtMs) -> PrebinnedPartitioning {
     }
 }
 
-fn get_div(pbp: PrebinnedPartitioning) -> Result<DtMs, Error> {
-    let ret = pbp.msp_div();
-    Ok(ret)
-}
-
 #[derive(Debug, Clone)]
 enum WriteCntZero {
     Enable,
@@ -83,6 +80,30 @@ impl WriteCntZero {
 }
 
 #[derive(Debug)]
+struct IndexWritten {
+    last: (u32, u64, u32),
+}
+
+impl IndexWritten {
+    fn new() -> Self {
+        Self { last: (0, 0, 0) }
+    }
+
+    fn should_write(&self, div: u32, quo: u64, rem: u32) -> bool {
+        let (div0, quo0, rem0) = self.last;
+        if div0 == 0 || quo0 != quo || rem0 != rem {
+            true
+        } else {
+            false
+        }
+    }
+
+    fn mark_written(&mut self, div: u32, quo: u64, rem: u32) {
+        self.last = (div, quo, rem);
+    }
+}
+
+#[derive(Debug)]
 pub struct BinWriter {
     chname: String,
     cssid: ChannelStatusSeriesId,
@@ -92,6 +113,7 @@ pub struct BinWriter {
     evbuf: ContainerEvents<f32>,
     binner_1st: Option<(RetentionTime, BinnedEventsTimeweight<f32>, WriteCntZero)>,
     binner_others: Vec<(RetentionTime, BinnedBinsTimeweight<f32, f32>, WriteCntZero)>,
+    index_written: IndexWritten,
     trd: bool,
 }
 
@@ -108,7 +130,7 @@ impl BinWriter {
     ) -> Result<Self, Error> {
         let trd = series::dbg::dbg_chn(&chname);
         if trd {
-            debug_bin2!(trd, "enabled debug for {}", chname);
+            debug_bin!(trd, "enabled debug for {}", chname);
         }
         const DUR_ZERO: DtMs = DtMs::from_ms_u64(0);
         const DUR_MAX: DtMs = DtMs::from_ms_u64(1000 * 60 * 60 * 24 * 123);
@@ -142,16 +164,8 @@ impl BinWriter {
         if !is_polled && combs.len() > 1 {
             combs.remove(0);
         }
-        // check
-        for e in combs.iter() {
-            if get_div(e.1.clone()).is_err() {
-                info!("unsupported bin length  {:?}  {:?}  {:?}", e.0, e.1, chname);
-                combs.clear();
-                break;
-            }
-        }
         let combs = combs;
-        debug_bin2!(trd, "{:?} binning combs {:?}", chname, combs);
+        debug_bin!(trd, "{:?} binning combs {:?}", chname, combs);
         for (rt, pbp, write_zero) in combs {
             if binner_1st.is_none() {
                 let range = BinnedRange::from_beg_to_inf(beg, pbp.bin_len());
@@ -179,6 +193,7 @@ impl BinWriter {
             evbuf: ContainerEvents::new(),
             binner_1st,
             binner_others,
+            index_written: IndexWritten::new(),
             trd,
         };
         let _ = ret.cssid;
@@ -255,8 +270,16 @@ impl BinWriter {
             };
             let bins = binner.output();
             if bins.len() > 0 {
-                trace_bin2!(self.trd, "binner_1st  out len {}", bins.len());
-                Self::handle_output_ready(self.trd, self.sid, rt, &bins, write_zero, iqdqs)?;
+                trace_bin!(self.trd, "binner_1st  out len {}", bins.len());
+                Self::handle_output_ready(
+                    self.trd,
+                    self.sid,
+                    rt,
+                    &bins,
+                    write_zero,
+                    &mut self.index_written,
+                    iqdqs,
+                )?;
                 // TODO avoid boxing
                 let mut bins2: BinsBoxed = Box::new(bins);
                 for i in 0..self.binner_others.len() {
@@ -267,9 +290,17 @@ impl BinWriter {
                     match bb {
                         Some(bb) => {
                             if bb.len() > 0 {
-                                trace_bin2!(self.trd, "binner_others {}  out len {}", i, bb.len());
+                                trace_bin!(self.trd, "binner_others {}  out len {}", i, bb.len());
                                 if let Some(bb2) = bb.as_any_ref().downcast_ref::<ContainerBins<f32, f32>>() {
-                                    Self::handle_output_ready(self.trd, self.sid, rt.clone(), &bb2, write_zero, iqdqs)?;
+                                    Self::handle_output_ready(
+                                        self.trd,
+                                        self.sid,
+                                        rt.clone(),
+                                        &bb2,
+                                        write_zero,
+                                        todo!(),
+                                        iqdqs,
+                                    )?;
                                 } else {
                                     return Err(Error::UnexpectedContainerType);
                                 }
@@ -301,6 +332,7 @@ impl BinWriter {
         rt: RetentionTime,
         bins: &ContainerBins<f32, f32>,
         write_zero: WriteCntZero,
+        index_written: &mut IndexWritten,
         iqdqs: &mut InsertDeques,
     ) -> Result<(), Error> {
         let selfname = "handle_output_ready";
@@ -317,7 +349,7 @@ impl BinWriter {
                 info!("zero count bin  {:?}", series);
             } else {
                 let pbp = PrebinnedPartitioning::try_from(bin_len)?;
-                let div = get_div(pbp)?;
+                let div = pbp.msp_div();
                 if div.ns() % bin_len.ns() != 0 {
                     let e = Error::UnsupportedGridDiv(bin_len, div);
                     return Err(e);
@@ -337,7 +369,7 @@ impl BinWriter {
                     lst,
                 });
                 if bin_len >= DtMs::from_ms_u64(1000 * 60 * 60) {
-                    debug_bin2!(trd, "handle_output_ready  emit  {:?}  len {}  {:?}", rt, bins_len, item);
+                    debug_bin!(trd, "handle_output_ready  emit  {:?}  len {}  {:?}", rt, bins_len, item);
                 }
                 match rt {
                     RetentionTime::Short => {
@@ -350,6 +382,10 @@ impl BinWriter {
                         iqdqs.lt_rf3_qu.push_back(item);
                     }
                 }
+
+                let div = PrebinnedPartitioning::Day1;
+                series.id();
+                ts1.ms() / div.msp_div().ms();
             }
         }
         Ok(())

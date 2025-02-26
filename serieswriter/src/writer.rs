@@ -13,7 +13,6 @@ macro_rules! trace_emit { ($det:expr, $($arg:tt)*) => ( if $det { trace!($($arg)
 autoerr::create_error_v1!(
     name(Error, "SerieswriterWriter"),
     enum variants {
-        DbPgSid(#[from] dbpg::seriesid::Error),
         ChannelSendError,
         ChannelRecvError,
         SeriesLookupError,

@@ -1,6 +1,6 @@
 use crate::config::ScyllaIngestConfig;
-use crate::session::create_session_no_ks;
 use crate::session::ScySession;
+use crate::session::create_session_no_ks;
 use futures_util::StreamExt;
 use futures_util::TryStreamExt;
 use log::*;
@@ -20,7 +20,9 @@ autoerr::create_error_v1!(
         ScyllaNextRow(#[from] scylla::transport::iterator::NextRowError),
         ScyllaTypecheck(#[from] scylla::deserialize::TypeCheckError),
         MissingData,
-        AddColumnImpossible,
+        AddColumnExists(String, String, String),
+        AddColumnPk(String, String, String, String),
+        AddColumnCk(String, String, String, String),
         BadSchema,
     },
 );
@@ -35,16 +37,16 @@ impl From<crate::session::Error> for Error {
 
 struct Changeset {
     do_change: bool,
-    would_do: Vec<String>,
-    done: Vec<String>,
+    todo: Vec<String>,
+    cql_done: Vec<String>,
 }
 
 impl Changeset {
     fn new() -> Self {
         Self {
             do_change: false,
-            would_do: Vec::new(),
-            done: Vec::new(),
+            todo: Vec::new(),
+            cql_done: Vec::new(),
         }
     }
 
@@ -58,27 +60,16 @@ impl Changeset {
         self.do_change
     }
 
-    fn add_would_do(&mut self, cql: String) {
-        self.would_do.push(cql);
+    fn add_todo(&mut self, cql: String) {
+        self.todo.push(cql);
     }
 
-    fn add_done(&mut self, cql: String) {
-        self.done.push(cql);
-    }
-
-    fn differs(&self) -> bool {
-        if self.would_do.len() != 0 {
-            true
-        } else {
-            false
-        }
+    fn has_to_do(&self) -> bool {
+        if self.todo.len() != 0 { true } else { false }
     }
 
     fn log_statements(&self) {
-        for q in &self.done {
-            info!("DONE      {q}");
-        }
-        for q in &self.would_do {
+        for q in &self.todo {
             info!("WOULD DO  {q}");
         }
     }
@@ -231,25 +222,17 @@ impl GenTwcsTab {
     }
 
     async fn setup(&self, chs: &mut Changeset, scy: &ScySession) -> Result<(), Error> {
-        self.create_if_missing(chs, scy).await?;
-        self.check_table_options(chs, scy).await?;
-        self.check_columns(chs, scy).await?;
+        if self.has_table_name(scy).await? {
+            self.check_table_options(chs, scy).await?;
+            self.check_columns(chs, scy).await?;
+        } else {
+            chs.add_todo(self.cql());
+        }
         Ok(())
     }
 
-    async fn create_if_missing(&self, chs: &mut Changeset, scy: &ScySession) -> Result<(), Error> {
-        // TODO check for more details (all columns, correct types, correct kinds, etc)
-        if !has_table(self.name(), scy).await? {
-            let cql = self.cql();
-            if chs.do_change() {
-                info!("scylla create table {}  {}", self.name(), cql);
-                scy.query_unpaged(cql.clone(), ()).await?;
-                chs.add_done(cql);
-            } else {
-                chs.add_would_do(cql);
-            }
-        }
-        Ok(())
+    async fn has_table_name(&self, scy: &ScySession) -> Result<bool, Error> {
+        has_table(self.name(), scy).await
     }
 
     fn cql(&self) -> String {
@@ -278,21 +261,24 @@ impl GenTwcsTab {
         write!(s, " ({})", cols).unwrap();
         write!(
             s,
-            " with default_time_to_live = {}",
-            self.default_time_to_live.as_secs()
+            " with default_time_to_live = {}, gc_grace_seconds = {}",
+            self.default_time_to_live.as_secs(),
+            self.gc_grace.as_secs()
         )
         .unwrap();
         s.write_str(" and compaction = { ").unwrap();
-        write!(
-            s,
-            concat!(
-                "'class': 'TimeWindowCompactionStrategy'",
-                ", 'compaction_window_unit': 'MINUTES'",
-                ", 'compaction_window_size': {}",
-            ),
-            self.compaction_window_size.as_secs() / 60
-        )
-        .unwrap();
+        {
+            let mut s2 = String::new();
+            // TODO merge with builder code in check_table_options
+            for e in self.compaction_options() {
+                if s2.len() != 0 {
+                    s2.push_str(", ");
+                }
+                let op = format!("'{}': '{}'", e.0, e.1);
+                s2.push_str(&op);
+            }
+            s.write_str(&s2).unwrap();
+        }
         s.write_str(" }").unwrap();
         s
     }
@@ -331,6 +317,11 @@ impl GenTwcsTab {
                 set_opts.push(format!("gc_grace_seconds = {}", self.gc_grace.as_secs()));
             }
             if row.2 != self.compaction_options() {
+                info!(
+                    "compaction options differ  {:?}  vs  {:?}",
+                    row.2,
+                    self.compaction_options()
+                );
                 let params: Vec<_> = self
                     .compaction_options()
                     .iter()
@@ -341,16 +332,10 @@ impl GenTwcsTab {
             }
             if set_opts.len() != 0 {
                 let cql = format!(concat!("alter table {} with {}"), self.name(), set_opts.join(" and "));
-                if chs.do_change() {
-                    info!("EXECUTE  {cql}");
-                    scy.query_unpaged(cql.clone(), ()).await?;
-                    chs.add_done(cql);
-                } else {
-                    chs.add_would_do(cql);
-                }
+                chs.add_todo(cql);
             }
         } else {
-            return Err(Error::MissingData);
+            chs.add_todo(self.cql());
         }
         Ok(())
     }
@@ -384,32 +369,36 @@ impl GenTwcsTab {
                         ct,
                         ty2
                     );
-                    return Err(Error::AddColumnImpossible);
+                    return Err(Error::AddColumnExists(cn.into(), ct.into(), ty2.into()));
                 }
             } else {
                 if self.partition_keys.contains(cn) {
                     error!("pk {} {}", cn, ct);
-                    return Err(Error::AddColumnImpossible);
+                    return Err(Error::AddColumnPk(
+                        self.keyspace().into(),
+                        self.name().into(),
+                        cn.into(),
+                        ct.into(),
+                    ));
                 }
                 if self.cluster_keys.contains(cn) {
                     error!("ck {} {}", cn, ct);
-                    return Err(Error::AddColumnImpossible);
+                    return Err(Error::AddColumnCk(
+                        self.keyspace().into(),
+                        self.name().into(),
+                        cn.into(),
+                        ct.into(),
+                    ));
                 }
-                self.add_column(cn, ct, chs, scy).await?;
+                self.add_column(cn, ct, chs).await?;
             }
         }
         Ok(())
     }
 
-    async fn add_column(&self, name: &str, ty: &str, chs: &mut Changeset, scy: &ScySession) -> Result<(), Error> {
+    async fn add_column(&self, name: &str, ty: &str, chs: &mut Changeset) -> Result<(), Error> {
         let cql = format!(concat!("alter table {} add {} {}"), self.name(), name, ty);
-        if chs.do_change() {
-            info!("EXECUTE  add_column  CQL {}", cql);
-            scy.query_unpaged(cql.clone(), ()).await?;
-            chs.add_done(cql);
-        } else {
-            chs.add_would_do(cql);
-        }
+        chs.add_todo(cql);
         Ok(())
     }
 }
@@ -677,6 +666,25 @@ pub async fn migrate_scylla_data_schema(
         let tab = GenTwcsTab::new(
             ks,
             rett.table_prefix(),
+            "bin_write_index_v00",
+            &[
+                ("series", "bigint"),
+                ("div", "int"),
+                ("quo", "bigint"),
+                ("rem", "int"),
+                ("rt", "int"),
+                ("binlen", "int"),
+            ],
+            ["series", "div", "quo"],
+            ["rem", "rt", "binlen"],
+            rett.ttl_binned(),
+        );
+        tab.setup(chs, scy).await?;
+    }
+    {
+        let tab = GenTwcsTab::new(
+            ks,
+            rett.table_prefix(),
             "binned_scalar_f32_v02",
             &[
                 ("series", "bigint"),
@@ -733,9 +741,17 @@ pub async fn migrate_scylla_data_schema(
         tab.setup(chs, scy).await?;
     }
 
-    if chs.differs() {
-        chs.log_statements();
-        Err(Error::BadSchema)
+    if chs.has_to_do() {
+        if do_change {
+            for cql in chs.todo.iter() {
+                scy.query_unpaged(cql.as_str(), ()).await?;
+            }
+            let fut = migrate_scylla_data_schema(scyconf, rett, false);
+            Box::pin(fut).await
+        } else {
+            chs.log_statements();
+            Err(Error::BadSchema)
+        }
     } else {
         Ok(())
     }

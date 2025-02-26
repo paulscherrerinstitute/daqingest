@@ -13,6 +13,7 @@ use netpod::Database;
 use netpod::ScalarType;
 use netpod::SeriesKind;
 use netpod::Shape;
+use serde::Serialize;
 use series::SeriesId;
 use stats::SeriesByChannelStats;
 use std::pin::Pin;
@@ -102,7 +103,7 @@ impl fmt::Debug for ChannelInfoQuery {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 pub struct ChannelInfoResult {
     pub backend: String,
     pub channel: String,
@@ -121,7 +122,7 @@ enum MatchingSeries {
     Latest(SeriesId),
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub enum RegisteredSeries {
     Created(SeriesId),
     Updated(SeriesId),

@@ -27,43 +27,71 @@ pub struct InsertQueuesTx {
     pub lt_rf3_lat5_tx: Sender<VecDeque<QueryItem>>,
 }
 
+async fn send_nonempty(qu: &mut VecDeque<QueryItem>, tx: &Sender<VecDeque<QueryItem>>) -> Result<(), Error> {
+    let item = core::mem::replace(qu, VecDeque::new());
+    if item.len() != 0 {
+        tx.send(item)
+            .await
+            .map_err(|_| Error::ChannelSend(RetentionTime::Short, 1))?;
+    }
+    Ok(())
+}
+
 impl InsertQueuesTx {
     /// Send all accumulated batches
     pub async fn send_all(&mut self, iqdqs: &mut InsertDeques) -> Result<(), Error> {
-        {
-            let item = core::mem::replace(&mut iqdqs.st_rf1_qu, VecDeque::new());
-            self.st_rf1_tx
-                .send(item)
-                .await
-                .map_err(|_| Error::ChannelSend(RetentionTime::Short, 1))?;
-        }
-        {
-            let item = core::mem::replace(&mut iqdqs.st_rf3_qu, VecDeque::new());
-            self.st_rf3_tx
-                .send(item)
-                .await
-                .map_err(|_| Error::ChannelSend(RetentionTime::Short, 3))?;
-        }
-        {
-            let item = core::mem::replace(&mut iqdqs.mt_rf3_qu, VecDeque::new());
-            self.mt_rf3_tx
-                .send(item)
-                .await
-                .map_err(|_| Error::ChannelSend(RetentionTime::Medium, 3))?;
-        }
-        {
-            let item = core::mem::replace(&mut iqdqs.lt_rf3_qu, VecDeque::new());
-            self.lt_rf3_tx
-                .send(item)
-                .await
-                .map_err(|_| Error::ChannelSend(RetentionTime::Long, 3))?;
-        }
-        {
-            let item = core::mem::replace(&mut iqdqs.lt_rf3_lat5_qu, VecDeque::new());
-            self.lt_rf3_tx
-                .send(item)
-                .await
-                .map_err(|_| Error::ChannelSend(RetentionTime::Long, 3))?;
+        if true {
+            send_nonempty(&mut iqdqs.st_rf1_qu, &self.st_rf1_tx).await?;
+            send_nonempty(&mut iqdqs.st_rf3_qu, &self.st_rf3_tx).await?;
+            send_nonempty(&mut iqdqs.mt_rf3_qu, &self.mt_rf3_tx).await?;
+            send_nonempty(&mut iqdqs.lt_rf3_qu, &self.lt_rf3_tx).await?;
+            send_nonempty(&mut iqdqs.lt_rf3_lat5_qu, &self.lt_rf3_tx).await?;
+        } else {
+            {
+                let item = core::mem::replace(&mut iqdqs.st_rf1_qu, VecDeque::new());
+                if item.len() != 0 {
+                    self.st_rf1_tx
+                        .send(item)
+                        .await
+                        .map_err(|_| Error::ChannelSend(RetentionTime::Short, 1))?;
+                }
+            }
+            {
+                let item = core::mem::replace(&mut iqdqs.st_rf3_qu, VecDeque::new());
+                if item.len() != 0 {
+                    self.st_rf3_tx
+                        .send(item)
+                        .await
+                        .map_err(|_| Error::ChannelSend(RetentionTime::Short, 3))?;
+                }
+            }
+            {
+                let item = core::mem::replace(&mut iqdqs.mt_rf3_qu, VecDeque::new());
+                if item.len() != 0 {
+                    self.mt_rf3_tx
+                        .send(item)
+                        .await
+                        .map_err(|_| Error::ChannelSend(RetentionTime::Medium, 3))?;
+                }
+            }
+            {
+                let item = core::mem::replace(&mut iqdqs.lt_rf3_qu, VecDeque::new());
+                if item.len() != 0 {
+                    self.lt_rf3_tx
+                        .send(item)
+                        .await
+                        .map_err(|_| Error::ChannelSend(RetentionTime::Long, 3))?;
+                }
+            }
+            {
+                let item = core::mem::replace(&mut iqdqs.lt_rf3_lat5_qu, VecDeque::new());
+                if item.len() != 0 {
+                    self.lt_rf3_tx
+                        .send(item)
+                        .await
+                        .map_err(|_| Error::ChannelSend(RetentionTime::Long, 3))?;
+                }
+            }
         }
         Ok(())
     }

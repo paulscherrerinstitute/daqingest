@@ -1,3 +1,5 @@
+pub mod write_v02;
+
 use super::RoutesResources;
 use axum::extract::FromRequest;
 use axum::extract::Query;
@@ -214,7 +216,10 @@ async fn post_v01_try(
     debug_setup!("series writer established");
     let mut iqdqs = InsertDeques::new();
     let mut iqtx = rres.iqtx.clone();
-    let mut frames = FramedBytesStream::new(body.into_data_stream().map_err(|_| streams::framed_bytes::Error::Logic));
+    let mut frames = FramedBytesStream::new(
+        body.into_data_stream()
+            .map_err(|_| streams::framed_bytes::Error::DataInput),
+    );
     loop {
         let x = timeout(Duration::from_millis(2000), frames.try_next()).await;
         let x = match x {

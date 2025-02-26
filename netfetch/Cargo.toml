@@ -2,7 +2,7 @@
 name = "netfetch"
 version = "0.0.3"
 authors = ["Dominik Werder <dominik.werder@gmail.com>"]
-edition = "2021"
+edition = "2024"
 
 [lib]
 doctest = false
@@ -25,7 +25,7 @@ hex = "0.4.3"
 regex = "1.8.4"
 axum = "0.8.1"
 http-body = "1"
-url = "2.2"
+url = "2.5"
 chrono = "0.4"
 humantime = "2.1.0"
 humantime-serde = "1.1.1"

@@ -335,16 +335,19 @@ pub struct RoutesResources {
     scyconf_st: ScyllaIngestConfig,
     scyconf_mt: ScyllaIngestConfig,
     scyconf_lt: ScyllaIngestConfig,
+    pgconf: netpod::Database,
 }
 
 impl RoutesResources {
     pub fn new(
         backend: String,
         worker_tx: Sender<ChannelInfoQuery>,
+        series_conf_by_id_tx: Sender<()>,
         iqtx: InsertQueuesTx,
         scyconf_st: ScyllaIngestConfig,
         scyconf_mt: ScyllaIngestConfig,
         scyconf_lt: ScyllaIngestConfig,
+        pgconf: netpod::Database,
     ) -> Self {
         Self {
             backend,
@@ -353,6 +356,7 @@ impl RoutesResources {
             scyconf_st,
             scyconf_mt,
             scyconf_lt,
+            pgconf,
         }
     }
 }
@@ -416,17 +420,7 @@ fn make_routes(
                 )
                 .nest(
                     "/ingest",
-                    Router::new().route(
-                        "/v1",
-                        post({
-                            let rres = rres.clone();
-                            move |(headers, params, body): (
-                                HeaderMap,
-                                Query<HashMap<String, String>>,
-                                axum::body::Body,
-                            )| { ingest::post_v01((headers, params, body), rres) }
-                        }),
-                    ),
+                    make_routes_ingest(rres.clone(), dcom.clone(), connset_cmd_tx.clone(), stats_set.clone()),
                 )
                 .nest(
                     "/private",
@@ -556,6 +550,40 @@ fn make_routes_channel(
             get({
                 let dcom = dcom.clone();
                 |Query(params): Query<HashMap<String, String>>| channel_remove(params, dcom)
+            }),
+        )
+}
+
+fn make_routes_ingest(
+    rres: Arc<RoutesResources>,
+    dcom: Arc<DaemonComm>,
+    connset_cmd_tx: Sender<CaConnSetEvent>,
+    stats_set: StatsSet,
+) -> axum::Router {
+    use axum::extract;
+    use axum::routing::{get, post, put};
+    use axum::Router;
+    use http::StatusCode;
+    Router::new()
+        .nest(
+            "/private",
+            Router::new().route(
+                "/write",
+                put({
+                    let rres = rres.clone();
+                    move |(headers, params, body): (HeaderMap, Query<HashMap<String, String>>, axum::body::Body)| {
+                        ingest::write_v02::write_with_fresh_msps((headers, params, body), rres)
+                    }
+                }),
+            ),
+        )
+        .route(
+            "/v1",
+            post({
+                let rres = rres.clone();
+                move |(headers, params, body): (HeaderMap, Query<HashMap<String, String>>, axum::body::Body)| {
+                    ingest::post_v01((headers, params, body), rres)
+                }
             }),
         )
 }
