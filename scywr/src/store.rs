@@ -1,10 +1,10 @@
 use crate::config::ScyllaIngestConfig;
 use crate::session::create_session;
 use netpod::ttl::RetentionTime;
+use scylla::Session as ScySession;
 use scylla::prepared_statement::PreparedStatement;
 use scylla::transport::errors::NewSessionError;
 use scylla::transport::errors::QueryError;
-use scylla::Session as ScySession;
 use std::sync::Arc;
 
 autoerr::create_error_v1!(
@@ -45,6 +45,7 @@ pub struct DataStore {
     pub qu_insert_array_f64: Arc<PreparedStatement>,
     pub qu_insert_array_bool: Arc<PreparedStatement>,
     pub qu_insert_binned_scalar_f32_v02: Arc<PreparedStatement>,
+    pub qu_insert_bin_write_index_v00: Arc<PreparedStatement>,
     pub qu_account_00: Arc<PreparedStatement>,
     pub qu_account_recv_00: Arc<PreparedStatement>,
     pub qu_dummy: Arc<PreparedStatement>,
@@ -156,6 +157,14 @@ impl DataStore {
             scy
         );
 
+        let qu_insert_bin_write_index_v00 = prep_qu_ins_c!(
+            "bin_write_index_v00",
+            "series, div, quo, rem, rt, binlen",
+            "?, ?, ?, ?, ?, ?",
+            rett,
+            scy
+        );
+
         let qu_account_00 = prep_qu_ins_c!(
             "account_00",
             "part, ts, series, count, bytes",
@@ -210,6 +219,7 @@ impl DataStore {
             qu_insert_array_f64,
             qu_insert_array_bool,
             qu_insert_binned_scalar_f32_v02,
+            qu_insert_bin_write_index_v00,
             qu_account_00,
             qu_account_recv_00,
             qu_dummy,

@@ -1,13 +1,14 @@
 use crate::config::ScyllaIngestConfig;
-use crate::iteminsertqueue::insert_item_fut;
-use crate::iteminsertqueue::insert_msp_fut;
 use crate::iteminsertqueue::Accounting;
 use crate::iteminsertqueue::AccountingRecv;
+use crate::iteminsertqueue::BinWriteIndexV00;
 use crate::iteminsertqueue::InsertFut;
 use crate::iteminsertqueue::InsertItem;
 use crate::iteminsertqueue::MspItem;
 use crate::iteminsertqueue::QueryItem;
 use crate::iteminsertqueue::TimeBinSimpleF32V02;
+use crate::iteminsertqueue::insert_item_fut;
+use crate::iteminsertqueue::insert_msp_fut;
 use crate::store::DataStore;
 use async_channel::Receiver;
 use atomic::AtomicU64;
@@ -15,12 +16,12 @@ use futures_util::Stream;
 use futures_util::StreamExt;
 use log::*;
 use netpod::ttl::RetentionTime;
-use smallvec::smallvec;
 use smallvec::SmallVec;
+use smallvec::smallvec;
 use stats::InsertWorkerStats;
 use std::collections::VecDeque;
-use std::sync::atomic;
 use std::sync::Arc;
+use std::sync::atomic;
 use std::time::Duration;
 use std::time::Instant;
 use taskrun::tokio;
@@ -42,13 +43,7 @@ macro_rules! trace_item_execute {
     };
 }
 
-macro_rules! debug_setup {
-    ($($arg:tt)*) => {
-        if false {
-            debug!($($arg)*);
-        }
-    };
-}
+macro_rules! debug_setup { ($($arg:expr),*) => ( if false { debug!($($arg),*); } ); }
 
 autoerr::create_error_v1!(
     name(Error, "ScyllaInsertWorker"),
@@ -278,6 +273,13 @@ where
                         prepare_timebin_v02_insert_futs(item, &data_store, &stats, tsnow)
                     }
                 }
+                QueryItem::BinWriteIndexV00(item) => {
+                    if ignore_writes {
+                        SmallVec::new()
+                    } else {
+                        prepare_bin_write_index_v00_insert_futs(item, &data_store, &stats, tsnow)
+                    }
+                }
                 QueryItem::Accounting(item) => {
                     if ignore_writes {
                         SmallVec::new()
@@ -318,6 +320,9 @@ fn inspect_items(
                 }
                 QueryItem::TimeBinSimpleF32V02(_) => {
                     trace_item_execute!("execute  {worker_name}  TimeBinSimpleF32V02");
+                }
+                QueryItem::BinWriteIndexV00(_) => {
+                    trace_item_execute!("execute  {worker_name}  BinWriteIndexV00");
                 }
                 QueryItem::Accounting(_) => {
                     trace_item_execute!("execute  {worker_name}  Accounting  {item:?}");
@@ -395,6 +400,38 @@ fn prepare_timebin_v02_insert_futs(
     let fut = InsertFut::new(
         data_store.scy.clone(),
         data_store.qu_insert_binned_scalar_f32_v02.clone(),
+        params,
+        tsnow,
+        stats.clone(),
+    );
+    let futs = smallvec![fut];
+
+    // TODO match on the query result:
+    // match qres {
+    //     Ok(_) => {
+    //         backoff = backoff_0;
+    //     }
+    //     Err(e) => {
+    //         stats_inc_for_err(&stats, &crate::iteminsertqueue::Error::QueryError(e));
+    //         back_off_sleep(&mut backoff).await;
+    //     }
+    // }
+
+    futs
+}
+
+fn prepare_bin_write_index_v00_insert_futs(
+    item: BinWriteIndexV00,
+    data_store: &Arc<DataStore>,
+    stats: &Arc<InsertWorkerStats>,
+    tsnow: Instant,
+) -> SmallVec<[InsertFut; 4]> {
+    let params = (item.series, item.div, item.quo, item.rem, item.rt, item.binlen);
+    // TODO would be better to count inserts only on completed insert
+    stats.inserted_binned().inc();
+    let fut = InsertFut::new(
+        data_store.scy.clone(),
+        data_store.qu_insert_bin_write_index_v00.clone(),
         params,
         tsnow,
         stats.clone(),

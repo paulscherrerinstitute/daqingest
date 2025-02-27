@@ -5,12 +5,13 @@ use crate::store::DataStore;
 use bytes::BufMut;
 use futures_util::Future;
 use futures_util::FutureExt;
-use netpod::channelstatus::ChannelStatus;
-use netpod::channelstatus::ChannelStatusClosedReason;
 use netpod::DtNano;
 use netpod::Shape;
 use netpod::TsMs;
 use netpod::TsNano;
+use netpod::channelstatus::ChannelStatus;
+use netpod::channelstatus::ChannelStatusClosedReason;
+use scylla::QueryResult;
 use scylla::frame::value::Value;
 use scylla::frame::value::ValueList;
 use scylla::prepared_statement::PreparedStatement;
@@ -18,9 +19,9 @@ use scylla::serialize::row::SerializeRow;
 use scylla::serialize::value::SerializeValue;
 use scylla::transport::errors::DbError;
 use scylla::transport::errors::QueryError;
-use scylla::QueryResult;
 use series::ChannelStatusSeriesId;
 use series::SeriesId;
+use series::msp::PrebinnedPartitioning;
 use stats::InsertWorkerStats;
 use std::net::SocketAddrV4;
 use std::pin::Pin;
@@ -549,12 +550,23 @@ pub struct TimeBinSimpleF32V02 {
     pub lst: f32,
 }
 
+#[derive(Debug, Clone)]
+pub struct BinWriteIndexV00 {
+    pub series: i64,
+    pub div: i32,
+    pub quo: i64,
+    pub rem: i32,
+    pub rt: i32,
+    pub binlen: i32,
+}
+
 // Needs to be Clone to send it to multiple retention times if required.
 #[derive(Debug, Clone)]
 pub enum QueryItem {
     Insert(InsertItem),
     Msp(MspItem),
     TimeBinSimpleF32V02(TimeBinSimpleF32V02),
+    BinWriteIndexV00(BinWriteIndexV00),
     Accounting(Accounting),
     AccountingRecv(AccountingRecv),
 }
