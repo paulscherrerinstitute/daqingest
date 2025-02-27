@@ -17,20 +17,20 @@ use netfetch::daemon_common::DaemonEvent;
 use netfetch::metrics::RoutesResources;
 use netfetch::metrics::StatsSet;
 use netfetch::throttletrace::ThrottleTrace;
-use netpod::ttl::RetentionTime;
 use netpod::Database;
+use netpod::ttl::RetentionTime;
 use scywr::config::ScyllaIngestConfig;
 use scywr::insertqueues::InsertQueuesRx;
 use scywr::insertqueues::InsertQueuesTx;
 use scywr::insertworker::InsertWorkerOpts;
-use stats::rand_xoshiro::rand_core::RngCore;
 use stats::DaemonStats;
 use stats::InsertWorkerStats;
 use stats::SeriesByChannelStats;
+use stats::rand_xoshiro::rand_core::RngCore;
+use std::sync::Arc;
 use std::sync::atomic;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::AtomicUsize;
-use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
 use std::time::SystemTime;
@@ -802,15 +802,16 @@ pub async fn run(opts: CaIngestOpts, channels_config: Option<ChannelsConfig>) ->
         warn!("scylla_disable config flag enabled");
     } else {
         info!("start scylla schema check");
-        scywr::schema::migrate_scylla_data_schema(opts.scylla_config_st(), RetentionTime::Short, false)
-            .await
-            .map_err(Error::from_string)?;
-        scywr::schema::migrate_scylla_data_schema(opts.scylla_config_mt(), RetentionTime::Medium, false)
-            .await
-            .map_err(Error::from_string)?;
-        scywr::schema::migrate_scylla_data_schema(opts.scylla_config_lt(), RetentionTime::Long, false)
-            .await
-            .map_err(Error::from_string)?;
+        scywr::schema::migrate_scylla_data_schema_all_rt(
+            [
+                opts.scylla_config_st(),
+                opts.scylla_config_mt(),
+                opts.scylla_config_lt(),
+            ],
+            false,
+        )
+        .await
+        .map_err(Error::from_string)?;
         info!("stop scylla schema check");
     }
     info!("database check done");

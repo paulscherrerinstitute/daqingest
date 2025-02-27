@@ -36,28 +36,12 @@ impl From<crate::session::Error> for Error {
 }
 
 struct Changeset {
-    do_change: bool,
     todo: Vec<String>,
-    cql_done: Vec<String>,
 }
 
 impl Changeset {
     fn new() -> Self {
-        Self {
-            do_change: false,
-            todo: Vec::new(),
-            cql_done: Vec::new(),
-        }
-    }
-
-    fn with_do_change(self, do_change: bool) -> Self {
-        let mut x = self;
-        x.do_change = do_change;
-        x
-    }
-
-    fn do_change(&self) -> bool {
-        self.do_change
+        Self { todo: Vec::new() }
     }
 
     fn add_todo(&mut self, cql: String) {
@@ -535,21 +519,35 @@ async fn check_event_tables(
     Ok(())
 }
 
-pub async fn migrate_scylla_data_schema(
+async fn migrate_scylla_data_schema(
     scyconf: &ScyllaIngestConfig,
     rett: RetentionTime,
-    do_change: bool,
+    chs: &mut Changeset,
 ) -> Result<(), Error> {
-    let mut chsv = Changeset::new().with_do_change(do_change);
-    let chs = &mut chsv;
     let scy2 = create_session_no_ks(scyconf).await?;
     let scy = &scy2;
     let durable = true;
 
     if !has_keyspace(scyconf.keyspace(), scy).await? {
-        if chs.do_change() {
-            // TODO
-            let replication = 3;
+        // TODO
+        let replication = 3;
+        let cql = format!(
+            concat!(
+                "create keyspace {}",
+                " with replication = {{ 'class': 'SimpleStrategy', 'replication_factor': {} }}",
+                " and durable_writes = {};"
+            ),
+            scyconf.keyspace(),
+            replication,
+            durable
+        );
+        info!("scylla create keyspace  {cql}");
+        chs.add_todo(cql);
+    }
+
+    if let Some(ks) = scyconf.keyspace_rf1() {
+        if !has_keyspace(ks, scy).await? {
+            let replication = 1;
             let cql = format!(
                 concat!(
                     "create keyspace {}",
@@ -561,35 +559,7 @@ pub async fn migrate_scylla_data_schema(
                 durable
             );
             info!("scylla create keyspace  {cql}");
-            scy.query_iter(cql, ()).await?;
-            info!("keyspace created");
-        } else {
-            error!("missing keyspace  {:?}", scyconf.keyspace());
-            return Err(Error::BadSchema);
-        }
-    }
-
-    if let Some(ks) = scyconf.keyspace_rf1() {
-        if !has_keyspace(ks, scy).await? {
-            if chs.do_change() {
-                let replication = 1;
-                let cql = format!(
-                    concat!(
-                        "create keyspace {}",
-                        " with replication = {{ 'class': 'SimpleStrategy', 'replication_factor': {} }}",
-                        " and durable_writes = {};"
-                    ),
-                    scyconf.keyspace(),
-                    replication,
-                    durable
-                );
-                info!("scylla create keyspace  {cql}");
-                scy.query_iter(cql, ()).await?;
-                info!("keyspace created");
-            } else {
-                error!("missing keyspace  {:?}", scyconf.keyspace_rf1());
-                return Err(Error::BadSchema);
-            }
+            chs.add_todo(cql);
         }
     }
 
@@ -740,19 +710,44 @@ pub async fn migrate_scylla_data_schema(
         );
         tab.setup(chs, scy).await?;
     }
+    Ok(())
+}
 
-    if chs.has_to_do() {
-        if do_change {
-            for cql in chs.todo.iter() {
-                scy.query_unpaged(cql.as_str(), ()).await?;
+pub async fn migrate_scylla_data_schema_all_rt(
+    scyconfs: [&ScyllaIngestConfig; 3],
+    do_change: bool,
+) -> Result<(), Error> {
+    let mut chsa = [Changeset::new(), Changeset::new(), Changeset::new()];
+    let rts = [RetentionTime::Short, RetentionTime::Medium, RetentionTime::Long];
+    for ((rt, scyconf), chs) in rts.clone().into_iter().zip(scyconfs.into_iter()).zip(chsa.iter_mut()) {
+        migrate_scylla_data_schema(scyconf, rt, chs).await?;
+    }
+    let todo = chsa.iter().any(|x| x.has_to_do());
+    if do_change {
+        if todo {
+            for ((_rt, scyconf), chs) in rts.into_iter().zip(scyconfs.into_iter()).zip(chsa.iter_mut()) {
+                if chs.has_to_do() {
+                    let scy2 = create_session_no_ks(scyconf).await?;
+                    let scy = &scy2;
+                    for cql in chs.todo.iter() {
+                        scy.query_unpaged(cql.as_str(), ()).await?;
+                    }
+                }
             }
-            let fut = migrate_scylla_data_schema(scyconf, rett, false);
-            Box::pin(fut).await
+            let fut = migrate_scylla_data_schema_all_rt(scyconfs, false);
+            Box::pin(fut).await?;
+            Ok(())
         } else {
-            chs.log_statements();
-            Err(Error::BadSchema)
+            Ok(())
         }
     } else {
-        Ok(())
+        if todo {
+            for chs in chsa.iter_mut() {
+                chs.log_statements();
+            }
+            Err(Error::BadSchema)
+        } else {
+            Ok(())
+        }
     }
 }

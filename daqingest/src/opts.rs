@@ -23,8 +23,7 @@ pub enum SubCmd {
     ListPulses,
     FetchEvents(FetchEvents),
     Db(Db),
-    ScyllaSchemaCheck(CaConfig),
-    ScyllaSchemaChange(CaConfig),
+    Scylla(Scylla),
     #[command(subcommand)]
     ChannelAccess(ChannelAccess),
     #[cfg(feature = "bsread")]
@@ -115,6 +114,39 @@ pub struct Db {
     pub pg_name: String,
     #[command(subcommand)]
     pub sub: DbSub,
+}
+
+#[derive(Debug, clap::Parser)]
+pub struct Scylla {
+    #[command(subcommand)]
+    pub sub: ScyllaSubcmd,
+}
+
+#[derive(Debug, clap::Parser)]
+pub enum ScyllaSubcmd {
+    Schema(ScyllaSchema),
+}
+
+#[derive(Debug, clap::Parser)]
+pub struct ScyllaSchema {
+    #[command(subcommand)]
+    pub sub: ScyllaSchemaSubcmd,
+}
+
+#[derive(Debug, clap::Parser)]
+pub enum ScyllaSchemaSubcmd {
+    Check(ScyllaSchemaCheck),
+    Change(ScyllaSchemaChange),
+}
+
+#[derive(Debug, clap::Parser)]
+pub struct ScyllaSchemaCheck {
+    pub config: String,
+}
+
+#[derive(Debug, clap::Parser)]
+pub struct ScyllaSchemaChange {
+    pub config: String,
 }
 
 #[derive(Debug, clap::Parser)]
