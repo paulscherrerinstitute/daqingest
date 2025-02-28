@@ -233,7 +233,7 @@ impl GenTwcsTab {
             format!("({}, {})", pkeys, self.cluster_keys.join(", "))
         };
         let mut s = String::new();
-        write!(s, "create table {}", self.name()).unwrap();
+        write!(s, "create table {}.{}", self.keyspace(), self.name()).unwrap();
         let mut cols: Vec<_> = self
             .col_names
             .iter()
@@ -245,7 +245,7 @@ impl GenTwcsTab {
         write!(s, " ({})", cols).unwrap();
         write!(
             s,
-            " with default_time_to_live = {}, gc_grace_seconds = {}",
+            " with default_time_to_live = {} and gc_grace_seconds = {}",
             self.default_time_to_live.as_secs(),
             self.gc_grace.as_secs()
         )
@@ -636,16 +636,17 @@ async fn migrate_scylla_data_schema(
         let tab = GenTwcsTab::new(
             ks,
             rett.table_prefix(),
-            "bin_write_index_v00",
+            "bin_write_index_v01",
             &[
                 ("series", "bigint"),
-                ("div", "int"),
+                ("dv1", "int"),
+                ("dv2", "int"),
                 ("quo", "bigint"),
                 ("rem", "int"),
                 ("rt", "int"),
                 ("binlen", "int"),
             ],
-            ["series", "div", "quo"],
+            ["series", "dv1", "dv2", "quo"],
             ["rem", "rt", "binlen"],
             rett.ttl_binned(),
         );
@@ -730,7 +731,13 @@ pub async fn migrate_scylla_data_schema_all_rt(
                     let scy2 = create_session_no_ks(scyconf).await?;
                     let scy = &scy2;
                     for cql in chs.todo.iter() {
-                        scy.query_unpaged(cql.as_str(), ()).await?;
+                        match scy.query_unpaged(cql.as_str(), ()).await {
+                            Ok(_) => {}
+                            Err(e) => {
+                                info!("cql error {}", cql);
+                                return Err(e.into());
+                            }
+                        }
                     }
                 }
             }

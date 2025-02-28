@@ -16,7 +16,7 @@ use netpod::Shape;
 use netpod::TsNano;
 use netpod::ttl::RetentionTime;
 use scywr::insertqueues::InsertDeques;
-use scywr::iteminsertqueue::BinWriteIndexV00;
+use scywr::iteminsertqueue::BinWriteIndexV01;
 use scywr::iteminsertqueue::QueryItem;
 use scywr::iteminsertqueue::TimeBinSimpleF32V02;
 use series::ChannelStatusSeriesId;
@@ -413,18 +413,19 @@ impl BinWriter {
                     }
                 }
                 let div = PrebinnedPartitioning::Day1;
-                let (quo, rem) = div.quo_rem(ts1.to_ts_ms());
+                let (quo, rem, dv1, dv2) = div.quo_rem(ts1.to_ts_ms());
                 if index_written.should_write(div.clone(), quo, rem) {
                     index_written.mark_written(div.clone(), quo, rem);
-                    let item = BinWriteIndexV00 {
+                    let item = BinWriteIndexV01 {
                         series: series.id() as i64,
-                        div: div.msp_div().ms() as i32,
+                        dv1: dv1 as i32,
+                        dv2: dv2 as i32,
                         quo: quo as i64,
                         rem: rem as i32,
                         rt: rt.index_db_i32(),
                         binlen: pbp.bin_len().ms() as i32,
                     };
-                    let item = QueryItem::BinWriteIndexV00(item);
+                    let item = QueryItem::BinWriteIndexV01(item);
                     match rt {
                         RetentionTime::Short => {
                             iqdqs.st_rf3_qu.push_back(item);
