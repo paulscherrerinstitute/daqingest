@@ -16,7 +16,7 @@ use netpod::Shape;
 use netpod::TsNano;
 use netpod::ttl::RetentionTime;
 use scywr::insertqueues::InsertDeques;
-use scywr::iteminsertqueue::BinWriteIndexV01;
+use scywr::iteminsertqueue::BinWriteIndexV03;
 use scywr::iteminsertqueue::QueryItem;
 use scywr::iteminsertqueue::TimeBinSimpleF32V02;
 use series::ChannelStatusSeriesId;
@@ -84,25 +84,26 @@ impl WriteCntZero {
 }
 
 #[derive(Debug)]
-struct IndexWritten {
-    last: Option<(PrebinnedPartitioning, u64, u32)>,
+enum IndexWritten {
+    None,
+    Last(u32, u32),
 }
 
 impl IndexWritten {
     fn new() -> Self {
-        Self { last: None }
+        IndexWritten::None
     }
 
-    fn should_write(&self, _div: PrebinnedPartitioning, quo: u64, rem: u32) -> bool {
-        if let Some((_div0, quo0, rem0)) = &self.last {
-            *quo0 != quo || *rem0 != rem
+    fn should_write(&self, msp: u32, lsp: u32) -> bool {
+        if let IndexWritten::Last(lmsp, llsp) = self {
+            *lmsp != msp || *llsp != lsp
         } else {
             true
         }
     }
 
-    fn mark_written(&mut self, div: PrebinnedPartitioning, quo: u64, rem: u32) {
-        self.last = Some((div, quo, rem));
+    fn mark_written(&mut self, msp: u32, lsp: u32) {
+        *self = IndexWritten::Last(msp, lsp);
     }
 }
 
@@ -119,14 +120,17 @@ pub struct BinWriter {
         BinnedEventsTimeweight<f32>,
         WriteCntZero,
         PrebinnedPartitioning,
+        IndexWritten,
+        Option<IndexWritten>,
     )>,
     binner_others: Vec<(
         RetentionTime,
         BinnedBinsTimeweight<f32, f32>,
         WriteCntZero,
         PrebinnedPartitioning,
+        IndexWritten,
+        Option<IndexWritten>,
     )>,
-    index_written: IndexWritten,
     trd: bool,
 }
 
@@ -151,13 +155,13 @@ impl BinWriter {
         let quiets = [min_quiets.st.clone(), min_quiets.mt.clone(), min_quiets.lt.clone()];
         let mut binner_1st = None;
         let mut binner_others = Vec::new();
-        let mut has_monitor = false;
+        let mut has_monitor = None;
         let mut combs: Vec<_> = rts
             .into_iter()
             .zip(quiets.into_iter().map(|x| DtMs::from_ms_u64(x.as_millis() as u64)))
             .inspect(|x| {
                 if x.1 <= DUR_ZERO {
-                    has_monitor = true;
+                    has_monitor = Some(x.0.clone());
                 }
             })
             .filter(|x| x.1 > DUR_ZERO && x.1 < DUR_MAX)
@@ -181,9 +185,42 @@ impl BinWriter {
                     combs.push((RetentionTime::Long, PrebinnedPartitioning::Day1, WriteCntZero::Enable));
                 }
             }
+        } else {
+            match &has_monitor {
+                Some(RetentionTime::Short) => {
+                    combs.push((RetentionTime::Short, PrebinnedPartitioning::Min1, WriteCntZero::Disable));
+                    combs.push((
+                        RetentionTime::Medium,
+                        PrebinnedPartitioning::Hour1,
+                        WriteCntZero::Disable,
+                    ));
+                    combs.push((RetentionTime::Long, PrebinnedPartitioning::Day1, WriteCntZero::Enable));
+                }
+                Some(RetentionTime::Medium) => {
+                    combs.push((RetentionTime::Short, PrebinnedPartitioning::Min1, WriteCntZero::Disable));
+                    combs.push((
+                        RetentionTime::Medium,
+                        PrebinnedPartitioning::Hour1,
+                        WriteCntZero::Disable,
+                    ));
+                    combs.push((RetentionTime::Long, PrebinnedPartitioning::Day1, WriteCntZero::Enable));
+                }
+                Some(RetentionTime::Long) => {
+                    combs.push((
+                        RetentionTime::Medium,
+                        PrebinnedPartitioning::Min1,
+                        WriteCntZero::Disable,
+                    ));
+                    combs.push((RetentionTime::Long, PrebinnedPartitioning::Hour1, WriteCntZero::Disable));
+                    combs.push((RetentionTime::Long, PrebinnedPartitioning::Day1, WriteCntZero::Enable));
+                }
+                None => {
+                    combs.push((RetentionTime::Long, PrebinnedPartitioning::Day1, WriteCntZero::Enable));
+                }
+            }
         }
         debug_init!(trd, "combs B  {:?}", combs);
-        if !is_polled && !has_monitor && combs.len() > 1 {
+        if combs.len() > 1 && has_monitor.is_none() && is_polled {
             combs.remove(0);
         }
         let combs = combs;
@@ -196,15 +233,24 @@ impl BinWriter {
                 if let WriteCntZero::Enable = write_zero {
                     binner.cnt_zero_enable();
                 }
-                binner_1st = Some((rt, binner, write_zero, pbp));
+                let iw2 = if pbp.uses_index_min10() {
+                    Some(IndexWritten::new())
+                } else {
+                    None
+                };
+                binner_1st = Some((rt, binner, write_zero, pbp, IndexWritten::new(), iw2));
             } else {
                 let range = BinnedRange::from_beg_to_inf(beg, pbp.bin_len());
-                let binner = BinnedBinsTimeweight::new(range);
+                let mut binner = BinnedBinsTimeweight::new(range);
                 if let WriteCntZero::Enable = write_zero {
-                    // TODO
-                    // binner.cnt_zero_enable();
+                    binner.cnt_zero_enable();
                 }
-                binner_others.push((rt, binner, write_zero, pbp));
+                let iw2 = if pbp.uses_index_min10() {
+                    Some(IndexWritten::new())
+                } else {
+                    None
+                };
+                binner_others.push((rt, binner, write_zero, pbp, IndexWritten::new(), iw2));
             }
         }
         let ret = Self {
@@ -216,7 +262,6 @@ impl BinWriter {
             evbuf: ContainerEvents::new(),
             binner_1st,
             binner_others,
-            index_written: IndexWritten::new(),
             trd,
         };
         let _ = ret.cssid;
@@ -278,6 +323,8 @@ impl BinWriter {
             let write_zero = ee.2.clone();
             let binner = &mut ee.1;
             let pbp = ee.3.clone();
+            let index_written = &mut ee.4;
+            let iw2 = &mut ee.5;
             // TODO avoid boxing
             let bufbox = Box::new(buf);
             use items_0::timebin::IngestReport;
@@ -297,18 +344,20 @@ impl BinWriter {
                 trace_bin!(self.trd, "binner_1st  out len {}", bins.len());
                 Self::handle_output_ready(
                     self.trd,
+                    true,
                     self.sid,
                     rt,
                     &bins,
                     write_zero,
-                    &mut self.index_written,
+                    index_written,
+                    iw2,
                     pbp,
                     iqdqs,
                 )?;
                 // TODO avoid boxing
                 let mut bins2: BinsBoxed = Box::new(bins);
                 for i in 0..self.binner_others.len() {
-                    let (rt, binner, write_zero, pbp) = &mut self.binner_others[i];
+                    let (rt, binner, write_zero, pbp, index_written, iw2) = &mut self.binner_others[i];
                     let write_zero = write_zero.clone();
                     binner.ingest(&bins2)?;
                     let bb: Option<BinsBoxed> = binner.output()?;
@@ -319,11 +368,13 @@ impl BinWriter {
                                 if let Some(bb2) = bb.as_any_ref().downcast_ref::<ContainerBins<f32, f32>>() {
                                     Self::handle_output_ready(
                                         self.trd,
+                                        false,
                                         self.sid,
                                         rt.clone(),
                                         &bb2,
                                         write_zero,
-                                        &mut self.index_written,
+                                        index_written,
+                                        iw2,
                                         pbp.clone(),
                                         iqdqs,
                                     )?;
@@ -348,17 +399,21 @@ impl BinWriter {
                 Ok(())
             }
         } else {
+            // TODO should rather make the top-level binner non-optional
+            self.evbuf.clear();
             Ok(())
         }
     }
 
     fn handle_output_ready(
         trd: bool,
+        is_from_events: bool,
         series: SeriesId,
         rt: RetentionTime,
         bins: &ContainerBins<f32, f32>,
         write_zero: WriteCntZero,
-        index_written: &mut IndexWritten,
+        iw1: &mut IndexWritten,
+        iw2: &mut Option<IndexWritten>,
         pbp: PrebinnedPartitioning,
         iqdqs: &mut InsertDeques,
     ) -> Result<(), Error> {
@@ -373,71 +428,91 @@ impl BinWriter {
             if fnl == false {
                 info!("non final bin  {:?}", series);
             } else if cnt == 0 && !write_zero.enabled() {
-                info!("zero count bin  {:?}", series);
+                if is_from_events {
+                    info!("zero count bin  from events  {:?}", series);
+                } else {
+                    info!("zero count bin  from bins  {:?}", series);
+                }
             } else {
                 if bin_len != pbp.bin_len() {
                     let e = Error::UnexpectedBinLen(bin_len, pbp);
                     return Err(e);
                 }
-                let div = pbp.msp_div();
-                if div.ns() % bin_len.ns() != 0 {
-                    let e = Error::UnsupportedGridDiv(bin_len, div);
-                    return Err(e);
+                {
+                    let (msp, lsp) = pbp.msp_lsp(ts1.to_ts_ms());
+                    let item = QueryItem::TimeBinSimpleF32V02(TimeBinSimpleF32V02 {
+                        series,
+                        binlen: bin_len.ms() as i32,
+                        msp: msp as i64,
+                        off: lsp as i32,
+                        cnt: cnt as i64,
+                        min,
+                        max,
+                        avg,
+                        dev: f32::NAN,
+                        lst,
+                    });
+                    if true || bin_len >= DtMs::from_ms_u64(1000 * 60 * 60) {
+                        debug_bin!(trd, "handle_output_ready  emit  {:?}  len {}  {:?}", rt, bins_len, item);
+                    }
+                    let qu = iqdqs.deque(rt.clone());
+                    qu.push_back(item);
                 }
-                let msp = ts1.ms() / div.ms();
-                let off = (ts1.ms() - div.ms() * msp) / bin_len.ms();
-                let item = QueryItem::TimeBinSimpleF32V02(TimeBinSimpleF32V02 {
-                    series,
-                    binlen: bin_len.ms() as i32,
-                    msp: msp as i64,
-                    off: off as i32,
-                    cnt: cnt as i64,
-                    min,
-                    max,
-                    avg,
-                    dev: f32::NAN,
-                    lst,
-                });
-                if true || bin_len >= DtMs::from_ms_u64(1000 * 60 * 60) {
-                    debug_bin!(trd, "handle_output_ready  emit  {:?}  len {}  {:?}", rt, bins_len, item);
+                if pbp.uses_index_min10() {
+                    let pbp_ix = PrebinnedPartitioning::Min10;
+                    let (msp, lsp) = pbp_ix.msp_lsp(ts1.to_ts_ms());
+                    debug_bin!(
+                        trd,
+                        "handle_output_ready  index  {:?}  {:?}  {:?}  {:?}  {:?}  {:?}",
+                        series,
+                        pbp_ix,
+                        pbp,
+                        rt,
+                        msp,
+                        lsp
+                    );
+                    let iw = iw2.as_mut().unwrap();
+                    if iw.should_write(msp, lsp) {
+                        iw.mark_written(msp, lsp);
+                        let item = BinWriteIndexV03 {
+                            series: series.id() as i64,
+                            pbp: pbp_ix.db_ix() as i16,
+                            msp: msp as i32,
+                            rt: rt.index_db_i32() as i16,
+                            lsp: lsp as i32,
+                            binlen: pbp.bin_len().ms() as i32,
+                        };
+                        let item = QueryItem::BinWriteIndexV03(item);
+                        iqdqs.deque(rt.clone()).push_back(item);
+                    }
                 }
-                match rt {
-                    RetentionTime::Short => {
-                        iqdqs.st_rf3_qu.push_back(item);
+                if true {
+                    let pbp_ix = PrebinnedPartitioning::Day1;
+                    let (msp, lsp) = pbp_ix.msp_lsp(ts1.to_ts_ms());
+                    debug_bin!(
+                        trd,
+                        "handle_output_ready  index  {:?}  {:?}  {:?}  {:?}  {:?}  {:?}",
+                        series,
+                        pbp_ix,
+                        pbp,
+                        rt,
+                        msp,
+                        lsp
+                    );
+                    // let iw = iw1;
+                    if iw1.should_write(msp, lsp) {
+                        iw1.mark_written(msp, lsp);
+                        let item = BinWriteIndexV03 {
+                            series: series.id() as i64,
+                            pbp: pbp_ix.db_ix() as i16,
+                            msp: msp as i32,
+                            rt: rt.index_db_i32() as i16,
+                            lsp: lsp as i32,
+                            binlen: pbp.bin_len().ms() as i32,
+                        };
+                        let item = QueryItem::BinWriteIndexV03(item);
+                        iqdqs.deque(rt.clone()).push_back(item);
                     }
-                    RetentionTime::Medium => {
-                        iqdqs.mt_rf3_qu.push_back(item);
-                    }
-                    RetentionTime::Long => {
-                        iqdqs.lt_rf3_qu.push_back(item);
-                    }
-                }
-                let div = PrebinnedPartitioning::Day1;
-                let (quo, rem, dv1, dv2) = div.quo_rem(ts1.to_ts_ms());
-                if index_written.should_write(div.clone(), quo, rem) {
-                    index_written.mark_written(div.clone(), quo, rem);
-                    let item = BinWriteIndexV01 {
-                        series: series.id() as i64,
-                        dv1: dv1 as i32,
-                        dv2: dv2 as i32,
-                        quo: quo as i64,
-                        rem: rem as i32,
-                        rt: rt.index_db_i32(),
-                        binlen: pbp.bin_len().ms() as i32,
-                    };
-                    let item = QueryItem::BinWriteIndexV01(item);
-                    match rt {
-                        RetentionTime::Short => {
-                            iqdqs.st_rf3_qu.push_back(item);
-                        }
-                        RetentionTime::Medium => {
-                            iqdqs.mt_rf3_qu.push_back(item);
-                        }
-                        RetentionTime::Long => {
-                            iqdqs.lt_rf3_qu.push_back(item);
-                        }
-                    }
-                } else {
                 }
             }
         }

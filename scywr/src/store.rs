@@ -45,7 +45,7 @@ pub struct DataStore {
     pub qu_insert_array_f64: Arc<PreparedStatement>,
     pub qu_insert_array_bool: Arc<PreparedStatement>,
     pub qu_insert_binned_scalar_f32_v02: Arc<PreparedStatement>,
-    pub qu_insert_bin_write_index_v01: Arc<PreparedStatement>,
+    pub qu_insert_bin_write_index_v03: Arc<PreparedStatement>,
     pub qu_account_00: Arc<PreparedStatement>,
     pub qu_account_recv_00: Arc<PreparedStatement>,
     pub qu_dummy: Arc<PreparedStatement>,
@@ -157,10 +157,10 @@ impl DataStore {
             scy
         );
 
-        let qu_insert_bin_write_index_v01 = prep_qu_ins_c!(
-            "bin_write_index_v01",
-            "series, dv1, dv2, quo, rem, rt, binlen",
-            "?, ?, ?, ?, ?, ?, ?",
+        let qu_insert_bin_write_index_v03 = prep_qu_ins_c!(
+            "bin_write_index_v03",
+            "series, pbp, msp, rt, lsp, binlen",
+            "?, ?, ?, ?, ?, ?",
             rett,
             scy
         );
@@ -219,7 +219,7 @@ impl DataStore {
             qu_insert_array_f64,
             qu_insert_array_bool,
             qu_insert_binned_scalar_f32_v02,
-            qu_insert_bin_write_index_v01,
+            qu_insert_bin_write_index_v03,
             qu_account_00,
             qu_account_recv_00,
             qu_dummy,

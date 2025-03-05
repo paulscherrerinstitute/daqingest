@@ -1,7 +1,7 @@
 use crate::config::ScyllaIngestConfig;
 use crate::iteminsertqueue::Accounting;
 use crate::iteminsertqueue::AccountingRecv;
-use crate::iteminsertqueue::BinWriteIndexV01;
+use crate::iteminsertqueue::BinWriteIndexV03;
 use crate::iteminsertqueue::InsertFut;
 use crate::iteminsertqueue::InsertItem;
 use crate::iteminsertqueue::MspItem;
@@ -273,11 +273,11 @@ where
                         prepare_timebin_v02_insert_futs(item, &data_store, &stats, tsnow)
                     }
                 }
-                QueryItem::BinWriteIndexV01(item) => {
+                QueryItem::BinWriteIndexV03(item) => {
                     if ignore_writes {
                         SmallVec::new()
                     } else {
-                        prepare_bin_write_index_v01_insert_futs(item, &data_store, &stats, tsnow)
+                        prepare_bin_write_index_v03_insert_futs(item, &data_store, &stats, tsnow)
                     }
                 }
                 QueryItem::Accounting(item) => {
@@ -321,8 +321,8 @@ fn inspect_items(
                 QueryItem::TimeBinSimpleF32V02(_) => {
                     trace_item_execute!("execute  {worker_name}  TimeBinSimpleF32V02");
                 }
-                QueryItem::BinWriteIndexV01(_) => {
-                    trace_item_execute!("execute  {worker_name}  BinWriteIndexV01");
+                QueryItem::BinWriteIndexV03(_) => {
+                    trace_item_execute!("execute  {worker_name}  BinWriteIndexV03");
                 }
                 QueryItem::Accounting(_) => {
                     trace_item_execute!("execute  {worker_name}  Accounting  {item:?}");
@@ -420,26 +420,18 @@ fn prepare_timebin_v02_insert_futs(
     futs
 }
 
-fn prepare_bin_write_index_v01_insert_futs(
-    item: BinWriteIndexV01,
+fn prepare_bin_write_index_v03_insert_futs(
+    item: BinWriteIndexV03,
     data_store: &Arc<DataStore>,
     stats: &Arc<InsertWorkerStats>,
     tsnow: Instant,
 ) -> SmallVec<[InsertFut; 4]> {
-    let params = (
-        item.series,
-        item.dv1,
-        item.dv2,
-        item.quo,
-        item.rem,
-        item.rt,
-        item.binlen,
-    );
+    let params = (item.series, item.pbp, item.msp, item.rt, item.lsp, item.binlen);
     // TODO would be better to count inserts only on completed insert
     stats.inserted_binned().inc();
     let fut = InsertFut::new(
         data_store.scy.clone(),
-        data_store.qu_insert_bin_write_index_v01.clone(),
+        data_store.qu_insert_bin_write_index_v03.clone(),
         params,
         tsnow,
         stats.clone(),

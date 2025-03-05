@@ -7,7 +7,6 @@ use async_channel::Receiver;
 use async_channel::Sender;
 use ca_proto::ca::proto;
 use ca_proto_tokio::tcpasyncwriteread::TcpAsyncWriteRead;
-use core::fmt;
 use dbpg::seriesbychannel::ChannelInfoQuery;
 use dbpg::seriesbychannel::ChannelInfoResult;
 use enumfetch::ConnFuture;
@@ -17,16 +16,16 @@ use futures_util::Stream;
 use futures_util::StreamExt;
 use hashbrown::HashMap;
 use log::*;
-use netpod::channelstatus::ChannelStatus;
-use netpod::channelstatus::ChannelStatusClosedReason;
-use netpod::timeunits::*;
-use netpod::ttl::RetentionTime;
+use netpod::EMIT_ACCOUNTING_SNAP;
 use netpod::ScalarType;
 use netpod::SeriesKind;
 use netpod::Shape;
 use netpod::TsMs;
 use netpod::TsNano;
-use netpod::EMIT_ACCOUNTING_SNAP;
+use netpod::channelstatus::ChannelStatus;
+use netpod::channelstatus::ChannelStatusClosedReason;
+use netpod::timeunits::*;
+use netpod::ttl::RetentionTime;
 use proto::CaDataValue;
 use proto::CaEventValue;
 use proto::CaItem;
@@ -60,19 +59,20 @@ use serieswriter::fixgridwriter::ChannelStatusWriteState;
 use serieswriter::msptool::MspSplit;
 use serieswriter::rtwriter::RtWriter;
 use serieswriter::writer::EmittableType;
-use stats::rand_xoshiro::rand_core::RngCore;
-use stats::rand_xoshiro::rand_core::SeedableRng;
-use stats::rand_xoshiro::Xoshiro128PlusPlus;
 use stats::CaConnStats;
 use stats::CaProtoStats;
 use stats::IntervalEma;
+use stats::rand_xoshiro::Xoshiro128PlusPlus;
+use stats::rand_xoshiro::rand_core::RngCore;
+use stats::rand_xoshiro::rand_core::SeedableRng;
 use std::collections::BTreeMap;
 use std::collections::VecDeque;
+use std::fmt;
 use std::net::SocketAddrV4;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::sync::atomic;
 use std::sync::atomic::AtomicUsize;
-use std::sync::Arc;
 use std::task::Context;
 use std::task::Poll;
 use std::time::Duration;
@@ -91,60 +91,17 @@ const READ_CHANNEL_VALUE_STATUS_EMIT_QUIET_MIN: Duration = Duration::from_millis
 const SILENCE_READ_NEXT_IVL: Duration = Duration::from_millis(1000 * 200);
 const POLL_READ_TIMEOUT: Duration = Duration::from_millis(1000 * 10);
 const DO_RATE_CHECK: bool = false;
+const CHANNEL_STATUS_PONG_QUIET: Duration = Duration::from_millis(1000 * 60 * 60);
 
-#[allow(unused)]
-macro_rules! trace2 {
-    ($($arg:tt)*) => {
-        if true {
-            trace!($($arg)*);
-        }
-    };
-}
+macro_rules! trace3 { ($($arg:expr),*) => ( if false { trace!($($arg),*); } ); }
 
-#[allow(unused)]
-macro_rules! trace3 {
-    ($($arg:tt)*) => {
-        if false {
-            trace!($($arg)*);
-        }
-    };
-}
+macro_rules! trace4 { ($($arg:expr),*) => ( if false { trace!($($arg),*); } ); }
 
-#[allow(unused)]
-macro_rules! trace4 {
-    ($($arg:tt)*) => {
-        if false {
-            trace!($($arg)*);
-        }
-    };
-}
+macro_rules! trace_flush_queue { ($($arg:expr),*) => ( if false { trace3!($($arg),*); } ); }
 
-#[allow(unused)]
-macro_rules! trace_flush_queue {
-    ($($arg:tt)*) => {
-        if false {
-            trace3!($($arg)*);
-        }
-    };
-}
+macro_rules! trace_event_incoming { ($($arg:expr),*) => ( if false { trace!($($arg),*); } ); }
 
-#[allow(unused)]
-macro_rules! trace_event_incoming {
-    ($($arg:tt)*) => {
-        if false {
-            trace!($($arg)*);
-        }
-    };
-}
-
-#[allow(unused)]
-macro_rules! trace_monitor_stale {
-    ($($arg:tt)*) => {
-        if false {
-            trace!($($arg)*);
-        }
-    };
-}
+macro_rules! trace_monitor_stale { ($($arg:expr),*) => ( if false { trace!($($arg),*); } ); }
 
 fn dbg_chn_cid(cid: Cid, conn: &CaConn) -> bool {
     if let Some(name) = conn.name_by_cid(cid) {
@@ -272,7 +229,7 @@ mod ser_instant {
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-struct Cid(pub u32);
+pub struct Cid(pub u32);
 
 impl fmt::Display for Cid {
     fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
@@ -636,11 +593,7 @@ impl ChannelState {
         let item_recv_ivl_ema = match self {
             ChannelState::Writable(s) => {
                 let ema = s.channel.item_recv_ivl_ema.ema();
-                if ema.update_count() == 0 {
-                    None
-                } else {
-                    Some(ema.ema())
-                }
+                if ema.update_count() == 0 { None } else { Some(ema.ema()) }
             }
             _ => None,
         };
@@ -1091,6 +1044,7 @@ pub struct CaConn {
     trace_channel_poll: bool,
     ca_msg_recv_count: u64,
     ca_version_recv_count: u64,
+    ts_channel_status_pong_last: Instant,
 }
 
 impl Drop for CaConn {
@@ -1157,6 +1111,7 @@ impl CaConn {
             trace_channel_poll: false,
             ca_msg_recv_count: 0,
             ca_version_recv_count: 0,
+            ts_channel_status_pong_last: tsnow,
         }
     }
 
@@ -1193,6 +1148,14 @@ impl CaConn {
     fn ioid_next(&mut self) -> Ioid {
         self.ioid = self.ioid.wrapping_add(1);
         Ioid(self.ioid)
+    }
+
+    fn channel_status_qu(iqdqs: &mut InsertDeques) -> &mut VecDeque<QueryItem> {
+        &mut iqdqs.lt_rf3_qu
+    }
+
+    fn channel_status_pong_qu(iqdqs: &mut InsertDeques) -> &mut VecDeque<QueryItem> {
+        &mut iqdqs.st_rf3_qu
     }
 
     pub fn conn_command_tx(&self) -> Sender<ConnCommand> {
@@ -1422,7 +1385,8 @@ impl CaConn {
                         cssid: st2.channel.cssid.clone(),
                         status: ChannelStatus::Opened,
                     };
-                    conf.wrst.emit_channel_status_item(item, &mut self.iqdqs.st_rf3_qu)?;
+                    conf.wrst
+                        .emit_channel_status_item(item, Self::channel_status_qu(&mut self.iqdqs))?;
                 }
                 if let Some((ivl,)) = conf_poll_conf {
                     let ivl = Duration::from_millis(ivl);
@@ -1449,10 +1413,7 @@ impl CaConn {
                         self.cid_by_subid.insert(subid, cid);
                         trace!(
                             "new {:?} for {:?}  chst {:?} {:?}",
-                            subid,
-                            cid,
-                            st2.channel.cid,
-                            st2.channel.sid
+                            subid, cid, st2.channel.cid, st2.channel.sid
                         );
                         subid
                     };
@@ -1532,7 +1493,6 @@ impl CaConn {
         debug!("channel_close  {}", name);
         let tsnow = Instant::now();
         let stnow = SystemTime::now();
-
         let cid = if let Some(x) = self.cid_by_name.get(&name) {
             x.clone()
         } else {
@@ -1540,22 +1500,16 @@ impl CaConn {
             return;
         };
         self.cid_by_name.remove(&name);
-
         if let Some(conf) = self.channels.get_mut(&cid) {
-            let mut item_deque = VecDeque::new();
             let item = ChannelStatusItem {
                 ts: stnow,
                 cssid: conf.state.cssid(),
                 status: ChannelStatus::Closed(ChannelStatusClosedReason::ChannelRemove),
             };
-            let deque = &mut item_deque;
-            if conf.wrst.emit_channel_status_item(item, deque).is_err() {
+            let qu = Self::channel_status_qu(&mut self.iqdqs);
+            if conf.wrst.emit_channel_status_item(item, qu).is_err() {
                 self.stats.logic_error().inc();
             }
-            for x in item_deque {
-                self.iqdqs.st_rf3_qu.push_back(x);
-            }
-
             // TODO shutdown the internal writer structures.
             if let Some(cst) = conf.state.created_state() {
                 if let Some(proto) = self.proto.as_mut() {
@@ -1567,7 +1521,6 @@ impl CaConn {
                     proto.push_out(item);
                 }
             }
-
             {
                 let mut it = self.cid_by_subid.extract_if(|_, v| *v == cid);
                 if let Some((subid, _cid)) = it.next() {
@@ -1589,14 +1542,11 @@ impl CaConn {
         } else {
             debug!("channel_close  {}   no channel block", name);
         };
-
         {
             let it = self.cid_by_sid.extract_if(|_, v| *v == cid);
             it.count();
         }
-
         self.channels.remove(&cid);
-
         // TODO emit CaConn item to let CaConnSet know that we have closed the channel.
         // TODO may be too full
         let value = CaConnEventValue::ChannelRemoved(name);
@@ -1656,20 +1606,16 @@ impl CaConn {
         // TODO  can I reuse emit_channel_info_insert_items ?
         trace!("channel_state_on_shutdown  channels {}", self.channels.len());
         let stnow = self.tmp_ts_poll;
-        let mut item_deque = VecDeque::new();
+        let status_qu = Self::channel_status_qu(&mut self.iqdqs);
         for (_cid, conf) in &mut self.channels {
             let item = ChannelStatusItem {
                 ts: stnow,
                 cssid: conf.state.cssid(),
                 status: ChannelStatus::Closed(channel_reason.clone()),
             };
-            let deque = &mut item_deque;
-            if conf.wrst.emit_channel_status_item(item, deque).is_err() {
+            if conf.wrst.emit_channel_status_item(item, status_qu).is_err() {
                 self.stats.logic_error().inc();
             }
-        }
-        for x in item_deque {
-            self.iqdqs.st_rf3_qu.push_back(x);
         }
         for (_cid, conf) in &mut self.channels {
             if series::dbg::dbg_chn(conf.conf.name()) {
@@ -2046,7 +1992,7 @@ impl CaConn {
                                     self.read_ioids.remove(&st3.ioid);
                                     let next = PollTickStateIdle::decide_next(st3.next_backup, st2.poll_ivl, tsnow);
                                     if self.trace_channel_poll {
-                                        trace!("make next poll idle at {next:?}   tsnow {tsnow:?}");
+                                        trace!("make next poll idle at {:?}   tsnow {:?}", next, tsnow);
                                     }
                                     st2.tick = PollTickState::Idle(PollTickStateIdle { next });
                                     let iqdqs = &mut self.iqdqs;
@@ -2085,7 +2031,7 @@ impl CaConn {
                                     } else {
                                         self.stats.recv_read_notify_state_read_pending.inc();
                                     }
-                                    let read_expected = if let Some(cid) = self.read_ioids.remove(&ioid) {
+                                    let read_expected = if let Some(_cid) = self.read_ioids.remove(&ioid) {
                                         true
                                     } else {
                                         false
@@ -2100,14 +2046,16 @@ impl CaConn {
                                             cssid: st.channel.cssid.clone(),
                                             status: ChannelStatus::MonitoringReadResultExpected,
                                         };
-                                        ch_wrst.emit_channel_status_item(item, &mut self.iqdqs.st_rf3_qu)?;
+                                        ch_wrst
+                                            .emit_channel_status_item(item, Self::channel_status_qu(&mut self.iqdqs))?;
                                     } else {
                                         let item = ChannelStatusItem {
                                             ts: self.tmp_ts_poll,
                                             cssid: st.channel.cssid.clone(),
                                             status: ChannelStatus::MonitoringReadResultUnexpected,
                                         };
-                                        ch_wrst.emit_channel_status_item(item, &mut self.iqdqs.st_rf3_qu)?;
+                                        ch_wrst
+                                            .emit_channel_status_item(item, Self::channel_status_qu(&mut self.iqdqs))?;
                                     }
                                     let iqdqs = &mut self.iqdqs;
                                     let stats = self.stats.as_ref();
@@ -2224,8 +2172,10 @@ impl CaConn {
                     cssid: crst.cssid,
                     status: ChannelStatus::MonitoringSilenceReadUnchanged,
                 };
-                let deque = &mut iqdqs.st_rf3_qu;
-                if wrst.emit_channel_status_item(item, deque).is_err() {
+                if wrst
+                    .emit_channel_status_item(item, Self::channel_status_qu(iqdqs))
+                    .is_err()
+                {
                     stats.logic_error().inc();
                 }
             }
@@ -2463,7 +2413,8 @@ impl CaConn {
                                         cssid: st2.channel.cssid.clone(),
                                         status: ChannelStatus::MonitoringSilenceReadStart,
                                     };
-                                    conf.wrst.emit_channel_status_item(item, &mut self.iqdqs.st_rf3_qu)?;
+                                    conf.wrst
+                                        .emit_channel_status_item(item, Self::channel_status_qu(&mut self.iqdqs))?;
                                 }
                             }
                         }
@@ -2485,7 +2436,8 @@ impl CaConn {
                                         cssid: st2.channel.cssid.clone(),
                                         status: ChannelStatus::MonitoringSilenceReadTimeout,
                                     };
-                                    conf.wrst.emit_channel_status_item(item, &mut self.iqdqs.st_rf3_qu)?;
+                                    conf.wrst
+                                        .emit_channel_status_item(item, Self::channel_status_qu(&mut self.iqdqs))?;
                                 }
                                 if false {
                                     // Here we try to close the channel at hand.
@@ -3204,8 +3156,16 @@ impl CaConn {
                         cssid: st1.channel.cssid,
                         status: ChannelStatus::Pong,
                     };
-                    let deque = &mut self.iqdqs.st_rf3_qu;
-                    if ch.wrst.emit_channel_status_item(item, deque).is_err() {
+                    let dt = self
+                        .poll_tsnow
+                        .saturating_duration_since(self.ts_channel_status_pong_last);
+                    let qu = if dt >= CHANNEL_STATUS_PONG_QUIET {
+                        self.ts_channel_status_pong_last = self.poll_tsnow;
+                        Self::channel_status_qu(&mut self.iqdqs)
+                    } else {
+                        Self::channel_status_pong_qu(&mut self.iqdqs)
+                    };
+                    if ch.wrst.emit_channel_status_item(item, qu).is_err() {
                         self.stats.logic_error().inc();
                     }
                 }

@@ -46,12 +46,12 @@ use statemap::ConnectionState;
 use statemap::ConnectionStateValue;
 use statemap::WithStatusSeriesIdState;
 use statemap::WithStatusSeriesIdStateInner;
-use stats::rand_xoshiro::rand_core::RngCore;
-use stats::rand_xoshiro::Xoshiro128PlusPlus;
 use stats::CaConnSetStats;
 use stats::CaConnStats;
 use stats::CaProtoStats;
 use stats::IocFinderStats;
+use stats::rand_xoshiro::Xoshiro128PlusPlus;
+use stats::rand_xoshiro::rand_core::RngCore;
 use std::collections::BTreeMap;
 use std::collections::VecDeque;
 use std::fmt;
@@ -418,9 +418,12 @@ pub struct CaConnSet {
     find_ioc_res_rx: Pin<Box<Receiver<VecDeque<FindIocRes>>>>,
     find_ioc_queue_set: QueueSet<ChannelName>,
     iqtx: Pin<Box<InsertQueuesTx>>,
-    storage_insert_queue_l1: VecDeque<QueryItem>,
-    storage_insert_queue: VecDeque<VecDeque<QueryItem>>,
-    storage_insert_sender: Pin<Box<SenderPolling<VecDeque<QueryItem>>>>,
+    storage_insert_st_qu: VecDeque<VecDeque<QueryItem>>,
+    storage_insert_st_qu_l1: VecDeque<QueryItem>,
+    storage_insert_st_tx: Pin<Box<SenderPolling<VecDeque<QueryItem>>>>,
+    storage_insert_lt_qu: VecDeque<VecDeque<QueryItem>>,
+    storage_insert_lt_qu_l1: VecDeque<QueryItem>,
+    storage_insert_lt_tx: Pin<Box<SenderPolling<VecDeque<QueryItem>>>>,
     ca_conn_res_tx: Pin<Box<Sender<(SocketAddr, CaConnEvent)>>>,
     ca_conn_res_rx: Pin<Box<Receiver<(SocketAddr, CaConnEvent)>>>,
     connset_out_queue: VecDeque<CaConnSetItem>,
@@ -486,12 +489,13 @@ impl CaConnSet {
             find_ioc_res_rx: Box::pin(find_ioc_res_rx),
             find_ioc_queue_set: QueueSet::new(),
             iqtx: Box::pin(iqtx.clone()),
-            storage_insert_queue_l1: VecDeque::new(),
-            storage_insert_queue: VecDeque::new(),
-
+            storage_insert_st_qu: VecDeque::new(),
+            storage_insert_st_qu_l1: VecDeque::new(),
+            storage_insert_st_tx: Box::pin(SenderPolling::new(iqtx.st_rf3_tx.clone())),
             // TODO simplify for all combinations
-            storage_insert_sender: Box::pin(SenderPolling::new(iqtx.st_rf3_tx.clone())),
-
+            storage_insert_lt_qu: VecDeque::new(),
+            storage_insert_lt_qu_l1: VecDeque::new(),
+            storage_insert_lt_tx: Box::pin(SenderPolling::new(iqtx.lt_rf3_tx.clone())),
             ca_conn_res_tx: Box::pin(ca_conn_res_tx),
             ca_conn_res_rx: Box::pin(ca_conn_res_rx),
             shutdown_stopping: false,
@@ -808,7 +812,7 @@ impl CaConnSet {
                         let item = serieswriter::fixgridwriter::ChannelStatusWriteValue::new(ts, status.to_u64());
                         let state = &mut writer_status_state;
                         let ts_net = Instant::now();
-                        let deque = &mut self.storage_insert_queue_l1;
+                        let deque = &mut self.storage_insert_lt_qu_l1;
                         writer_status.write(item, state, ts_net, ts, deque)?;
                     }
                     *chst2 = ActiveChannelState::WithStatusSeriesId(WithStatusSeriesIdState {
@@ -873,7 +877,7 @@ impl CaConnSet {
                         let item = serieswriter::fixgridwriter::ChannelStatusWriteValue::new(ts, status.to_u64());
                         let state = &mut writer_status_state;
                         let ts_net = Instant::now();
-                        let deque = &mut self.storage_insert_queue_l1;
+                        let deque = &mut self.storage_insert_lt_qu_l1;
                         writer_status.write(item, state, ts_net, ts, deque)?;
                     }
                     *st3 = WithStatusSeriesIdState {
@@ -1013,8 +1017,9 @@ impl CaConnSet {
             Ok(())
         } else {
             if false {
+                // TODO
                 self.thr_msg_storage_len
-                    .trigger("connset handle_check_health", &[&self.storage_insert_sender.len()]);
+                    .trigger("connset handle_check_health", &[&self.storage_insert_st_tx.len()]);
             }
             self.check_channel_states(tsnow, stnow)?;
             let item = CaConnSetItem::Healthy;
@@ -1136,8 +1141,7 @@ impl CaConnSet {
                     } else {
                         trace!(
                             "handle_channel_create_fail  {:?}  {:?}  set to MaybeWrongAddress",
-                            ch,
-                            addr
+                            ch, addr
                         );
                     }
                     bump_backoff(&mut st3.addr_find_backoff);
@@ -1482,7 +1486,8 @@ impl CaConnSet {
         } else {
             self.channel_states.range_mut(..)
         };
-        let mut item_deque = VecDeque::new();
+        let mut st_qu_2 = VecDeque::new();
+        let mut lt_qu_2 = VecDeque::new();
         for (i, (ch, st)) in it.enumerate() {
             match &mut st.value {
                 ChannelStateValue::Active(st2) => match st2 {
@@ -1556,7 +1561,7 @@ impl CaConnSet {
                                         st3.inner = WithStatusSeriesIdStateInner::MaybeWrongAddress(snew);
                                         let item = ChannelStatusItem::new_closed_conn_timeout(stnow, st3.cssid.clone());
                                         let (tsev, val) = item.to_ts_val();
-                                        let deque = &mut item_deque;
+                                        let deque = &mut lt_qu_2;
                                         st3.writer_status.as_mut().unwrap().write(
                                             serieswriter::fixgridwriter::ChannelStatusWriteValue::new(tsev, val),
                                             st3.writer_status_state.as_mut().unwrap(),
@@ -1642,7 +1647,8 @@ impl CaConnSet {
                 }
             };
         }
-        self.storage_insert_queue.push_back(item_deque);
+        self.storage_insert_st_qu.push_back(st_qu_2);
+        self.storage_insert_lt_qu.push_back(lt_qu_2);
         for (addr, ch) in cmd_remove_channel {
             if let Some(g) = self.ca_conn_ress.get_mut(&addr) {
                 let cmd = ConnCommand::channel_close(ch.name().into());
@@ -1793,9 +1799,15 @@ impl CaConnSet {
         }
         self.handle_check_health()?;
         {
-            if self.storage_insert_queue_l1.len() != 0 {
-                let a = core::mem::replace(&mut self.storage_insert_queue_l1, VecDeque::new());
-                self.storage_insert_queue.push_back(a);
+            if self.storage_insert_st_qu_l1.len() != 0 {
+                let a = std::mem::replace(&mut self.storage_insert_st_qu_l1, VecDeque::new());
+                self.storage_insert_st_qu.push_back(a);
+            }
+        }
+        {
+            if self.storage_insert_lt_qu_l1.len() != 0 {
+                let a = std::mem::replace(&mut self.storage_insert_lt_qu_l1, VecDeque::new());
+                self.storage_insert_lt_qu.push_back(a);
             }
         }
         Ok(())
@@ -1907,7 +1919,7 @@ impl Stream for CaConnSet {
             self.stats.storage_insert_tx_len.set(self.iqtx.st_rf3_tx.len() as _);
             self.stats
                 .storage_insert_queue_len
-                .set(self.storage_insert_queue.len() as _);
+                .set(self.storage_insert_st_qu.len() as _);
             self.stats
                 .channel_info_query_queue_len
                 .set(self.channel_info_query_qu.len() as _);
@@ -1978,8 +1990,20 @@ impl Stream for CaConnSet {
 
             {
                 let this = self.as_mut().get_mut();
-                let qu = &mut this.storage_insert_queue;
-                let tx = this.storage_insert_sender.as_mut();
+                let qu = &mut this.storage_insert_st_qu;
+                let tx = this.storage_insert_st_tx.as_mut();
+                let counter = this.stats.storage_insert_queue_send();
+                let x = sender_polling_send(qu, tx, cx, || {
+                    counter.inc();
+                });
+                if let Err(e) = merge_pending_progress(x, &mut penpro) {
+                    break Ready(Some(CaConnSetItem::Error(e)));
+                }
+            }
+            {
+                let this = self.as_mut().get_mut();
+                let qu = &mut this.storage_insert_lt_qu;
+                let tx = this.storage_insert_lt_tx.as_mut();
                 let counter = this.stats.storage_insert_queue_send();
                 let x = sender_polling_send(qu, tx, cx, || {
                     counter.inc();

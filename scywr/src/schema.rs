@@ -636,18 +636,17 @@ async fn migrate_scylla_data_schema(
         let tab = GenTwcsTab::new(
             ks,
             rett.table_prefix(),
-            "bin_write_index_v01",
+            "bin_write_index_v03",
             &[
                 ("series", "bigint"),
-                ("dv1", "int"),
-                ("dv2", "int"),
-                ("quo", "bigint"),
-                ("rem", "int"),
-                ("rt", "int"),
+                ("pbp", "smallint"),
+                ("msp", "int"),
+                ("rt", "smallint"),
+                ("lsp", "int"),
                 ("binlen", "int"),
             ],
-            ["series", "dv1", "dv2", "quo"],
-            ["rem", "rt", "binlen"],
+            ["series", "pbp", "msp"],
+            ["rt", "lsp", "binlen"],
             rett.ttl_binned(),
         );
         tab.setup(chs, scy).await?;
@@ -710,6 +709,18 @@ async fn migrate_scylla_data_schema(
             rett.ttl_channel_status(),
         );
         tab.setup(chs, scy).await?;
+    }
+    {
+        let tn = format!("{}{}", rett.table_prefix(), "bin_write_index_v00");
+        if has_table(&tn, scy).await? {
+            chs.add_todo(format!("drop table {}.{}", ks, tn));
+        }
+    }
+    {
+        let tn = format!("{}{}", rett.table_prefix(), "bin_write_index_v01");
+        if has_table(&tn, scy).await? {
+            chs.add_todo(format!("drop table {}.{}", ks, tn));
+        }
     }
     Ok(())
 }

@@ -551,13 +551,12 @@ pub struct TimeBinSimpleF32V02 {
 }
 
 #[derive(Debug, Clone)]
-pub struct BinWriteIndexV01 {
+pub struct BinWriteIndexV03 {
     pub series: i64,
-    pub dv1: i32,
-    pub dv2: i32,
-    pub quo: i64,
-    pub rem: i32,
-    pub rt: i32,
+    pub pbp: i16,
+    pub msp: i32,
+    pub rt: i16,
+    pub lsp: i32,
     pub binlen: i32,
 }
 
@@ -567,7 +566,7 @@ pub enum QueryItem {
     Insert(InsertItem),
     Msp(MspItem),
     TimeBinSimpleF32V02(TimeBinSimpleF32V02),
-    BinWriteIndexV01(BinWriteIndexV01),
+    BinWriteIndexV03(BinWriteIndexV03),
     Accounting(Accounting),
     AccountingRecv(AccountingRecv),
 }
