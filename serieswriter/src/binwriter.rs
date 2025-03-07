@@ -219,6 +219,13 @@ impl BinWriter {
                 }
             }
         }
+        if chname.contains("TEST:MIN10:") {
+            for c in &mut combs {
+                if let PrebinnedPartitioning::Min1 = c.1 {
+                    c.2 = WriteCntZero::Enable;
+                }
+            }
+        }
         debug_init!(trd, "combs B  {:?}", combs);
         if combs.len() > 1 && has_monitor.is_none() && is_polled {
             combs.remove(0);
