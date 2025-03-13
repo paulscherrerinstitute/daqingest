@@ -1320,6 +1320,7 @@ impl CaConn {
                                         shape,
                                         ch.conf.min_quiets(),
                                         ch.conf.is_polled(),
+                                        ch.conf.replication(),
                                         &|| CaWriterValueState::new(st.series_status, chinfo.series.to_series()),
                                     )?;
                                     self.handle_writer_establish_inner(cid, writer)?;

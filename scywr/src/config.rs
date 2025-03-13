@@ -4,21 +4,20 @@ use serde::Deserialize;
 pub struct ScyllaIngestConfig {
     hosts: Vec<String>,
     keyspace: String,
-    keyspace_rf1: Option<String>,
+    rf: u8,
 }
 
 impl ScyllaIngestConfig {
-    pub fn new<I, H, K1, K2>(hosts: I, ks_rf3: K1, ks_rf1: K2) -> Self
+    pub fn new<I, H, K1>(hosts: I, ks: K1, rf: u8) -> Self
     where
         I: IntoIterator<Item = H>,
         H: Into<String>,
         K1: Into<String>,
-        K2: Into<String>,
     {
         Self {
             hosts: hosts.into_iter().map(Into::into).collect(),
-            keyspace: ks_rf3.into(),
-            keyspace_rf1: Some(ks_rf1.into()),
+            keyspace: ks.into(),
+            rf,
         }
     }
 
@@ -30,7 +29,7 @@ impl ScyllaIngestConfig {
         &self.keyspace
     }
 
-    pub fn keyspace_rf1(&self) -> Option<&String> {
-        self.keyspace_rf1.as_ref()
+    pub fn rf(&self) -> u8 {
+        self.rf
     }
 }

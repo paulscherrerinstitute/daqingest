@@ -1,4 +1,4 @@
-use crate::log::*;
+use crate::log;
 use crate::ratelimitwriter::RateLimitWriter;
 use crate::writer::EmittableType;
 use netpod::ScalarType;
@@ -11,13 +11,7 @@ use std::collections::VecDeque;
 use std::time::Duration;
 use std::time::Instant;
 
-macro_rules! trace_emit {
-    ($det:expr, $($arg:tt)*) => {
-        if $det {
-            trace!($($arg)*);
-        }
-    };
-}
+macro_rules! trace_emit { ($det:expr, $($arg:expr),*) => ( if $det { log::trace!($($arg),*); } ); }
 
 autoerr::create_error_v1!(
     name(Error, "SerieswriterRtwriter"),
@@ -86,6 +80,7 @@ where
     state_lt: State<ET>,
     min_quiets: MinQuiets,
     do_trace_detail: bool,
+    do_st_rf1: bool,
 }
 
 impl<ET> RtWriter<ET>
@@ -98,6 +93,7 @@ where
         shape: Shape,
         min_quiets: MinQuiets,
         is_polled: bool,
+        do_st_rf1: bool,
         emit_state_new: &dyn Fn() -> <ET as EmittableType>::State,
     ) -> Result<Self, Error> {
         let state_st = {
@@ -122,6 +118,7 @@ where
             state_lt,
             min_quiets,
             do_trace_detail: netpod::TRACE_SERIES_ID.contains(&series.id()),
+            do_st_rf1,
         };
         Ok(ret)
     }
@@ -162,7 +159,13 @@ where
             if !res_lt.accept {
                 res_mt = Self::write_inner(&mut self.state_mt, item.clone(), ts_net, tsev, &mut iqdqs.mt_rf3_qu)?;
                 if !res_mt.accept {
-                    res_st = Self::write_inner(&mut self.state_st, item.clone(), ts_net, tsev, &mut iqdqs.st_rf3_qu)?;
+                    if self.do_st_rf1 {
+                        res_st =
+                            Self::write_inner(&mut self.state_st, item.clone(), ts_net, tsev, &mut iqdqs.st_rf1_qu)?;
+                    } else {
+                        res_st =
+                            Self::write_inner(&mut self.state_st, item.clone(), ts_net, tsev, &mut iqdqs.st_rf3_qu)?;
+                    }
                 }
             }
         }
@@ -191,7 +194,11 @@ where
     }
 
     pub fn tick(&mut self, iqdqs: &mut InsertDeques) -> Result<(), Error> {
-        self.state_st.writer.tick(&mut iqdqs.st_rf3_qu)?;
+        if self.do_st_rf1 {
+            self.state_st.writer.tick(&mut iqdqs.st_rf1_qu)?;
+        } else {
+            self.state_st.writer.tick(&mut iqdqs.st_rf3_qu)?;
+        }
         self.state_mt.writer.tick(&mut iqdqs.mt_rf3_qu)?;
         self.state_lt.writer.tick(&mut iqdqs.lt_rf3_qu)?;
         Ok(())

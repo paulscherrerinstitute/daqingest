@@ -1,6 +1,6 @@
 use err::Error;
-use netpod::log::*;
 use netpod::Database;
+use netpod::log::*;
 use regex::Regex;
 use scywr::config::ScyllaIngestConfig;
 use serde::Deserialize;
@@ -32,6 +32,7 @@ pub struct CaIngestOpts {
     scylla_st: ScyllaIngestConfig,
     scylla_mt: ScyllaIngestConfig,
     scylla_lt: ScyllaIngestConfig,
+    scylla_st_rf1: ScyllaIngestConfig,
     array_truncate: Option<u64>,
     insert_worker_count: Option<usize>,
     insert_worker_concurrency: Option<usize>,
@@ -78,6 +79,10 @@ impl CaIngestOpts {
 
     pub fn scylla_config_lt(&self) -> &ScyllaIngestConfig {
         &self.scylla_lt
+    }
+
+    pub fn scylla_config_st_rf1(&self) -> &ScyllaIngestConfig {
+        &self.scylla_st_rf1
     }
 
     pub fn search(&self) -> &Vec<String> {
@@ -358,11 +363,11 @@ fn bool_true() -> bool {
 mod serde_ingest_config_archiving {
     use super::ChannelReadConfigApiFormat;
     use super::IngestConfigArchiving;
+    use serde::Deserializer;
+    use serde::Serializer;
     use serde::de;
     use serde::ser;
     use serde::ser::SerializeMap;
-    use serde::Deserializer;
-    use serde::Serializer;
     use std::fmt;
 
     impl ser::Serialize for IngestConfigArchiving {
@@ -421,9 +426,9 @@ mod serde_ChannelReadConfigApiFormat {
 }
 
 mod serde_replication_bool {
-    use serde::de;
     use serde::Deserializer;
     use serde::Serializer;
+    use serde::de;
     use std::fmt;
 
     pub fn serialize<S>(v: &bool, ser: S) -> Result<S::Ok, S::Error>
@@ -484,9 +489,9 @@ mod serde_replication_bool {
 
 mod serde_option_channel_read_config {
     use super::ChannelReadConfig;
-    use serde::de;
     use serde::Deserializer;
     use serde::Serializer;
+    use serde::de;
     use std::fmt;
     use std::time::Duration;
 
@@ -568,11 +573,7 @@ pub enum ChannelReadConfig {
 
 impl ChannelReadConfig {
     pub fn is_monitor(&self) -> bool {
-        if let Self::Monitor = self {
-            true
-        } else {
-            false
-        }
+        if let Self::Monitor = self { true } else { false }
     }
 }
 
@@ -678,6 +679,10 @@ impl ChannelConfig {
 
     pub fn is_polled(&self) -> bool {
         self.arch.is_polled
+    }
+
+    pub fn replication(&self) -> bool {
+        self.arch.replication
     }
 
     pub fn poll_conf(&self) -> Option<(u64,)> {
