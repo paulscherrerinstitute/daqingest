@@ -485,7 +485,7 @@ impl BinWriter {
                             series: series.id() as i64,
                             pbp: pbp_ix.db_ix() as i16,
                             msp: msp as i32,
-                            rt: rt.index_db_i32() as i16,
+                            rt: rt.to_index_db_i32() as i16,
                             lsp: lsp as i32,
                             binlen: pbp.bin_len().ms() as i32,
                         };
@@ -513,7 +513,7 @@ impl BinWriter {
                             series: series.id() as i64,
                             pbp: pbp_ix.db_ix() as i16,
                             msp: msp as i32,
-                            rt: rt.index_db_i32() as i16,
+                            rt: rt.to_index_db_i32() as i16,
                             lsp: lsp as i32,
                             binlen: pbp.bin_len().ms() as i32,
                         };

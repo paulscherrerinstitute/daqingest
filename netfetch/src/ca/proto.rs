@@ -1055,6 +1055,10 @@ impl CaMsg {
             }
             // TODO make response type for host name:
             0x15 => CaMsg::from_ty_ts(CaMsgTy::HostName("TODOx5288".into()), tsnow),
+            0x1b => {
+                warn!("HANDLE_SERVER_CHANNEL_DISCONNECT");
+                return Err(Error::CaCommandNotSupported(x));
+            }
             x => return Err(Error::CaCommandNotSupported(x)),
         };
         Ok(msg)

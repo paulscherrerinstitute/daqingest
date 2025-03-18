@@ -54,7 +54,7 @@ impl Changeset {
 
     fn log_statements(&self) {
         for q in &self.todo {
-            info!("WOULD DO  {q}");
+            info!("would execute:\n{q}\n");
         }
     }
 }
@@ -70,10 +70,9 @@ pub async fn has_keyspace(name: &str, scy: &ScySession) -> Result<bool, Error> {
     Ok(false)
 }
 
-pub async fn has_table(name: &str, scy: &ScySession) -> Result<bool, Error> {
+pub async fn has_table(ks: &str, name: &str, scy: &ScySession) -> Result<bool, Error> {
     let cql = "select table_name from system_schema.tables where keyspace_name = ?";
-    let ks = scy.get_keyspace().ok_or_else(|| Error::NoKeyspaceChosen)?;
-    let mut res = scy.query_iter(cql, (ks.as_ref(),)).await?.rows_stream::<(String,)>()?;
+    let mut res = scy.query_iter(cql, (ks,)).await?.rows_stream::<(String,)>()?;
     while let Some((table_name,)) = res.try_next().await? {
         if table_name == name {
             return Ok(true);
@@ -82,9 +81,12 @@ pub async fn has_table(name: &str, scy: &ScySession) -> Result<bool, Error> {
     Ok(false)
 }
 
-pub async fn check_table_readable(name: &str, scy: &ScySession) -> Result<bool, Error> {
+pub async fn check_table_readable(ks: &str, name: &str, scy: &ScySession) -> Result<bool, Error> {
     use crate::scylla::transport::errors::QueryError;
-    match scy.query_unpaged(format!("select * from {} limit 1", name), ()).await {
+    match scy
+        .query_unpaged(format!("select * from {}.{} limit 1", ks, name), ())
+        .await
+    {
         Ok(_) => Ok(true),
         Err(e) => match &e {
             QueryError::DbError(e2, msg) => match e2 {
@@ -216,7 +218,7 @@ impl GenTwcsTab {
     }
 
     async fn has_table_name(&self, scy: &ScySession) -> Result<bool, Error> {
-        has_table(self.name(), scy).await
+        has_table(self.keyspace(), self.name(), scy).await
     }
 
     fn cql(&self) -> String {
@@ -283,7 +285,6 @@ impl GenTwcsTab {
         );
         let x = scy.query_iter(cql, (self.keyspace(), self.name())).await?;
         let mut it = x.rows_stream::<(i32, i32, BTreeMap<String, String>)>()?;
-        // let mut it = x.into_typed::<(i32, i32, BTreeMap<String, String>)>();
         let mut rows = Vec::new();
         while let Some(u) = it.next().await {
             let row = u?;
@@ -478,7 +479,7 @@ async fn check_event_tables(
             ],
             ["series", "ts_msp"],
             ["ts_lsp"],
-            rett.ttl_events_d1(),
+            rett.ttl_events_d0(),
         );
         tab.setup(chs, scy).await?;
     }
@@ -495,7 +496,7 @@ async fn check_event_tables(
             ],
             ["series", "ts_msp"],
             ["ts_lsp"],
-            rett.ttl_events_d1(),
+            rett.ttl_events_d0(),
         );
         tab.setup(chs, scy).await?;
     }
@@ -512,7 +513,7 @@ async fn check_event_tables(
             ],
             ["series", "ts_msp"],
             ["ts_lsp"],
-            rett.ttl_events_d1(),
+            rett.ttl_events_d0(),
         );
         tab.setup(chs, scy).await?;
     }
@@ -522,6 +523,7 @@ async fn check_event_tables(
 async fn migrate_scylla_data_schema(
     scyconf: &ScyllaIngestConfig,
     rett: RetentionTime,
+    rf: u8,
     chs: &mut Changeset,
 ) -> Result<(), Error> {
     let scy2 = create_session_no_ks(scyconf).await?;
@@ -530,22 +532,19 @@ async fn migrate_scylla_data_schema(
     let ks = scyconf.keyspace();
 
     if !has_keyspace(ks, scy).await? {
-        let replication = scyconf.rf();
         let cql = format!(
             concat!(
                 "create keyspace {}",
                 " with replication = {{ 'class': 'SimpleStrategy', 'replication_factor': {} }}",
                 " and durable_writes = {};"
             ),
-            ks, replication, durable
+            ks, rf, durable
         );
         info!("scylla create keyspace  {cql}");
         chs.add_todo(cql);
     } else {
         info!("scylla has keyspace  {ks}");
     }
-
-    scy.use_keyspace(ks, true).await?;
 
     check_event_tables(ks, rett.clone(), chs, scy).await?;
 
@@ -692,13 +691,19 @@ async fn migrate_scylla_data_schema(
     }
     {
         let tn = format!("{}{}", rett.table_prefix(), "bin_write_index_v00");
-        if has_table(&tn, scy).await? {
+        if has_table(ks, &tn, scy).await? {
             chs.add_todo(format!("drop table {}.{}", ks, tn));
         }
     }
     {
         let tn = format!("{}{}", rett.table_prefix(), "bin_write_index_v01");
-        if has_table(&tn, scy).await? {
+        if has_table(&ks, &tn, scy).await? {
+            chs.add_todo(format!("drop table {}.{}", ks, tn));
+        }
+    }
+    {
+        let tn = format!("{}{}", rett.table_prefix(), "bin_write_index_v02");
+        if has_table(&ks, &tn, scy).await? {
             chs.add_todo(format!("drop table {}.{}", ks, tn));
         }
     }
@@ -716,8 +721,15 @@ pub async fn migrate_scylla_data_schema_all_rt(
         RetentionTime::Long,
         RetentionTime::Short,
     ];
-    for ((rt, scyconf), chs) in rts.clone().into_iter().zip(scyconfs.iter()).zip(chsa.iter_mut()) {
-        migrate_scylla_data_schema(scyconf, rt, chs).await?;
+    let rfs = [3, 3, 3, 1];
+    for (((rt, scyconf), chs), rf) in rts
+        .clone()
+        .into_iter()
+        .zip(scyconfs.iter())
+        .zip(chsa.iter_mut())
+        .zip(rfs.iter().map(|&x| x))
+    {
+        migrate_scylla_data_schema(scyconf, rt, rf, chs).await?;
     }
     let todo = chsa.iter().any(|x| x.has_to_do());
     if do_change {

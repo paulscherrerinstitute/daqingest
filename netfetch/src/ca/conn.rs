@@ -79,6 +79,7 @@ use std::time::Duration;
 use std::time::Instant;
 use std::time::SystemTime;
 use taskrun::tokio;
+use time::UtcDateTime;
 use tokio::net::TcpStream;
 
 const CONNECTING_TIMEOUT: Duration = Duration::from_millis(1000 * 6);
@@ -188,6 +189,7 @@ pub struct ChannelStateInfo {
     pub write_mt_last: SystemTime,
     pub write_lt_last: SystemTime,
     pub status_emit_count: u64,
+    pub last_comparisons: Option<VecDeque<(UtcDateTime, MonitorReadCmp)>>,
 }
 
 mod ser_instant {
@@ -307,12 +309,21 @@ enum Monitoring2State {
     Passive(Monitoring2PassiveState),
     ReadPending(Ioid, Instant),
 }
+#[derive(Debug, Clone, Serialize)]
+enum MonitorReadCmp {
+    Equal,
+    DiffTime,
+    DiffTimeValue,
+    DiffValue,
+}
 
 #[derive(Debug, Clone)]
 struct MonitoringState {
     tsbeg: Instant,
     subid: Subid,
     mon2state: Monitoring2State,
+    monitoring_event_last: Option<proto::EventAddRes>,
+    last_comparisons: VecDeque<(time::UtcDateTime, MonitorReadCmp)>,
 }
 
 #[derive(Debug, Clone)]
@@ -606,6 +617,13 @@ impl ChannelState {
             ChannelState::Writable(s) => s.channel.status_emit_count,
             _ => 0,
         };
+        let last_comparisons = match self {
+            ChannelState::Writable(s) => match &s.reading {
+                ReadingState::Monitoring(st2) => Some(st2.last_comparisons.clone()),
+                _ => None,
+            },
+            _ => None,
+        };
         ChannelStateInfo {
             stnow,
             cssid,
@@ -628,6 +646,7 @@ impl ChannelState {
             write_mt_last,
             write_lt_last,
             status_emit_count,
+            last_comparisons,
         }
     }
 
@@ -1784,6 +1803,8 @@ impl CaConn {
                                 tsbeg: tsnow,
                                 ts_silence_read_next: tsnow + Self::silence_read_next_ivl_rng(&mut self.rng),
                             }),
+                            monitoring_event_last: Some(ev.clone()),
+                            last_comparisons: VecDeque::new(),
                         });
                         let crst = &mut st.channel;
                         let writer = &mut st.writer;
@@ -1821,6 +1842,7 @@ impl CaConn {
                         let binwriter = &mut st.binwriter;
                         let iqdqs = &mut self.iqdqs;
                         let stats = self.stats.as_ref();
+                        st2.monitoring_event_last = Some(ev.clone());
                         Self::event_add_ingest(
                             ev.payload_len,
                             ev.value,
@@ -2060,6 +2082,27 @@ impl CaConn {
                                     }
                                     let iqdqs = &mut self.iqdqs;
                                     let stats = self.stats.as_ref();
+                                    // NOTE we do not update the last value in this ev handler.
+                                    {
+                                        if let Some(lst) = st2.monitoring_event_last.as_ref() {
+                                            // TODO compare with last monitoring value
+                                            if ev.value.data == lst.value.data {
+                                                if ev.value.meta == lst.value.meta {
+                                                    st2.last_comparisons
+                                                        .push_back((UtcDateTime::now(), MonitorReadCmp::Equal));
+                                                } else {
+                                                    st2.last_comparisons
+                                                        .push_back((UtcDateTime::now(), MonitorReadCmp::DiffTime));
+                                                }
+                                            } else {
+                                                st2.last_comparisons
+                                                    .push_back((UtcDateTime::now(), MonitorReadCmp::DiffValue));
+                                            }
+                                        }
+                                        while st2.last_comparisons.len() > 6 {
+                                            st2.last_comparisons.pop_front();
+                                        }
+                                    }
                                     // TODO check ADEL to see if monitor should have fired.
                                     // But there is still a small chance that the monitor will just received slightly later.
                                     // More involved check would be to raise a flag, wait for the expected monitor for some

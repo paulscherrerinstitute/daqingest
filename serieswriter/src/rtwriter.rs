@@ -12,6 +12,7 @@ use std::time::Duration;
 use std::time::Instant;
 
 macro_rules! trace_emit { ($det:expr, $($arg:expr),*) => ( if $det { log::trace!($($arg),*); } ); }
+macro_rules! trace_rt_decision { ($det:expr, $($arg:expr),*) => ( if $det { log::trace!($($arg),*); } ); }
 
 autoerr::create_error_v1!(
     name(Error, "SerieswriterRtwriter"),
@@ -48,6 +49,10 @@ impl WriteRes {
     pub fn nstatus(&self) -> u8 {
         self.st.status + self.mt.status + self.lt.status
     }
+
+    pub fn accept_any(&self) -> bool {
+        self.lt.accept || self.mt.accept || self.st.accept
+    }
 }
 
 #[derive(Debug)]
@@ -81,6 +86,8 @@ where
     min_quiets: MinQuiets,
     do_trace_detail: bool,
     do_st_rf1: bool,
+    last_insert_ts: TsNano,
+    last_insert_val: Option<ET>,
 }
 
 impl<ET> RtWriter<ET>
@@ -119,6 +126,8 @@ where
             min_quiets,
             do_trace_detail: netpod::TRACE_SERIES_ID.contains(&series.id()),
             do_st_rf1,
+            last_insert_ts: TsNano::from_ns(0),
+            last_insert_val: None,
         };
         Ok(ret)
     }
@@ -152,9 +161,15 @@ where
         // Optimize for the common case that we only write into one of the stores.
         // Make the decision first, based on ref, then clone only as required.
         let res_lt;
-        let mut res_mt = WriteRtRes::default();
-        let mut res_st = WriteRtRes::default();
+        let res_mt;
+        let res_st;
+        if self
+            .last_insert_val
+            .as_ref()
+            .map(|k| item.has_change(k))
+            .unwrap_or(true)
         {
+            // TODO filter duplicate values already here
             res_lt = Self::write_inner(&mut self.state_lt, item.clone(), ts_net, tsev, &mut iqdqs.lt_rf3_qu)?;
             if !res_lt.accept {
                 res_mt = Self::write_inner(&mut self.state_mt, item.clone(), ts_net, tsev, &mut iqdqs.mt_rf3_qu)?;
@@ -166,14 +181,28 @@ where
                         res_st =
                             Self::write_inner(&mut self.state_st, item.clone(), ts_net, tsev, &mut iqdqs.st_rf3_qu)?;
                     }
+                } else {
+                    res_st = WriteRtRes::default();
                 }
+            } else {
+                res_mt = WriteRtRes::default();
+                res_st = WriteRtRes::default();
             }
+        } else {
+            trace_rt_decision!(det, "{}  ignore, because value did not change", self.series);
+            res_lt = WriteRtRes::default();
+            res_mt = WriteRtRes::default();
+            res_st = WriteRtRes::default();
         }
         let ret = WriteRes {
             st: res_st,
             mt: res_mt,
             lt: res_lt,
         };
+        if ret.accept_any() {
+            self.last_insert_ts = tsev.clone();
+            self.last_insert_val = Some(item.clone());
+        }
         Ok(ret)
     }
 

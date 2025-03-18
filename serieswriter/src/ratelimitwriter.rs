@@ -1,9 +1,9 @@
 use crate::writer::EmittableType;
 use crate::writer::SeriesWriter;
 use core::fmt;
-use netpod::log::*;
 use netpod::DtNano;
 use netpod::TsNano;
+use netpod::log;
 use scywr::iteminsertqueue::QueryItem;
 use series::SeriesId;
 use std::collections::VecDeque;
@@ -11,7 +11,9 @@ use std::marker::PhantomData;
 use std::time::Duration;
 use std::time::Instant;
 
-macro_rules! trace_rt_decision { ($det:expr, $($arg:tt)*) => { if $det { trace!($($arg)*); } }; }
+macro_rules! debug { ($($arg:expr),*) => ( if true { log::debug!($($arg),*); } ); }
+macro_rules! trace { ($($arg:expr),*) => ( if true { log::trace!($($arg),*); } ); }
+macro_rules! trace_rt_decision { ($det:expr, $($arg:expr),*) => ( if $det { log::trace!($($arg),*); } ); }
 
 autoerr::create_error_v1!(
     name(Error, "RateLimitWriter"),
@@ -92,10 +94,13 @@ where
         if false {
             trace_rt_decision!(
                 det,
-                "{dbgname}  {sid}  min_quiet {min_quiet:?}  ts1 {ts1:?}  ts2 {ts2:?}  item {item:?}",
-                ts1 = ts.ms(),
-                ts2 = tsl.ms(),
-                item = item,
+                "{}  {}  min_quiet {:?}  ts1 {:?}  ts2 {:?}  item {:?}",
+                dbgname,
+                sid,
+                min_quiet,
+                ts.ms(),
+                tsl.ms(),
+                item
             );
         }
         let do_write = {
@@ -105,7 +110,11 @@ where
             } else if ts < tsl {
                 trace_rt_decision!(
                     det,
-                    "{dbgname}  {sid}  ignore, because ts_local  rewind  {ts:?}  {tsl:?}",
+                    "{}  {}  ignore, because ts_local  rewind  {:?}  {:?}",
+                    dbgname,
+                    sid,
+                    ts,
+                    tsl
                 );
                 false
             } else if !self.is_polled && ts.ms() < tsl.ms() + min_quiet {
@@ -120,20 +129,8 @@ where
             } else if ts < tsl.add_dt_nano(DtNano::from_ms(5)) {
                 trace_rt_decision!(det, "{dbgname}  {sid}  ignore, because store rate cap");
                 false
-            } else if self
-                .last_insert_val
-                .as_ref()
-                .map(|k| !item.has_change(k))
-                .unwrap_or(false)
-            {
-                trace_rt_decision!(det, "{dbgname}  {sid}  ignore, because value did not change");
-                false
             } else {
                 trace_rt_decision!(det, "{dbgname}  {sid}  accept");
-                if true {
-                    self.last_insert_val = Some(item.clone());
-                }
-                self.last_insert_ts = ts.clone();
                 true
             }
         };
