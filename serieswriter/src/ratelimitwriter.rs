@@ -86,10 +86,10 @@ where
         // Decide whether we want to write.
         // TODO catch already in CaConn the cases when the IOC-timestamp did not change.
         let det = self.do_trace_detail;
-        let tsl = self.last_insert_ts.clone();
         let dbgname = &self.dbgname;
         let sid = &self.series;
         let min_quiet = 1000 * self.min_quiet.as_secs() + self.min_quiet.subsec_millis() as u64;
+        let tsl = self.last_insert_ts.clone();
         let ts = tsev;
         if false {
             trace_rt_decision!(
@@ -104,20 +104,7 @@ where
             );
         }
         let do_write = {
-            if ts == tsl {
-                trace_rt_decision!(det, "{dbgname}  {sid}  ignore, because same time  {ts:?}  {tsl:?}");
-                false
-            } else if ts < tsl {
-                trace_rt_decision!(
-                    det,
-                    "{}  {}  ignore, because ts_local  rewind  {:?}  {:?}",
-                    dbgname,
-                    sid,
-                    ts,
-                    tsl
-                );
-                false
-            } else if !self.is_polled && ts.ms() < tsl.ms() + min_quiet {
+            if !self.is_polled && ts.ms() < tsl.ms() + min_quiet {
                 trace_rt_decision!(det, "{dbgname}  {sid}  ignore, because not min quiet  {ts:?}  {tsl:?}");
                 false
             } else if self.is_polled && ts.ms() + 800 < tsl.ms() + min_quiet {

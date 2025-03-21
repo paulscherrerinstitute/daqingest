@@ -157,13 +157,27 @@ where
     ) -> Result<WriteRes, Error> {
         let det = self.do_trace_detail;
         trace_emit!(det, "write  {:?}", item.ts());
-        // TODO
-        // Optimize for the common case that we only write into one of the stores.
-        // Make the decision first, based on ref, then clone only as required.
         let res_lt;
         let res_mt;
         let res_st;
-        if self
+        let tsl = self.last_insert_ts.clone();
+        if tsev < tsl {
+            trace_rt_decision!(
+                det,
+                "{}  ignore, because rewind time  {:?}  {:?}",
+                self.series,
+                tsev,
+                tsl
+            );
+            res_lt = WriteRtRes::default();
+            res_mt = WriteRtRes::default();
+            res_st = WriteRtRes::default();
+        } else if tsev == tsl {
+            trace_rt_decision!(det, "{}  ignore, because same time  {:?}  {:?}", self.series, tsev, tsl);
+            res_lt = WriteRtRes::default();
+            res_mt = WriteRtRes::default();
+            res_st = WriteRtRes::default();
+        } else if self
             .last_insert_val
             .as_ref()
             .map(|k| item.has_change(k))
