@@ -202,6 +202,18 @@ async fn config_reload(dcom: Arc<DaemonComm>) -> Result<axum::Json<serde_json::V
     }
 }
 
+async fn metrics2(dcom: Arc<DaemonComm>) -> Result<String, Response> {
+    let (tx, rx) = async_channel::bounded(1);
+    let item = DaemonEvent::GetMetrics(tx);
+    dcom.tx.send(item).await;
+    match rx.recv().await {
+        Ok(x) => Ok(x.prometheus()),
+        Err(e) => Err(Error::with_public_msg_no_trace(e.to_string())
+            .to_public_err_msg()
+            .into_response()),
+    }
+}
+
 async fn find_channel(
     params: HashMap<String, String>,
     dcom: Arc<DaemonComm>,
@@ -426,8 +438,24 @@ fn make_routes(
                     Router::new().fallback(|| async { StatusCode::NOT_FOUND }).route(
                         "/",
                         get({
+                            let dcom = dcom.clone();
                             let stats_set = stats_set.clone();
-                            || async move { metrics(&stats_set) }
+                            || async move {
+                                let prom2 = metrics2(dcom).await.unwrap_or(String::new());
+                                let mut s = metrics(&stats_set);
+                                s.push_str(&prom2);
+                                s
+                            }
+                        }),
+                    ),
+                )
+                .nest(
+                    "/metrics2",
+                    Router::new().fallback(|| async { StatusCode::NOT_FOUND }).route(
+                        "/",
+                        get({
+                            let dcom = dcom.clone();
+                            || metrics2(dcom)
                         }),
                     ),
                 )

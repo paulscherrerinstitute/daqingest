@@ -1112,7 +1112,7 @@ pub struct CaConn {
     read_ioids: HashMap<Ioid, Cid>,
     handler_by_ioid: HashMap<Ioid, Option<Pin<Box<dyn ConnFuture>>>>,
     trace_channel_poll: bool,
-    ca_msg_recv_count: u64,
+    ca_msg_recv_cnt: u64,
     ca_version_recv_count: u64,
     ts_channel_status_pong_last: Instant,
 }
@@ -1179,7 +1179,7 @@ impl CaConn {
             read_ioids: HashMap::new(),
             handler_by_ioid: HashMap::new(),
             trace_channel_poll: false,
-            ca_msg_recv_count: 0,
+            ca_msg_recv_cnt: 0,
             ca_version_recv_count: 0,
             ts_channel_status_pong_last: tsnow,
         }
@@ -2810,9 +2810,9 @@ impl CaConn {
                                 }
                             }
                             CaMsgTy::VersionRes(_) => {
-                                if self.ca_msg_recv_count != 0 {
+                                // TODO must check that version is only ever the first message.
+                                if false {
                                     self.stats.ca_proto_version_later().inc();
-                                    // TODO emit log or count stats
                                 }
                             }
                             CaMsgTy::ChannelCloseRes(x) => {
@@ -2825,12 +2825,11 @@ impl CaConn {
                     }
                     CaItem::Empty => {}
                 }
-                if self.ca_msg_recv_count == 0 {
-                    if self.ca_version_recv_count == 0 {
-                        self.stats.ca_proto_no_version_as_first().inc();
-                    }
+                if false {
+                    // TODO use flags to keep track of whether we have seen version or other msgs.
+                    self.stats.ca_proto_no_version_as_first().inc();
                 }
-                self.ca_msg_recv_count += 1;
+                self.ca_msg_recv_cnt = self.ca_msg_recv_cnt.saturating_add(1);
                 Ready(Some(Ok(())))
             }
             Ready(Some(Err(e))) => {
@@ -3184,17 +3183,14 @@ impl CaConn {
         Ok(())
     }
 
-    fn housekeeping_self(&mut self) {
-        let cnt_max = 0xfffffff000000000;
-        if self.ca_msg_recv_count > cnt_max {
-            let mask = !cnt_max;
-            self.ca_msg_recv_count &= mask;
-        }
-    }
+    fn housekeeping_self(&mut self) {}
 
     fn metrics_emit(&mut self) {
+        let ca_msg_recv_cnt = self.ca_msg_recv_cnt;
+        self.ca_msg_recv_cnt = 0;
         let item = CaConnMetrics {
             ca_conn_event_out_queue_len: self.ca_conn_event_out_queue.len(),
+            ca_msg_recv_cnt,
         };
         let item = CaConnEvent::new(Instant::now(), CaConnEventValue::Metrics(item));
         self.ca_conn_event_out_queue.push_back(item);

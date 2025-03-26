@@ -3,7 +3,98 @@ use serde::Serialize;
 
 #[derive(Debug, Serialize)]
 pub struct CaConnMetrics {
+    // a value
     pub ca_conn_event_out_queue_len: usize,
+    // a term of a running counter sum
+    pub ca_msg_recv_cnt: u64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CaConnMetricsAgg {
+    // derived from values
+    pub ca_conn_event_out_queue_len_max: usize,
+    // derived from counter terms
+    pub ca_msg_recv_cnt_all: u64,
+}
+
+impl CaConnMetricsAgg {
+    pub fn new() -> Self {
+        Self {
+            ca_conn_event_out_queue_len_max: 0,
+            ca_msg_recv_cnt_all: 0,
+        }
+    }
+
+    pub fn ingest(&mut self, inp: CaConnMetrics) {
+        self.ca_conn_event_out_queue_len_max = self
+            .ca_conn_event_out_queue_len_max
+            .max(inp.ca_conn_event_out_queue_len);
+        self.ca_msg_recv_cnt_all += inp.ca_msg_recv_cnt;
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct CaConnMetricsAggAgg {
+    // derived from values
+    pub ca_conn_event_out_queue_len_max: usize,
+    // derived from counter terms
+    pub ca_msg_recv_cnt_all: u64,
+}
+
+impl CaConnMetricsAggAgg {
+    pub fn new() -> Self {
+        Self {
+            ca_conn_event_out_queue_len_max: 0,
+            ca_msg_recv_cnt_all: 0,
+        }
+    }
+
+    pub fn ingest(&mut self, inp: CaConnMetricsAgg) {
+        // take again the max of the maxs
+        self.ca_conn_event_out_queue_len_max = self
+            .ca_conn_event_out_queue_len_max
+            .max(inp.ca_conn_event_out_queue_len_max);
+        // sum up again to a total
+        self.ca_msg_recv_cnt_all += inp.ca_msg_recv_cnt_all;
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct CaConnSetMetrics {
+    pub ca_conn_agg: CaConnMetricsAgg,
+}
+
+impl CaConnSetMetrics {
+    pub fn new() -> Self {
+        Self {
+            ca_conn_agg: CaConnMetricsAgg::new(),
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct CaConnSetAggMetrics {
+    pub ca_conn_agg_agg: CaConnMetricsAggAgg,
+}
+
+impl CaConnSetAggMetrics {
+    pub fn new() -> Self {
+        Self {
+            ca_conn_agg_agg: CaConnMetricsAggAgg::new(),
+        }
+    }
+
+    pub fn ingest(&mut self, inp: CaConnSetMetrics) {
+        {
+            let src = inp.ca_conn_agg;
+            let dst = &mut self.ca_conn_agg_agg;
+            // take again the max of the maxs
+            dst.ca_conn_event_out_queue_len_max = dst
+                .ca_conn_event_out_queue_len_max
+                .max(src.ca_conn_event_out_queue_len_max);
+            dst.ca_msg_recv_cnt_all += src.ca_msg_recv_cnt_all;
+        }
+    }
 }
 
 pub struct InsertQueuesTxMetrics {
@@ -22,6 +113,55 @@ impl From<&InsertQueuesTx> for InsertQueuesTxMetrics {
             mt_rf3_len: value.mt_rf3_tx.len(),
             lt_rf3_len: value.lt_rf3_tx.len(),
             lt_rf3_lat5_len: value.lt_rf3_lat5_tx.len(),
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct DaemonMetrics {
+    pub ca_conn_set_agg: CaConnSetAggMetrics,
+}
+
+impl DaemonMetrics {
+    pub fn new() -> Self {
+        Self {
+            ca_conn_set_agg: CaConnSetAggMetrics::new(),
+        }
+    }
+
+    pub fn ingest_ca_conn_set(&mut self, inp: CaConnSetMetrics) {
+        self.ca_conn_set_agg.ingest(inp);
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct MetricsPrometheusShort {
+    // derived from values
+    pub ca_conn_event_out_queue_len_max: usize,
+    // derived from counter terms
+    pub ca_msg_recv_cnt_all: u64,
+}
+
+impl MetricsPrometheusShort {
+    pub fn prometheus(&self) -> String {
+        use std::fmt::Write;
+        let mut s = String::new();
+        write!(
+            &mut s,
+            "ca_conn_event_out_queue_len_max {}\n",
+            self.ca_conn_event_out_queue_len_max
+        )
+        .unwrap();
+        write!(&mut s, "ca_msg_recv_all_sum {}\n", self.ca_msg_recv_cnt_all).unwrap();
+        s
+    }
+}
+
+impl From<&DaemonMetrics> for MetricsPrometheusShort {
+    fn from(value: &DaemonMetrics) -> Self {
+        Self {
+            ca_conn_event_out_queue_len_max: value.ca_conn_set_agg.ca_conn_agg_agg.ca_conn_event_out_queue_len_max,
+            ca_msg_recv_cnt_all: value.ca_conn_set_agg.ca_conn_agg_agg.ca_msg_recv_cnt_all,
         }
     }
 }

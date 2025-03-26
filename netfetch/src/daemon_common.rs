@@ -1,5 +1,6 @@
 use crate::ca::connset::CaConnSetItem;
 use crate::conf::ChannelConfig;
+use crate::metrics::types::MetricsPrometheusShort;
 use async_channel::Sender;
 use serde::Serialize;
 
@@ -26,7 +27,8 @@ pub enum DaemonEvent {
     ChannelCommand(crate::ca::connset::ChannelCommand),
     CaConnSetItem(CaConnSetItem),
     Shutdown,
-    ConfigReload(async_channel::Sender<u64>),
+    ConfigReload(Sender<u64>),
+    GetMetrics(Sender<MetricsPrometheusShort>),
 }
 
 impl DaemonEvent {
@@ -40,6 +42,7 @@ impl DaemonEvent {
             CaConnSetItem(_) => format!("CaConnSetItem"),
             Shutdown => format!("Shutdown"),
             ConfigReload(..) => format!("ConfigReload"),
+            GetMetrics(..) => format!("GetMetrics"),
         }
     }
 }

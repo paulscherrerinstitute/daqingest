@@ -59,6 +59,8 @@ use std::net::SocketAddr;
 use std::net::SocketAddrV4;
 use std::pin::Pin;
 
+use crate::metrics::types::CaConnMetricsAgg;
+use crate::metrics::types::CaConnSetMetrics;
 use crate::queueset::QueueSet;
 use netpod::OnDrop;
 use netpod::TsNano;
@@ -257,6 +259,7 @@ impl CaConnSetEvent {
 pub enum CaConnSetItem {
     Error(Error),
     Healthy,
+    Metrics(crate::metrics::types::CaConnSetMetrics),
 }
 
 pub struct CaConnSetCtrl {
@@ -457,6 +460,7 @@ pub struct CaConnSet {
     rogue_channel_count: u64,
     connect_fail_count: usize,
     cssid_latency_max: Duration,
+    ca_connset_metrics: CaConnSetMetrics,
 }
 
 impl CaConnSet {
@@ -530,6 +534,7 @@ impl CaConnSet {
             rogue_channel_count: 0,
             connect_fail_count: 0,
             cssid_latency_max: Duration::from_millis(2000),
+            ca_connset_metrics: CaConnSetMetrics::new(),
         };
         // TODO await on jh
         let jh = tokio::spawn(CaConnSet::run(connset));
@@ -765,7 +770,7 @@ impl CaConnSet {
             CaConnEventValue::EndOfStream(reason) => self.handle_ca_conn_eos(addr, reason),
             CaConnEventValue::ChannelRemoved(name) => self.handle_ca_conn_channel_removed(addr, name),
             CaConnEventValue::Metrics(v) => {
-                // TODO aggregate metrics and stats
+                self.ca_connset_metrics.ca_conn_agg.ingest(v);
                 Ok(())
             }
         }
@@ -1440,7 +1445,8 @@ impl CaConnSet {
                 | CaConnEventValue::EchoTimeout
                 | CaConnEventValue::ConnCommandResult(..)
                 | CaConnEventValue::ChannelCreateFail(..)
-                | CaConnEventValue::ChannelStatus(..) => {
+                | CaConnEventValue::ChannelStatus(..)
+                | CaConnEventValue::Metrics(..) => {
                     if let Err(e) = tx1.send((addr, item)).await {
                         error!("channel send  {:?}", e);
                         return Err(e.into());
@@ -1455,9 +1461,6 @@ impl CaConnSet {
                         error!("channel send  {:?}", e);
                         return Err(e.into());
                     }
-                }
-                CaConnEventValue::Metrics(_) => {
-                    // TODO merge metrics
                 }
             }
         }
@@ -1878,6 +1881,11 @@ impl CaConnSet {
                 self.storage_insert_lt_qu.push_back(a);
             }
         }
+        {
+            let metrics = std::mem::replace(&mut self.ca_connset_metrics, CaConnSetMetrics::new());
+            let item = CaConnSetItem::Metrics(metrics);
+            self.connset_out_queue.push_back(item);
+        }
         Ok(())
     }
 }
@@ -2009,10 +2017,6 @@ impl Stream for CaConnSet {
                 break Ready(Some(CaConnSetItem::Error(e)));
             }
 
-            if let Some(item) = self.connset_out_queue.pop_front() {
-                break Ready(Some(item));
-            }
-
             match self.ticker.poll_unpin(cx) {
                 Ready(()) => match self.as_mut().handle_own_ticker_tick(cx) {
                     Ok(()) => {
@@ -2026,6 +2030,10 @@ impl Stream for CaConnSet {
                 Pending => {
                     penpro.mark_pending();
                 }
+            }
+
+            if let Some(item) = self.connset_out_queue.pop_front() {
+                break Ready(Some(item));
             }
 
             if let Some((addr, jh)) = self.await_ca_conn_jhs.front_mut() {

@@ -16,6 +16,7 @@ use netfetch::daemon_common::ChannelName;
 use netfetch::daemon_common::DaemonEvent;
 use netfetch::metrics::RoutesResources;
 use netfetch::metrics::StatsSet;
+use netfetch::metrics::types::DaemonMetrics;
 use netfetch::throttletrace::ThrottleTrace;
 use netpod::Database;
 use netpod::ttl::RetentionTime;
@@ -85,6 +86,7 @@ pub struct Daemon {
     // TODO
     series_conf_by_id_tx: Sender<()>,
     iqtx: Option<InsertQueuesTx>,
+    daemon_metrics: DaemonMetrics,
 }
 
 impl Daemon {
@@ -385,6 +387,7 @@ impl Daemon {
             channel_info_query_tx,
             series_conf_by_id_tx,
             iqtx: Some(iqtx2),
+            daemon_metrics: DaemonMetrics::new(),
         };
         Ok(ret)
     }
@@ -561,6 +564,9 @@ impl Daemon {
                 error!("error from CaConnSet: {e}");
                 self.handle_shutdown().await?;
             }
+            Metrics(metrics) => {
+                self.daemon_metrics.ingest_ca_conn_set(metrics);
+            }
         }
         Ok(())
     }
@@ -695,6 +701,15 @@ impl Daemon {
             CaConnSetItem(item) => self.handle_ca_conn_set_item(item).await,
             Shutdown => self.handle_shutdown().await,
             ConfigReload(tx) => self.handle_config_reload(tx).await,
+            GetMetrics(tx) => {
+                match tx.send((&self.daemon_metrics).into()).await {
+                    Ok(()) => {}
+                    Err(e) => {
+                        error!("can not send metrics into channel");
+                    }
+                }
+                Ok(())
+            }
         };
         let dt = ts1.elapsed();
         if dt > Duration::from_millis(200) {
