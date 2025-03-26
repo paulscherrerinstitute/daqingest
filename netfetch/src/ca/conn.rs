@@ -2,6 +2,7 @@ mod enumfetch;
 
 use crate::conf::ChannelConfig;
 use crate::metrics::status::StorageUsage;
+use crate::metrics::types::CaConnMetrics;
 use crate::throttletrace::ThrottleTrace;
 use async_channel::Receiver;
 use async_channel::Sender;
@@ -51,6 +52,7 @@ use scywriiq::MspItem;
 use scywriiq::QueryItem;
 use scywriiq::ShutdownReason;
 use serde::Serialize;
+use serde_helper::serde_instant::serde_Instant_elapsed_ms;
 use series::ChannelStatusSeriesId;
 use series::SeriesId;
 use serieswriter::binwriter::BinWriter;
@@ -230,7 +232,7 @@ mod ser_instant {
     }
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 pub struct Cid(pub u32);
 
 impl fmt::Display for Cid {
@@ -239,7 +241,7 @@ impl fmt::Display for Cid {
     }
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 struct Subid(pub u32);
 
 impl Subid {
@@ -248,7 +250,7 @@ impl Subid {
     }
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 struct Sid(pub u32);
 
 impl Sid {
@@ -257,57 +259,71 @@ impl Sid {
     }
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 struct Ioid(pub u32);
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 enum ChannelError {
     CreateChanFail(ChannelStatusSeriesId),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 struct CreatingState {
+    #[serde(with = "serde_Instant_elapsed_ms")]
     tsbeg: Instant,
     cssid: ChannelStatusSeriesId,
     cid: Cid,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 struct MakingSeriesWriterState {
+    #[serde(with = "serde_Instant_elapsed_ms")]
     tsbeg: Instant,
     channel: CreatedState,
     series_status: SeriesId,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 struct FetchEnumDetails {
+    #[serde(with = "serde_Instant_elapsed_ms")]
     tsbeg: Instant,
     cssid: ChannelStatusSeriesId,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 struct EnableMonitoringState {
+    #[serde(with = "serde_Instant_elapsed_ms")]
     tsbeg: Instant,
     subid: Subid,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 struct ReadPendingState {
+    #[serde(with = "serde_Instant_elapsed_ms")]
     tsbeg: Instant,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 struct Monitoring2PassiveState {
     // Holds instant when we entered this state. A receive of an event is considered a re-enter of the state,
     // so the instant gets updated. Used for timeout check.
+    #[serde(with = "serde_Instant_elapsed_ms")]
     tsbeg: Instant,
+    #[serde(with = "serde_Instant_elapsed_ms")]
     ts_silence_read_next: Instant,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
+struct Monitoring2ReadPendingState {
+    #[serde(with = "serde_Instant_elapsed_ms")]
+    tsbeg: Instant,
+    ioid: Ioid,
+}
+
+#[derive(Debug, Clone, Serialize)]
 enum Monitoring2State {
     Passive(Monitoring2PassiveState),
-    ReadPending(Ioid, Instant),
+    ReadPending(Monitoring2ReadPendingState),
 }
 #[derive(Debug, Clone, Serialize)]
 enum MonitorReadCmp {
@@ -317,8 +333,9 @@ enum MonitorReadCmp {
     DiffValue,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 struct MonitoringState {
+    #[serde(with = "serde_Instant_elapsed_ms")]
     tsbeg: Instant,
     subid: Subid,
     mon2state: Monitoring2State,
@@ -326,20 +343,23 @@ struct MonitoringState {
     last_comparisons: VecDeque<(time::UtcDateTime, MonitorReadCmp)>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 struct StopMonitoringForPollingState {
+    #[serde(with = "serde_Instant_elapsed_ms")]
     tsbeg: Instant,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 struct PollingState {
+    #[serde(with = "serde_Instant_elapsed_ms")]
     tsbeg: Instant,
     poll_ivl: Duration,
     tick: PollTickState,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 struct PollTickStateIdle {
+    #[serde(with = "serde_Instant_elapsed_ms")]
     next: Instant,
 }
 
@@ -358,21 +378,24 @@ impl PollTickStateIdle {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 struct PollTickStateWait {
+    #[serde(with = "serde_Instant_elapsed_ms")]
     next_backup: Instant,
+    #[serde(with = "serde_Instant_elapsed_ms")]
     since: Instant,
     ioid: Ioid,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 enum PollTickState {
     Idle(PollTickStateIdle),
     Wait(PollTickStateWait),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 struct WritableState {
+    #[serde(with = "serde_Instant_elapsed_ms")]
     tsbeg: Instant,
     channel: CreatedState,
     writer: CaRtWriter,
@@ -380,7 +403,7 @@ struct WritableState {
     reading: ReadingState,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 enum ReadingState {
     EnableMonitoring(EnableMonitoringState),
     Monitoring(MonitoringState),
@@ -388,7 +411,7 @@ enum ReadingState {
     Polling(PollingState),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 struct AccountingInfo {
     usage: StorageUsage,
     beg: TsMs,
@@ -416,21 +439,29 @@ impl AccountingInfo {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 struct CreatedState {
     cssid: ChannelStatusSeriesId,
     cid: Cid,
     sid: Sid,
     ca_dbr_type: u16,
     ca_dbr_count: u32,
+    #[serde(with = "serde_Instant_elapsed_ms")]
     ts_created: Instant,
     // Updated when we receive something via monitoring or polling
+    #[serde(with = "serde_Instant_elapsed_ms")]
     ts_alive_last: Instant,
     // Updated on monitoring, polling or when the channel config changes to reset the timeout
+    #[serde(with = "serde_Instant_elapsed_ms")]
     ts_activity_last: Instant,
     st_activity_last: SystemTime,
+    // TODO
+    #[serde(skip)]
     insert_item_ivl_ema: IntervalEma,
+    // TODO
+    #[serde(skip)]
     item_recv_ivl_ema: IntervalEma,
+    #[serde(with = "serde_Instant_elapsed_ms")]
     insert_recv_ivl_last: Instant,
     muted_before: u32,
     recv_count: u64,
@@ -450,6 +481,7 @@ struct CreatedState {
     name: String,
     enum_str_table: Option<Vec<String>>,
     status_emit_count: u64,
+    #[serde(with = "serde_Instant_elapsed_ms")]
     ts_recv_value_status_emit_next: Instant,
 }
 
@@ -498,7 +530,7 @@ impl CreatedState {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 enum ChannelState {
     Init(ChannelStatusSeriesId),
     Creating(CreatingState),
@@ -511,16 +543,19 @@ enum ChannelState {
     Ended(ChannelStatusSeriesId),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 struct ClosingState {
+    #[serde(with = "serde_Instant_elapsed_ms")]
     tsbeg: Instant,
     cssid: ChannelStatusSeriesId,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 struct ChannelConf {
     conf: ChannelConfig,
     state: ChannelState,
+    // TODO
+    #[serde(skip)]
     wrst: WriterStatus,
 }
 
@@ -843,10 +878,17 @@ fn info_store_msp_from_time(ts: SystemTime) -> u32 {
 pub type CmdResTx = Sender<Result<(), Error>>;
 
 #[derive(Debug)]
+pub struct CmdChannelInspectFull {
+    name: String,
+    tx: Sender<serde_json::Value>,
+}
+
+#[derive(Debug)]
 pub enum ConnCommandKind {
     ChannelAdd(ChannelConfig, ChannelStatusSeriesId),
     ChannelClose(String),
     Shutdown,
+    ChannelInspectFull(CmdChannelInspectFull),
 }
 
 #[derive(Debug)]
@@ -965,6 +1007,7 @@ pub enum CaConnEventValue {
     ChannelCreateFail(String),
     EndOfStream(EndOfStreamReason),
     ChannelRemoved(String),
+    Metrics(CaConnMetrics),
 }
 
 impl CaConnEventValue {
@@ -977,6 +1020,7 @@ impl CaConnEventValue {
             CaConnEventValue::ChannelCreateFail(_) => "ChannelCreateFail",
             CaConnEventValue::EndOfStream(_) => "EndOfStream",
             CaConnEventValue::ChannelRemoved(_) => "ChannelRemoved",
+            CaConnEventValue::Metrics(_) => "Metrics",
         }
     }
 }
@@ -1279,6 +1323,34 @@ impl CaConn {
                             self.cmd_shutdown();
                             Ok(Ready(Some(())))
                         }
+                        ConnCommandKind::ChannelInspectFull(cmd) => match self.cid_by_name(&cmd.name) {
+                            Some(cid) => match self.channels.get(&cid) {
+                                Some(ch) => match serde_json::to_value(&ch) {
+                                    Ok(val) => match cmd.tx.send_blocking(val) {
+                                        Ok(()) => {
+                                            // all fine
+                                            Ok(Ready(Some(())))
+                                        }
+                                        Err(_) => {
+                                            // TODO count in metrics
+                                            Ok(Ready(Some(())))
+                                        }
+                                    },
+                                    Err(_) => {
+                                        // TODO count in metrics
+                                        Ok(Ready(Some(())))
+                                    }
+                                },
+                                None => {
+                                    // TODO count in metrics
+                                    Ok(Ready(Some(())))
+                                }
+                            },
+                            None => {
+                                // cmd.tx.close();
+                                Ok(Ready(Some(())))
+                            }
+                        },
                     }
                 }
                 Ready(None) => {
@@ -1333,6 +1405,9 @@ impl CaConn {
                                 ChannelState::MakingSeriesWriter(st) => {
                                     let scalar_type = st.channel.scalar_type.clone();
                                     let shape = st.channel.shape.clone();
+                                    if series::dbg::dbg_chn(st.channel.name()) {
+                                        info!("call RtWriter::new  {:?}  {:?}", chinfo, ch.conf);
+                                    }
                                     let writer = RtWriter::new(
                                         chinfo.series.to_series(),
                                         scalar_type,
@@ -1639,7 +1714,9 @@ impl CaConn {
         }
         for (_cid, conf) in &mut self.channels {
             if series::dbg::dbg_chn(conf.conf.name()) {
-                info!("channel_state_on_shutdown {:?}", conf);
+                let js = serde_json::to_string(conf).unwrap();
+                info!("channel_state_on_shutdown  debug  {:?}", conf);
+                info!("channel_state_on_shutdown  json  {}", js);
             }
             let chst = &mut conf.state;
             match chst {
@@ -1770,7 +1847,7 @@ impl CaConn {
                                 match x.mon2state {
                                     // actually, no differing behavior needed so far.
                                     Monitoring2State::Passive(_) => {}
-                                    Monitoring2State::ReadPending(_, _) => {}
+                                    Monitoring2State::ReadPending(_) => {}
                                 }
                                 Some(x.subid.clone())
                             }
@@ -1831,7 +1908,7 @@ impl CaConn {
                             Monitoring2State::Passive(st3) => {
                                 st3.tsbeg = tsnow;
                             }
-                            Monitoring2State::ReadPending(_ioid, _since) => {
+                            Monitoring2State::ReadPending(_) => {
                                 // Received EventAdd while still waiting for answer to explicit ReadNotify.
                                 // This is fine.
                                 self.stats.recv_event_add_while_wait_on_read_notify.inc();
@@ -1939,7 +2016,7 @@ impl CaConn {
                         Monitoring2State::Passive(st3) => {
                             st3.tsbeg = tsnow;
                         }
-                        Monitoring2State::ReadPending(_, _) => {}
+                        Monitoring2State::ReadPending(_) => {}
                     }
                     let name = self.name_by_cid(cid);
                     warn!("received event-cancel but channel {name:?} in wrong state");
@@ -2045,10 +2122,10 @@ impl CaConn {
                                     }
                                     st3.tsbeg = tsnow;
                                 }
-                                Monitoring2State::ReadPending(ioid2, _since) => {
+                                Monitoring2State::ReadPending(st3) => {
                                     // We don't check again for `since` here. That's done in timeout checking.
                                     // So we could be here a little beyond timeout but we don't care about that.
-                                    if ioid != *ioid2 {
+                                    if ioid != st3.ioid {
                                         // warn!("IOID mismatch ReadNotifyRes on Monitor Read Pending  {ioid:?}  {ioid2:?}");
                                         self.stats.recv_read_notify_state_read_pending_bad_ioid.inc();
                                     } else {
@@ -2243,7 +2320,7 @@ impl CaConn {
             Self::check_ev_value_data(&value.data, &writer.scalar_type())?;
             crst.muted_before = 0;
             crst.insert_item_ivl_ema.tick(tsnow);
-            binwriter.ingest(tsev, value.f32_for_binning(), iqdqs)?;
+            // binwriter.ingest(tsev, value.f32_for_binning(), iqdqs)?;
             {
                 let wres = writer.write(CaWriterValue::new(value, crst), tsnow, tsev, iqdqs)?;
                 crst.status_emit_count += wres.nstatus() as u64;
@@ -2449,7 +2526,8 @@ impl CaConn {
                                 );
                                 do_wake_again = true;
                                 self.proto.as_mut().ok_or_else(|| Error::NoProtocol)?.push_out(msg);
-                                st3.mon2state = Monitoring2State::ReadPending(ioid, tsnow);
+                                st3.mon2state =
+                                    Monitoring2State::ReadPending(Monitoring2ReadPendingState { tsbeg: tsnow, ioid });
                                 self.stats.caget_issued().inc();
                                 {
                                     let item = ChannelStatusItem {
@@ -2462,8 +2540,8 @@ impl CaConn {
                                 }
                             }
                         }
-                        Monitoring2State::ReadPending(ioid, since) => {
-                            if *since + MONITOR_POLL_TIMEOUT < tsnow {
+                        Monitoring2State::ReadPending(st4) => {
+                            if st4.tsbeg + MONITOR_POLL_TIMEOUT < tsnow {
                                 // Something is wrong with this channel.
                                 // Maybe we lost connection, maybe the IOC went down, maybe there is a bug where only
                                 // this or a subset of the subscribed channels no longer give updates.
@@ -2472,7 +2550,7 @@ impl CaConn {
                                 trace_monitor_stale!(
                                     "channel monitor explicit read timeout  {}  ioid {:?}",
                                     name,
-                                    ioid
+                                    st4.ioid
                                 );
                                 {
                                     let item = ChannelStatusItem {
@@ -2609,7 +2687,7 @@ impl CaConn {
                         }
                         ReadingState::Monitoring(st3) => match &st3.mon2state {
                             Monitoring2State::Passive(_st4) => {}
-                            Monitoring2State::ReadPending(_, _) => {
+                            Monitoring2State::ReadPending(_) => {
                                 // This is handled in check_channels_state_poll
                                 // TODO should unify.
                             }
@@ -3095,6 +3173,7 @@ impl CaConn {
             CaConnState::EndOfStream => {}
         }
         self.iqdqs.housekeeping();
+        self.metrics_emit();
         Ok(())
     }
 
@@ -3104,6 +3183,14 @@ impl CaConn {
             let mask = !cnt_max;
             self.ca_msg_recv_count &= mask;
         }
+    }
+
+    fn metrics_emit(&mut self) {
+        let item = CaConnMetrics {
+            ca_conn_event_out_queue_len: self.ca_conn_event_out_queue.len(),
+        };
+        let item = CaConnEvent::new(Instant::now(), CaConnEventValue::Metrics(item));
+        self.ca_conn_event_out_queue.push_back(item);
     }
 
     fn emit_channel_status(&mut self) -> Result<(), Error> {
@@ -3665,6 +3752,7 @@ impl Stream for CaConn {
     }
 }
 
+#[derive(Debug, Serialize)]
 struct CaWriterValueState {
     series_data: SeriesId,
     series_status: SeriesId,
@@ -3687,7 +3775,7 @@ impl CaWriterValueState {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 struct CaWriterValue(CaEventValue, Option<String>);
 
 impl CaWriterValue {

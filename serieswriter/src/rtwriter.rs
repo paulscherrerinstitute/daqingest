@@ -6,11 +6,13 @@ use netpod::Shape;
 use netpod::TsNano;
 use scywr::insertqueues::InsertDeques;
 use scywr::iteminsertqueue::QueryItem;
+use serde::Serialize;
 use series::SeriesId;
 use std::collections::VecDeque;
 use std::time::Duration;
 use std::time::Instant;
 
+macro_rules! debug_init { ($det:expr, $($arg:expr),*) => ( if $det { log::info!($($arg),*); } ); }
 macro_rules! trace_emit { ($det:expr, $($arg:expr),*) => ( if $det { log::trace!($($arg),*); } ); }
 macro_rules! trace_rt_decision { ($det:expr, $($arg:expr),*) => ( if $det { log::trace!($($arg),*); } ); }
 
@@ -23,14 +25,14 @@ autoerr::create_error_v1!(
     },
 );
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct MinQuiets {
     pub st: Duration,
     pub mt: Duration,
     pub lt: Duration,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 struct State<ET>
 where
     ET: EmittableType,
@@ -72,7 +74,7 @@ impl Default for WriteRtRes {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 pub struct RtWriter<ET>
 where
     ET: EmittableType,
@@ -103,8 +105,9 @@ where
         do_st_rf1: bool,
         emit_state_new: &dyn Fn() -> <ET as EmittableType>::State,
     ) -> Result<Self, Error> {
+        let dtd = series::dbg::dbg_series(series);
+        debug_init!(dtd, "new  {:?}  is_polled {}", min_quiets, is_polled);
         let state_st = {
-            // let writer = SeriesWriter::establish_with_sid(sid, stnow)?;
             let writer = RateLimitWriter::new(series, min_quiets.st, is_polled, emit_state_new(), "st".into())?;
             State { writer }
         };
@@ -124,7 +127,7 @@ where
             state_mt,
             state_lt,
             min_quiets,
-            do_trace_detail: netpod::TRACE_SERIES_ID.contains(&series.id()),
+            do_trace_detail: dtd,
             do_st_rf1,
             last_insert_ts: TsNano::from_ns(0),
             last_insert_val: None,
@@ -157,6 +160,9 @@ where
     ) -> Result<WriteRes, Error> {
         let det = self.do_trace_detail;
         trace_emit!(det, "write  {:?}", item.ts());
+        // TODO
+        // Optimize for the common case that we only write into one of the stores.
+        // Make the decision first, based on ref, then clone only as required.
         let res_lt;
         let res_mt;
         let res_st;
@@ -182,31 +188,21 @@ where
             .as_ref()
             .map(|k| item.has_change(k))
             .unwrap_or(true)
+            == false
         {
-            // TODO filter duplicate values already here
-            res_lt = Self::write_inner(&mut self.state_lt, item.clone(), ts_net, tsev, &mut iqdqs.lt_rf3_qu)?;
-            if !res_lt.accept {
-                res_mt = Self::write_inner(&mut self.state_mt, item.clone(), ts_net, tsev, &mut iqdqs.mt_rf3_qu)?;
-                if !res_mt.accept {
-                    if self.do_st_rf1 {
-                        res_st =
-                            Self::write_inner(&mut self.state_st, item.clone(), ts_net, tsev, &mut iqdqs.st_rf1_qu)?;
-                    } else {
-                        res_st =
-                            Self::write_inner(&mut self.state_st, item.clone(), ts_net, tsev, &mut iqdqs.st_rf3_qu)?;
-                    }
-                } else {
-                    res_st = WriteRtRes::default();
-                }
-            } else {
-                res_mt = WriteRtRes::default();
-                res_st = WriteRtRes::default();
-            }
-        } else {
             trace_rt_decision!(det, "{}  ignore, because value did not change", self.series);
             res_lt = WriteRtRes::default();
             res_mt = WriteRtRes::default();
             res_st = WriteRtRes::default();
+        } else {
+            res_lt = Self::write_inner(&mut self.state_lt, item.clone(), ts_net, tsev, &mut iqdqs.lt_rf3_qu)?;
+            res_mt = Self::write_inner(&mut self.state_mt, item.clone(), ts_net, tsev, &mut iqdqs.mt_rf3_qu)?;
+            res_st = if self.do_st_rf1 {
+                // Self::write_inner(&mut self.state_st, item.clone(), ts_net, tsev, &mut iqdqs.st_rf1_qu)?
+                Self::write_inner(&mut self.state_st, item.clone(), ts_net, tsev, &mut iqdqs.st_rf3_qu)?
+            } else {
+                Self::write_inner(&mut self.state_st, item.clone(), ts_net, tsev, &mut iqdqs.st_rf3_qu)?
+            };
         }
         let ret = WriteRes {
             st: res_st,

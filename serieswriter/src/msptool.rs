@@ -2,11 +2,12 @@ pub mod fixgrid;
 
 use netpod::DtNano;
 use netpod::TsNano;
+use serde::Serialize;
 
 const SEC: u64 = 1000_000_000;
 const HOUR: u64 = SEC * 60 * 60 * 24;
 
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 pub struct MspSplit {
     last: Option<TsNano>,
     count: u32,

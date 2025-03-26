@@ -1,12 +1,14 @@
-use core::fmt;
 use log::*;
 use netpod::TsNano;
 use scywr::iteminsertqueue::QueryItem;
+use serde::Serialize;
 use series::SeriesId;
-pub use smallvec::SmallVec;
 use std::collections::VecDeque;
+use std::fmt;
 use std::marker::PhantomData;
 use std::time::Instant;
+
+pub use smallvec::SmallVec;
 
 macro_rules! trace_emit { ($det:expr, $($arg:tt)*) => ( if $det { trace!($($arg)*); } ) }
 
@@ -32,7 +34,7 @@ pub struct EmitRes {
 }
 
 pub trait EmittableType: fmt::Debug + Clone {
-    type State;
+    type State: fmt::Debug + Serialize;
     fn ts(&self) -> TsNano;
     fn has_change(&self, k: &Self) -> bool;
     fn byte_size(&self) -> u32;
@@ -57,7 +59,7 @@ pub struct WriteRes {
     pub status: u8,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 pub struct SeriesWriter<ET> {
     series: SeriesId,
     do_trace_detail: bool,
@@ -71,7 +73,7 @@ where
     pub fn new(series: SeriesId) -> Result<Self, Error> {
         let res = Self {
             series,
-            do_trace_detail: netpod::TRACE_SERIES_ID.contains(&series.id()),
+            do_trace_detail: series::dbg::dbg_series(series),
             _t1: PhantomData,
         };
         Ok(res)
@@ -92,7 +94,7 @@ where
         let det = self.do_trace_detail;
         let ts_main = item.ts();
         let res = item.into_query_item(ts_net, tsev, state);
-        trace_emit!(det, "emit value for ts {:?}  items len {}", ts_main, res.items.len());
+        trace_emit!(det, "emit value for ts {}  items len {}", ts_main, res.items.len());
         for item in res.items {
             deque.push_back(item);
         }

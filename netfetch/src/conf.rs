@@ -102,11 +102,11 @@ impl CaIngestOpts {
     }
 
     pub fn insert_worker_count(&self) -> usize {
-        self.insert_worker_count.unwrap_or(8)
+        self.insert_worker_count.unwrap_or(10)
     }
 
     pub fn insert_worker_concurrency(&self) -> usize {
-        self.insert_worker_concurrency.unwrap_or(32)
+        self.insert_worker_concurrency.unwrap_or(64)
     }
 
     pub fn array_truncate(&self) -> u64 {
@@ -352,10 +352,6 @@ impl IngestConfigArchiving {
     }
 }
 
-fn bool_is_false(x: &bool) -> bool {
-    *x == false
-}
-
 fn bool_true() -> bool {
     true
 }
@@ -363,12 +359,9 @@ fn bool_true() -> bool {
 mod serde_ingest_config_archiving {
     use super::ChannelReadConfigApiFormat;
     use super::IngestConfigArchiving;
-    use serde::Deserializer;
     use serde::Serializer;
-    use serde::de;
     use serde::ser;
     use serde::ser::SerializeMap;
-    use std::fmt;
 
     impl ser::Serialize for IngestConfigArchiving {
         fn serialize<S>(&self, ser: S) -> Result<S::Ok, S::Error>
@@ -682,7 +675,8 @@ impl ChannelConfig {
     }
 
     pub fn replication(&self) -> bool {
-        self.arch.replication
+        // self.arch.replication
+        true
     }
 
     pub fn poll_conf(&self) -> Option<(u64,)> {

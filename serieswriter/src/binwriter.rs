@@ -1,14 +1,11 @@
 use crate::log;
 use crate::rtwriter::MinQuiets;
 use items_0::timebin::BinnedBinsTimeweightTrait;
-use items_0::timebin::BinnedEventsTimeweightTrait;
 use items_0::timebin::BinsBoxed;
 use items_2::binning::container_bins::ContainerBins;
 use items_2::binning::container_events::ContainerEvents;
 use items_2::binning::timeweight::timeweight_bins::BinnedBinsTimeweight;
-use items_2::binning::timeweight::timeweight_bins_lazy::BinnedBinsTimeweightLazy;
 use items_2::binning::timeweight::timeweight_events::BinnedEventsTimeweight;
-use items_2::binning::timeweight::timeweight_events_dyn::BinnedEventsTimeweightLazy;
 use netpod::BinnedRange;
 use netpod::DtMs;
 use netpod::ScalarType;
@@ -19,10 +16,10 @@ use scywr::insertqueues::InsertDeques;
 use scywr::iteminsertqueue::BinWriteIndexV03;
 use scywr::iteminsertqueue::QueryItem;
 use scywr::iteminsertqueue::TimeBinSimpleF32V02;
+use serde::Serialize;
 use series::ChannelStatusSeriesId;
 use series::SeriesId;
 use series::msp::PrebinnedPartitioning;
-use std::time::Duration;
 
 macro_rules! info { ($($arg:expr),*) => ( if true { log::info!($($arg),*); } ) }
 
@@ -31,7 +28,7 @@ macro_rules! debug_bin { ($t:expr, $($arg:expr),*) => ( if true { if $t { log::d
 
 macro_rules! trace_ingest { ($($arg:expr),*) => ( if false { log::trace!($($arg),*); } ) }
 macro_rules! trace_tick { ($($arg:expr),*) => ( if true { log::trace!($($arg),*); } ) }
-macro_rules! trace_tick_verbose { ($($arg:expr),*) => ( if true { log::trace!($($arg),*); } ) }
+macro_rules! trace_tick_verbose { ($($arg:expr),*) => ( if false { log::trace!($($arg),*); } ) }
 
 macro_rules! trace_bin { ($t:expr, $($arg:expr),*) => ( if true { if $t { log::trace!($($arg),*); } } ) }
 
@@ -68,7 +65,7 @@ fn bin_len_clamp(dur: DtMs) -> PrebinnedPartitioning {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 enum WriteCntZero {
     Enable,
     Disable,
@@ -83,7 +80,7 @@ impl WriteCntZero {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 enum IndexWritten {
     None,
     Last(u32, u32),
@@ -107,7 +104,7 @@ impl IndexWritten {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 pub struct BinWriter {
     chname: String,
     cssid: ChannelStatusSeriesId,
@@ -425,6 +422,10 @@ impl BinWriter {
         iqdqs: &mut InsertDeques,
     ) -> Result<(), Error> {
         let selfname = "handle_output_ready";
+        if true {
+            trace_tick!("{selfname}  bins ready len {}  DISCARDING", bins.len());
+            return Ok(());
+        }
         trace_tick!("{selfname}  bins ready len {}", bins.len());
         for e in bins.iter_debug() {
             trace_tick_verbose!("{e:?}");

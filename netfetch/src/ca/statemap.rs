@@ -3,12 +3,13 @@ use crate::conf::ChannelConfig;
 use crate::daemon_common::ChannelName;
 use dashmap::DashMap;
 use serde::Serialize;
+use serde_helper::serde_instant::serde_Instant_elapsed_ms;
 use series::ChannelStatusSeriesId;
 use serieswriter::fixgridwriter::ChannelStatusSeriesWriter;
 use serieswriter::fixgridwriter::ChannelStatusWriteState;
-use std::collections::btree_map::RangeMut;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
+use std::collections::btree_map::RangeMut;
 use std::net::SocketAddr;
 use std::net::SocketAddrV4;
 use std::ops::RangeBounds;
@@ -65,7 +66,7 @@ pub enum WithAddressState {
 pub struct UnassignedState {
     #[serde(with = "humantime_serde")]
     since: SystemTime,
-    #[serde(with = "serde_helper::serde_Instant")]
+    #[serde(with = "serde_Instant_elapsed_ms")]
     unused_since_ts: Instant,
 }
 
@@ -73,7 +74,7 @@ pub struct UnassignedState {
 pub struct UnassigningForConfigChangeState {
     pub config_new: ChannelConfig,
     pub addr: SocketAddr,
-    #[serde(with = "serde_helper::serde_Instant")]
+    #[serde(with = "serde_Instant_elapsed_ms")]
     pub since: Instant,
 }
 

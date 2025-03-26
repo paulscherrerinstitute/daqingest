@@ -2,8 +2,9 @@ use netpod::DtMs;
 use netpod::DtNano;
 use netpod::TsMs;
 use netpod::TsNano;
+use serde::Serialize;
 
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 pub struct MspSplitFixGrid {
     grid_dt: DtMs,
     last: Option<TsMs>,

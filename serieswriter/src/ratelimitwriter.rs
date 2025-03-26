@@ -5,6 +5,7 @@ use netpod::DtNano;
 use netpod::TsNano;
 use netpod::log;
 use scywr::iteminsertqueue::QueryItem;
+use serde::Serialize;
 use series::SeriesId;
 use std::collections::VecDeque;
 use std::marker::PhantomData;
@@ -13,7 +14,7 @@ use std::time::Instant;
 
 macro_rules! debug { ($($arg:expr),*) => ( if true { log::debug!($($arg),*); } ); }
 macro_rules! trace { ($($arg:expr),*) => ( if true { log::trace!($($arg),*); } ); }
-macro_rules! trace_rt_decision { ($det:expr, $($arg:expr),*) => ( if $det { log::trace!($($arg),*); } ); }
+macro_rules! trace_rt_decision { ($dtd:expr, $($arg:expr),*) => ( if $dtd { log::trace!($($arg),*); } ); }
 
 autoerr::create_error_v1!(
     name(Error, "RateLimitWriter"),
@@ -29,6 +30,7 @@ pub struct WriteRes {
     pub status: u8,
 }
 
+#[derive(Serialize)]
 pub struct RateLimitWriter<ET>
 where
     ET: EmittableType,
@@ -66,7 +68,7 @@ where
             last_insert_val: None,
             dbgname,
             writer,
-            do_trace_detail: netpod::TRACE_SERIES_ID.contains(&series.id()),
+            do_trace_detail: series::dbg::dbg_series(series),
             _t1: PhantomData,
         };
         if ret.do_trace_detail {
@@ -83,9 +85,7 @@ where
         tsev: TsNano,
         deque: &mut VecDeque<QueryItem>,
     ) -> Result<WriteRes, Error> {
-        // Decide whether we want to write.
-        // TODO catch already in CaConn the cases when the IOC-timestamp did not change.
-        let det = self.do_trace_detail;
+        let dtd = self.do_trace_detail;
         let dbgname = &self.dbgname;
         let sid = &self.series;
         let min_quiet = 1000 * self.min_quiet.as_secs() + self.min_quiet.subsec_millis() as u64;
@@ -93,7 +93,7 @@ where
         let ts = tsev;
         if false {
             trace_rt_decision!(
-                det,
+                dtd,
                 "{}  {}  min_quiet {:?}  ts1 {:?}  ts2 {:?}  item {:?}",
                 dbgname,
                 sid,
@@ -105,23 +105,42 @@ where
         }
         let do_write = {
             if !self.is_polled && ts.ms() < tsl.ms() + min_quiet {
-                trace_rt_decision!(det, "{dbgname}  {sid}  ignore, because not min quiet  {ts:?}  {tsl:?}");
+                trace_rt_decision!(
+                    dtd,
+                    "{}  {}  ignore, because not min quiet  {}  {}",
+                    dbgname,
+                    sid,
+                    ts,
+                    tsl
+                );
                 false
             } else if self.is_polled && ts.ms() + 800 < tsl.ms() + min_quiet {
                 trace_rt_decision!(
-                    det,
-                    "{dbgname}  {sid}  ignore, because not is-polled min quiet  {ts:?}  {tsl:?}"
+                    dtd,
+                    "{}  {}  ignore, because not is-polled min quiet  {}  {}",
+                    dbgname,
+                    sid,
+                    ts,
+                    tsl
                 );
                 false
-            } else if ts < tsl.add_dt_nano(DtNano::from_ms(5)) {
-                trace_rt_decision!(det, "{dbgname}  {sid}  ignore, because store rate cap");
+            } else if ts < tsl.add_dt_nano(DtNano::from_ms(1)) {
+                trace_rt_decision!(
+                    dtd,
+                    "{}  {}  ignore, because store rate cap  {}  {}",
+                    dbgname,
+                    sid,
+                    ts,
+                    tsl
+                );
                 false
             } else {
-                trace_rt_decision!(det, "{dbgname}  {sid}  accept");
+                trace_rt_decision!(dtd, "{}  {}  accept  {}  {}", dbgname, sid, ts, tsl);
                 true
             }
         };
         if do_write {
+            self.last_insert_ts = ts;
             let res = self.writer.write(item, &mut self.emit_state, ts_net, ts, deque)?;
             let ret = WriteRes {
                 accept: true,

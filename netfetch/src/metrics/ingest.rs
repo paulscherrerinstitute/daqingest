@@ -1,10 +1,10 @@
 pub mod write_v02;
 
 use super::RoutesResources;
+use axum::Json;
 use axum::extract::FromRequest;
 use axum::extract::Query;
 use axum::http::HeaderMap;
-use axum::Json;
 use bytes::Bytes;
 use core::fmt;
 use dbpg::seriesbychannel::ChannelInfoQuery;
@@ -12,20 +12,21 @@ use futures_util::StreamExt;
 use futures_util::TryStreamExt;
 use items_2::binning::container_events::ContainerEvents;
 use items_2::binning::container_events::EventValueType;
-use netpod::log::*;
-use netpod::ttl::RetentionTime;
+use netpod::APP_CBOR_FRAMED;
 use netpod::EnumVariant;
 use netpod::ScalarType;
 use netpod::SeriesKind;
 use netpod::Shape;
 use netpod::TsNano;
-use netpod::APP_CBOR_FRAMED;
+use netpod::log::*;
+use netpod::ttl::RetentionTime;
 use scywr::insertqueues::InsertDeques;
 use scywr::iteminsertqueue::ArrayValue;
 use scywr::iteminsertqueue::DataValue;
 use scywr::iteminsertqueue::QueryItem;
 use scywr::iteminsertqueue::ScalarValue;
 use serde::Deserialize;
+use serde::Serialize;
 use series::SeriesId;
 use serieswriter::msptool::MspSplit;
 use serieswriter::writer::EmittableType;
@@ -70,6 +71,7 @@ macro_rules! trace_queues {
 
 type ValueSeriesWriter = SeriesWriter<WritableType>;
 
+#[derive(Debug, Serialize)]
 struct WritableTypeState {
     series: SeriesId,
     msp_split_data: MspSplit,

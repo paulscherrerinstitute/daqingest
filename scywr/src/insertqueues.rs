@@ -96,6 +96,14 @@ impl InsertQueuesTx {
         Ok(())
     }
 
+    pub fn close_all(&self) {
+        self.st_rf1_tx.close();
+        self.st_rf3_tx.close();
+        self.mt_rf3_tx.close();
+        self.lt_rf3_tx.close();
+        self.lt_rf3_lat5_tx.close();
+    }
+
     pub fn clone2(&self) -> Self {
         self.clone()
     }
@@ -231,11 +239,12 @@ impl<'a> fmt::Display for InsertDequesSummary<'a> {
         let obj = self.obj;
         write!(
             fmt,
-            "InsertDeques {{ st_rf1_len: {}, st_rf3_len: {}, mt_rf3_len: {}, lt_rf3_len: {} }}",
+            "InsertDeques {{ st_rf1_len: {}, st_rf3_len: {}, mt_rf3_len: {}, lt_rf3_len: {}, lt_rf3_lat5_len: {} }}",
             obj.st_rf1_qu.len(),
             obj.st_rf3_qu.len(),
             obj.mt_rf3_qu.len(),
-            obj.lt_rf3_qu.len()
+            obj.lt_rf3_qu.len(),
+            obj.lt_rf3_lat5_qu.len()
         )
     }
 }
@@ -266,7 +275,11 @@ impl InsertSenderPolling {
     }
 
     pub fn is_idle(&self) -> bool {
-        self.st_rf1_sp.is_idle() && self.st_rf3_sp.is_idle() && self.mt_rf3_sp.is_idle() && self.lt_rf3_sp.is_idle()
+        self.st_rf1_sp.is_idle()
+            && self.st_rf3_sp.is_idle()
+            && self.mt_rf3_sp.is_idle()
+            && self.lt_rf3_sp.is_idle()
+            && self.lt_rf3_lat5_sp.is_idle()
     }
 
     pub fn st_rf1_sp_pin(self: Pin<&mut Self>) -> Pin<&mut SenderPolling<VecDeque<QueryItem>>> {
@@ -287,13 +300,6 @@ impl InsertSenderPolling {
 
     pub fn lt_rf3_lat5_sp_pin(self: Pin<&mut Self>) -> Pin<&mut SenderPolling<VecDeque<QueryItem>>> {
         self.project().lt_rf3_lat5_sp
-    }
-
-    pub fn __st_rf1_sp_pin(self: Pin<&mut Self>) -> Pin<&mut SenderPolling<VecDeque<QueryItem>>> {
-        if true {
-            panic!("encapsulated by pin_project");
-        }
-        unsafe { self.map_unchecked_mut(|x| &mut x.st_rf1_sp) }
     }
 
     pub fn summary(&self) -> InsertSenderPollingSummary {

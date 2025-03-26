@@ -1,5 +1,5 @@
-use super::connset::IocAddrQuery;
 use super::connset::CURRENT_SEARCH_PENDING_MAX;
+use super::connset::IocAddrQuery;
 use super::connset::SEARCH_BATCH_MAX;
 use super::search::ca_search_workers_start;
 use crate::ca::findioc::FindIocRes;
@@ -10,7 +10,6 @@ use dbpg::conn::make_pg_client;
 use dbpg::iocindex::IocItem;
 use dbpg::iocindex::IocSearchIndexWorker;
 use dbpg::postgres::Row as PgRow;
-use hashbrown::HashMap;
 use log::*;
 use netpod::Database;
 use stats::IocFinderStats;
@@ -23,9 +22,7 @@ use tokio::task::JoinHandle;
 
 const SEARCH_DB_WORKER_CNT: usize = 2;
 
-macro_rules! debug_batch { ($($arg:tt)*) => ( if false { debug!($($arg)*); } ) }
-
-macro_rules! trace_batch { ($($arg:tt)*) => ( if false { trace!($($arg)*); } ) }
+macro_rules! debug_batch { ($($arg:expr),*) => ( if false { debug!($($arg),*); } ); }
 
 autoerr::create_error_v1!(
     name(Error, "Finder"),

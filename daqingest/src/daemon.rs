@@ -45,7 +45,8 @@ const CHECK_CHANNEL_SLOW_WARN: Duration = Duration::from_millis(500);
 
 pub struct DaemonOpts {
     pgconf: Database,
-    scyconf_st: ScyllaIngestConfig,
+    scyconf_st_rf3: ScyllaIngestConfig,
+    scyconf_st_rf1: ScyllaIngestConfig,
     scyconf_mt: ScyllaIngestConfig,
     scyconf_lt: ScyllaIngestConfig,
     #[allow(unused)]
@@ -204,6 +205,16 @@ impl Daemon {
             let jh = scywr::insertworker::spawn_scylla_insert_workers_dummy(
                 ingest_opts.insert_worker_count(),
                 ingest_opts.insert_worker_concurrency(),
+                iqrx.st_rf1_rx,
+                insert_worker_opts.clone(),
+                insert_worker_stats.clone(),
+            )
+            .await
+            .map_err(Error::from_string)?;
+            insert_worker_jhs.extend(jh);
+            let jh = scywr::insertworker::spawn_scylla_insert_workers_dummy(
+                ingest_opts.insert_worker_count(),
+                ingest_opts.insert_worker_concurrency(),
                 iqrx.st_rf3_rx,
                 insert_worker_opts.clone(),
                 insert_worker_stats.clone(),
@@ -231,10 +242,36 @@ impl Daemon {
             .await
             .map_err(Error::from_string)?;
             insert_worker_jhs.extend(jh);
+            let jh = scywr::insertworker::spawn_scylla_insert_workers_dummy(
+                ingest_opts.insert_worker_count(),
+                ingest_opts.insert_worker_concurrency(),
+                iqrx.lt_rf3_lat5_rx,
+                insert_worker_opts.clone(),
+                insert_worker_stats.clone(),
+            )
+            .await
+            .map_err(Error::from_string)?;
+            insert_worker_jhs.extend(jh);
         } else {
             let jh = scywr::insertworker::spawn_scylla_insert_workers(
                 RetentionTime::Short,
-                opts.scyconf_st.clone(),
+                opts.scyconf_st_rf1.clone(),
+                ingest_opts.insert_scylla_sessions(),
+                ingest_opts.insert_worker_count(),
+                ingest_opts.insert_worker_concurrency(),
+                iqrx.st_rf1_rx,
+                insert_worker_opts.clone(),
+                insert_worker_stats.clone(),
+                ingest_opts.use_rate_limit_queue(),
+                ignore_writes,
+            )
+            .await
+            .map_err(Error::from_string)?;
+            insert_worker_jhs.extend(jh);
+
+            let jh = scywr::insertworker::spawn_scylla_insert_workers(
+                RetentionTime::Short,
+                opts.scyconf_st_rf3.clone(),
                 ingest_opts.insert_scylla_sessions(),
                 ingest_opts.insert_worker_count(),
                 ingest_opts.insert_worker_concurrency(),
@@ -252,8 +289,8 @@ impl Daemon {
                 RetentionTime::Medium,
                 opts.scyconf_mt.clone(),
                 ingest_opts.insert_scylla_sessions(),
-                ingest_opts.insert_worker_count().min(2),
-                ingest_opts.insert_worker_concurrency().min(8),
+                ingest_opts.insert_worker_count(),
+                ingest_opts.insert_worker_concurrency(),
                 iqrx.mt_rf3_rx,
                 insert_worker_opts.clone(),
                 insert_worker_stats.clone(),
@@ -270,8 +307,8 @@ impl Daemon {
                 RetentionTime::Long,
                 opts.scyconf_lt.clone(),
                 ingest_opts.insert_scylla_sessions(),
-                ingest_opts.insert_worker_count().min(2),
-                ingest_opts.insert_worker_concurrency().min(8),
+                ingest_opts.insert_worker_count(),
+                ingest_opts.insert_worker_concurrency(),
                 lt_rx_combined,
                 insert_worker_opts.clone(),
                 insert_worker_stats.clone(),
@@ -422,6 +459,23 @@ impl Daemon {
                 self.insert_queue_counter.load(atomic::Ordering::Acquire),
             );
         }
+        let iqtxm = self
+            .iqtx
+            .as_ref()
+            .map(|x| netfetch::metrics::types::InsertQueuesTxMetrics::from(x));
+        if let Some(iqtxm) = iqtxm {
+            self.stats().iqtx_len_st_rf1().set(iqtxm.st_rf1_len as _);
+            self.stats().iqtx_len_st_rf3().set(iqtxm.st_rf3_len as _);
+            self.stats().iqtx_len_mt_rf3().set(iqtxm.mt_rf3_len as _);
+            self.stats().iqtx_len_lt_rf3().set(iqtxm.lt_rf3_len as _);
+            self.stats().iqtx_len_lt_rf3_lat5().set(iqtxm.lt_rf3_lat5_len as _);
+        } else {
+            self.stats().iqtx_len_st_rf1().set(2);
+            self.stats().iqtx_len_st_rf3().set(2);
+            self.stats().iqtx_len_mt_rf3().set(2);
+            self.stats().iqtx_len_lt_rf3().set(2);
+            self.stats().iqtx_len_lt_rf3_lat5().set(2);
+        }
         Ok(())
     }
 
@@ -436,6 +490,11 @@ impl Daemon {
 
     async fn handle_channel_remove(&mut self, ch: ChannelName) -> Result<(), Error> {
         self.connset_ctrl.remove_channel(ch.name().into()).await?;
+        Ok(())
+    }
+
+    async fn handle_channel_command(&mut self, cmd: netfetch::ca::connset::ChannelCommand) -> Result<(), Error> {
+        self.connset_ctrl.send_channel_command(cmd).await?;
         Ok(())
     }
 
@@ -510,6 +569,7 @@ impl Daemon {
         if self.shutting_down {
             warn!("already shutting down");
         } else {
+            info!("handle_shutdown");
             self.shutting_down = true;
             // TODO make sure we:
             // set a flag so that we don't attempt to use resources any longer (why could that happen?)
@@ -518,6 +578,13 @@ impl Daemon {
             // drop our ends of channels to workers (gate them behind option?).
             // await the connection sets.
             // await other workers that we've spawned.
+            if let Some(iqtx) = &self.iqtx {
+                info!("scylla output channels, closing all");
+                iqtx.close_all();
+            } else {
+                info!("scylla output channels, not set");
+            }
+            drop(self.iqtx.take());
             self.connset_ctrl.shutdown().await?;
             self.rx.close();
         }
@@ -624,6 +691,7 @@ impl Daemon {
             }
             ChannelAdd(ch, tx) => self.handle_channel_add(ch, tx).await,
             ChannelRemove(ch) => self.handle_channel_remove(ch).await,
+            ChannelCommand(cmd) => self.handle_channel_command(cmd).await,
             CaConnSetItem(item) => self.handle_ca_conn_set_item(item).await,
             Shutdown => self.handle_shutdown().await,
             ConfigReload(tx) => self.handle_config_reload(tx).await,
@@ -683,6 +751,7 @@ impl Daemon {
             self.channel_info_query_tx.clone(),
             self.series_conf_by_id_tx.clone(),
             self.iqtx
+                .clone()
                 .take()
                 .ok_or_else(|| Error::with_msg_no_trace("no iqtx available"))?,
             self.ingest_opts.scylla_config_st().clone(),
@@ -833,7 +902,8 @@ pub async fn run(opts: CaIngestOpts, channels_config: Option<ChannelsConfig>) ->
 
     let opts2 = DaemonOpts {
         pgconf: opts.postgresql_config().clone(),
-        scyconf_st: opts.scylla_config_st().clone(),
+        scyconf_st_rf3: opts.scylla_config_st().clone(),
+        scyconf_st_rf1: opts.scylla_config_st_rf1().clone(),
         scyconf_mt: opts.scylla_config_mt().clone(),
         scyconf_lt: opts.scylla_config_lt().clone(),
         test_bsread_addr: opts.test_bsread_addr.clone(),

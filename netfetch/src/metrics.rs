@@ -2,6 +2,7 @@
 pub mod delete;
 pub mod ingest;
 pub mod status;
+pub mod types;
 
 use crate::ca::conn::ChannelStateInfo;
 use crate::ca::connset::CaConnSetEvent;
@@ -46,9 +47,9 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::net::SocketAddrV4;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
-use std::sync::Arc;
 use std::task::Context;
 use std::task::Poll;
 use std::time::Duration;
@@ -367,9 +368,9 @@ fn make_routes(
     connset_cmd_tx: Sender<CaConnSetEvent>,
     stats_set: StatsSet,
 ) -> axum::Router {
+    use axum::Router;
     use axum::extract;
     use axum::routing::{get, post, put};
-    use axum::Router;
     use http::StatusCode;
 
     Router::new()
@@ -518,9 +519,9 @@ fn make_routes_channel(
     connset_cmd_tx: Sender<CaConnSetEvent>,
     stats_set: StatsSet,
 ) -> axum::Router {
+    use axum::Router;
     use axum::extract;
     use axum::routing::{get, post, put};
-    use axum::Router;
     use http::StatusCode;
     Router::new()
         .fallback(|| async { axum::Json(json!({"subcommands":["states"]})) })
@@ -560,9 +561,9 @@ fn make_routes_ingest(
     connset_cmd_tx: Sender<CaConnSetEvent>,
     stats_set: StatsSet,
 ) -> axum::Router {
+    use axum::Router;
     use axum::extract;
     use axum::routing::{get, post, put};
-    use axum::Router;
     use http::StatusCode;
     Router::new()
         .nest(

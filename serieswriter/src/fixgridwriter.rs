@@ -8,6 +8,7 @@ use scywr::iteminsertqueue::DataValue;
 use scywr::iteminsertqueue::MspItem;
 use scywr::iteminsertqueue::QueryItem;
 use scywr::iteminsertqueue::ScalarValue;
+use serde::Serialize;
 use series::SeriesId;
 use std::time::Instant;
 
@@ -78,7 +79,7 @@ impl EmittableType for ChannelStatusWriteValue {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 pub struct ChannelStatusWriteState {
     series: SeriesId,
     msp_split: MspSplitFixGrid,

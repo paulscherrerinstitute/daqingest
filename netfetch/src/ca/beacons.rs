@@ -8,8 +8,6 @@ use netpod::Shape;
 use netpod::TsNano;
 use scywr::iteminsertqueue::DataValue;
 use scywr::iteminsertqueue::ScalarValue;
-use serieswriter::writer::SeriesWriter;
-use std::collections::VecDeque;
 use std::io::Cursor;
 use std::net::Ipv4Addr;
 use std::time::SystemTime;

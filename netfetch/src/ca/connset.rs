@@ -71,6 +71,7 @@ use std::time::Duration;
 use std::time::Instant;
 use std::time::SystemTime;
 use taskrun::tokio;
+use tracing::Instrument;
 
 const CHECK_CHANS_PER_TICK: usize = 10000000;
 pub const SEARCH_BATCH_MAX: usize = 64;
@@ -226,6 +227,17 @@ impl fmt::Debug for ChannelStatusesRequest {
 }
 
 #[derive(Debug)]
+pub enum ChannelCommandKind {
+    InspectDetail,
+}
+
+#[derive(Debug)]
+pub struct ChannelCommand {
+    pub channel: String,
+    pub kind: ChannelCommandKind,
+}
+
+#[derive(Debug)]
 pub enum ConnSetCmd {
     ChannelConfigFlagReset(ChannelConfigFlagReset),
     ChannelConfigRemoveUnflagged(ChannelConfigRemoveUnflagged),
@@ -233,6 +245,7 @@ pub enum ConnSetCmd {
     ChannelRemove(ChannelRemove),
     Shutdown,
     ChannelStatuses(ChannelStatusesRequest),
+    ChannelCommand(ChannelCommand),
 }
 
 #[derive(Debug)]
@@ -296,6 +309,13 @@ impl CaConnSetCtrl {
         let cmd = ChannelRemove { name };
         let cmd = ConnSetCmd::ChannelRemove(cmd);
         self.tx.send(CaConnSetEvent::ConnSetCmd(cmd)).await?;
+        Ok(())
+    }
+
+    pub async fn send_channel_command(&self, cmd: ChannelCommand) -> Result<(), Error> {
+        self.tx
+            .send(CaConnSetEvent::ConnSetCmd(ConnSetCmd::ChannelCommand(cmd)))
+            .await?;
         Ok(())
     }
 
@@ -582,6 +602,7 @@ impl CaConnSet {
                 ConnSetCmd::ChannelRemove(x) => self.handle_remove_channel(x),
                 ConnSetCmd::Shutdown => self.handle_shutdown(),
                 ConnSetCmd::ChannelStatuses(x) => self.handle_channel_statuses_req(x),
+                ConnSetCmd::ChannelCommand(x) => self.handle_channel_command(x),
             },
         }
     }
@@ -721,6 +742,9 @@ impl CaConnSet {
             trace3!("handle_add_channel but shutdown_stopping");
             return Ok(());
         }
+        if series::dbg::dbg_chn(cmd.name()) {
+            info!("handle_add_channel  {:?}", cmd);
+        }
         trace_channel_state!("handle_add_channel {:?}", cmd);
         self.stats.channel_add().inc();
         // TODO should I add the transition through ActiveChannelState::Init as well?
@@ -744,6 +768,10 @@ impl CaConnSet {
             CaConnEventValue::ChannelStatus(st) => self.apply_ca_conn_health_update(addr, st),
             CaConnEventValue::EndOfStream(reason) => self.handle_ca_conn_eos(addr, reason),
             CaConnEventValue::ChannelRemoved(name) => self.handle_ca_conn_channel_removed(addr, name),
+            CaConnEventValue::Metrics(v) => {
+                // TODO aggregate metrics and stats
+                Ok(())
+            }
         }
     }
 
@@ -1047,6 +1075,24 @@ impl CaConnSet {
         Ok(())
     }
 
+    fn handle_channel_command(&mut self, cmd: ChannelCommand) -> Result<(), Error> {
+        if self.shutdown_stopping {
+            return Ok(());
+        }
+        // TODO handle, send to corresponding CaConn
+        // let channels_ca_conn_set = self
+        //     .channel_states
+        //     .iter()
+        //     .filter(|(k, _)| k.name() == cmd.channel)
+        //     .map(|(k, v)| (k.name().to_string(), v.clone()))
+        //     .collect();
+        // let item = ChannelStatusesResponse { channels_ca_conn_set };
+        // if req.tx.try_send(item).is_err() {
+        //     self.stats.response_tx_fail.inc();
+        // }
+        Ok(())
+    }
+
     fn handle_shutdown(&mut self) -> Result<(), Error> {
         if self.shutdown_stopping {
             return Ok(());
@@ -1317,7 +1363,19 @@ impl CaConnSet {
         let conn_tx = conn.conn_command_tx();
         let conn_stats = conn.stats();
         let tx1 = self.ca_conn_res_tx.as_ref().get_ref().clone();
-        let jh = tokio::spawn(Self::ca_conn_item_merge(conn, tx1, addr, self.stats.clone()));
+        let log_level = "trace";
+        let logspan = if log_level == "trace" {
+            trace!("enable trace for handler");
+            tracing::span!(tracing::Level::INFO, "log_span_trace")
+        } else if log_level == "debug" {
+            debug!("enable debug for handler");
+            tracing::span!(tracing::Level::INFO, "log_span_debug")
+        } else {
+            tracing::Span::none()
+        };
+        let fut = Self::ca_conn_item_merge(conn, tx1, addr, self.stats.clone());
+        let fut = fut.instrument(logspan);
+        let jh = tokio::spawn(fut);
         let ca_conn_res = CaConnRes {
             state: CaConnState::new(CaConnStateValue::Fresh),
             sender: Box::pin(conn_tx.into()),
@@ -1390,6 +1448,9 @@ impl CaConnSet {
                         error!("channel send  {:?}", e);
                         return Err(e.into());
                     }
+                }
+                CaConnEventValue::Metrics(_) => {
+                    // TODO merge metrics
                 }
             }
         }
