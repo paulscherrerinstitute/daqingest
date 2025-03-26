@@ -912,6 +912,13 @@ impl ConnCommand {
         }
     }
 
+    pub fn channel_inspect(name: String, tx: Sender<serde_json::Value>) -> Self {
+        Self {
+            id: Self::make_id(),
+            kind: ConnCommandKind::ChannelInspectFull(CmdChannelInspectFull { name, tx }),
+        }
+    }
+
     pub fn shutdown() -> Self {
         Self {
             id: Self::make_id(),

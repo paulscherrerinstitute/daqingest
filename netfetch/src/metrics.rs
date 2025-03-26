@@ -263,6 +263,36 @@ async fn channel_remove(params: HashMap<String, String>, dcom: Arc<DaemonComm>) 
     Json(Value::Bool(false))
 }
 
+async fn channel_inspect_inner(
+    params: HashMap<String, String>,
+    dcom: Arc<DaemonComm>,
+) -> Result<axum::Json<serde_json::Value>, Error> {
+    if let Some(name) = params.get("name") {
+        let (tx, rx) = async_channel::bounded(1);
+        let ev = DaemonEvent::ChannelCommand(crate::ca::connset::ChannelCommand {
+            channel: name.into(),
+            conn_command: crate::ca::conn::ConnCommand::channel_inspect(name.into(), tx),
+        });
+        dcom.tx.send(ev).await?;
+        match rx.recv().await {
+            Ok(js) => Ok(axum::Json(js)),
+            Err(e) => Err(Error::from_string("recv error while waiting for answer")),
+        }
+    } else {
+        Err(Error::with_msg_no_trace(format!("wrong parameters given")))
+    }
+}
+
+async fn channel_inspect(
+    params: HashMap<String, String>,
+    dcom: Arc<DaemonComm>,
+) -> Result<axum::Json<serde_json::Value>, Response> {
+    match channel_inspect_inner(params, dcom).await {
+        Ok(ret) => Ok(ret),
+        Err(e) => Err(PublicErrorMsg(e.to_string()).into_response()),
+    }
+}
+
 // ChannelStatusesResponse
 // BTreeMap<String, ChannelState>
 async fn private_channel_states(
@@ -372,7 +402,6 @@ fn make_routes(
     use axum::extract;
     use axum::routing::{get, post, put};
     use http::StatusCode;
-
     Router::new()
         .fallback(|req: Request<axum::body::Body>| async move {
             info!("Fallback for {} {}", req.method(), req.uri());
@@ -428,18 +457,11 @@ fn make_routes(
                     Router::new()
                         .nest(
                             "/channel",
-                            Router::new().route(
-                                "/delete",
-                                post({
-                                    let rres = rres.clone();
-                                    move |(headers, params, body): (
-                                        HeaderMap,
-                                        Query<HashMap<String, String>>,
-                                        axum::body::Body,
-                                    )| {
-                                        delete::delete((headers, params, body), rres)
-                                    }
-                                }),
+                            make_routes_private_channel(
+                                rres.clone(),
+                                dcom.clone(),
+                                connset_cmd_tx.clone(),
+                                stats_set.clone(),
                             ),
                         )
                         .route(
@@ -585,6 +607,35 @@ fn make_routes_ingest(
                 move |(headers, params, body): (HeaderMap, Query<HashMap<String, String>>, axum::body::Body)| {
                     ingest::post_v01((headers, params, body), rres)
                 }
+            }),
+        )
+}
+
+fn make_routes_private_channel(
+    rres: Arc<RoutesResources>,
+    dcom: Arc<DaemonComm>,
+    connset_cmd_tx: Sender<CaConnSetEvent>,
+    stats_set: StatsSet,
+) -> axum::Router {
+    use axum::Router;
+    use axum::extract;
+    use axum::routing::{get, post, put};
+    use http::StatusCode;
+    Router::new()
+        .route(
+            "/delete",
+            post({
+                let rres = rres.clone();
+                move |(headers, params, body): (HeaderMap, Query<HashMap<String, String>>, axum::body::Body)| {
+                    delete::delete((headers, params, body), rres)
+                }
+            }),
+        )
+        .route(
+            "/inspect",
+            get({
+                let dcom = dcom.clone();
+                |Query(params): Query<HashMap<String, String>>| channel_inspect(params, dcom)
             }),
         )
 }

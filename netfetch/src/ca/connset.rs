@@ -227,14 +227,9 @@ impl fmt::Debug for ChannelStatusesRequest {
 }
 
 #[derive(Debug)]
-pub enum ChannelCommandKind {
-    InspectDetail,
-}
-
-#[derive(Debug)]
 pub struct ChannelCommand {
     pub channel: String,
-    pub kind: ChannelCommandKind,
+    pub conn_command: ConnCommand,
 }
 
 #[derive(Debug)]
@@ -245,6 +240,7 @@ pub enum ConnSetCmd {
     ChannelRemove(ChannelRemove),
     Shutdown,
     ChannelStatuses(ChannelStatusesRequest),
+    // TODO rename to ConnCommand because it must be handled by some specific Conn
     ChannelCommand(ChannelCommand),
 }
 
@@ -1080,16 +1076,27 @@ impl CaConnSet {
             return Ok(());
         }
         // TODO handle, send to corresponding CaConn
-        // let channels_ca_conn_set = self
-        //     .channel_states
-        //     .iter()
-        //     .filter(|(k, _)| k.name() == cmd.channel)
-        //     .map(|(k, v)| (k.name().to_string(), v.clone()))
-        //     .collect();
-        // let item = ChannelStatusesResponse { channels_ca_conn_set };
-        // if req.tx.try_send(item).is_err() {
-        //     self.stats.response_tx_fail.inc();
-        // }
+        let name = cmd.channel.clone();
+        let mut cmd = Some(cmd);
+        // TODO no need to iterate anymore
+        self.channel_states
+            .iter_mut()
+            .filter(|(k, _)| k.name() == name)
+            .map(|(_, st1)| {
+                if let ChannelStateValue::Active(st2) = &mut st1.value {
+                    if let ActiveChannelState::WithStatusSeriesId(st3) = st2 {
+                        if let WithStatusSeriesIdStateInner::WithAddress { addr, state: _ } = &mut st3.inner {
+                            let addr2 = SocketAddr::V4(*addr);
+                            self.ca_conn_ress.get_mut(&addr2).map(|q| {
+                                if let Some(cmd) = cmd.take() {
+                                    q.cmd_queue.push_back(cmd.conn_command);
+                                }
+                            });
+                        }
+                    }
+                };
+            })
+            .for_each(|_| ());
         Ok(())
     }
 
