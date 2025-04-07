@@ -636,7 +636,7 @@ impl syn::parse::Parse for StatsTreeDef {
                 let diff_def = DiffStructDef::from_args(fa.args)?;
                 diff_defs.push(diff_def);
             } else {
-                return Err(syn::Error::new(fa.name.span(), "Unexpected"));
+                return Err(syn::Error::new(fa.name.span(), "unexpected"));
             }
         }
         let ret = StatsTreeDef {

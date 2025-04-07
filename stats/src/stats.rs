@@ -1,3 +1,5 @@
+pub mod mett;
+
 pub use rand_xoshiro;
 
 use std::sync::atomic::AtomicU64;
@@ -410,7 +412,6 @@ stats_proc::stats_struct!((
             ca_proto_version_later,
             no_cid_for_subid,
         ),
-        values(inter_ivl_ema, read_ioids_len, proto_out_len,),
         histolog2s(
             poll_all_dt,
             poll_op3_dt,

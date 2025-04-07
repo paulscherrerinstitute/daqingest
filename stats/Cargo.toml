@@ -8,7 +8,9 @@ edition = "2021"
 path = "src/stats.rs"
 
 [dependencies]
+serde = { version = "1", features = ["derive"] }
 rand_xoshiro = "0.6.0"
 stats_types = { path = "../stats_types" }
 stats_proc = { path = "../stats_proc" }
 log = { path = "../log" }
+mettrics = { version = "0.0.5", path = "../../mettrics" }

@@ -62,12 +62,14 @@ impl CaConnMetricsAggAgg {
 #[derive(Debug, Serialize)]
 pub struct CaConnSetMetrics {
     pub ca_conn_agg: CaConnMetricsAgg,
+    pub mett: stats::mett::CaConnSetMetrics,
 }
 
 impl CaConnSetMetrics {
     pub fn new() -> Self {
         Self {
             ca_conn_agg: CaConnMetricsAgg::new(),
+            mett: stats::mett::CaConnSetMetrics::new(),
         }
     }
 }
@@ -118,23 +120,6 @@ impl From<&InsertQueuesTx> for InsertQueuesTxMetrics {
 }
 
 #[derive(Debug, Serialize)]
-pub struct DaemonMetrics {
-    pub ca_conn_set_agg: CaConnSetAggMetrics,
-}
-
-impl DaemonMetrics {
-    pub fn new() -> Self {
-        Self {
-            ca_conn_set_agg: CaConnSetAggMetrics::new(),
-        }
-    }
-
-    pub fn ingest_ca_conn_set(&mut self, inp: CaConnSetMetrics) {
-        self.ca_conn_set_agg.ingest(inp);
-    }
-}
-
-#[derive(Debug, Serialize)]
 pub struct MetricsPrometheusShort {
     // derived from values
     pub ca_conn_event_out_queue_len_max: usize,
@@ -157,8 +142,8 @@ impl MetricsPrometheusShort {
     }
 }
 
-impl From<&DaemonMetrics> for MetricsPrometheusShort {
-    fn from(value: &DaemonMetrics) -> Self {
+impl From<&stats::mett::DaemonMetrics> for MetricsPrometheusShort {
+    fn from(value: &stats::mett::DaemonMetrics) -> Self {
         Self {
             ca_conn_event_out_queue_len_max: value.ca_conn_set_agg.ca_conn_agg_agg.ca_conn_event_out_queue_len_max,
             ca_msg_recv_cnt_all: value.ca_conn_set_agg.ca_conn_agg_agg.ca_msg_recv_cnt_all,

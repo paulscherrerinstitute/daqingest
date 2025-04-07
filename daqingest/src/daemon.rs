@@ -86,7 +86,7 @@ pub struct Daemon {
     // TODO
     series_conf_by_id_tx: Sender<()>,
     iqtx: Option<InsertQueuesTx>,
-    daemon_metrics: DaemonMetrics,
+    daemon_metrics: stats::mett::DaemonMetrics,
 }
 
 impl Daemon {
@@ -387,7 +387,7 @@ impl Daemon {
             channel_info_query_tx,
             series_conf_by_id_tx,
             iqtx: Some(iqtx2),
-            daemon_metrics: DaemonMetrics::new(),
+            daemon_metrics: stats::mett::DaemonMetrics::new(),
         };
         Ok(ret)
     }
@@ -564,8 +564,8 @@ impl Daemon {
                 error!("error from CaConnSet: {e}");
                 self.handle_shutdown().await?;
             }
-            Metrics(metrics) => {
-                self.daemon_metrics.ingest_ca_conn_set(metrics);
+            Metrics(x) => {
+                self.daemon_metrics.ca_conn_set().ingest(x);
             }
         }
         Ok(())

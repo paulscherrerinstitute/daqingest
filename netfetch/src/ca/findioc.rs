@@ -15,9 +15,9 @@ use std::collections::VecDeque;
 use std::net::Ipv4Addr;
 use std::net::SocketAddrV4;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
-use std::sync::Arc;
 use std::task::Context;
 use std::task::Poll;
 use std::time::Duration;
@@ -188,26 +188,28 @@ impl FindIocStream {
     }
 
     unsafe fn create_socket() -> Result<SockBox, Error> {
-        let ec = libc::socket(libc::AF_INET, libc::SOCK_DGRAM, 0);
+        let ec = unsafe { libc::socket(libc::AF_INET, libc::SOCK_DGRAM, 0) };
         if ec == -1 {
             return Err(Error::SocketCreate);
         }
         let sock = SockBox(ec);
         {
             let opt: libc::c_int = 1;
-            let ec = libc::setsockopt(
-                sock.0,
-                libc::SOL_SOCKET,
-                libc::SO_BROADCAST,
-                &opt as *const _ as _,
-                std::mem::size_of::<libc::c_int>() as _,
-            );
+            let ec = unsafe {
+                libc::setsockopt(
+                    sock.0,
+                    libc::SOL_SOCKET,
+                    libc::SO_BROADCAST,
+                    &opt as *const _ as _,
+                    std::mem::size_of::<libc::c_int>() as _,
+                )
+            };
             if ec == -1 {
                 return Err(Error::BroadcastEnable);
             }
         }
         {
-            let ec = libc::fcntl(sock.0, libc::F_SETFL, libc::O_NONBLOCK);
+            let ec = unsafe { libc::fcntl(sock.0, libc::F_SETFL, libc::O_NONBLOCK) };
             if ec == -1 {
                 return Err(Error::NonblockEnable);
             }
@@ -222,7 +224,7 @@ impl FindIocStream {
             sin_zero: [0; 8],
         };
         let addr_len = std::mem::size_of::<libc::sockaddr_in>();
-        let ec = libc::bind(sock.0, &addr as *const _ as _, addr_len as _);
+        let ec = unsafe { libc::bind(sock.0, &addr as *const _ as _, addr_len as _) };
         if ec == -1 {
             return Err(Error::SocketBind);
         }
@@ -234,7 +236,7 @@ impl FindIocStream {
                 sin_zero: [0; 8],
             };
             let mut addr_len = std::mem::size_of::<libc::sockaddr_in>();
-            let ec = libc::getsockname(sock.0, &mut addr as *mut _ as _, &mut addr_len as *mut _ as _);
+            let ec = unsafe { libc::getsockname(sock.0, &mut addr as *mut _ as _, &mut addr_len as *mut _ as _) };
             if ec == -1 {
                 error!("getsockname {ec}");
                 return Err(Error::SocketConvertTokio);
@@ -261,16 +263,18 @@ impl FindIocStream {
             sin_zero: [0; 8],
         };
         let addr_len = std::mem::size_of::<libc::sockaddr_in>();
-        let ec = libc::sendto(
-            sock,
-            &buf[0] as *const _ as _,
-            buf.len() as _,
-            0,
-            &addr as *const _ as _,
-            addr_len as _,
-        );
+        let ec = unsafe {
+            libc::sendto(
+                sock,
+                &buf[0] as *const _ as _,
+                buf.len() as _,
+                0,
+                &addr as *const _ as _,
+                addr_len as _,
+            )
+        };
         if ec == -1 {
-            let errno = *libc::__errno_location();
+            let errno = unsafe { *libc::__errno_location() };
             if errno == libc::EAGAIN {
                 return Poll::Pending;
             } else {
@@ -288,16 +292,18 @@ impl FindIocStream {
         let mut saddr_mem = [0u8; std::mem::size_of::<libc::sockaddr>()];
         let mut saddr_len: libc::socklen_t = saddr_mem.len() as _;
         let mut buf = vec![0u8; 1024];
-        let ec = libc::recvfrom(
-            sock,
-            buf.as_mut_ptr() as _,
-            buf.len() as _,
-            libc::O_NONBLOCK,
-            &mut saddr_mem as *mut _ as _,
-            &mut saddr_len as *mut _ as _,
-        );
+        let ec = unsafe {
+            libc::recvfrom(
+                sock,
+                buf.as_mut_ptr() as _,
+                buf.len() as _,
+                libc::O_NONBLOCK,
+                &mut saddr_mem as *mut _ as _,
+                &mut saddr_len as *mut _ as _,
+            )
+        };
         if ec == -1 {
-            let errno = *libc::__errno_location();
+            let errno = unsafe { *libc::__errno_location() };
             if errno == libc::EAGAIN {
                 return Poll::Pending;
             } else {
@@ -312,7 +318,7 @@ impl FindIocStream {
             Poll::Ready(Err(Error::ReadEmpty))
         } else {
             stats.ca_udp_io_recv().inc();
-            let saddr2: libc::sockaddr_in = std::mem::transmute_copy(&saddr_mem);
+            let saddr2: libc::sockaddr_in = unsafe { std::mem::transmute_copy(&saddr_mem) };
             let src_addr = Ipv4Addr::from(saddr2.sin_addr.s_addr.to_ne_bytes());
             let src_port = u16::from_be(saddr2.sin_port);
             if false {

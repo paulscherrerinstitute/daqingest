@@ -259,7 +259,7 @@ impl CaConnSetEvent {
 pub enum CaConnSetItem {
     Error(Error),
     Healthy,
-    Metrics(crate::metrics::types::CaConnSetMetrics),
+    Metrics(stats::mett::CaConnSetMetrics),
 }
 
 pub struct CaConnSetCtrl {
@@ -770,7 +770,7 @@ impl CaConnSet {
             CaConnEventValue::EndOfStream(reason) => self.handle_ca_conn_eos(addr, reason),
             CaConnEventValue::ChannelRemoved(name) => self.handle_ca_conn_channel_removed(addr, name),
             CaConnEventValue::Metrics(v) => {
-                self.ca_connset_metrics.ca_conn_agg.ingest(v);
+                self.ca_connset_metrics.mett.ca_conn().ingest(v);
                 Ok(())
             }
         }
@@ -1882,8 +1882,9 @@ impl CaConnSet {
             }
         }
         {
-            let metrics = std::mem::replace(&mut self.ca_connset_metrics, CaConnSetMetrics::new());
-            let item = CaConnSetItem::Metrics(metrics);
+            // let item = std::mem::replace(&mut self.ca_connset_metrics, CaConnSetMetrics::new());
+            let item = self.ca_connset_metrics.mett.take_and_reset();
+            let item = CaConnSetItem::Metrics(item);
             self.connset_out_queue.push_back(item);
         }
         Ok(())
