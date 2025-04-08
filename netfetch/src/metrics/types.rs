@@ -121,23 +121,16 @@ impl From<&InsertQueuesTx> for InsertQueuesTxMetrics {
 
 #[derive(Debug, Serialize)]
 pub struct MetricsPrometheusShort {
-    // derived from values
-    pub ca_conn_event_out_queue_len_max: usize,
-    // derived from counter terms
-    pub ca_msg_recv_cnt_all: u64,
+    counters: Vec<(String, u64)>,
 }
 
 impl MetricsPrometheusShort {
     pub fn prometheus(&self) -> String {
         use std::fmt::Write;
         let mut s = String::new();
-        write!(
-            &mut s,
-            "ca_conn_event_out_queue_len_max {}\n",
-            self.ca_conn_event_out_queue_len_max
-        )
-        .unwrap();
-        write!(&mut s, "ca_msg_recv_all_sum {}\n", self.ca_msg_recv_cnt_all).unwrap();
+        for e in self.counters.iter() {
+            write!(&mut s, "{} {}\n", e.0, e.1).unwrap();
+        }
         s
     }
 }
@@ -145,8 +138,7 @@ impl MetricsPrometheusShort {
 impl From<&stats::mett::DaemonMetrics> for MetricsPrometheusShort {
     fn from(value: &stats::mett::DaemonMetrics) -> Self {
         Self {
-            ca_conn_event_out_queue_len_max: value.ca_conn_set_agg.ca_conn_agg_agg.ca_conn_event_out_queue_len_max,
-            ca_msg_recv_cnt_all: value.ca_conn_set_agg.ca_conn_agg_agg.ca_msg_recv_cnt_all,
+            counters: value.to_flatten_prometheus(),
         }
     }
 }

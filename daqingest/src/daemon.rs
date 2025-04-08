@@ -16,7 +16,6 @@ use netfetch::daemon_common::ChannelName;
 use netfetch::daemon_common::DaemonEvent;
 use netfetch::metrics::RoutesResources;
 use netfetch::metrics::StatsSet;
-use netfetch::metrics::types::DaemonMetrics;
 use netfetch::throttletrace::ThrottleTrace;
 use netpod::Database;
 use netpod::ttl::RetentionTime;
