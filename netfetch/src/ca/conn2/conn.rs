@@ -21,9 +21,9 @@ use proto::CaProto;
 use scywr::insertqueues::InsertDeques;
 use scywr::insertqueues::InsertQueuesTx;
 use scywr::iteminsertqueue::QueryItem;
-use stats::rand_xoshiro::Xoshiro128PlusPlus;
 use stats::CaConnStats;
 use stats::CaProtoStats;
+use stats::rand_xoshiro::Xoshiro128PlusPlus;
 use std::collections::VecDeque;
 use std::fmt;
 use std::net::SocketAddrV4;
@@ -160,9 +160,11 @@ impl Stream for CaConn {
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
         use Poll::*;
         let mut durs = DurationMeasureSteps::new();
-        self.stats.poll_fn_begin().inc();
+        // TODO STATS
+        // self.stats.poll_fn_begin().inc();
         let ret = loop {
-            self.stats.poll_loop_begin().inc();
+            // TODO STATS
+            // self.stats.poll_loop_begin().inc();
             let qlen = self.iqdqs.len();
             if qlen >= self.opts.insert_queue_max * 2 / 3 {
                 self.stats.insert_item_queue_pressure().inc();
@@ -189,11 +191,6 @@ impl Stream for CaConn {
                     self.shutdown_on_error(e);
                     continue;
                 }
-            }
-
-            {
-                let n = self.iqdqs.len();
-                self.stats.iiq_len().ingest(n as u32);
             }
 
             {

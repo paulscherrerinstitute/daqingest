@@ -11,6 +11,7 @@ use crate::iteminsertqueue::insert_item_fut;
 use crate::iteminsertqueue::insert_msp_fut;
 use crate::store::DataStore;
 use async_channel::Receiver;
+use async_channel::Sender;
 use atomic::AtomicU64;
 use futures_util::Stream;
 use futures_util::StreamExt;
@@ -100,6 +101,11 @@ async fn back_off_sleep(backoff_dt: &mut Duration) {
     tokio::time::sleep(*backoff_dt).await;
 }
 
+#[derive(Debug)]
+pub enum InsertWorkerOutputItem {
+    Metrics(stats::mett::ScyllaInsertWorker),
+}
+
 pub struct InsertWorkerOpts {
     pub store_workers_rate: Arc<AtomicU64>,
     pub insert_workers_running: Arc<AtomicU64>,
@@ -118,6 +124,7 @@ pub async fn spawn_scylla_insert_workers(
     store_stats: Arc<stats::InsertWorkerStats>,
     use_rate_limit_queue: bool,
     ignore_writes: bool,
+    tx: Sender<InsertWorkerOutputItem>,
 ) -> Result<Vec<JoinHandle<Result<(), Error>>>, Error> {
     let item_inp = if use_rate_limit_queue {
         crate::ratelimit::rate_limiter(insert_worker_opts.store_workers_rate.clone(), item_inp)
@@ -140,6 +147,7 @@ pub async fn spawn_scylla_insert_workers(
             Some(data_store),
             ignore_writes,
             store_stats.clone(),
+            tx.clone(),
         ));
         jhs.push(jh);
     }
@@ -152,6 +160,7 @@ pub async fn spawn_scylla_insert_workers_dummy(
     item_inp: Receiver<VecDeque<QueryItem>>,
     insert_worker_opts: Arc<InsertWorkerOpts>,
     store_stats: Arc<stats::InsertWorkerStats>,
+    tx: Sender<InsertWorkerOutputItem>,
 ) -> Result<Vec<JoinHandle<Result<(), Error>>>, Error> {
     let mut jhs = Vec::new();
     for worker_ix in 0..insert_worker_count {
@@ -164,6 +173,7 @@ pub async fn spawn_scylla_insert_workers_dummy(
             data_store,
             true,
             store_stats.clone(),
+            tx.clone(),
         ));
         jhs.push(jh);
     }
@@ -178,9 +188,13 @@ async fn worker_streamed(
     data_store: Option<Arc<DataStore>>,
     ignore_writes: bool,
     stats: Arc<InsertWorkerStats>,
+    tx: Sender<InsertWorkerOutputItem>,
 ) -> Result<(), Error> {
     debug_setup!("worker_streamed  begin");
-    stats.worker_start().inc();
+    let tsnow = Instant::now();
+    let mut mett = stats::mett::ScyllaInsertWorker::new();
+    let mut mett_emit_last = tsnow;
+    let metrics_ivl = Duration::from_millis(1000);
     insert_worker_opts
         .insert_workers_running
         .fetch_add(1, atomic::Ordering::AcqRel);
@@ -199,9 +213,10 @@ async fn worker_streamed(
         debug_setup!("waiting for item");
         while let Some(item) = stream.next().await {
             trace_item_execute!("see item");
+            let tsnow = Instant::now();
             match item {
                 Ok(_) => {
-                    stats.inserted_values().inc();
+                    mett.job_ok().inc();
                     // TODO compute the insert latency bin and count.
                 }
                 Err(e) => {
@@ -215,7 +230,20 @@ async fn worker_streamed(
                         },
                         _ => e.into(),
                     };
+                    mett.job_err().inc();
                     stats_inc_for_err(&stats, &e);
+                }
+            }
+            if mett_emit_last + metrics_ivl <= tsnow {
+                mett_emit_last = tsnow;
+                let m = mett.take_and_reset();
+                let item = InsertWorkerOutputItem::Metrics(m);
+                match tx.send(item).await {
+                    Ok(()) => {}
+                    Err(_) => {
+                        error!("insert worker can not emit metrics");
+                        break;
+                    }
                 }
             }
         }

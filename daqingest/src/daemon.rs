@@ -200,6 +200,7 @@ impl Daemon {
 
         let ignore_writes = ingest_opts.scylla_ignore_writes();
 
+        let (insert_worker_output_tx, insert_worker_output_rx) = async_channel::bounded(256);
         let mut insert_worker_jhs = Vec::new();
 
         if ingest_opts.scylla_disable() {
@@ -209,6 +210,7 @@ impl Daemon {
                 iqrx.st_rf1_rx,
                 insert_worker_opts.clone(),
                 insert_worker_stats.clone(),
+                insert_worker_output_tx.clone(),
             )
             .await
             .map_err(Error::from_string)?;
@@ -219,6 +221,7 @@ impl Daemon {
                 iqrx.st_rf3_rx,
                 insert_worker_opts.clone(),
                 insert_worker_stats.clone(),
+                insert_worker_output_tx.clone(),
             )
             .await
             .map_err(Error::from_string)?;
@@ -229,6 +232,7 @@ impl Daemon {
                 iqrx.mt_rf3_rx,
                 insert_worker_opts.clone(),
                 insert_worker_stats.clone(),
+                insert_worker_output_tx.clone(),
             )
             .await
             .map_err(Error::from_string)?;
@@ -239,6 +243,7 @@ impl Daemon {
                 iqrx.lt_rf3_rx,
                 insert_worker_opts.clone(),
                 insert_worker_stats.clone(),
+                insert_worker_output_tx.clone(),
             )
             .await
             .map_err(Error::from_string)?;
@@ -249,6 +254,7 @@ impl Daemon {
                 iqrx.lt_rf3_lat5_rx,
                 insert_worker_opts.clone(),
                 insert_worker_stats.clone(),
+                insert_worker_output_tx.clone(),
             )
             .await
             .map_err(Error::from_string)?;
@@ -265,6 +271,7 @@ impl Daemon {
                 insert_worker_stats.clone(),
                 ingest_opts.use_rate_limit_queue(),
                 ignore_writes,
+                insert_worker_output_tx.clone(),
             )
             .await
             .map_err(Error::from_string)?;
@@ -281,6 +288,7 @@ impl Daemon {
                 insert_worker_stats.clone(),
                 ingest_opts.use_rate_limit_queue(),
                 ignore_writes,
+                insert_worker_output_tx.clone(),
             )
             .await
             .map_err(Error::from_string)?;
@@ -297,6 +305,7 @@ impl Daemon {
                 insert_worker_stats.clone(),
                 ingest_opts.use_rate_limit_queue(),
                 ignore_writes,
+                insert_worker_output_tx.clone(),
             )
             .await
             .map_err(Error::from_string)?;
@@ -315,6 +324,7 @@ impl Daemon {
                 insert_worker_stats.clone(),
                 ingest_opts.use_rate_limit_queue(),
                 ignore_writes,
+                insert_worker_output_tx.clone(),
             )
             .await
             .map_err(Error::from_string)?;
@@ -356,6 +366,29 @@ impl Daemon {
             //jh.await.map_err(|e| e.to_string()).map_err(Error::from)??;
         }
 
+        {
+            // TODO join the task
+            let tx = daemon_ev_tx.clone();
+            tokio::task::spawn(async move {
+                loop {
+                    match insert_worker_output_rx.recv().await {
+                        Ok(x) => {
+                            match tx.send(DaemonEvent::ScyllaInsertWorkerOutput(x)).await {
+                                Ok(()) => {}
+                                Err(_) => {
+                                    // TODO
+                                    break;
+                                }
+                            }
+                        }
+                        Err(_) => {
+                            // TODO
+                            break;
+                        }
+                    }
+                }
+            });
+        }
         let (metrics_shutdown_tx, metrics_shutdown_rx) = async_channel::bounded(8);
 
         let ret = Self {
@@ -708,6 +741,15 @@ impl Daemon {
                     }
                 }
                 Ok(())
+            }
+            ScyllaInsertWorkerOutput(x) => {
+                use scywr::insertworker::InsertWorkerOutputItem::*;
+                match x {
+                    Metrics(x) => {
+                        self.daemon_metrics.scy_inswork().ingest(x);
+                        Ok(())
+                    }
+                }
             }
         };
         let dt = ts1.elapsed();

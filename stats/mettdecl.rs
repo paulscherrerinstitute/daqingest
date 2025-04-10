@@ -1,6 +1,16 @@
 mod Metrics {
+    type StructName = ScyllaInsertWorker;
+    enum counters {
+        metrics_emit,
+        job_ok,
+        job_err,
+    }
+}
+
+mod Metrics {
     type StructName = CaConnMetrics;
     enum counters {
+        metrics_emit,
         ioid_read_begin,
         ioid_read_done,
         ioid_read_timeout,
@@ -49,6 +59,17 @@ mod Metrics {
         get_series_id_ok,
         channel_add_exists,
     }
+    enum histolog2s {
+        clock_ioc_diff_abs,
+        caget_lat,
+        poll_reloops,
+        poll_all_dt,
+        iiq_batch_len,
+    }
+    mod Compose {
+        type Input = ca_proto::mett::CaProtoMetrics;
+        type Name = proto;
+    }
 }
 
 mod Metrics {
@@ -64,5 +85,9 @@ mod Metrics {
     mod Compose {
         type Input = CaConnSetMetrics;
         type Name = ca_conn_set;
+    }
+    mod Compose {
+        type Input = ScyllaInsertWorker;
+        type Name = scy_inswork;
     }
 }

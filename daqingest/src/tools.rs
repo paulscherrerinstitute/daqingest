@@ -6,18 +6,16 @@ use crate::opts::RemoveOlderAll;
 use chrono::DateTime;
 use chrono::Utc;
 use dbpg::conn::PgClient;
-use err::thiserror;
-use err::ThisError;
-use futures_util::future;
-use futures_util::stream;
 use futures_util::StreamExt;
 use futures_util::TryStreamExt;
+use futures_util::future;
+use futures_util::stream;
 use log::*;
-use netpod::ttl::RetentionTime;
 use netpod::Database;
 use netpod::ScalarType;
 use netpod::Shape;
 use netpod::TsMs;
+use netpod::ttl::RetentionTime;
 use scywr::config::ScyllaIngestConfig;
 use scywr::scylla::prepared_statement::PreparedStatement;
 use scywr::scylla::transport::errors::QueryError;
@@ -28,19 +26,20 @@ use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
 
-#[derive(Debug, ThisError)]
-#[cstm(name = "DaqingestTools")]
-pub enum Error {
-    PgConn(#[from] dbpg::err::Error),
-    Postgres(#[from] dbpg::postgres::Error),
-    ScyllaSession(#[from] scywr::session::Error),
-    ScyllaQuery(#[from] QueryError),
-    ScyllaNextRowError(#[from] NextRowError),
-    ScyllaSchema(#[from] scywr::schema::Error),
-    ScyllaTypeCheck(#[from] scywr::scylla::deserialize::TypeCheckError),
-    ParseError(String),
-    InvalidValue,
-}
+autoerr::create_error_v1!(
+    name(Error, "DaqingestTools"),
+    enum variants {
+        PgConn(#[from] dbpg::err::Error),
+        Postgres(#[from] dbpg::postgres::Error),
+        ScyllaSession(#[from] scywr::session::Error),
+        ScyllaQuery(#[from] QueryError),
+        ScyllaNextRowError(#[from] NextRowError),
+        ScyllaSchema(#[from] scywr::schema::Error),
+        ScyllaTypeCheck(#[from] scywr::scylla::deserialize::TypeCheckError),
+        ParseError(String),
+        InvalidValue,
+    },
+);
 
 pub async fn remove_older(
     backend: String,

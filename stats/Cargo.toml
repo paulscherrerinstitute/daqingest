@@ -13,4 +13,5 @@ rand_xoshiro = "0.6.0"
 stats_types = { path = "../stats_types" }
 stats_proc = { path = "../stats_proc" }
 log = { path = "../log" }
-mettrics = { version = "0.0.5", path = "../../mettrics" }
+mettrics = { version = "0.0.6", path = "../../mettrics" }
+ca_proto = { path = "../../daqbuf-ca-proto", package = "daqbuf-ca-proto" }

@@ -95,6 +95,7 @@ const SILENCE_READ_NEXT_IVL: Duration = Duration::from_millis(1000 * 200);
 const POLL_READ_TIMEOUT: Duration = Duration::from_millis(1000 * 10);
 const DO_RATE_CHECK: bool = false;
 const CHANNEL_STATUS_PONG_QUIET: Duration = Duration::from_millis(1000 * 60 * 60);
+const METRICS_EMIT_IVL: Duration = Duration::from_millis(1000 * 1);
 
 macro_rules! trace3 { ($($arg:expr),*) => ( if false { trace!($($arg),*); } ); }
 
@@ -1117,6 +1118,7 @@ pub struct CaConn {
     trace_channel_poll: bool,
     ts_channel_status_pong_last: Instant,
     mett: stats::mett::CaConnMetrics,
+    metrics_emit_last: Instant,
 }
 
 impl Drop for CaConn {
@@ -1186,6 +1188,7 @@ impl CaConn {
             trace_channel_poll: false,
             ts_channel_status_pong_last: tsnow,
             mett: stats::mett::CaConnMetrics::new(),
+            metrics_emit_last: tsnow,
         }
     }
 
@@ -2096,15 +2099,13 @@ impl CaConn {
                                     self.mett.recv_read_notify_while_polling_idle().inc();
                                 }
                                 PollTickState::Wait(st3) => {
-                                    let dt = tsnow.saturating_duration_since(st3.since);
-                                    // TODO STATS
-                                    // self.stats.caget_lat().ingest_dur_dms(dt);
-                                    // TODO maintain histogram of read-notify latencies
                                     if self.read_ioids.remove(&st3.ioid).is_some() {
                                         self.mett.ioid_read_done().inc();
                                     } else {
                                         self.mett.ioid_read_error_not_found().inc();
                                     }
+                                    let dt = tsnow.saturating_duration_since(st3.since);
+                                    self.mett.caget_lat().push_dur_100us(dt);
                                     let next = PollTickStateIdle::decide_next(st3.next_backup, st2.poll_ivl, tsnow);
                                     if self.trace_channel_poll {
                                         trace!("make next poll idle at {:?}   tsnow {:?}", next, tsnow);
@@ -3052,8 +3053,6 @@ impl CaConn {
                                         TcpAsyncWriteRead::from(tcp),
                                         self.remote_addr_dbg.to_string(),
                                         self.opts.array_truncate,
-                                        // self.ca_proto_stats.clone(),
-                                        (),
                                     );
                                     self.state = CaConnState::Init;
                                     self.proto = Some(proto);
@@ -3237,13 +3236,23 @@ impl CaConn {
             CaConnState::EndOfStream => {}
         }
         self.iqdqs.housekeeping();
-        self.metrics_emit();
+        if self.metrics_emit_last + METRICS_EMIT_IVL <= tsnow {
+            self.metrics_emit_last = tsnow;
+            self.metrics_emit();
+        }
         Ok(())
     }
 
     fn housekeeping_self(&mut self) {}
 
     fn metrics_emit(&mut self) {
+        if let Some(x) = self.proto.as_mut() {
+            let mett = x.mett();
+            mett.metrics_emit().inc();
+            let m = mett.take_and_reset();
+            self.mett.proto().ingest(m);
+        }
+        self.mett.metrics_emit().inc();
         let item = self.mett.take_and_reset();
         let item = CaConnEvent::new(Instant::now(), CaConnEventValue::Metrics(item));
         self.ca_conn_event_out_queue.push_back(item);
@@ -3393,12 +3402,13 @@ impl CaConn {
         loop_max: u32,
         cx: &mut Context,
         id: &str,
-        stats: FS,
+        mut stats: FS,
+        mett: &mut stats::mett::CaConnMetrics,
     ) -> Result<Poll<Option<()>>, Error>
     where
         Q: Unpin,
         FB: Fn(&mut VecDeque<T>) -> Option<Q>,
-        FS: Fn(&Q),
+        FS: for<'a, 'b> FnMut(&'a Q, &'b mut stats::mett::CaConnMetrics),
     {
         let self_name = "attempt_flush_queue";
         use Poll::*;
@@ -3417,7 +3427,7 @@ impl CaConn {
             }
             if sp.is_idle() {
                 if let Some(item) = qu_to_si(qu) {
-                    stats(&item);
+                    stats(&item, mett);
                     sp.as_mut().send_pin(item);
                 } else {
                     break;
@@ -3469,7 +3479,8 @@ macro_rules! flush_queue {
             qu.shrink_to(qu.capacity() * 7 / 10);
         }
         let sp = obj.$sp.as_mut();
-        match Self::attempt_flush_queue(qu, sp, $batcher, $loop_max, $cx, $id, $stats) {
+        let mett = &mut obj.mett;
+        match Self::attempt_flush_queue(qu, sp, $batcher, $loop_max, $cx, $id, $stats, mett) {
             Ok(Ready(Some(()))) => {
                 *$have.0 |= true;
             }
@@ -3493,7 +3504,8 @@ macro_rules! flush_queue_dqs {
             qu.shrink_to(qu.capacity() * 7 / 10);
         }
         let sp = obj.iqsp.as_mut().$sp();
-        match Self::attempt_flush_queue(qu, sp, $batcher, $loop_max, $cx, $id, $stats) {
+        let mett = &mut obj.mett;
+        match Self::attempt_flush_queue(qu, sp, $batcher, $loop_max, $cx, $id, $stats, mett) {
             Ok(Ready(Some(()))) => {
                 *$have.0 |= true;
             }
@@ -3563,17 +3575,6 @@ impl Stream for CaConn {
             }
 
             {
-                let n = self.iqdqs.len();
-                // TODO STATS
-                self.stats.iiq_len().ingest(n as u32);
-            }
-
-            {
-                let stats2 = self.stats.clone();
-                let stats_fn = move |item: &VecDeque<QueryItem>| {
-                    // TODO STATS
-                    stats2.iiq_batch_len().ingest(item.len() as u32);
-                };
                 flush_queue_dqs!(
                     self,
                     st_rf1_qu,
@@ -3583,14 +3584,11 @@ impl Stream for CaConn {
                     (&mut have_progress, &mut have_pending),
                     "st_rf1_rx",
                     cx,
-                    stats_fn
+                    |item: &VecDeque<QueryItem>, mett: &mut stats::mett::CaConnMetrics| {
+                        mett.iiq_batch_len().push_val(item.len() as u32);
+                    }
                 );
 
-                let stats2 = self.stats.clone();
-                let stats_fn = move |item: &VecDeque<QueryItem>| {
-                    // TODO STATS
-                    stats2.iiq_batch_len().ingest(item.len() as u32);
-                };
                 flush_queue_dqs!(
                     self,
                     st_rf3_qu,
@@ -3600,14 +3598,11 @@ impl Stream for CaConn {
                     (&mut have_progress, &mut have_pending),
                     "st_rf3_rx",
                     cx,
-                    stats_fn
+                    |item: &VecDeque<QueryItem>, mett: &mut stats::mett::CaConnMetrics| {
+                        mett.iiq_batch_len().push_val(item.len() as u32);
+                    }
                 );
 
-                let stats2 = self.stats.clone();
-                let stats_fn = move |item: &VecDeque<QueryItem>| {
-                    // TODO STATS
-                    stats2.iiq_batch_len().ingest(item.len() as u32);
-                };
                 flush_queue_dqs!(
                     self,
                     mt_rf3_qu,
@@ -3617,14 +3612,11 @@ impl Stream for CaConn {
                     (&mut have_progress, &mut have_pending),
                     "mt_rf3_rx",
                     cx,
-                    stats_fn
+                    |item: &VecDeque<QueryItem>, mett: &mut stats::mett::CaConnMetrics| {
+                        mett.iiq_batch_len().push_val(item.len() as u32);
+                    }
                 );
 
-                let stats2 = self.stats.clone();
-                let stats_fn = move |item: &VecDeque<QueryItem>| {
-                    // TODO STATS
-                    stats2.iiq_batch_len().ingest(item.len() as u32);
-                };
                 flush_queue_dqs!(
                     self,
                     lt_rf3_qu,
@@ -3634,14 +3626,11 @@ impl Stream for CaConn {
                     (&mut have_progress, &mut have_pending),
                     "lt_rf3_rx",
                     cx,
-                    stats_fn
+                    |item: &VecDeque<QueryItem>, mett: &mut stats::mett::CaConnMetrics| {
+                        mett.iiq_batch_len().push_val(item.len() as u32);
+                    }
                 );
 
-                let stats2 = self.stats.clone();
-                let stats_fn = move |item: &VecDeque<QueryItem>| {
-                    // TODO STATS
-                    stats2.iiq_batch_len().ingest(item.len() as u32);
-                };
                 flush_queue_dqs!(
                     self,
                     lt_rf3_lat5_qu,
@@ -3651,7 +3640,9 @@ impl Stream for CaConn {
                     (&mut have_progress, &mut have_pending),
                     "lt_rf3_lat5_rx",
                     cx,
-                    stats_fn
+                    |item: &VecDeque<QueryItem>, mett: &mut stats::mett::CaConnMetrics| {
+                        mett.iiq_batch_len().push_val(item.len() as u32);
+                    }
                 );
             }
 
@@ -3667,7 +3658,7 @@ impl Stream for CaConn {
                     (&mut have_progress, &mut have_pending),
                     "chinf",
                     cx,
-                    |_| {}
+                    |_, _| {}
                 );
             }
 
@@ -3795,19 +3786,9 @@ impl Stream for CaConn {
         let poll_ts2 = Instant::now();
         let dt = poll_ts2.saturating_duration_since(poll_ts1);
         if self.trace_channel_poll {
-            // TODO STATS
-            self.stats.poll_all_dt().ingest_dur_dms(dt);
-            if dt >= Duration::from_millis(10) {
-                trace!("long poll {dt:?}");
-            } else if dt >= Duration::from_micros(400) {
-                // TODO STATS
-                let v = self.stats.poll_all_dt.to_display();
-                let ip = self.remote_addr_dbg;
-                trace!("poll_all_dt  {ip}  {v}");
-            }
+            self.mett.poll_all_dt().push_dur_100us(dt);
         }
-        // TODO STATS
-        // self.stats.poll_reloops().ingest(reloops);
+        self.mett.poll_reloops().push_val(reloops);
         ret
     }
 }

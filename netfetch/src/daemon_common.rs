@@ -29,6 +29,7 @@ pub enum DaemonEvent {
     Shutdown,
     ConfigReload(Sender<u64>),
     GetMetrics(Sender<MetricsPrometheusShort>),
+    ScyllaInsertWorkerOutput(scywr::insertworker::InsertWorkerOutputItem),
 }
 
 impl DaemonEvent {
@@ -43,6 +44,7 @@ impl DaemonEvent {
             Shutdown => format!("Shutdown"),
             ConfigReload(..) => format!("ConfigReload"),
             GetMetrics(..) => format!("GetMetrics"),
+            ScyllaInsertWorkerOutput(..) => format!("ScyllaInsertWorkerOutput"),
         }
     }
 }
