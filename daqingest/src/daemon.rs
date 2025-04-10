@@ -37,7 +37,6 @@ use std::time::SystemTime;
 use taskrun::tokio;
 use tokio::task::JoinHandle;
 
-const CHECK_HEALTH_IVL: Duration = Duration::from_millis(2000);
 const CHECK_HEALTH_TIMEOUT: Duration = Duration::from_millis(5000);
 const PRINT_ACTIVE_INTERVAL: Duration = Duration::from_millis(60000);
 const PRINT_STATUS_INTERVAL: Duration = Duration::from_millis(20000);
@@ -77,7 +76,6 @@ pub struct Daemon {
     connset_status_last: Instant,
     // TODO should be a stats object?
     insert_workers_running: AtomicU64,
-    connset_health_lat_ema: f32,
     metrics_shutdown_tx: Sender<u32>,
     metrics_shutdown_rx: Receiver<u32>,
     metrics_jh: Option<JoinHandle<Result<(), Error>>>,
@@ -412,7 +410,6 @@ impl Daemon {
             connset_ctrl: conn_set_ctrl,
             connset_status_last: Instant::now(),
             insert_workers_running: AtomicU64::new(0),
-            connset_health_lat_ema: 0.,
             metrics_shutdown_tx,
             metrics_shutdown_rx,
             metrics_jh: None,

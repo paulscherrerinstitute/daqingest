@@ -2,64 +2,6 @@ use scywr::insertqueues::InsertQueuesTx;
 use serde::Serialize;
 
 #[derive(Debug, Serialize)]
-pub struct CaConnMetrics {
-    // a value
-    pub ca_conn_event_out_queue_len: usize,
-    // a term of a running counter sum
-    pub ca_msg_recv_cnt: u64,
-}
-
-#[derive(Debug, Serialize)]
-pub struct CaConnMetricsAgg {
-    // derived from values
-    pub ca_conn_event_out_queue_len_max: usize,
-    // derived from counter terms
-    pub ca_msg_recv_cnt_all: u64,
-}
-
-impl CaConnMetricsAgg {
-    pub fn new() -> Self {
-        Self {
-            ca_conn_event_out_queue_len_max: 0,
-            ca_msg_recv_cnt_all: 0,
-        }
-    }
-
-    pub fn ingest(&mut self, inp: CaConnMetrics) {
-        self.ca_conn_event_out_queue_len_max = self
-            .ca_conn_event_out_queue_len_max
-            .max(inp.ca_conn_event_out_queue_len);
-        self.ca_msg_recv_cnt_all += inp.ca_msg_recv_cnt;
-    }
-}
-
-#[derive(Debug, Serialize)]
-pub struct CaConnMetricsAggAgg {
-    // derived from values
-    pub ca_conn_event_out_queue_len_max: usize,
-    // derived from counter terms
-    pub ca_msg_recv_cnt_all: u64,
-}
-
-impl CaConnMetricsAggAgg {
-    pub fn new() -> Self {
-        Self {
-            ca_conn_event_out_queue_len_max: 0,
-            ca_msg_recv_cnt_all: 0,
-        }
-    }
-
-    pub fn ingest(&mut self, inp: CaConnMetricsAgg) {
-        // take again the max of the maxs
-        self.ca_conn_event_out_queue_len_max = self
-            .ca_conn_event_out_queue_len_max
-            .max(inp.ca_conn_event_out_queue_len_max);
-        // sum up again to a total
-        self.ca_msg_recv_cnt_all += inp.ca_msg_recv_cnt_all;
-    }
-}
-
-#[derive(Debug, Serialize)]
 pub struct CaConnSetMetrics {
     pub ca_conn_agg: CaConnMetricsAgg,
     pub mett: stats::mett::CaConnSetMetrics,

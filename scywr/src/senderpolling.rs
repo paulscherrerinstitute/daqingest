@@ -125,15 +125,19 @@ impl<T> SenderPolling<T> {
     }
 
     unsafe fn reset_fut(futopt: Pin<&mut Option<Send<'_, T>>>) {
-        let y = futopt.get_unchecked_mut();
-        let z = y.as_mut().unwrap_unchecked();
-        std::ptr::drop_in_place(z);
-        std::ptr::write(y, None);
+        unsafe {
+            let y = futopt.get_unchecked_mut();
+            let z = y.as_mut().unwrap_unchecked();
+            std::ptr::drop_in_place(z);
+            std::ptr::write(y, None);
+        }
     }
 
     #[allow(unused)]
     unsafe fn reset_fut_old(futopt: Pin<&mut Option<Send<'_, T>>>) {
-        *futopt.get_unchecked_mut() = None;
+        unsafe {
+            *futopt.get_unchecked_mut() = None;
+        }
     }
 }
 

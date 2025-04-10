@@ -2,7 +2,6 @@ mod enumfetch;
 
 use crate::conf::ChannelConfig;
 use crate::metrics::status::StorageUsage;
-use crate::metrics::types::CaConnMetrics;
 use crate::throttletrace::ThrottleTrace;
 use async_channel::Receiver;
 use async_channel::Sender;
