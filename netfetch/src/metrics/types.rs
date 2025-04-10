@@ -1,46 +1,6 @@
 use scywr::insertqueues::InsertQueuesTx;
 use serde::Serialize;
 
-#[derive(Debug, Serialize)]
-pub struct CaConnSetMetrics {
-    pub ca_conn_agg: CaConnMetricsAgg,
-    pub mett: stats::mett::CaConnSetMetrics,
-}
-
-impl CaConnSetMetrics {
-    pub fn new() -> Self {
-        Self {
-            ca_conn_agg: CaConnMetricsAgg::new(),
-            mett: stats::mett::CaConnSetMetrics::new(),
-        }
-    }
-}
-
-#[derive(Debug, Serialize)]
-pub struct CaConnSetAggMetrics {
-    pub ca_conn_agg_agg: CaConnMetricsAggAgg,
-}
-
-impl CaConnSetAggMetrics {
-    pub fn new() -> Self {
-        Self {
-            ca_conn_agg_agg: CaConnMetricsAggAgg::new(),
-        }
-    }
-
-    pub fn ingest(&mut self, inp: CaConnSetMetrics) {
-        {
-            let src = inp.ca_conn_agg;
-            let dst = &mut self.ca_conn_agg_agg;
-            // take again the max of the maxs
-            dst.ca_conn_event_out_queue_len_max = dst
-                .ca_conn_event_out_queue_len_max
-                .max(src.ca_conn_event_out_queue_len_max);
-            dst.ca_msg_recv_cnt_all += src.ca_msg_recv_cnt_all;
-        }
-    }
-}
-
 pub struct InsertQueuesTxMetrics {
     pub st_rf1_len: usize,
     pub st_rf3_len: usize,

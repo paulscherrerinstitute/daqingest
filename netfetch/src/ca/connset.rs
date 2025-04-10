@@ -59,8 +59,6 @@ use std::net::SocketAddr;
 use std::net::SocketAddrV4;
 use std::pin::Pin;
 
-use crate::metrics::types::CaConnMetricsAgg;
-use crate::metrics::types::CaConnSetMetrics;
 use crate::queueset::QueueSet;
 use netpod::OnDrop;
 use netpod::TsNano;
@@ -460,7 +458,7 @@ pub struct CaConnSet {
     rogue_channel_count: u64,
     connect_fail_count: usize,
     cssid_latency_max: Duration,
-    ca_connset_metrics: CaConnSetMetrics,
+    ca_connset_metrics: stats::mett::CaConnSetMetrics,
 }
 
 impl CaConnSet {
@@ -534,7 +532,7 @@ impl CaConnSet {
             rogue_channel_count: 0,
             connect_fail_count: 0,
             cssid_latency_max: Duration::from_millis(2000),
-            ca_connset_metrics: CaConnSetMetrics::new(),
+            ca_connset_metrics: stats::mett::CaConnSetMetrics::new(),
         };
         // TODO await on jh
         let jh = tokio::spawn(CaConnSet::run(connset));
@@ -770,7 +768,7 @@ impl CaConnSet {
             CaConnEventValue::EndOfStream(reason) => self.handle_ca_conn_eos(addr, reason),
             CaConnEventValue::ChannelRemoved(name) => self.handle_ca_conn_channel_removed(addr, name),
             CaConnEventValue::Metrics(v) => {
-                self.ca_connset_metrics.mett.ca_conn().ingest(v);
+                self.ca_connset_metrics.ca_conn().ingest(v);
                 Ok(())
             }
         }
@@ -1883,7 +1881,7 @@ impl CaConnSet {
         }
         {
             // let item = std::mem::replace(&mut self.ca_connset_metrics, CaConnSetMetrics::new());
-            let item = self.ca_connset_metrics.mett.take_and_reset();
+            let item = self.ca_connset_metrics.take_and_reset();
             let item = CaConnSetItem::Metrics(item);
             self.connset_out_queue.push_back(item);
         }
