@@ -2738,7 +2738,6 @@ impl CaConn {
                     }
                     if st2.channel.ts_activity_last + conf.conf.expect_activity_within() < tsnow {
                         not_alive_count += 1;
-                        self.mett.channel_not_alive_no_activity().inc();
                     } else {
                         alive_count += 1;
                     }
@@ -2828,14 +2827,12 @@ impl CaConn {
                             }
                             CaMsgTy::ReadNotifyRes(ev) => Self::handle_read_notify_res(self, ev, camsg.ts, tsnow)?,
                             CaMsgTy::Echo => {
-                                // let addr = &self.remote_addr_dbg;
                                 if let Some(started) = self.ioc_ping_start {
                                     let dt = started.elapsed();
-                                    // TODO STATS
-                                    // self.stats.pong_recv_lat().ingest_dur_dms(dt);
+                                    self.mett.pong_recv_lat().push_dur_100us(dt);
                                 } else {
                                     let addr = &self.remote_addr_dbg;
-                                    warn!("received Echo even though we didn't asked for it  {addr:?}");
+                                    warn!("received Echo even though we didn't asked for it  {}", addr);
                                 }
                                 self.ioc_pong_last = Some(self.tmp_ts_poll);
                                 self.ioc_ping_next = tsnow + Self::ioc_ping_ivl_rng(&mut self.rng);

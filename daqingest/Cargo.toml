@@ -8,6 +8,7 @@ edition = "2024"
 default = []
 # default = ["bsread"]
 bsread = []
+DISABLED = []
 
 [dependencies]
 clap = { version = "4.5.28", features = ["derive", "cargo"] }

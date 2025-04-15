@@ -36,7 +36,6 @@ mod Metrics {
         ca_msg_recv,
         event_add_res_recv,
         time_check_channels_state_init,
-        channel_not_alive_no_activity,
         ping_no_proto,
         ping_start,
         pong_timeout,
@@ -65,6 +64,7 @@ mod Metrics {
         poll_reloops,
         poll_all_dt,
         iiq_batch_len,
+        pong_recv_lat,
     }
     mod Compose {
         type Input = ca_proto::mett::CaProtoMetrics;
@@ -89,5 +89,11 @@ mod Metrics {
     mod Compose {
         type Input = ScyllaInsertWorker;
         type Name = scy_inswork;
+    }
+    enum counters {
+        proc_cpu_v0_inc,
+        proc_cpu_v0_dec,
+        proc_mem_rss_inc,
+        proc_mem_rss_dec,
     }
 }
