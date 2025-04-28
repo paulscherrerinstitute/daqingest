@@ -84,8 +84,6 @@ pub struct Daemon {
     series_conf_by_id_tx: Sender<()>,
     iqtx: Option<InsertQueuesTx>,
     daemon_metrics: stats::mett::DaemonMetrics,
-    cpu_latest: u64,
-    rss_latest: u64,
 }
 
 impl Daemon {
@@ -331,7 +329,6 @@ impl Daemon {
             insert_worker_jhs.extend(jh);
         };
         let stats = Arc::new(DaemonStats::new());
-        stats.insert_worker_spawned().add(insert_worker_jhs.len() as _);
 
         #[cfg(feature = "bsread")]
         if let Some(bsaddr) = &opts.test_bsread_addr {
@@ -419,8 +416,6 @@ impl Daemon {
             series_conf_by_id_tx,
             iqtx: Some(iqtx2),
             daemon_metrics: stats::mett::DaemonMetrics::new(),
-            cpu_latest: 0,
-            rss_latest: 0,
         };
         Ok(ret)
     }
@@ -479,15 +474,7 @@ impl Daemon {
 
     fn update_cpu_usage(&mut self) {
         let cpu = Self::get_cpu_usage();
-        if cpu > self.cpu_latest {
-            let diff = cpu - self.cpu_latest;
-            self.cpu_latest = cpu;
-            self.daemon_metrics.proc_cpu_v0_inc().add(diff as u32);
-        } else if cpu < self.cpu_latest {
-            let diff = self.cpu_latest - cpu;
-            self.cpu_latest = cpu;
-            self.daemon_metrics.proc_cpu_v0_dec().add(diff as u32);
-        }
+        self.daemon_metrics.proc_cpu_v0().set(cpu as _);
     }
 
     fn get_memory_usage() -> u64 {
@@ -518,15 +505,7 @@ impl Daemon {
 
     fn update_memory_usage(&mut self) {
         let rss = Self::get_memory_usage();
-        if rss > self.rss_latest {
-            let diff = rss - self.rss_latest;
-            self.rss_latest = rss;
-            self.daemon_metrics.proc_mem_rss_inc().add(diff as u32);
-        } else if rss < self.rss_latest {
-            let diff = self.rss_latest - rss;
-            self.rss_latest = rss;
-            self.daemon_metrics.proc_mem_rss_dec().add(diff as u32);
-        }
+        self.daemon_metrics.proc_mem_rss().set(rss as _);
     }
 
     async fn handle_timer_tick(&mut self) -> Result<(), Error> {
@@ -545,7 +524,6 @@ impl Daemon {
                 std::process::exit(0);
             }
         }
-        self.stats.handle_timer_tick_count.inc();
         let tsnow = SystemTime::now();
         {
             let n = SIGINT.load(atomic::Ordering::Acquire);
@@ -583,18 +561,19 @@ impl Daemon {
             .as_ref()
             .map(|x| netfetch::metrics::types::InsertQueuesTxMetrics::from(x));
         if let Some(iqtxm) = iqtxm {
-            // TODO metrics
-            self.stats().iqtx_len_st_rf1().set(iqtxm.st_rf1_len as _);
-            self.stats().iqtx_len_st_rf3().set(iqtxm.st_rf3_len as _);
-            self.stats().iqtx_len_mt_rf3().set(iqtxm.mt_rf3_len as _);
-            self.stats().iqtx_len_lt_rf3().set(iqtxm.lt_rf3_len as _);
-            self.stats().iqtx_len_lt_rf3_lat5().set(iqtxm.lt_rf3_lat5_len as _);
+            self.daemon_metrics.iqtx_len_st_rf1().set(iqtxm.st_rf1_len as _);
+            self.daemon_metrics.iqtx_len_st_rf3().set(iqtxm.st_rf3_len as _);
+            self.daemon_metrics.iqtx_len_mt_rf3().set(iqtxm.mt_rf3_len as _);
+            self.daemon_metrics.iqtx_len_lt_rf3().set(iqtxm.lt_rf3_len as _);
+            self.daemon_metrics
+                .iqtx_len_lt_rf3_lat5()
+                .set(iqtxm.lt_rf3_lat5_len as _);
         } else {
-            self.stats().iqtx_len_st_rf1().set(2);
-            self.stats().iqtx_len_st_rf3().set(2);
-            self.stats().iqtx_len_mt_rf3().set(2);
-            self.stats().iqtx_len_lt_rf3().set(2);
-            self.stats().iqtx_len_lt_rf3_lat5().set(2);
+            self.daemon_metrics.iqtx_len_st_rf1().set(0);
+            self.daemon_metrics.iqtx_len_st_rf3().set(0);
+            self.daemon_metrics.iqtx_len_mt_rf3().set(0);
+            self.daemon_metrics.iqtx_len_lt_rf3().set(0);
+            self.daemon_metrics.iqtx_len_lt_rf3_lat5().set(0);
         }
         self.update_cpu_usage();
         self.update_memory_usage();
@@ -677,7 +656,7 @@ impl Daemon {
             Healthy => {
                 let tsnow = Instant::now();
                 self.connset_status_last = tsnow;
-                self.stats.caconnset_health_response().inc();
+                self.daemon_metrics.caconnset_health_response().inc();
             }
             Error(e) => {
                 error!("error from CaConnSet: {e}");
@@ -766,21 +745,21 @@ impl Daemon {
         match self.handle_config_reload_inner().await {
             Ok(()) => {
                 if tx.send(0).await.is_err() {
-                    self.stats.channel_send_err().inc();
+                    self.daemon_metrics.channel_send_err().inc();
                 }
                 Ok(())
             }
             Err(e) => {
                 error!("{e}");
                 if tx.send(127).await.is_err() {
-                    self.stats.channel_send_err().inc();
+                    self.daemon_metrics.channel_send_err().inc();
                 }
                 Ok(())
             }
         }
     }
 
-    #[cfg(target_abi = "x32")]
+    #[cfg(feature = "DISABLED")]
     async fn handle_shutdown(&mut self) -> Result<(), Error> {
         warn!("received shutdown event");
         if self.shutting_down {
@@ -795,7 +774,7 @@ impl Daemon {
 
     async fn handle_event(&mut self, item: DaemonEvent) -> Result<(), Error> {
         use DaemonEvent::*;
-        self.stats.events.inc();
+        self.daemon_metrics.handle_event().inc();
         let ts1 = Instant::now();
         let item_summary = item.summary();
         let ret = match item {
@@ -805,7 +784,6 @@ impl Daemon {
                 match tx.send(i.wrapping_add(1)).await {
                     Ok(()) => {}
                     Err(_) => {
-                        self.stats.ticker_token_release_error.inc();
                         error!("can not send ticker token");
                         return Err(Error::with_msg_no_trace("can not send ticker token"));
                     }
@@ -871,7 +849,7 @@ impl Daemon {
                         match ticker_inp_rx.recv().await {
                             Ok(_) => {}
                             Err(_) => {
-                                stats.ticker_token_acquire_error.inc();
+                                panic!("can not acquire timer ticker token");
                                 break;
                             }
                         }
@@ -909,7 +887,6 @@ impl Daemon {
                 daemon_stats,
                 conn_set_stats,
                 ca_conn_stats,
-                self.connset_ctrl.ca_proto_stats().clone(),
                 self.insert_worker_stats.clone(),
                 self.series_by_channel_stats.clone(),
                 self.connset_ctrl.ioc_finder_stats().clone(),
@@ -960,17 +937,12 @@ impl Daemon {
         while let Some(jh) = self.insert_workers_jhs.pop() {
             match jh.await.map_err(Error::from_string) {
                 Ok(x) => match x {
-                    Ok(()) => {
-                        self.stats.insert_worker_join_ok().inc();
-                        // debug!("joined insert worker");
-                    }
+                    Ok(()) => {}
                     Err(e) => {
-                        self.stats.insert_worker_join_ok_err().inc();
                         error!("joined insert worker, error  {e}");
                     }
                 },
                 Err(e) => {
-                    self.stats.insert_worker_join_err().inc();
                     error!("insert worker join error {e}");
                 }
             }

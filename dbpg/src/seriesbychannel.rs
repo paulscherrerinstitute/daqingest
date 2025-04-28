@@ -3,8 +3,8 @@ use async_channel::Sender;
 use chrono::DateTime;
 use chrono::Utc;
 use core::fmt;
-use err::thiserror;
 use err::ThisError;
+use err::thiserror;
 use futures_util::Future;
 use futures_util::TryFutureExt;
 use log::*;
@@ -626,6 +626,7 @@ pub async fn start_lookup_workers<FR: HashSalter>(
     Ok((query_tx, jhs, bjh))
 }
 
+#[allow(unused)]
 struct SalterTest;
 
 impl HashSalter for SalterTest {
@@ -639,6 +640,8 @@ pub struct SalterRandom;
 
 impl HashSalter for SalterRandom {
     fn hupd(hupd: &mut dyn FnMut(&[u8]), i1: u16, i2: u16) {
+        let _ = i1;
+        let _ = i2;
         let tsnow = Instant::now();
         let b = unsafe { &*(&tsnow as *const Instant as *const [u8; core::mem::size_of::<Instant>()]) };
         hupd(b)
@@ -647,9 +650,9 @@ impl HashSalter for SalterRandom {
 
 #[cfg(test)]
 async fn psql_play(db: &Database) -> Result<(), Error> {
-    use tokio_postgres::types::ToSql;
+    // use tokio_postgres::types::ToSql;
     use tokio_postgres::types::Type;
-    let (pg, pg_client_jh) = crate::conn::make_pg_client(db).await?;
+    let (pg, _pg_client_jh) = crate::conn::make_pg_client(db).await?;
     if false {
         let sql = concat!("select pg_typeof($1)");
         let qu = pg.prepare_typed(sql, &[Type::INT4_ARRAY]).await?;
@@ -763,7 +766,7 @@ fn test_series_by_channel_01() {
             }
         }
         // TODO keep join handles and await later
-        let (channel_info_query_tx, jhs, jh) =
+        let (channel_info_query_tx, _jhs, _jh) =
             dbpg::seriesbychannel::start_lookup_workers::<SalterTest>(1, &pgconf, series_by_channel_stats.clone())
                 .await?;
 
@@ -894,11 +897,4 @@ fn test_db_conf() -> Database {
             name: "test_daqbuffer".into(),
         }
     }
-}
-
-#[cfg(test)]
-async fn test_db_conn() -> Result<PgClient, Error> {
-    let db = test_db_conf();
-    let (pg, pg_client_jh) = crate::conn::make_pg_client(&db).await?;
-    Ok(pg)
 }

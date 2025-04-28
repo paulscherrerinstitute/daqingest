@@ -5,12 +5,18 @@ mod Metrics {
         job_ok,
         job_err,
     }
+    enum histolog2s {
+        job_dt1,
+        job_dt2,
+        job_dt_net,
+    }
 }
 
 mod Metrics {
     type StructName = CaConnMetrics;
     enum counters {
         metrics_emit,
+        metrics_emit_final,
         ioid_read_begin,
         ioid_read_done,
         ioid_read_timeout,
@@ -91,9 +97,17 @@ mod Metrics {
         type Name = scy_inswork;
     }
     enum counters {
-        proc_cpu_v0_inc,
-        proc_cpu_v0_dec,
-        proc_mem_rss_inc,
-        proc_mem_rss_dec,
+        handle_event,
+        caconnset_health_response,
+        channel_send_err,
+    }
+    enum values {
+        proc_cpu_v0,
+        proc_mem_rss,
+        iqtx_len_st_rf1,
+        iqtx_len_st_rf3,
+        iqtx_len_mt_rf3,
+        iqtx_len_lt_rf3,
+        iqtx_len_lt_rf3_lat5,
     }
 }

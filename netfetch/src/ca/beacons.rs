@@ -41,7 +41,6 @@ pub async fn listen_beacons(
     worker_tx: Sender<ChannelInfoQuery>,
     backend: String,
 ) -> Result<(), Error> {
-    let stnow = SystemTime::now();
     let channel = "epics-ca-beacons".to_string();
     let scalar_type = ScalarType::U64;
     let shape = Shape::Scalar;
@@ -56,6 +55,7 @@ pub async fn listen_beacons(
     };
     worker_tx.send(qu).await?;
     let chinfo = rx.recv().await??;
+    let _ = chinfo;
     // TODO
     // let mut writer = SeriesWriter::new(chinfo.series.to_series());
     // let mut deque = VecDeque::new();
@@ -91,6 +91,8 @@ pub async fn listen_beacons(
                 let ts_local = ts;
                 let blob = addr_u32 as i64;
                 let val = DataValue::Scalar(ScalarValue::I64(blob));
+                let _ = ts_local;
+                let _ = val;
                 // writer.write(ts, ts_local, val, &mut deque)?;
             }
         }

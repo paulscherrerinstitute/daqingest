@@ -781,6 +781,7 @@ enum CaConnState {
     PeerReady,
     Shutdown(EndOfStreamReason),
     EndOfStream,
+    MetricsEmitted,
 }
 
 impl fmt::Debug for CaConnState {
@@ -793,6 +794,7 @@ impl fmt::Debug for CaConnState {
             Self::PeerReady => fmt.debug_tuple("PeerReady").finish(),
             Self::Shutdown(v0) => fmt.debug_tuple("Shutdown").field(v0).finish(),
             Self::EndOfStream => fmt.debug_tuple("EndOfStream").finish(),
+            Self::MetricsEmitted => fmt.debug_tuple("MetricsEmitted").finish(),
         }
     }
 }
@@ -1101,7 +1103,6 @@ pub struct CaConn {
     ca_conn_event_out_queue: VecDeque<CaConnEvent>,
     ca_conn_event_out_queue_max: usize,
     thr_msg_poll: ThrottleTrace,
-    ca_proto_stats: Arc<CaProtoStats>,
     rng: Xoshiro128PlusPlus,
     channel_info_query_qu: VecDeque<ChannelInfoQuery>,
     channel_info_query_tx: Pin<Box<SenderPolling<ChannelInfoQuery>>>,
@@ -1118,6 +1119,7 @@ pub struct CaConn {
     ts_channel_status_pong_last: Instant,
     mett: stats::mett::CaConnMetrics,
     metrics_emit_last: Instant,
+    fionread_last: u32,
 }
 
 impl Drop for CaConn {
@@ -1135,7 +1137,6 @@ impl CaConn {
         iqtx: InsertQueuesTx,
         channel_info_query_tx: Sender<ChannelInfoQuery>,
         stats: Arc<CaConnStats>,
-        ca_proto_stats: Arc<CaProtoStats>,
     ) -> Self {
         let tsnow = Instant::now();
         let (cq_tx, cq_rx) = async_channel::bounded(32);
@@ -1174,7 +1175,6 @@ impl CaConn {
             ca_conn_event_out_queue: VecDeque::new(),
             ca_conn_event_out_queue_max: 2000,
             thr_msg_poll: ThrottleTrace::new(Duration::from_millis(2000)),
-            ca_proto_stats,
             rng,
             channel_info_query_qu: VecDeque::new(),
             channel_info_query_tx: Box::pin(SenderPolling::new(channel_info_query_tx)),
@@ -1188,6 +1188,7 @@ impl CaConn {
             ts_channel_status_pong_last: tsnow,
             mett: stats::mett::CaConnMetrics::new(),
             metrics_emit_last: tsnow,
+            fionread_last: 0,
         }
     }
 
@@ -1528,12 +1529,14 @@ impl CaConn {
                         if dbg_chn_cid {
                             info!("send out EventAdd for {cid:?}");
                         }
-                        let ty = CaMsgTy::EventAdd(EventAdd {
-                            sid: st2.channel.sid.to_u32(),
-                            data_type: st2.channel.ca_dbr_type,
-                            data_count: st2.channel.ca_dbr_count,
-                            subid: subid.to_u32(),
-                        });
+                        let data_count = st2.channel.ca_dbr_count;
+                        let _data_count = 0;
+                        let ty = CaMsgTy::EventAdd(EventAdd::new(
+                            st2.channel.ca_dbr_type,
+                            data_count,
+                            st2.channel.sid.to_u32(),
+                            subid.to_u32(),
+                        ));
                         let msg = CaMsg::from_ty_ts(ty, self.poll_tsnow);
                         let proto = self.proto.as_mut().unwrap();
                         proto.push_out(msg);
@@ -1802,7 +1805,12 @@ impl CaConn {
         Ok(())
     }
 
-    fn handle_event_add_res(&mut self, ev: proto::EventAddRes, tsnow: Instant) -> Result<(), Error> {
+    fn handle_event_add_res(
+        &mut self,
+        ev: proto::EventAddRes,
+        tsnow: Instant,
+        tscaproto: Instant,
+    ) -> Result<(), Error> {
         let subid = Subid(ev.subid);
         // TODO handle subid-not-found which can also be peer error:
         let cid = if let Some(x) = self.cid_by_subid.get(&subid) {
@@ -1910,6 +1918,7 @@ impl CaConn {
                             iqdqs,
                             tsnow,
                             stnow,
+                            tscaproto,
                             ch_conf.use_ioc_time(),
                             stats,
                             &mut self.rng,
@@ -1942,6 +1951,7 @@ impl CaConn {
                             iqdqs,
                             tsnow,
                             stnow,
+                            tscaproto,
                             ch_conf.use_ioc_time(),
                             stats,
                             &mut self.rng,
@@ -2049,8 +2059,8 @@ impl CaConn {
     fn handle_read_notify_res(
         &mut self,
         ev: proto::ReadNotifyRes,
-        camsg_ts: Instant,
         tsnow: Instant,
+        tscaproto: Instant,
     ) -> Result<(), Error> {
         // trace!("handle_read_notify_res  {ev:?}");
         // TODO can not rely on the SID in the response.
@@ -2058,10 +2068,7 @@ impl CaConn {
         let ioid = Ioid(ev.ioid);
         if let Some(pp) = self.handler_by_ioid.get_mut(&ioid) {
             if let Some(mut fut) = pp.take() {
-                let camsg = CaMsg {
-                    ty: CaMsgTy::ReadNotifyRes(ev),
-                    ts: camsg_ts,
-                };
+                let camsg = CaMsg::from_ty_ts(CaMsgTy::ReadNotifyRes(ev), tscaproto);
                 fut.as_mut().camsg(camsg, self)?;
                 Ok(())
             } else {
@@ -2119,6 +2126,7 @@ impl CaConn {
                                         iqdqs,
                                         stnow,
                                         tsnow,
+                                        tscaproto,
                                         ch_conf.use_ioc_time(),
                                         stats,
                                         &mut self.rng,
@@ -2211,6 +2219,7 @@ impl CaConn {
                                             iqdqs,
                                             stnow,
                                             tsnow,
+                                            tscaproto,
                                             ch_conf.use_ioc_time(),
                                             stats,
                                             &mut self.rng,
@@ -2243,6 +2252,7 @@ impl CaConn {
         iqdqs: &mut InsertDeques,
         stnow: SystemTime,
         tsnow: Instant,
+        tscaproto: Instant,
         use_ioc_time: bool,
         stats: &CaConnStats,
         rng: &mut Xoshiro128PlusPlus,
@@ -2260,6 +2270,7 @@ impl CaConn {
             iqdqs,
             tsnow,
             stnow,
+            tscaproto,
             use_ioc_time,
             stats,
             rng,
@@ -2277,6 +2288,7 @@ impl CaConn {
         iqdqs: &mut InsertDeques,
         tsnow: Instant,
         stnow: SystemTime,
+        tscaproto: Instant,
         use_ioc_time: bool,
         stats: &CaConnStats,
         rng: &mut Xoshiro128PlusPlus,
@@ -2340,7 +2352,7 @@ impl CaConn {
             crst.insert_item_ivl_ema.tick(tsnow);
             // binwriter.ingest(tsev, value.f32_for_binning(), iqdqs)?;
             {
-                let wres = writer.write(CaWriterValue::new(value, crst), tsnow, tsev, iqdqs)?;
+                let wres = writer.write(CaWriterValue::new(value, crst), tscaproto, tsev, iqdqs)?;
                 crst.status_emit_count += wres.nstatus() as u64;
                 if wres.st.accept {
                     crst.dw_st_last = stnow;
@@ -2595,13 +2607,11 @@ impl CaConn {
                                     // Do not go directly into error state: need to at least attempt to close the channel and wait/timeout for reply.
 
                                     let proto = self.proto.as_mut().ok_or(Error::NoProtocol)?;
-                                    let item = CaMsg {
-                                        ty: CaMsgTy::ChannelClose(ChannelClose {
-                                            sid: st2.channel.sid.0,
-                                            cid: st2.channel.cid.0,
-                                        }),
-                                        ts: tsnow,
-                                    };
+                                    let ty = CaMsgTy::ChannelClose(ChannelClose {
+                                        sid: st2.channel.sid.0,
+                                        cid: st2.channel.cid.0,
+                                    });
+                                    let item = CaMsg::from_ty_ts(ty, tsnow);
                                     proto.push_out(item);
                                     *chst = ChannelState::Closing(ClosingState {
                                         tsbeg: tsnow,
@@ -2775,7 +2785,8 @@ impl CaConn {
             Ready(Some(Ok(k))) => {
                 match k {
                     CaItem::Msg(camsg) => {
-                        match &camsg.ty {
+                        let (msgcom, ty) = camsg.into_parts();
+                        match &ty {
                             CaMsgTy::Version => {
                                 if !self.version_seen {
                                     self.version_seen = true;
@@ -2804,7 +2815,7 @@ impl CaConn {
                                 }
                             }
                         }
-                        match camsg.ty {
+                        match ty {
                             CaMsgTy::SearchRes(k) => {
                                 let a = k.addr.to_be_bytes();
                                 let addr = format!("{}.{}.{}.{}:{}", a[0], a[1], a[2], a[3], k.tcp_port);
@@ -2817,15 +2828,15 @@ impl CaConn {
                                 cx.waker().wake_by_ref();
                             }
                             CaMsgTy::EventAddRes(ev) => {
-                                trace4!("got EventAddRes  {:?}  cnt {}", camsg.ts, ev.data_count);
+                                trace4!("got EventAddRes  {:?}  cnt {}", msgcom.ts(), ev.data_count);
                                 self.mett.event_add_res_recv().inc();
-                                Self::handle_event_add_res(self, ev, tsnow)?
+                                Self::handle_event_add_res(self, ev, tsnow, msgcom.ts())?
                             }
                             CaMsgTy::EventAddResEmpty(ev) => {
-                                trace4!("got EventAddResEmpty  {:?}", camsg.ts);
+                                trace4!("got EventAddResEmpty  {:?}", msgcom.ts());
                                 Self::handle_event_add_res_empty(self, ev, tsnow)?
                             }
-                            CaMsgTy::ReadNotifyRes(ev) => Self::handle_read_notify_res(self, ev, camsg.ts, tsnow)?,
+                            CaMsgTy::ReadNotifyRes(ev) => Self::handle_read_notify_res(self, ev, tsnow, msgcom.ts())?,
                             CaMsgTy::Echo => {
                                 if let Some(started) = self.ioc_ping_start {
                                     let dt = started.elapsed();
@@ -2874,11 +2885,11 @@ impl CaConn {
                                 }
                                 self.version_seen = true;
                             }
-                            CaMsgTy::ChannelCloseRes(x) => {
-                                self.handle_channel_close_res(x, tsnow)?;
+                            CaMsgTy::ChannelCloseRes(ty) => {
+                                self.handle_channel_close_res(ty, tsnow)?;
                             }
                             _ => {
-                                warn!("Received unexpected protocol message {:?}", camsg);
+                                warn!("Received unexpected protocol message {:?} {:?}", msgcom, ty);
                             }
                         }
                     }
@@ -3014,6 +3025,7 @@ impl CaConn {
     }
 
     fn handle_channel_close_res(&mut self, k: proto::ChannelCloseRes, tsnow: Instant) -> Result<(), Error> {
+        let _ = tsnow;
         debug!("{:?}", k);
         Ok(())
     }
@@ -3037,6 +3049,11 @@ impl CaConn {
                         Ready(connect_result) => {
                             match connect_result {
                                 Ok(Ok(tcp)) => {
+                                    let raw_fd = {
+                                        use std::os::fd::AsRawFd;
+                                        let raw_fd = tcp.as_raw_fd();
+                                        raw_fd
+                                    };
                                     self.mett.tcp_connected().inc();
                                     let addr = addr.clone();
                                     self.emit_connection_status_item(ConnectionStatusItem {
@@ -3047,6 +3064,7 @@ impl CaConn {
                                     self.backoff_reset();
                                     let proto = CaProto::new(
                                         TcpAsyncWriteRead::from(tcp),
+                                        Some(raw_fd),
                                         self.remote_addr_dbg.to_string(),
                                         self.opts.array_truncate,
                                     );
@@ -3128,6 +3146,7 @@ impl CaConn {
                 }
                 CaConnState::Shutdown(..) => Ok(Ready(None)),
                 CaConnState::EndOfStream => Ok(Ready(None)),
+                CaConnState::MetricsEmitted => Ok(Ready(None)),
             };
         }
     }
@@ -3230,6 +3249,7 @@ impl CaConn {
             CaConnState::PeerReady => {}
             CaConnState::Shutdown(..) => {}
             CaConnState::EndOfStream => {}
+            CaConnState::MetricsEmitted => {}
         }
         self.iqdqs.housekeeping();
         if self.metrics_emit_last + METRICS_EMIT_IVL <= tsnow {
@@ -3243,8 +3263,29 @@ impl CaConn {
 
     fn metrics_emit(&mut self) {
         if let Some(x) = self.proto.as_mut() {
+            let fionread = if let Some(rawfd) = x.get_raw_socket_fd() {
+                let mut v = 0;
+                if unsafe { libc::ioctl(rawfd, libc::FIONREAD, &mut v) } == 0 {
+                    Some(v as u32)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
             let mett = x.mett();
             mett.metrics_emit().inc();
+            if let Some(fionread) = fionread {
+                if fionread > self.fionread_last {
+                    let diff = fionread - self.fionread_last;
+                    self.fionread_last = fionread;
+                    mett.fionread_inc().add(diff);
+                } else if fionread < self.fionread_last {
+                    let diff = self.fionread_last - fionread;
+                    self.fionread_last = fionread;
+                    mett.fionread_dec().add(diff);
+                }
+            }
             let m = mett.take_and_reset();
             self.mett.proto().ingest(m);
         }
@@ -3552,8 +3593,14 @@ impl Stream for CaConn {
             let mut have_pending = false;
             let mut have_progress = false;
 
-            if let CaConnState::EndOfStream = self.state {
+            if let CaConnState::MetricsEmitted = self.state {
                 break Ready(None);
+            } else if let CaConnState::EndOfStream = self.state {
+                self.mett.metrics_emit_final().inc();
+                let mett = self.mett.take_and_reset();
+                self.state = CaConnState::MetricsEmitted;
+                break Ready(Some(CaConnEvent::new_now(CaConnEventValue::Metrics(mett))));
+                // break Ready(None);
             } else if let Some(item) = self.ca_conn_event_out_queue.pop_front() {
                 break Ready(Some(item));
             }

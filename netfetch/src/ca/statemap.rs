@@ -24,21 +24,6 @@ pub enum CaConnStateValue {
     Shutdown { since: Instant },
 }
 
-#[derive(Debug)]
-pub struct CaConnState {
-    pub last_feedback: Instant,
-    pub value: CaConnStateValue,
-}
-
-impl CaConnState {
-    pub fn new(value: CaConnStateValue) -> Self {
-        Self {
-            last_feedback: Instant::now(),
-            value,
-        }
-    }
-}
-
 #[derive(Debug, Clone, Serialize)]
 pub enum ConnectionStateValue {
     Unknown,
@@ -243,6 +228,8 @@ impl ChannelStateMap {
     }
 
     pub fn insert(&mut self, k: ChannelName, v: ChannelState) -> Option<ChannelState> {
+        let _ = &self.map2;
+        let _ = &self.map3;
         self.map.insert(k, v)
     }
 

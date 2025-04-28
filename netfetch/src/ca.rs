@@ -8,7 +8,6 @@ pub mod findioc;
 pub mod search;
 pub mod statemap;
 
-use crate::metrics::ExtraInsertsConf;
 use futures_util::Future;
 use futures_util::FutureExt;
 use log::*;

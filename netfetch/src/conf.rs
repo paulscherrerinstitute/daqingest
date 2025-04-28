@@ -23,8 +23,6 @@ pub struct CaIngestOpts {
     search: Vec<String>,
     #[serde(default)]
     search_blacklist: Vec<String>,
-    whitelist: Option<String>,
-    blacklist: Option<String>,
     #[allow(unused)]
     #[serde(default, with = "humantime_serde")]
     timeout: Option<Duration>,
@@ -424,6 +422,7 @@ mod serde_replication_bool {
     use serde::de;
     use std::fmt;
 
+    #[allow(unused)]
     pub fn serialize<S>(v: &bool, ser: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
@@ -488,6 +487,7 @@ mod serde_option_channel_read_config {
     use std::fmt;
     use std::time::Duration;
 
+    #[allow(unused)]
     pub fn serialize<S>(v: &Option<ChannelReadConfig>, ser: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,

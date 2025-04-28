@@ -13,38 +13,38 @@ use crate::store::DataStore;
 use async_channel::Receiver;
 use async_channel::Sender;
 use atomic::AtomicU64;
+use futures_util::FutureExt;
 use futures_util::Stream;
 use futures_util::StreamExt;
-use log::*;
+use log;
 use netpod::ttl::RetentionTime;
 use smallvec::SmallVec;
 use smallvec::smallvec;
 use stats::InsertWorkerStats;
 use std::collections::VecDeque;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic;
+use std::task::Context;
+use std::task::Poll;
 use std::time::Duration;
 use std::time::Instant;
 use taskrun::tokio;
 use tokio::task::JoinHandle;
 
-macro_rules! trace2 {
-    ($($arg:tt)*) => {
-        if false {
-            trace!($($arg)*);
-        }
-    };
-}
+macro_rules! error { ($($arg:expr),*) => ( if true { log::error!($($arg),*); } ); }
 
-macro_rules! trace_item_execute {
-    ($($arg:tt)*) => {
-        if false {
-            trace!($($arg)*);
-        }
-    };
-}
+macro_rules! warn { ($($arg:expr),*) => ( if true { log::warn!($($arg),*); } ); }
 
-macro_rules! debug_setup { ($($arg:expr),*) => ( if false { debug!($($arg),*); } ); }
+macro_rules! trace2 { ($($arg:expr),*) => ( if false { log::trace!($($arg),*); } ); }
+
+macro_rules! trace_transform { ($($arg:expr),*) => ( if false { log::trace!($($arg),*); } ); }
+
+macro_rules! trace_inspect { ($($arg:expr),*) => ( if false { log::trace!($($arg),*); } ); }
+
+macro_rules! trace_item_execute { ($($arg:expr),*) => ( if false { log::trace!($($arg),*); } ); }
+
+macro_rules! debug_setup { ($($arg:expr),*) => ( if false { log::debug!($($arg),*); } ); }
 
 autoerr::create_error_v1!(
     name(Error, "ScyllaInsertWorker"),
@@ -67,7 +67,7 @@ fn stats_inc_for_err(stats: &stats::InsertWorkerStats, err: &crate::iteminsertqu
         }
         Error::DbError(_) => {
             if true {
-                warn!("db error {err}");
+                warn!("db error {}", err);
             }
             stats.db_error().inc();
         }
@@ -180,6 +180,46 @@ pub async fn spawn_scylla_insert_workers_dummy(
     Ok(jhs)
 }
 
+struct FutTrackDt<F> {
+    ts1: Instant,
+    ts2: Instant,
+    ts_net: Instant,
+    poll1: bool,
+    fut: F,
+}
+
+impl FutTrackDt<InsertFut> {
+    fn from_fut_job(job: FutJob) -> Self {
+        let tsnow = Instant::now();
+        Self {
+            ts1: tsnow,
+            ts2: tsnow,
+            ts_net: job.ts_net,
+            poll1: false,
+            fut: job.fut,
+        }
+    }
+}
+
+impl<F> Future for FutTrackDt<F>
+where
+    F: Future + Unpin,
+{
+    type Output = (Instant, Instant, Instant, F::Output);
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
+        use Poll::*;
+        if self.poll1 == false {
+            self.poll1 = true;
+            self.ts2 = Instant::now();
+        }
+        match self.as_mut().fut.poll_unpin(cx) {
+            Ready(x) => Ready((self.ts_net, self.ts1, self.ts2, x)),
+            Pending => Pending,
+        }
+    }
+}
+
 async fn worker_streamed(
     worker_ix: usize,
     concurrency: usize,
@@ -208,16 +248,22 @@ async fn worker_streamed(
         let stream = stream
             .map(|x| futures_util::stream::iter(x))
             .flatten_unordered(Some(1))
+            .map(|x| FutTrackDt::from_fut_job(x))
             .buffer_unordered(concurrency);
         let mut stream = Box::pin(stream);
         debug_setup!("waiting for item");
-        while let Some(item) = stream.next().await {
+        while let Some((ts_net, ts1, ts2, item)) = stream.next().await {
             trace_item_execute!("see item");
             let tsnow = Instant::now();
             match item {
                 Ok(_) => {
                     mett.job_ok().inc();
-                    // TODO compute the insert latency bin and count.
+                    let dt1 = tsnow.saturating_duration_since(ts1);
+                    let dt2 = tsnow.saturating_duration_since(ts2);
+                    let dt_net = tsnow.saturating_duration_since(ts_net);
+                    mett.job_dt1().push_dur_100us(dt1);
+                    mett.job_dt2().push_dur_100us(dt2);
+                    mett.job_dt_net().push_dur_100us(dt_net);
                 }
                 Err(e) => {
                     use scylla::transport::errors::QueryError;
@@ -261,21 +307,26 @@ async fn worker_streamed(
     Ok(())
 }
 
+struct FutJob {
+    fut: InsertFut,
+    ts_net: Instant,
+}
+
 fn transform_to_db_futures<S>(
     item_inp: S,
     data_store: Arc<DataStore>,
     ignore_writes: bool,
     stats: Arc<InsertWorkerStats>,
-) -> impl Stream<Item = Vec<InsertFut>>
+) -> impl Stream<Item = Vec<FutJob>>
 where
     S: Stream<Item = VecDeque<QueryItem>>,
 {
-    trace!("transform_to_db_futures  begin");
+    trace_transform!("transform_to_db_futures  begin");
     // TODO possible without box?
     // let item_inp = Box::pin(item_inp);
     item_inp.map(move |batch| {
         stats.item_recv.inc();
-        trace!("transform_to_db_futures  have batch  len {}", batch.len());
+        trace_transform!("transform_to_db_futures  have batch  len {}", batch.len());
         let tsnow = Instant::now();
         let mut res = Vec::with_capacity(32);
         for item in batch {
@@ -284,46 +335,46 @@ where
                     if ignore_writes {
                         SmallVec::new()
                     } else {
-                        prepare_query_insert_futs(item, &data_store, &stats, tsnow)
+                        prepare_query_insert_futs(item, &data_store)
                     }
                 }
                 QueryItem::Msp(item) => {
                     if ignore_writes {
                         SmallVec::new()
                     } else {
-                        prepare_msp_insert_futs(item, &data_store, &stats, tsnow)
+                        prepare_msp_insert_futs(item, &data_store)
                     }
                 }
                 QueryItem::TimeBinSimpleF32V02(item) => {
                     if ignore_writes {
                         SmallVec::new()
                     } else {
-                        prepare_timebin_v02_insert_futs(item, &data_store, &stats, tsnow)
+                        prepare_timebin_v02_insert_futs(item, &data_store, tsnow)
                     }
                 }
                 QueryItem::BinWriteIndexV03(item) => {
                     if ignore_writes {
                         SmallVec::new()
                     } else {
-                        prepare_bin_write_index_v03_insert_futs(item, &data_store, &stats, tsnow)
+                        prepare_bin_write_index_v03_insert_futs(item, &data_store, tsnow)
                     }
                 }
                 QueryItem::Accounting(item) => {
                     if ignore_writes {
                         SmallVec::new()
                     } else {
-                        prepare_accounting_insert_futs(item, &data_store, &stats, tsnow)
+                        prepare_accounting_insert_futs(item, &data_store, tsnow)
                     }
                 }
                 QueryItem::AccountingRecv(item) => {
                     if ignore_writes {
                         SmallVec::new()
                     } else {
-                        prepare_accounting_recv_insert_futs(item, &data_store, &stats, tsnow)
+                        prepare_accounting_recv_insert_futs(item, &data_store, tsnow)
                     }
                 }
             };
-            trace!("prepared futs  len {}", futs.len());
+            trace_transform!("prepared futs  len {}", futs.len());
             res.extend(futs.into_iter());
         }
         res
@@ -334,7 +385,7 @@ fn inspect_items(
     item_inp: Receiver<VecDeque<QueryItem>>,
     worker_name: String,
 ) -> impl Stream<Item = VecDeque<QueryItem>> {
-    trace!("transform_to_db_futures  begin");
+    trace_inspect!("transform_to_db_futures  begin");
     // TODO possible without box?
     // let item_inp = Box::pin(item_inp);
     item_inp.inspect(move |batch| {
@@ -363,44 +414,30 @@ fn inspect_items(
     })
 }
 
-fn prepare_msp_insert_futs(
-    item: MspItem,
-    data_store: &Arc<DataStore>,
-    stats: &Arc<InsertWorkerStats>,
-    tsnow: Instant,
-) -> SmallVec<[InsertFut; 4]> {
+fn prepare_msp_insert_futs(item: MspItem, data_store: &Arc<DataStore>) -> SmallVec<[FutJob; 4]> {
     trace2!("execute  MSP bump");
-    stats.inserts_msp().inc();
-    {
-        let dt = tsnow.saturating_duration_since(item.ts_net());
-        let dt_ms = 1000 * dt.as_secs() as u32 + dt.subsec_millis();
-        stats.item_lat_net_worker().ingest(dt_ms);
-    }
     let fut = insert_msp_fut(
         item.series(),
         item.ts_msp(),
-        item.ts_net(),
         data_store.scy.clone(),
         data_store.qu_insert_ts_msp.clone(),
-        stats.clone(),
     );
+    let fut = FutJob {
+        fut,
+        ts_net: item.ts_net(),
+    };
     let futs = smallvec![fut];
     futs
 }
 
-fn prepare_query_insert_futs(
-    item: InsertItem,
-    data_store: &Arc<DataStore>,
-    stats: &Arc<InsertWorkerStats>,
-    tsnow: Instant,
-) -> SmallVec<[InsertFut; 4]> {
-    stats.inserts_value().inc();
+fn prepare_query_insert_futs(item: InsertItem, data_store: &Arc<DataStore>) -> SmallVec<[FutJob; 4]> {
     let item_ts_net = item.ts_net;
-    let dt = tsnow.saturating_duration_since(item_ts_net);
-    let dt_ms = 1000 * dt.as_secs() as u32 + dt.subsec_millis();
-    stats.item_lat_net_worker().ingest(dt_ms);
     let do_insert = true;
-    let fut = insert_item_fut(item, &data_store, do_insert, stats);
+    let fut = insert_item_fut(item, &data_store, do_insert);
+    let fut = FutJob {
+        fut,
+        ts_net: item_ts_net,
+    };
     let futs = smallvec![fut];
     futs
 }
@@ -408,9 +445,8 @@ fn prepare_query_insert_futs(
 fn prepare_timebin_v02_insert_futs(
     item: TimeBinSimpleF32V02,
     data_store: &Arc<DataStore>,
-    stats: &Arc<InsertWorkerStats>,
     tsnow: Instant,
-) -> SmallVec<[InsertFut; 4]> {
+) -> SmallVec<[FutJob; 4]> {
     let params = (
         item.series.id() as i64,
         item.binlen,
@@ -423,15 +459,12 @@ fn prepare_timebin_v02_insert_futs(
         item.dev,
         item.lst,
     );
-    // TODO would be better to count inserts only on completed insert
-    stats.inserted_binned().inc();
     let fut = InsertFut::new(
         data_store.scy.clone(),
         data_store.qu_insert_binned_scalar_f32_v02.clone(),
         params,
-        tsnow,
-        stats.clone(),
     );
+    let fut = FutJob { fut, ts_net: tsnow };
     let futs = smallvec![fut];
 
     // TODO match on the query result:
@@ -451,19 +484,15 @@ fn prepare_timebin_v02_insert_futs(
 fn prepare_bin_write_index_v03_insert_futs(
     item: BinWriteIndexV03,
     data_store: &Arc<DataStore>,
-    stats: &Arc<InsertWorkerStats>,
     tsnow: Instant,
-) -> SmallVec<[InsertFut; 4]> {
+) -> SmallVec<[FutJob; 4]> {
     let params = (item.series, item.pbp, item.msp, item.rt, item.lsp, item.binlen);
-    // TODO would be better to count inserts only on completed insert
-    stats.inserted_binned().inc();
     let fut = InsertFut::new(
         data_store.scy.clone(),
         data_store.qu_insert_bin_write_index_v03.clone(),
         params,
-        tsnow,
-        stats.clone(),
     );
+    let fut = FutJob { fut, ts_net: tsnow };
     let futs = smallvec![fut];
 
     // TODO match on the query result:
@@ -483,9 +512,8 @@ fn prepare_bin_write_index_v03_insert_futs(
 fn prepare_accounting_insert_futs(
     item: Accounting,
     data_store: &Arc<DataStore>,
-    stats: &Arc<InsertWorkerStats>,
     tsnow: Instant,
-) -> SmallVec<[InsertFut; 4]> {
+) -> SmallVec<[FutJob; 4]> {
     let params = (
         item.part,
         item.ts.sec() as i64,
@@ -493,13 +521,8 @@ fn prepare_accounting_insert_futs(
         item.count,
         item.bytes,
     );
-    let fut = InsertFut::new(
-        data_store.scy.clone(),
-        data_store.qu_account_00.clone(),
-        params,
-        tsnow,
-        stats.clone(),
-    );
+    let fut = InsertFut::new(data_store.scy.clone(), data_store.qu_account_00.clone(), params);
+    let fut = FutJob { fut, ts_net: tsnow };
     let futs = smallvec![fut];
     futs
 }
@@ -507,9 +530,8 @@ fn prepare_accounting_insert_futs(
 fn prepare_accounting_recv_insert_futs(
     item: AccountingRecv,
     data_store: &Arc<DataStore>,
-    stats: &Arc<InsertWorkerStats>,
     tsnow: Instant,
-) -> SmallVec<[InsertFut; 4]> {
+) -> SmallVec<[FutJob; 4]> {
     let params = (
         item.part,
         item.ts.sec() as i64,
@@ -517,13 +539,8 @@ fn prepare_accounting_recv_insert_futs(
         item.count,
         item.bytes,
     );
-    let fut = InsertFut::new(
-        data_store.scy.clone(),
-        data_store.qu_account_recv_00.clone(),
-        params,
-        tsnow,
-        stats.clone(),
-    );
+    let fut = InsertFut::new(data_store.scy.clone(), data_store.qu_account_recv_00.clone(), params);
+    let fut = FutJob { fut, ts_net: tsnow };
     let futs = smallvec![fut];
     futs
 }

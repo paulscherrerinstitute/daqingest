@@ -2,7 +2,6 @@ use super::conn::EndOfStreamReason;
 use super::findioc::FindIocRes;
 use crate::ca::conn;
 use crate::ca::statemap;
-use crate::ca::statemap::CaConnState;
 use crate::ca::statemap::MaybeWrongAddressState;
 use crate::ca::statemap::WithAddressState;
 use crate::conf::CaIngestOpts;
@@ -38,7 +37,6 @@ use scywr::senderpolling::SenderPolling;
 use serde::Serialize;
 use series::ChannelStatusSeriesId;
 use statemap::ActiveChannelState;
-use statemap::CaConnStateValue;
 use statemap::ChannelState;
 use statemap::ChannelStateMap;
 use statemap::ChannelStateValue;
@@ -50,8 +48,6 @@ use stats::CaConnSetStats;
 use stats::CaConnStats;
 use stats::CaProtoStats;
 use stats::IocFinderStats;
-use stats::rand_xoshiro::Xoshiro128PlusPlus;
-use stats::rand_xoshiro::rand_core::RngCore;
 use std::collections::BTreeMap;
 use std::collections::VecDeque;
 use std::fmt;
@@ -76,18 +72,16 @@ use tracing::Instrument;
 const CHECK_CHANS_PER_TICK: usize = 10000000;
 pub const SEARCH_BATCH_MAX: usize = 64;
 pub const CURRENT_SEARCH_PENDING_MAX: usize = SEARCH_BATCH_MAX * 4;
-const UNKNOWN_ADDRESS_STAY: Duration = Duration::from_millis(15000);
 const NO_ADDRESS_STAY: Duration = Duration::from_millis(20000);
-const MAYBE_WRONG_ADDRESS_STAY: Duration = Duration::from_millis(4000);
 const SEARCH_PENDING_TIMEOUT: Duration = Duration::from_millis(30000);
 const CHANNEL_HEALTH_TIMEOUT: Duration = Duration::from_millis(30000);
 const CHANNEL_UNASSIGNED_TIMEOUT: Duration = Duration::from_millis(0);
 const UNASSIGN_FOR_CONFIG_CHANGE_TIMEOUT: Duration = Duration::from_millis(1000 * 10);
 const CHANNEL_MAX_WITHOUT_HEALTH_UPDATE: usize = 3000000;
 
-macro_rules! trace2 { ($($arg:tt)*) => { if false { trace!($($arg)*); } }; }
+macro_rules! trace2 { ($($arg:expr),*) => ( if false { trace!($($arg),*); } ); }
 
-macro_rules! trace3 { ($($arg:tt)*) => { if false { trace!($($arg)*); } }; }
+macro_rules! trace3 { ($($arg:expr),*) => ( if false { trace!($($arg),*); } ); }
 
 macro_rules! trace4 { ($($arg:tt)*) => { if false { trace!($($arg)*); } }; }
 
@@ -139,7 +133,6 @@ impl From<Error> for ::err::Error {
 pub struct CmdId(SocketAddrV4, usize);
 
 pub struct CaConnRes {
-    state: CaConnState,
     sender: Pin<Box<SenderPolling<ConnCommand>>>,
     stats: Arc<CaConnStats>,
     cmd_queue: VecDeque<ConnCommand>,
@@ -265,11 +258,8 @@ pub struct CaConnSetCtrl {
     rx: Receiver<CaConnSetItem>,
     stats: Arc<CaConnSetStats>,
     ca_conn_stats: Arc<CaConnStats>,
-    ca_proto_stats: Arc<CaProtoStats>,
     ioc_finder_stats: Arc<IocFinderStats>,
     jh: JoinHandle<Result<(), Error>>,
-    rng: Xoshiro128PlusPlus,
-    idcnt: u32,
 }
 
 impl CaConnSetCtrl {
@@ -335,18 +325,8 @@ impl CaConnSetCtrl {
         &self.ca_conn_stats
     }
 
-    pub fn ca_proto_stats(&self) -> &Arc<CaProtoStats> {
-        &self.ca_proto_stats
-    }
-
     pub fn ioc_finder_stats(&self) -> &Arc<IocFinderStats> {
         &self.ioc_finder_stats
-    }
-
-    fn make_id(&mut self) -> u32 {
-        let id = self.idcnt;
-        self.idcnt += 1;
-        self.rng.next_u32() & 0xffff | (id << 16)
     }
 }
 
@@ -452,11 +432,8 @@ pub struct CaConnSet {
     ca_conn_stats: Arc<CaConnStats>,
     ioc_finder_jh: JoinHandle<Result<(), crate::ca::finder::Error>>,
     await_ca_conn_jhs: VecDeque<(SocketAddr, JoinHandle<Result<(), Error>>)>,
-    thr_msg_poll_1: ThrottleTrace,
     thr_msg_storage_len: ThrottleTrace,
-    ca_proto_stats: Arc<CaProtoStats>,
     rogue_channel_count: u64,
-    connect_fail_count: usize,
     cssid_latency_max: Duration,
     ca_connset_metrics: stats::mett::CaConnSetMetrics,
 }
@@ -526,11 +503,8 @@ impl CaConnSet {
             // connset_out_sender: SenderPolling::new(connset_out_tx),
             ioc_finder_jh,
             await_ca_conn_jhs: VecDeque::new(),
-            thr_msg_poll_1: ThrottleTrace::new(Duration::from_millis(2000)),
             thr_msg_storage_len: ThrottleTrace::new(Duration::from_millis(1000)),
-            ca_proto_stats: ca_proto_stats.clone(),
             rogue_channel_count: 0,
-            connect_fail_count: 0,
             cssid_latency_max: Duration::from_millis(2000),
             ca_connset_metrics: stats::mett::CaConnSetMetrics::new(),
         };
@@ -541,11 +515,8 @@ impl CaConnSet {
             rx: connset_out_rx,
             stats,
             ca_conn_stats,
-            ca_proto_stats,
             ioc_finder_stats,
             jh,
-            idcnt: 0,
-            rng: stats::xoshiro_from_time(),
         }
     }
 
@@ -1249,7 +1220,6 @@ impl CaConnSet {
 
     fn handle_ca_conn_channel_removed(&mut self, addr: SocketAddr, name: String) -> Result<(), Error> {
         debug!("handle_ca_conn_channel_removed  {addr}  {name}");
-        let stnow = SystemTime::now();
         let name = ChannelName::new(name);
         if let Some(st1) = self.channel_states.get_mut(&name) {
             match &mut st1.value {
@@ -1368,7 +1338,6 @@ impl CaConnSet {
                 .clone()
                 .ok_or_else(|| Error::MissingChannelInfoChannelTx)?,
             self.ca_conn_stats.clone(),
-            self.ca_proto_stats.clone(),
         );
         let conn_tx = conn.conn_command_tx();
         let conn_stats = conn.stats();
@@ -1387,7 +1356,6 @@ impl CaConnSet {
         let fut = fut.instrument(logspan);
         let jh = tokio::spawn(fut);
         let ca_conn_res = CaConnRes {
-            state: CaConnState::new(CaConnStateValue::Fresh),
             sender: Box::pin(conn_tx.into()),
             stats: conn_stats,
             cmd_queue: VecDeque::new(),
@@ -1470,80 +1438,6 @@ impl CaConnSet {
         }
     }
 
-    async fn wait_stopped(&self) -> Result<(), Error> {
-        warn!("Lock for wait_stopped");
-        // let mut g = self.ca_conn_ress.lock().await;
-        // let mm = std::mem::replace(&mut *g, BTreeMap::new());
-        let mm: BTreeMap<SocketAddrV4, JoinHandle<Result<(), Error>>> = BTreeMap::new();
-        let mut jhs: VecDeque<_> = VecDeque::new();
-        for t in mm {
-            jhs.push_back(t.1.fuse());
-        }
-        loop {
-            let mut jh = if let Some(x) = jhs.pop_front() {
-                x
-            } else {
-                break;
-            };
-            futures_util::select! {
-                a = jh => match a {
-                    Ok(k) => match k {
-                        Ok(_) => {}
-                        Err(e) => {
-                            error!("{e:?}");
-                        }
-                    },
-                    Err(e) => {
-                        error!("{e:?}");
-                    }
-                },
-                _b = crate::rt::sleep(Duration::from_millis(1000)).fuse() => {
-                    jhs.push_back(jh);
-                    info!("waiting for {} connections", jhs.len());
-                }
-            };
-        }
-        Ok(())
-    }
-
-    fn check_connection_states(&mut self) -> Result<(), Error> {
-        let tsnow = Instant::now();
-        for (addr, val) in &mut self.ca_conn_ress {
-            let state = &mut val.state;
-            let v = &mut state.value;
-            match v {
-                CaConnStateValue::Fresh => {
-                    // TODO check for delta t since last issued status command.
-                    if tsnow.duration_since(state.last_feedback) > Duration::from_millis(20000) {
-                        error!("TODO Fresh timeout send connection-close for {addr}");
-                        // TODO collect in metrics
-                        // self.stats.ca_conn_status_feedback_timeout.inc();
-                        // TODO send shutdown to this CaConn, check that we've received
-                        // a 'shutdown' state from it. (see below)
-                        *v = CaConnStateValue::Shutdown { since: tsnow };
-                    }
-                }
-                CaConnStateValue::HadFeedback => {
-                    // TODO check for delta t since last issued status command.
-                    if tsnow.duration_since(state.last_feedback) > Duration::from_millis(20000) {
-                        error!("TODO HadFeedback timeout send connection-close for {addr}");
-                        // TODO collect in metrics
-                        // self.stats.ca_conn_status_feedback_timeout.inc();
-                        *v = CaConnStateValue::Shutdown { since: tsnow };
-                    }
-                }
-                CaConnStateValue::Shutdown { since } => {
-                    if tsnow.saturating_duration_since(*since) > Duration::from_millis(10000) {
-                        // TODO collect in metrics as severe error, this would be a bug.
-                        // self.stats.critical_error.inc();
-                        error!("Shutdown of CaConn failed for {addr}");
-                    }
-                }
-            }
-        }
-        Ok(())
-    }
-
     fn check_channel_states(&mut self, tsnow: Instant, stnow: SystemTime) -> Result<(), Error> {
         let (mut search_pending_count, mut assigned_without_health_update) = self.update_channel_state_counts();
         let mut cmd_remove_channel = Vec::new();
@@ -1555,6 +1449,7 @@ impl CaConnSet {
         } else {
             self.channel_states.range_mut(..)
         };
+        #[allow(unused)]
         let mut st_qu_2 = VecDeque::new();
         let mut lt_qu_2 = VecDeque::new();
         for (i, (ch, st)) in it.enumerate() {

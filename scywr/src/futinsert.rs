@@ -2,12 +2,11 @@ use crate::access::Error;
 use crate::session::ScySession;
 use futures_util::Future;
 use futures_util::FutureExt;
-use netpod::log::*;
-use scylla::frame::value::ValueList;
+use netpod::log::error;
+use scylla::QueryResult;
 use scylla::prepared_statement::PreparedStatement;
 use scylla::serialize::row::SerializeRow;
 use scylla::transport::errors::QueryError;
-use scylla::QueryResult;
 use std::pin::Pin;
 use std::task::Context;
 use std::task::Poll;
@@ -25,7 +24,7 @@ impl<'a> ScyInsertFut<'a> {
 
     pub fn new<V>(scy: &'a ScySession, query: &'a PreparedStatement, values: V) -> Self
     where
-        V: ValueList + SerializeRow + Send + 'static,
+        V: SerializeRow + Send + 'static,
     {
         let fut = scy.execute_unpaged(query, values);
         let fut = Box::pin(fut) as _;

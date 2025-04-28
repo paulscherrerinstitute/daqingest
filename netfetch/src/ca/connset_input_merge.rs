@@ -41,6 +41,10 @@ impl InputMerge {
     }
 }
 
+fn todoval<T>() -> T {
+    todo!()
+}
+
 impl Stream for InputMerge {
     type Item = CaConnSetEvent;
 
@@ -50,7 +54,7 @@ impl Stream for InputMerge {
             let mut selfp = self.as_mut().project();
             if let Some(inp) = selfp.inp3.as_mut().as_pin_mut() {
                 match inp.poll_next(cx) {
-                    Ready(Some(x)) => Some(CaConnSetEvent::ConnSetCmd(todo!())),
+                    Ready(Some(_)) => Some(CaConnSetEvent::ConnSetCmd(todoval())),
                     Ready(None) => {
                         unsafe {
                             // TODO what guarantees that I can drop the content here like this?
@@ -70,7 +74,7 @@ impl Stream for InputMerge {
             let mut selfp = self.as_mut().project();
             if let Some(inp) = selfp.inp2.as_mut().as_pin_mut() {
                 match inp.poll_next(cx) {
-                    Ready(Some(x)) => Some(CaConnSetEvent::ConnSetCmd(todo!())),
+                    Ready(Some(_)) => Some(CaConnSetEvent::ConnSetCmd(todoval())),
                     Ready(None) => {
                         unsafe {
                             // TODO what guarantees that I can drop the content here like this?

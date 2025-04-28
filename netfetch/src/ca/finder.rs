@@ -40,7 +40,7 @@ fn transform_pgres(rows: Vec<PgRow>) -> VecDeque<FindIocRes> {
         let n: Result<i32, _> = row.try_get(0);
         let ch: Result<String, _> = row.try_get(1);
         match (n, ch) {
-            (Ok(n), Ok(ch)) => {
+            (Ok(_n), Ok(ch)) => {
                 if let Some(addr) = row.get::<_, Option<String>>(3) {
                     let addr = addr.parse().map_or(None, |x| Some(x));
                     let item = FindIocRes {

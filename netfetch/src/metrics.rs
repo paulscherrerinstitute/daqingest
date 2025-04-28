@@ -135,7 +135,6 @@ pub struct StatsSet {
     daemon: Arc<DaemonStats>,
     ca_conn_set: Arc<CaConnSetStats>,
     ca_conn: Arc<CaConnStats>,
-    ca_proto: Arc<CaProtoStats>,
     insert_worker_stats: Arc<InsertWorkerStats>,
     series_by_channel_stats: Arc<SeriesByChannelStats>,
     ioc_finder_stats: Arc<IocFinderStats>,
@@ -147,7 +146,6 @@ impl StatsSet {
         daemon: Arc<DaemonStats>,
         ca_conn_set: Arc<CaConnSetStats>,
         ca_conn: Arc<CaConnStats>,
-        ca_proto: Arc<CaProtoStats>,
         insert_worker_stats: Arc<InsertWorkerStats>,
         series_by_channel_stats: Arc<SeriesByChannelStats>,
         ioc_finder_stats: Arc<IocFinderStats>,
@@ -157,7 +155,6 @@ impl StatsSet {
             daemon,
             ca_conn_set,
             ca_conn,
-            ca_proto,
             insert_worker_stats,
             series_by_channel_stats,
             ioc_finder_stats,
@@ -366,9 +363,8 @@ fn metrics(stats_set: &StatsSet) -> String {
     let s3 = stats_set.insert_worker_stats.prometheus();
     let s4 = stats_set.ca_conn.prometheus();
     let s5 = stats_set.series_by_channel_stats.prometheus();
-    let s6 = stats_set.ca_proto.prometheus();
     let s7 = stats_set.ioc_finder_stats.prometheus();
-    [s1, s2, s3, s4, s5, s6, s7].join("")
+    [s1, s2, s3, s4, s5, s7].join("")
 }
 
 pub struct RoutesResources {
