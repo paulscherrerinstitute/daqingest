@@ -7,8 +7,10 @@ autoerr::create_error_v1!(
     name(Error, "ScyllaTools"),
     enum variants {
         Session(#[from] crate::session::Error),
-        ScyllaNewSession(#[from] scylla::transport::errors::NewSessionError),
-        ScyllaQueryError(#[from] scylla::transport::errors::QueryError),
+        ScyllaNewSession(#[from] scylla::errors::NewSessionError),
+        ScyllaPrepare(#[from] scylla::errors::PrepareError),
+        ScyllaNextRow(#[from] scylla::errors::NextRowError),
+        ScyllaPagerExecution(#[from] scylla::errors::PagerExecutionError),
         ScyllaTypeCheck(#[from] scylla::deserialize::TypeCheckError),
     },
 );

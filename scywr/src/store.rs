@@ -1,17 +1,17 @@
 use crate::config::ScyllaIngestConfig;
 use crate::session::create_session;
 use netpod::ttl::RetentionTime;
-use scylla::Session as ScySession;
-use scylla::prepared_statement::PreparedStatement;
-use scylla::transport::errors::NewSessionError;
-use scylla::transport::errors::QueryError;
+use scylla::client::session::Session as ScySession;
+use scylla::errors::NewSessionError;
+use scylla::errors::PrepareError;
+use scylla::statement::prepared::PreparedStatement;
 use std::sync::Arc;
 
 autoerr::create_error_v1!(
     name(Error, "ScyllaStore"),
     enum variants {
         NewSessionError(#[from] NewSessionError),
-        QueryError(#[from] QueryError),
+        Prepare(#[from] PrepareError),
         NewSession,
     },
 );

@@ -5,18 +5,18 @@ use crate::store::DataStore;
 use bytes::BufMut;
 use futures_util::Future;
 use futures_util::FutureExt;
+use futures_util::TryFutureExt;
 use netpod::DtNano;
 use netpod::Shape;
 use netpod::TsMs;
 use netpod::TsNano;
 use netpod::channelstatus::ChannelStatus;
 use netpod::channelstatus::ChannelStatusClosedReason;
-use scylla::QueryResult;
-use scylla::prepared_statement::PreparedStatement;
+use scylla::errors::DbError;
+use scylla::response::query_result::QueryResult;
 use scylla::serialize::row::SerializeRow;
 use scylla::serialize::value::SerializeValue;
-use scylla::transport::errors::DbError;
-use scylla::transport::errors::QueryError;
+use scylla::statement::prepared::PreparedStatement;
 use series::ChannelStatusSeriesId;
 use series::SeriesId;
 use std::net::SocketAddrV4;
@@ -35,10 +35,17 @@ autoerr::create_error_v1!(
         DbOverload,
         DbUnavailable,
         DbError(#[from] DbError),
-        QueryError(#[from] QueryError),
         GetValHelpTodoWaveform,
         GetValHelpInnerTypeMismatch,
         UnknownConnectionStatus,
+    },
+);
+
+autoerr::create_error_v1!(
+    name(InsertFutError, "InsertFut"),
+    enum variants {
+        NoFuture,
+        Execution(#[from] scylla::errors::ExecutionError),
     },
 );
 
@@ -633,7 +640,7 @@ pub struct InsertFut {
     scy: Arc<ScySession>,
     #[allow(unused)]
     qu: Arc<PreparedStatement>,
-    fut: Pin<Box<dyn Future<Output = Result<QueryResult, QueryError>> + Send>>,
+    fut: Pin<Box<dyn Future<Output = Result<QueryResult, InsertFutError>> + Send>>,
     // #[pin]
     // fut: StackFuture<'static, Result<QueryResult, QueryError>, { 1024 * 3 }>,
 }
@@ -644,6 +651,7 @@ impl InsertFut {
         let qu_ref = unsafe { NonNull::from(qu.as_ref()).as_ref() };
         let fut = scy_ref.execute_unpaged(qu_ref, params);
         let fut = taskrun::tokio::task::unconstrained(fut);
+        let fut = fut.map_err(|e| e.into());
         let fut = Box::pin(fut);
         // let _ff = StackFuture::from(fut);
         Self { scy, qu, fut }
@@ -653,13 +661,13 @@ impl InsertFut {
         Self {
             scy,
             qu,
-            fut: Box::pin(async { Err(QueryError::TimeoutError) }),
+            fut: Box::pin(async { Err(InsertFutError::NoFuture) }),
         }
     }
 }
 
 impl Future for InsertFut {
-    type Output = Result<QueryResult, QueryError>;
+    type Output = Result<QueryResult, InsertFutError>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
         let this = self.project();

@@ -17,9 +17,7 @@ use netpod::Shape;
 use netpod::TsMs;
 use netpod::ttl::RetentionTime;
 use scywr::config::ScyllaIngestConfig;
-use scywr::scylla::prepared_statement::PreparedStatement;
-use scywr::scylla::transport::errors::QueryError;
-use scywr::scylla::transport::iterator::NextRowError;
+use scywr::scylla::statement::prepared::PreparedStatement;
 use scywr::session::ScySession;
 use series::SeriesId;
 use std::sync::Arc;
@@ -32,8 +30,9 @@ autoerr::create_error_v1!(
         PgConn(#[from] dbpg::err::Error),
         Postgres(#[from] dbpg::postgres::Error),
         ScyllaSession(#[from] scywr::session::Error),
-        ScyllaQuery(#[from] QueryError),
-        ScyllaNextRowError(#[from] NextRowError),
+        ScyllaPrepareError(#[from] scywr::scylla::errors::PrepareError),
+        ScyllaPagerExecutionError(#[from] scywr::scylla::errors::PagerExecutionError),
+        ScyllaNextRowError(#[from] scywr::scylla::errors::NextRowError),
         ScyllaSchema(#[from] scywr::schema::Error),
         ScyllaTypeCheck(#[from] scywr::scylla::deserialize::TypeCheckError),
         ParseError(String),

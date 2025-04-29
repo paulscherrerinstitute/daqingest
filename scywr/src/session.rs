@@ -1,10 +1,12 @@
-pub use scylla::Session;
 pub use Session as ScySession;
+pub use scylla::client::session::Session;
 
 use crate::config::ScyllaIngestConfig;
-use scylla::execution_profile::ExecutionProfileBuilder;
+use scylla::client::PoolSize;
+use scylla::client::execution_profile::ExecutionProfileBuilder;
+use scylla::client::session_builder::GenericSessionBuilder;
+use scylla::errors::NewSessionError;
 use scylla::statement::Consistency;
-use scylla::transport::errors::NewSessionError;
 use std::sync::Arc;
 
 autoerr::create_error_v1!(
@@ -21,8 +23,6 @@ impl From<NewSessionError> for Error {
 }
 
 pub async fn create_session_no_ks(scyconf: &ScyllaIngestConfig) -> Result<Arc<Session>, Error> {
-    use scylla::transport::session::PoolSize;
-    use scylla::transport::session_builder::GenericSessionBuilder;
     let profile = ExecutionProfileBuilder::default()
         .consistency(Consistency::LocalOne)
         .build()

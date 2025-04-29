@@ -5,7 +5,7 @@ use futures_util::StreamExt;
 use futures_util::TryStreamExt;
 use log::*;
 use netpod::ttl::RetentionTime;
-use scylla::transport::errors::DbError;
+use scylla::errors::NextRowError;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::time::Duration;
@@ -15,9 +15,10 @@ autoerr::create_error_v1!(
     enum variants {
         NoKeyspaceChosen,
         Fmt(#[from] fmt::Error),
-        Query(#[from] scylla::transport::errors::QueryError),
         NewSession(String),
-        ScyllaNextRow(#[from] scylla::transport::iterator::NextRowError),
+        ScyllaExecution(#[from] scylla::errors::ExecutionError),
+        ScyllaPagerExecution(#[from] scylla::errors::PagerExecutionError),
+        ScyllaNextRow(#[from] NextRowError),
         ScyllaTypecheck(#[from] scylla::deserialize::TypeCheckError),
         MissingData,
         AddColumnExists(String, String, String),
@@ -82,24 +83,23 @@ pub async fn has_table(ks: &str, name: &str, scy: &ScySession) -> Result<bool, E
 }
 
 pub async fn check_table_readable(ks: &str, name: &str, scy: &ScySession) -> Result<bool, Error> {
-    use crate::scylla::transport::errors::QueryError;
+    use scylla::errors::ExecutionError;
     match scy
         .query_unpaged(format!("select * from {}.{} limit 1", ks, name), ())
         .await
     {
         Ok(_) => Ok(true),
         Err(e) => match &e {
-            QueryError::DbError(e2, msg) => match e2 {
-                DbError::Invalid => {
-                    if msg.contains("unconfigured table") {
-                        Ok(false)
-                    } else {
-                        Err(e.into())
-                    }
-                }
-                _ => Err(e.into()),
-            },
-            _ => Err(e.into()),
+            ExecutionError::BadQuery(_) => Ok(false),
+            ExecutionError::PrepareError(_) => Ok(false),
+            ExecutionError::EmptyPlan => Err(Error::ScyllaExecution(e)),
+            ExecutionError::ConnectionPoolError(_) => Err(Error::ScyllaExecution(e)),
+            ExecutionError::LastAttemptError(_) => Err(Error::ScyllaExecution(e)),
+            ExecutionError::RequestTimeout(_) => Err(Error::ScyllaExecution(e)),
+            ExecutionError::UseKeyspaceError(_) => Err(Error::ScyllaExecution(e)),
+            ExecutionError::SchemaAgreementError(_) => Err(Error::ScyllaExecution(e)),
+            ExecutionError::MetadataError(_) => Err(Error::ScyllaExecution(e)),
+            _ => Err(Error::ScyllaExecution(e)),
         },
     }
 }

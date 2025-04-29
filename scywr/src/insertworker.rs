@@ -53,34 +53,21 @@ autoerr::create_error_v1!(
     },
 );
 
-fn stats_inc_for_err(stats: &stats::InsertWorkerStats, err: &crate::iteminsertqueue::Error) {
-    use crate::iteminsertqueue::Error;
+fn stats_inc_for_err(stats: &stats::InsertWorkerStats, err: &crate::iteminsertqueue::InsertFutError) {
+    use crate::iteminsertqueue::InsertFutError;
     match err {
-        Error::DbOverload => {
-            stats.db_overload().inc();
-        }
-        Error::DbTimeout => {
-            stats.db_timeout().inc();
-        }
-        Error::DbUnavailable => {
-            stats.db_unavailable().inc();
-        }
-        Error::DbError(_) => {
-            if true {
-                warn!("db error {}", err);
+        InsertFutError::Execution(e) => match e {
+            scylla::errors::ExecutionError::RequestTimeout(_) => {
+                stats.db_timeout().inc();
             }
-            stats.db_error().inc();
-        }
-        Error::QueryError(_) => {
-            stats.query_error().inc();
-        }
-        Error::GetValHelpTodoWaveform => {
-            stats.logic_error().inc();
-        }
-        Error::GetValHelpInnerTypeMismatch => {
-            stats.logic_error().inc();
-        }
-        Error::UnknownConnectionStatus => {
+            _ => {
+                if true {
+                    warn!("db error {}", err);
+                }
+                stats.db_error().inc();
+            }
+        },
+        InsertFutError::NoFuture => {
             stats.logic_error().inc();
         }
     }
@@ -266,16 +253,6 @@ async fn worker_streamed(
                     mett.job_dt_net().push_dur_100us(dt_net);
                 }
                 Err(e) => {
-                    use scylla::transport::errors::QueryError;
-                    let e = match e {
-                        QueryError::TimeoutError => crate::iteminsertqueue::Error::DbTimeout,
-                        // TODO use `msg`
-                        QueryError::DbError(e, _msg) => match e {
-                            scylla::transport::errors::DbError::Overloaded => crate::iteminsertqueue::Error::DbOverload,
-                            _ => e.into(),
-                        },
-                        _ => e.into(),
-                    };
                     mett.job_err().inc();
                     stats_inc_for_err(&stats, &e);
                 }

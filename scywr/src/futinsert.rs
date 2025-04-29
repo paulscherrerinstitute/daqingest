@@ -3,17 +3,17 @@ use crate::session::ScySession;
 use futures_util::Future;
 use futures_util::FutureExt;
 use netpod::log::error;
-use scylla::QueryResult;
-use scylla::prepared_statement::PreparedStatement;
+use scylla::errors::ExecutionError;
+use scylla::response::query_result::QueryResult;
 use scylla::serialize::row::SerializeRow;
-use scylla::transport::errors::QueryError;
+use scylla::statement::prepared::PreparedStatement;
 use std::pin::Pin;
 use std::task::Context;
 use std::task::Poll;
 use std::time::Instant;
 
 pub struct ScyInsertFut<'a> {
-    fut: Pin<Box<dyn Future<Output = Result<QueryResult, QueryError>> + Send + 'a>>,
+    fut: Pin<Box<dyn Future<Output = Result<QueryResult, ExecutionError>> + Send + 'a>>,
     polled: usize,
     ts_create: Instant,
     ts_poll_first: Instant,

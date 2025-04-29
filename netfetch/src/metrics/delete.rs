@@ -1,21 +1,21 @@
 use super::RoutesResources;
+use axum::Json;
 use axum::extract::FromRequest;
 use axum::extract::Query;
 use axum::handler::Handler;
 use axum::http::HeaderMap;
-use axum::Json;
 use bytes::Bytes;
 use chrono::DateTime;
 use chrono::Utc;
 use core::fmt;
 use futures_util::StreamExt;
 use futures_util::TryStreamExt;
-use netpod::log::*;
-use netpod::ttl::RetentionTime;
 use netpod::ScalarType;
 use netpod::TsMs;
 use netpod::TsNano;
-use scylla::Session as ScySession;
+use netpod::log::*;
+use netpod::ttl::RetentionTime;
+use scylla::client::session::Session as ScySession;
 use scywr::config::ScyllaIngestConfig;
 use scywr::insertqueues::InsertDeques;
 use scywr::iteminsertqueue::ArrayValue;
@@ -23,7 +23,12 @@ use scywr::iteminsertqueue::DataValue;
 use scywr::iteminsertqueue::QueryItem;
 use scywr::iteminsertqueue::ScalarValue;
 use scywr::scylla;
-use scywr::scylla::prepared_statement::PreparedStatement;
+use scywr::scylla::client::PoolSize;
+use scywr::scylla::client::execution_profile::ExecutionProfileBuilder;
+use scywr::scylla::client::session_builder::GenericSessionBuilder;
+use scywr::scylla::statement::Consistency;
+use scywr::scylla::statement::Statement;
+use scywr::scylla::statement::prepared::PreparedStatement;
 use serde::Deserialize;
 use series::SeriesId;
 use serieswriter::writer::SeriesWriter;
@@ -37,13 +42,7 @@ use streams::framed_bytes::FramedBytesStream;
 use taskrun::tokio::time::timeout;
 
 #[allow(unused)]
-macro_rules! debug_cql {
-    ($($arg:tt)*) => {
-        if true {
-            debug!($($arg)*);
-        }
-    };
-}
+macro_rules! debug_cql { ($($arg:expr),*) => ( if false { debug!($($arg),*); } ); }
 
 autoerr::create_error_v1!(
     name(Error, "HttpDelete"),
@@ -54,9 +53,10 @@ autoerr::create_error_v1!(
         MissingScalarType,
         MissingBegDate,
         MissingEndDate,
-        ScyllaTransport(#[from] scylla::transport::errors::NewSessionError),
-        ScyllaQuery(#[from] scylla::transport::errors::QueryError),
-        ScyllaNextRow(#[from] scylla::transport::iterator::NextRowError),
+        ScyllaTransport(#[from] scylla::errors::NewSessionError),
+        ScyllaPrepare(#[from] scylla::errors::PrepareError),
+        ScyllaPagerExecution(#[from] scylla::errors::PagerExecutionError),
+        ScyllaNextRow(#[from] scylla::errors::NextRowError),
         ScyllaTypeCheck(#[from] scylla::deserialize::TypeCheckError),
         InvalidTimestamp,
     },
@@ -126,7 +126,7 @@ async fn delete_try(
             scyconf.keyspace(),
             rt.table_prefix(),
         );
-        scy.prepare(scylla::query::Query::new(cql).with_page_size(4)).await?
+        scy.prepare(Statement::new(cql).with_page_size(4)).await?
     };
     let qu_delete_val = {
         let _cql = format!(
@@ -149,10 +149,10 @@ async fn delete_try(
             rt.table_prefix(),
             scalar_type.to_scylla_table_name_id(),
         );
-        scy.prepare(scylla::query::Query::new(cql).with_page_size(100)).await?
+        scy.prepare(Statement::new(cql).with_page_size(100)).await?
     };
     let mut i = 0;
-    // debug_cql!("query iteration  {i}");
+    debug_cql!("query iteration  {i}");
     let mut it = scy
         .execute_iter(qu.clone(), (series.to_i64(),))
         .await?
@@ -176,7 +176,7 @@ async fn delete_val(
 ) -> Result<(), Error> {
     let msp_ns = msp.ns_u64();
     if msp_ns >= end.ns() {
-        // debug_cql!("  return early  msp {msp}  after range");
+        debug_cql!("  return early  msp {msp}  after range");
         return Ok(());
     }
     let r1 = if msp_ns >= beg.ns() { 0 } else { beg.ns() - msp_ns };
@@ -195,10 +195,6 @@ async fn delete_val(
 }
 
 async fn scy_connect(scyconf: &ScyllaIngestConfig) -> Result<Arc<ScySession>, Error> {
-    use scylla::execution_profile::ExecutionProfileBuilder;
-    use scylla::statement::Consistency;
-    use scylla::transport::session::PoolSize;
-    use scylla::transport::session_builder::GenericSessionBuilder;
     let profile = ExecutionProfileBuilder::default()
         .consistency(Consistency::Quorum)
         .build()
