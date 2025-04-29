@@ -1,13 +1,13 @@
 use std::ffi::CStr;
 use std::mem::MaybeUninit;
-use thiserror::Error;
 
-#[derive(Debug, Error)]
-#[cstm(name = "LinuxSignal")]
-pub enum Error {
-    SignalHandlerSet,
-    SignalHandlerUnset,
-}
+autoerr::create_error_v1!(
+    name(Error, "LinuxSignalError"),
+    enum variants {
+        SignalHandlerSet,
+        SignalHandlerUnset,
+    },
+);
 
 pub fn set_signal_handler(
     signum: libc::c_int,

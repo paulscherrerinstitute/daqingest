@@ -44,7 +44,6 @@ serieswriter = { path = "../serieswriter" }
 stats = { path = "../stats" }
 scywr = { path = "../scywr" }
 dbpg = { path = "../dbpg" }
-serde_helper = { path = "../serde_helper" }
 ingest-linux = { path = "../ingest-linux" }
 err = { path = "../../daqbuf-err", package = "daqbuf-err" }
 netpod = { path = "../../daqbuf-netpod", package = "daqbuf-netpod" }
@@ -53,12 +52,10 @@ items_2 = { path = "../../daqbuf-items-2", package = "daqbuf-items-2" }
 streams = { path = "../../daqbuf-streams", package = "daqbuf-streams" }
 ca_proto = { path = "../../daqbuf-ca-proto", package = "daqbuf-ca-proto" }
 ca-proto-tokio = { path = "../../daqbuf-ca-proto-tokio", package = "daqbuf-ca-proto-tokio" }
+serde-helper = { path = "../../daqbuf-serde-helper", package = "daqbuf-serde-helper" }
 taskrun = { path = "../../daqbuffer/crates/taskrun" }
 mrucache = { path = "../mrucache" }
 batchtools = { path = "../batchtools" }
-
-[patch.crates-io]
-thiserror = { git = "https://github.com/dominikwerder/thiserror.git", branch = "cstm" }
 
 [features]
 disabled = []

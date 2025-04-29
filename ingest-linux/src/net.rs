@@ -1,14 +1,14 @@
 use std::ffi::CStr;
 use taskrun::tokio;
-use thiserror::Error;
 use tokio::net::TcpStream;
 
-#[derive(Debug, Error)]
-#[error("{self}")]
-pub enum Error {
-    SocketOptionSet,
-    SocketOptionGet,
-}
+autoerr::create_error_v1!(
+    name(Error, "LinuxNetError"),
+    enum variants {
+        SocketOptionSet,
+        SocketOptionGet,
+    },
+);
 
 pub fn local_hostname() -> String {
     let mut buf = vec![0u8; 128];

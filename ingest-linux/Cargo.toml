@@ -2,13 +2,10 @@
 name = "ingest-linux"
 version = "0.0.1"
 authors = ["Dominik Werder <dominik.werder@gmail.com>"]
-edition = "2021"
+edition = "2024"
 
 [dependencies]
 libc = "0.2"
-thiserror = "=0.0.1"
+autoerr = "0.0.3"
 log = { path = "../log" }
 taskrun = { path = "../../daqbuffer/crates/taskrun" }
-
-[patch.crates-io]
-thiserror = { git = "https://github.com/dominikwerder/thiserror.git", branch = "cstm" }
