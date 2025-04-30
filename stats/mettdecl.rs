@@ -87,6 +87,54 @@ mod Metrics {
         type Input = CaConnMetrics;
         type Name = ca_conn;
     }
+    enum counters {
+        poll_fn_begin,
+        poll_loop_begin,
+        ready_for_end_of_stream,
+        ready_for_end_of_stream_with_progress,
+        poll_reloop,
+        poll_pending,
+        poll_no_progress_no_pending,
+        ioc_search_start,
+        chan_send_err,
+        cmd_res_send_err,
+        logic_err,
+        channel_status_series_found,
+        ioc_addr_found,
+        ioc_addr_not_found,
+        ioc_addr_result_for_unknown_channel,
+        ca_conn_eos_ok,
+        ca_conn_eos_unexpected,
+        handle_add_channel_with_addr,
+        try_push_ca_conn_cmds_sent,
+        try_push_ca_conn_cmds_closed,
+        create_ca_conn,
+        storage_insert_queue_send,
+        ca_conn_task_join_done_ok,
+        ca_conn_task_join_done_err,
+        ca_conn_task_join_err,
+    }
+    enum values {
+        channel_info_query_queue_len,
+        channel_info_query_sender_len,
+        channel_info_res_tx_len,
+        ca_conn_res_tx_len,
+        find_ioc_query_sender_len,
+        channel_rogue,
+        channel_unknown_address,
+        channel_search_pending,
+        channel_no_address,
+        channel_unassigned,
+        channel_assigned,
+        channel_connected,
+        channel_maybe_wrong_address,
+        channel_assigned_without_health_update,
+        channel_health_timeout_soon,
+        channel_health_timeout_reached,
+    }
+    enum histolog2s {
+        poll_all_dt,
+    }
 }
 
 mod Metrics {

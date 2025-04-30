@@ -880,10 +880,8 @@ impl Daemon {
         );
         let rres = Arc::new(rres);
         let metrics_jh = {
-            let conn_set_stats = self.connset_ctrl.stats().clone();
             let stats_set = StatsSet::new(
                 daemon_stats,
-                conn_set_stats,
                 self.insert_worker_stats.clone(),
                 self.series_by_channel_stats.clone(),
                 self.connset_ctrl.ioc_finder_stats().clone(),

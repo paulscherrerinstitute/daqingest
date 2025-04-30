@@ -33,7 +33,6 @@ use scywr::iteminsertqueue::QueryItem;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::json;
-use stats::CaConnSetStats;
 use stats::CaProtoStats;
 use stats::DaemonStats;
 use stats::InsertWorkerStats;
@@ -130,7 +129,6 @@ impl IntoResponse for CustomErrorResponse {
 #[derive(Clone)]
 pub struct StatsSet {
     daemon: Arc<DaemonStats>,
-    ca_conn_set: Arc<CaConnSetStats>,
     insert_worker_stats: Arc<InsertWorkerStats>,
     series_by_channel_stats: Arc<SeriesByChannelStats>,
     ioc_finder_stats: Arc<IocFinderStats>,
@@ -140,7 +138,6 @@ pub struct StatsSet {
 impl StatsSet {
     pub fn new(
         daemon: Arc<DaemonStats>,
-        ca_conn_set: Arc<CaConnSetStats>,
         insert_worker_stats: Arc<InsertWorkerStats>,
         series_by_channel_stats: Arc<SeriesByChannelStats>,
         ioc_finder_stats: Arc<IocFinderStats>,
@@ -148,7 +145,6 @@ impl StatsSet {
     ) -> Self {
         Self {
             daemon,
-            ca_conn_set,
             insert_worker_stats,
             series_by_channel_stats,
             ioc_finder_stats,
@@ -354,7 +350,6 @@ fn metricbeat(stats_set: &StatsSet) -> axum::Json<serde_json::Value> {
 fn metrics(stats_set: &StatsSet) -> String {
     let ss = [
         stats_set.daemon.prometheus(),
-        stats_set.ca_conn_set.prometheus(),
         stats_set.insert_worker_stats.prometheus(),
         stats_set.series_by_channel_stats.prometheus(),
         stats_set.ioc_finder_stats.prometheus(),
