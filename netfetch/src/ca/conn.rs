@@ -60,9 +60,8 @@ use serieswriter::fixgridwriter::ChannelStatusWriteState;
 use serieswriter::msptool::MspSplit;
 use serieswriter::rtwriter::RtWriter;
 use serieswriter::writer::EmittableType;
-use stats::CaConnStats;
-use stats::CaProtoStats;
 use stats::IntervalEma;
+use stats::mett::CaConnMetrics;
 use stats::rand_xoshiro::Xoshiro128PlusPlus;
 use stats::rand_xoshiro::rand_core::RngCore;
 use stats::rand_xoshiro::rand_core::SeedableRng;
@@ -71,7 +70,6 @@ use std::collections::VecDeque;
 use std::fmt;
 use std::net::SocketAddrV4;
 use std::pin::Pin;
-use std::sync::Arc;
 use std::sync::atomic;
 use std::sync::atomic::AtomicUsize;
 use std::task::Context;
@@ -958,11 +956,6 @@ impl ConnCommandResult {
     pub fn id(&self) -> usize {
         self.id
     }
-
-    fn make_id() -> usize {
-        static ID: AtomicUsize = AtomicUsize::new(0);
-        ID.fetch_add(1, atomic::Ordering::AcqRel)
-    }
 }
 
 #[derive(Debug)]
@@ -1090,7 +1083,6 @@ pub struct CaConn {
     iqdqs: InsertDeques,
     remote_addr_dbg: SocketAddrV4,
     local_epics_hostname: String,
-    stats: Arc<CaConnStats>,
     conn_command_tx: Pin<Box<Sender<ConnCommand>>>,
     conn_command_rx: Pin<Box<Receiver<ConnCommand>>>,
     conn_backoff: f32,
@@ -1136,7 +1128,6 @@ impl CaConn {
         local_epics_hostname: String,
         iqtx: InsertQueuesTx,
         channel_info_query_tx: Sender<ChannelInfoQuery>,
-        stats: Arc<CaConnStats>,
     ) -> Self {
         let tsnow = Instant::now();
         let (cq_tx, cq_rx) = async_channel::bounded(32);
@@ -1162,7 +1153,6 @@ impl CaConn {
             iqdqs: InsertDeques::new(),
             remote_addr_dbg,
             local_epics_hostname,
-            stats,
             conn_command_tx: Box::pin(cq_tx),
             conn_command_rx: Box::pin(cq_rx),
             conn_backoff: 0.02,
@@ -1486,7 +1476,7 @@ impl CaConn {
                     st2.channel.shape.clone(),
                     conf.conf.name().into(),
                 )?;
-                self.stats.get_series_id_ok().inc();
+                self.mett.get_series_id_ok().inc();
                 {
                     let item = ChannelStatusItem {
                         ts: self.tmp_ts_poll,
@@ -1562,10 +1552,6 @@ impl CaConn {
             warn!("TODO handle_series_lookup_result channel in bad state, reset");
             Ok(())
         }
-    }
-
-    pub fn stats(&self) -> Arc<CaConnStats> {
-        self.stats.clone()
     }
 
     pub fn channel_add(&mut self, conf: ChannelConfig, cssid: ChannelStatusSeriesId) -> Result<(), Error> {
@@ -1907,7 +1893,7 @@ impl CaConn {
                         let writer = &mut st.writer;
                         let binwriter = &mut st.binwriter;
                         let iqdqs = &mut self.iqdqs;
-                        let stats = self.stats.as_ref();
+                        let mett = &mut self.mett;
                         Self::event_add_ingest(
                             ev.payload_len,
                             ev.value,
@@ -1920,7 +1906,7 @@ impl CaConn {
                             stnow,
                             tscaproto,
                             ch_conf.use_ioc_time(),
-                            stats,
+                            mett,
                             &mut self.rng,
                         )?;
                     }
@@ -1939,7 +1925,7 @@ impl CaConn {
                         let writer = &mut st.writer;
                         let binwriter = &mut st.binwriter;
                         let iqdqs = &mut self.iqdqs;
-                        let stats = self.stats.as_ref();
+                        let mett = &mut self.mett;
                         st2.monitoring_event_last = Some(ev.clone());
                         Self::event_add_ingest(
                             ev.payload_len,
@@ -1953,7 +1939,7 @@ impl CaConn {
                             stnow,
                             tscaproto,
                             ch_conf.use_ioc_time(),
-                            stats,
+                            mett,
                             &mut self.rng,
                         )?;
                     }
@@ -2118,7 +2104,7 @@ impl CaConn {
                                     }
                                     st2.tick = PollTickState::Idle(PollTickStateIdle { next });
                                     let iqdqs = &mut self.iqdqs;
-                                    let stats = self.stats.as_ref();
+                                    let mett = &mut self.mett;
                                     Self::read_notify_res_for_write(
                                         ev,
                                         ch_wrst,
@@ -2128,13 +2114,13 @@ impl CaConn {
                                         tsnow,
                                         tscaproto,
                                         ch_conf.use_ioc_time(),
-                                        stats,
+                                        mett,
                                         &mut self.rng,
                                     )?;
                                 }
                             },
                             ReadingState::EnableMonitoring(_) => {
-                                self.stats.recv_read_notify_while_enabling_monitoring.inc();
+                                self.mett.recv_read_notify_while_enabling_monitoring().inc();
                             }
                             ReadingState::Monitoring(st2) => match &mut st2.mon2state {
                                 Monitoring2State::Passive(st3) => {
@@ -2184,7 +2170,7 @@ impl CaConn {
                                             .emit_channel_status_item(item, Self::channel_status_qu(&mut self.iqdqs))?;
                                     }
                                     let iqdqs = &mut self.iqdqs;
-                                    let stats = self.stats.as_ref();
+                                    let mett = &mut self.mett;
                                     // NOTE we do not update the last value in this ev handler.
                                     {
                                         if let Some(lst) = st2.monitoring_event_last.as_ref() {
@@ -2221,7 +2207,7 @@ impl CaConn {
                                             tsnow,
                                             tscaproto,
                                             ch_conf.use_ioc_time(),
-                                            stats,
+                                            mett,
                                             &mut self.rng,
                                         )?;
                                     }
@@ -2254,7 +2240,7 @@ impl CaConn {
         tsnow: Instant,
         tscaproto: Instant,
         use_ioc_time: bool,
-        stats: &CaConnStats,
+        mett: &mut CaConnMetrics,
         rng: &mut Xoshiro128PlusPlus,
     ) -> Result<(), Error> {
         let crst = &mut st.channel;
@@ -2272,7 +2258,7 @@ impl CaConn {
             stnow,
             tscaproto,
             use_ioc_time,
-            stats,
+            mett,
             rng,
         )?;
         Ok(())
@@ -2290,7 +2276,7 @@ impl CaConn {
         stnow: SystemTime,
         tscaproto: Instant,
         use_ioc_time: bool,
-        stats: &CaConnStats,
+        mett: &mut CaConnMetrics,
         rng: &mut Xoshiro128PlusPlus,
     ) -> Result<(), Error> {
         {
@@ -2327,7 +2313,7 @@ impl CaConn {
                     .emit_channel_status_item(item, Self::channel_status_qu(iqdqs))
                     .is_err()
                 {
-                    stats.logic_error().inc();
+                    mett.logic_error().inc();
                 }
             }
         }
@@ -2335,7 +2321,8 @@ impl CaConn {
         {
             let ts = value.ts().ok_or_else(|| Error::MissingTimestamp)?;
             let ts_diff = ts.abs_diff(tsev_local.ns());
-            stats.ca_ts_off().ingest((ts_diff / MS) as u32);
+            let ts_diff_dur = Duration::from_nanos(ts_diff);
+            mett.ca_ts_off().push_dur_100us(ts_diff_dur);
         }
         {
             let tsev = if use_ioc_time {
@@ -2370,7 +2357,6 @@ impl CaConn {
         }
         if false {
             // TODO record stats on drop with the new filter
-            stats.channel_fast_item_drop.inc();
             {
                 if tsnow.duration_since(crst.insert_recv_ivl_last) >= Duration::from_millis(10000) {
                     crst.insert_recv_ivl_last = tsnow;
@@ -2546,7 +2532,7 @@ impl CaConn {
                                 self.ioid = self.ioid.wrapping_add(1);
                                 self.read_ioids
                                     .entry(ioid)
-                                    .and_modify(|e| {
+                                    .and_modify(|_| {
                                         self.mett.ioid_read_error_exists().inc();
                                     })
                                     .or_insert_with(|| {
@@ -2631,7 +2617,7 @@ impl CaConn {
                                 self.ioid = self.ioid.wrapping_add(1);
                                 self.read_ioids
                                     .entry(ioid)
-                                    .and_modify(|e| {
+                                    .and_modify(|_| {
                                         self.mett.ioid_read_error_exists().inc();
                                     })
                                     .or_insert_with(|| {
@@ -3757,7 +3743,7 @@ impl Stream for CaConn {
             }
             let dt = lts3.saturating_duration_since(lts2);
             // TODO STATS
-            self.stats.poll_op3_dt().ingest_dur_dms(dt);
+            self.mett.poll_op3_dt().push_dur_100us(dt);
             if dt > max {
                 debug!("LONG OPERATION  3  {:.0} ms", 1e3 * dt.as_secs_f32());
             }

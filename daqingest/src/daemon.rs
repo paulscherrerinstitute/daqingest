@@ -824,7 +824,7 @@ impl Daemon {
         ret
     }
 
-    fn spawn_ticker(tx: Sender<DaemonEvent>, stats: Arc<DaemonStats>) {
+    fn spawn_ticker(tx: Sender<DaemonEvent>) {
         let (ticker_inp_tx, ticker_inp_rx) = async_channel::bounded::<u32>(1);
         let ticker = {
             async move {
@@ -850,7 +850,6 @@ impl Daemon {
                             Ok(_) => {}
                             Err(_) => {
                                 panic!("can not acquire timer ticker token");
-                                break;
                             }
                         }
                     }
@@ -865,7 +864,6 @@ impl Daemon {
         let tx = self.tx.clone();
         let daemon_stats = self.stats().clone();
         let connset_cmd_tx = self.connset_ctrl.sender().clone();
-        let ca_conn_stats = self.connset_ctrl.ca_conn_stats().clone();
         let dcom = Arc::new(netfetch::metrics::DaemonComm::new(tx.clone()));
         let rres = RoutesResources::new(
             self.ingest_opts.backend().into(),
@@ -886,7 +884,6 @@ impl Daemon {
             let stats_set = StatsSet::new(
                 daemon_stats,
                 conn_set_stats,
-                ca_conn_stats,
                 self.insert_worker_stats.clone(),
                 self.series_by_channel_stats.clone(),
                 self.connset_ctrl.ioc_finder_stats().clone(),
@@ -908,7 +905,7 @@ impl Daemon {
 
     pub async fn daemon(mut self) -> Result<(), Error> {
         self.spawn_metrics().await?;
-        Self::spawn_ticker(self.tx.clone(), self.stats.clone());
+        Self::spawn_ticker(self.tx.clone());
         loop {
             if self.shutting_down {
                 break;
@@ -1000,11 +997,6 @@ pub async fn run(opts: CaIngestOpts, channels_config: Option<ChannelsConfig>) ->
         info!("stop scylla schema check");
     }
     info!("database check done");
-
-    // TODO use a new stats type:
-    //let store_stats = Arc::new(CaConnStats::new());
-    //let metrics_agg_fut = metrics_agg_task(ingest_commons.clone(), local_stats.clone(), store_stats.clone());
-    //let metrics_agg_jh = tokio::spawn(metrics_agg_fut);
 
     let channels_config = if opts.test_bsread_addr.is_some() {
         None

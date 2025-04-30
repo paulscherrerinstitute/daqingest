@@ -53,6 +53,7 @@ mod Metrics {
         recv_read_notify_state_read_pending,
         recv_read_notify_state_read_pending_bad_ioid,
         recv_read_notify_while_polling_idle,
+        recv_read_notify_while_enabling_monitoring,
         no_cid_for_subid,
         recv_read_notify_but_no_longer_ready,
         recv_read_notify_but_not_init_yet,
@@ -69,8 +70,10 @@ mod Metrics {
         caget_lat,
         poll_reloops,
         poll_all_dt,
+        poll_op3_dt,
         iiq_batch_len,
         pong_recv_lat,
+        ca_ts_off,
     }
     mod Compose {
         type Input = ca_proto::mett::CaProtoMetrics;

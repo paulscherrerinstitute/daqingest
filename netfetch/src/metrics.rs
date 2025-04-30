@@ -34,9 +34,6 @@ use serde::Deserialize;
 use serde::Serialize;
 use serde_json::json;
 use stats::CaConnSetStats;
-use stats::CaConnStats;
-use stats::CaConnStatsAgg;
-use stats::CaConnStatsAggDiff;
 use stats::CaProtoStats;
 use stats::DaemonStats;
 use stats::InsertWorkerStats;
@@ -134,7 +131,6 @@ impl IntoResponse for CustomErrorResponse {
 pub struct StatsSet {
     daemon: Arc<DaemonStats>,
     ca_conn_set: Arc<CaConnSetStats>,
-    ca_conn: Arc<CaConnStats>,
     insert_worker_stats: Arc<InsertWorkerStats>,
     series_by_channel_stats: Arc<SeriesByChannelStats>,
     ioc_finder_stats: Arc<IocFinderStats>,
@@ -145,7 +141,6 @@ impl StatsSet {
     pub fn new(
         daemon: Arc<DaemonStats>,
         ca_conn_set: Arc<CaConnSetStats>,
-        ca_conn: Arc<CaConnStats>,
         insert_worker_stats: Arc<InsertWorkerStats>,
         series_by_channel_stats: Arc<SeriesByChannelStats>,
         ioc_finder_stats: Arc<IocFinderStats>,
@@ -154,7 +149,6 @@ impl StatsSet {
         Self {
             daemon,
             ca_conn_set,
-            ca_conn,
             insert_worker_stats,
             series_by_channel_stats,
             ioc_finder_stats,
@@ -358,13 +352,14 @@ fn metricbeat(stats_set: &StatsSet) -> axum::Json<serde_json::Value> {
 }
 
 fn metrics(stats_set: &StatsSet) -> String {
-    let s1 = stats_set.daemon.prometheus();
-    let s2 = stats_set.ca_conn_set.prometheus();
-    let s3 = stats_set.insert_worker_stats.prometheus();
-    let s4 = stats_set.ca_conn.prometheus();
-    let s5 = stats_set.series_by_channel_stats.prometheus();
-    let s7 = stats_set.ioc_finder_stats.prometheus();
-    [s1, s2, s3, s4, s5, s7].join("")
+    let ss = [
+        stats_set.daemon.prometheus(),
+        stats_set.ca_conn_set.prometheus(),
+        stats_set.insert_worker_stats.prometheus(),
+        stats_set.series_by_channel_stats.prometheus(),
+        stats_set.ioc_finder_stats.prometheus(),
+    ];
+    ss.join("")
 }
 
 pub struct RoutesResources {
@@ -683,19 +678,4 @@ pub async fn metrics_service(
         })
         .await?;
     Ok(())
-}
-
-pub async fn metrics_agg_task(local_stats: Arc<CaConnStats>, store_stats: Arc<CaConnStats>) -> Result<(), Error> {
-    use stats::rand_xoshiro::rand_core::RngCore;
-    let mut rng = stats::xoshiro_from_time();
-    let mut agg_last = CaConnStatsAgg::new();
-    loop {
-        let dt = rng.next_u32();
-        tokio::time::sleep(Duration::from_millis(500 + (dt as u64 & 0x7f))).await;
-        let agg = CaConnStatsAgg::new();
-        agg.push(&local_stats);
-        agg.push(&store_stats);
-        trace!("TODO metrics_agg_task");
-        agg_last = agg;
-    }
 }

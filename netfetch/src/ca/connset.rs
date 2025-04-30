@@ -45,8 +45,6 @@ use statemap::ConnectionStateValue;
 use statemap::WithStatusSeriesIdState;
 use statemap::WithStatusSeriesIdStateInner;
 use stats::CaConnSetStats;
-use stats::CaConnStats;
-use stats::CaProtoStats;
 use stats::IocFinderStats;
 use std::collections::BTreeMap;
 use std::collections::VecDeque;
@@ -134,16 +132,9 @@ pub struct CmdId(SocketAddrV4, usize);
 
 pub struct CaConnRes {
     sender: Pin<Box<SenderPolling<ConnCommand>>>,
-    stats: Arc<CaConnStats>,
     cmd_queue: VecDeque<ConnCommand>,
     // TODO await on jh
     jh: JoinHandle<Result<(), Error>>,
-}
-
-impl CaConnRes {
-    pub fn stats(&self) -> &Arc<CaConnStats> {
-        &self.stats
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -257,7 +248,6 @@ pub struct CaConnSetCtrl {
     tx: Sender<CaConnSetEvent>,
     rx: Receiver<CaConnSetItem>,
     stats: Arc<CaConnSetStats>,
-    ca_conn_stats: Arc<CaConnStats>,
     ioc_finder_stats: Arc<IocFinderStats>,
     jh: JoinHandle<Result<(), Error>>,
 }
@@ -319,10 +309,6 @@ impl CaConnSetCtrl {
 
     pub fn stats(&self) -> &Arc<CaConnSetStats> {
         &self.stats
-    }
-
-    pub fn ca_conn_stats(&self) -> &Arc<CaConnStats> {
-        &self.ca_conn_stats
     }
 
     pub fn ioc_finder_stats(&self) -> &Arc<IocFinderStats> {
@@ -429,7 +415,6 @@ pub struct CaConnSet {
     shutdown_done: bool,
     chan_check_next: Option<ChannelName>,
     stats: Arc<CaConnSetStats>,
-    ca_conn_stats: Arc<CaConnStats>,
     ioc_finder_jh: JoinHandle<Result<(), crate::ca::finder::Error>>,
     await_ca_conn_jhs: VecDeque<(SocketAddr, JoinHandle<Result<(), Error>>)>,
     thr_msg_storage_len: ThrottleTrace,
@@ -464,8 +449,6 @@ impl CaConnSet {
         .unwrap();
         let (channel_info_res_tx, channel_info_res_rx) = async_channel::bounded(400);
         let stats = Arc::new(CaConnSetStats::new());
-        let ca_proto_stats = Arc::new(CaProtoStats::new());
-        let ca_conn_stats = Arc::new(CaConnStats::new());
         let connset = Self {
             ticker: Self::new_self_ticker(),
             backend,
@@ -497,7 +480,6 @@ impl CaConnSet {
             shutdown_done: false,
             chan_check_next: None,
             stats: stats.clone(),
-            ca_conn_stats: ca_conn_stats.clone(),
             connset_out_tx: Box::pin(connset_out_tx),
             connset_out_queue: VecDeque::new(),
             // connset_out_sender: SenderPolling::new(connset_out_tx),
@@ -514,7 +496,6 @@ impl CaConnSet {
             tx: connset_inp_tx,
             rx: connset_out_rx,
             stats,
-            ca_conn_stats,
             ioc_finder_stats,
             jh,
         }
@@ -1337,10 +1318,8 @@ impl CaConnSet {
             self.channel_info_query_tx
                 .clone()
                 .ok_or_else(|| Error::MissingChannelInfoChannelTx)?,
-            self.ca_conn_stats.clone(),
         );
         let conn_tx = conn.conn_command_tx();
-        let conn_stats = conn.stats();
         let tx1 = self.ca_conn_res_tx.as_ref().get_ref().clone();
         let log_level = "trace";
         let logspan = if log_level == "trace" {
@@ -1352,12 +1331,11 @@ impl CaConnSet {
         } else {
             tracing::Span::none()
         };
-        let fut = Self::ca_conn_item_merge(conn, tx1, addr, self.stats.clone());
+        let fut = Self::ca_conn_item_merge(conn, tx1, addr);
         let fut = fut.instrument(logspan);
         let jh = tokio::spawn(fut);
         let ca_conn_res = CaConnRes {
             sender: Box::pin(conn_tx.into()),
-            stats: conn_stats,
             cmd_queue: VecDeque::new(),
             jh,
         };
@@ -1368,12 +1346,9 @@ impl CaConnSet {
         conn: CaConn,
         tx1: Sender<(SocketAddr, CaConnEvent)>,
         addr: SocketAddr,
-        stats: Arc<CaConnSetStats>,
     ) -> Result<(), Error> {
-        stats.ca_conn_task_begin().inc();
         trace2!("ca_conn_consumer  begin  {}", addr);
-        let connstats = conn.stats();
-        let ret = Self::ca_conn_item_merge_inner(Box::pin(conn), tx1.clone(), addr, connstats).await;
+        let ret = Self::ca_conn_item_merge_inner(Box::pin(conn), tx1.clone(), addr).await;
         trace2!("ca_conn_consumer  ended {}", addr);
         match ret {
             Ok(x) => {
@@ -1385,7 +1360,6 @@ impl CaConnSet {
                 error!("ca_conn_item_merge received from inner: {e}");
             }
         }
-        stats.ca_conn_task_done().inc();
         Ok(())
     }
 
@@ -1393,7 +1367,6 @@ impl CaConnSet {
         mut conn: Pin<Box<CaConn>>,
         tx1: Sender<(SocketAddr, CaConnEvent)>,
         addr: SocketAddr,
-        stats: Arc<CaConnStats>,
     ) -> Result<EndOfStreamReason, Error> {
         let mut eos_reason = None;
         while let Some(item) = conn.next().await {
@@ -1405,7 +1378,6 @@ impl CaConnSet {
                 // return Err(e);
                 warn!("CaConn {addr} EOS reason [{x:?}] after [{eos_reason:?}]");
             }
-            stats.item_count.inc();
             match item.value {
                 CaConnEventValue::None
                 | CaConnEventValue::EchoTimeout

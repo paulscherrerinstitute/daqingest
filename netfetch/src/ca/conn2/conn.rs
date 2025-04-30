@@ -21,8 +21,6 @@ use proto::CaProto;
 use scywr::insertqueues::InsertDeques;
 use scywr::insertqueues::InsertQueuesTx;
 use scywr::iteminsertqueue::QueryItem;
-use stats::CaConnStats;
-use stats::CaProtoStats;
 use stats::rand_xoshiro::Xoshiro128PlusPlus;
 use std::collections::VecDeque;
 use std::fmt;
@@ -90,7 +88,7 @@ struct CaConn {
     ca_conn_event_out_queue: VecDeque<CaConnEvent>,
     ca_conn_event_out_queue_max: usize,
     rng: Xoshiro128PlusPlus,
-    stats: Arc<CaConnStats>,
+    mett: stats::mett::CaConnMetrics,
 }
 
 impl CaConn {
@@ -101,8 +99,6 @@ impl CaConn {
         local_epics_hostname: String,
         iqtx: InsertQueuesTx,
         channel_info_query_tx: Sender<ChannelInfoQuery>,
-        stats: Arc<CaConnStats>,
-        ca_proto_stats: Arc<CaProtoStats>,
     ) -> Self {
         let tsnow = Instant::now();
         let (cq_tx, cq_rx) = async_channel::bounded::<ConnCommand>(32);
@@ -115,7 +111,7 @@ impl CaConn {
             ca_conn_event_out_queue: VecDeque::new(),
             ca_conn_event_out_queue_max: 2000,
             rng,
-            stats,
+            mett: stats::mett::CaConnMetrics::new(),
         }
     }
 
@@ -160,16 +156,14 @@ impl Stream for CaConn {
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
         use Poll::*;
         let mut durs = DurationMeasureSteps::new();
-        // TODO STATS
-        // self.stats.poll_fn_begin().inc();
+        self.mett.poll_fn_begin().inc();
         let ret = loop {
-            // TODO STATS
-            // self.stats.poll_loop_begin().inc();
+            self.mett.poll_loop_begin().inc();
             let qlen = self.iqdqs.len();
             if qlen >= self.opts.insert_queue_max * 2 / 3 {
-                self.stats.insert_item_queue_pressure().inc();
+                self.mett.insert_item_queue_pressure().inc();
             } else if qlen >= self.opts.insert_queue_max {
-                self.stats.insert_item_queue_full().inc();
+                self.mett.insert_item_queue_full().inc();
             }
             let mut hppv = HaveProgressPending::new();
             let hpp = &mut hppv;
