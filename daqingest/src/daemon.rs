@@ -983,10 +983,10 @@ pub async fn run(opts: CaIngestOpts, channels_config: Option<ChannelsConfig>) ->
         info!("start scylla schema check");
         scywr::schema::migrate_scylla_data_schema_all_rt(
             [
-                opts.scylla_config_st(),
-                opts.scylla_config_mt(),
-                opts.scylla_config_lt(),
-                opts.scylla_config_st_rf1(),
+                &opts.scylla_config_st(),
+                &opts.scylla_config_mt(),
+                &opts.scylla_config_lt(),
+                &opts.scylla_config_st_rf1(),
             ],
             false,
         )

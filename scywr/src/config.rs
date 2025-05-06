@@ -2,8 +2,8 @@ use serde::Deserialize;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ScyllaIngestConfig {
-    hosts: Vec<String>,
     keyspace: String,
+    hosts: Vec<String>,
 }
 
 impl ScyllaIngestConfig {
@@ -14,16 +14,16 @@ impl ScyllaIngestConfig {
         K1: Into<String>,
     {
         Self {
-            hosts: hosts.into_iter().map(Into::into).collect(),
             keyspace: ks.into(),
+            hosts: hosts.into_iter().map(Into::into).collect(),
         }
-    }
-
-    pub fn hosts(&self) -> &Vec<String> {
-        &self.hosts
     }
 
     pub fn keyspace(&self) -> &String {
         &self.keyspace
+    }
+
+    pub fn hosts(&self) -> &Vec<String> {
+        &self.hosts
     }
 }
