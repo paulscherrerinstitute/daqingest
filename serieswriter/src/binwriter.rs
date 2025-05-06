@@ -23,14 +23,14 @@ use series::msp::PrebinnedPartitioning;
 
 macro_rules! info { ($($arg:expr),*) => ( if true { log::info!($($arg),*); } ) }
 
-macro_rules! debug_init { ($t:expr, $($arg:expr),*) => ( if true { if $t { log::debug!($($arg),*); } } ) }
-macro_rules! debug_bin { ($t:expr, $($arg:expr),*) => ( if true { if $t { log::debug!($($arg),*); } } ) }
+macro_rules! debug_init { ($t:expr, $($arg:expr),*) => ( if true { if $t { log::info!($($arg),*); } } ) }
+macro_rules! debug_bin { ($t:expr, $($arg:expr),*) => ( if true { if $t { log::info!($($arg),*); } } ) }
 
-macro_rules! trace_ingest { ($($arg:expr),*) => ( if false { log::trace!($($arg),*); } ) }
-macro_rules! trace_tick { ($($arg:expr),*) => ( if true { log::trace!($($arg),*); } ) }
-macro_rules! trace_tick_verbose { ($($arg:expr),*) => ( if false { log::trace!($($arg),*); } ) }
+macro_rules! trace_ingest { ($t:expr, $($arg:expr),*) => ( if false { if $t { log::trace!($($arg),*); } } ) }
+macro_rules! trace_tick { ($t:expr, $($arg:expr),*) => ( if true { if $t { log::info!($($arg),*); } } ) }
+macro_rules! trace_tick_verbose { ($t:expr, $($arg:expr),*) => ( if false { if $t { log::trace!($($arg),*); } } ) }
 
-macro_rules! trace_bin { ($t:expr, $($arg:expr),*) => ( if true { if $t { log::trace!($($arg),*); } } ) }
+macro_rules! trace_bin { ($t:expr, $($arg:expr),*) => ( if true { if $t { log::info!($($arg),*); } } ) }
 
 autoerr::create_error_v1!(
     name(Error, "SerieswriterBinwriter"),
@@ -312,21 +312,25 @@ impl BinWriter {
 
     pub fn ingest(&mut self, ts_local: TsNano, val: f32, iqdqs: &mut InsertDeques) -> Result<(), Error> {
         let _ = iqdqs;
-        trace_ingest!("ingest  {ts_local}  {val}");
+        let trd = self.trd;
+        trace_ingest!(trd, "ingest  {}  {}", ts_local, val);
+        // info!("ingest  {}  {}  {}", trd, ts_local, val);
         self.evbuf.push_back(ts_local, val);
         Ok(())
     }
 
     pub fn tick(&mut self, iqdqs: &mut InsertDeques) -> Result<(), Error> {
-        if self.evbuf.len() != 0 {
-            trace_tick!("tick  evbuf len {}", self.evbuf.len());
+        let trd = self.trd;
+        let nev = self.evbuf.len();
+        trace_tick!(trd, "tick  evbuf len {}", nev);
+        if nev != 0 {
             if true {
                 self.tick_ingest_loop(iqdqs)?;
             } else {
                 self.evbuf.clear();
             }
         } else {
-            trace_tick_verbose!("tick  nothing to ingest");
+            trace_tick_verbose!(trd, "tick  nothing to ingest");
         }
         Ok(())
     }
@@ -444,13 +448,13 @@ impl BinWriter {
         iqdqs: &mut InsertDeques,
     ) -> Result<(), Error> {
         let selfname = "handle_output_ready";
-        if true {
-            trace_tick!("{selfname}  bins ready len {}  DISCARDING", bins.len());
+        if false {
+            trace_tick!(trd, "{}  bins ready len {}  DISCARDING", selfname, bins.len());
             return Ok(());
         }
-        trace_tick!("{selfname}  bins ready len {}", bins.len());
+        trace_tick!(trd, "{}  bins ready len {}", selfname, bins.len());
         for e in bins.iter_debug() {
-            trace_tick_verbose!("{e:?}");
+            trace_tick_verbose!(trd, "{:?}", e);
         }
         let bins_len = bins.len();
         for (ts1, ts2, cnt, min, max, avg, lst, fnl) in bins.zip_iter_2() {
@@ -470,6 +474,7 @@ impl BinWriter {
                 }
                 if *discard_front < 1 {
                     *discard_front += 1;
+                    debug_bin!(trd, "handle_output_ready  discard_front  {:?}", rt);
                 } else {
                     {
                         let (msp, lsp) = pbp.msp_lsp(ts1.to_ts_ms());

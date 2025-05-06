@@ -1716,8 +1716,8 @@ impl CaConn {
         for (_cid, conf) in &mut self.channels {
             if series::dbg::dbg_chn(conf.conf.name()) {
                 let js = serde_json::to_string(conf).unwrap();
-                info!("channel_state_on_shutdown  debug  {:?}", conf);
-                info!("channel_state_on_shutdown  json  {}", js);
+                debug!("channel_state_on_shutdown  debug  {:?}", conf);
+                debug!("channel_state_on_shutdown  json  {}", js);
             }
             let chst = &mut conf.state;
             match chst {
