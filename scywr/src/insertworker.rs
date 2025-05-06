@@ -1,7 +1,7 @@
 use crate::config::ScyllaIngestConfig;
 use crate::iteminsertqueue::Accounting;
 use crate::iteminsertqueue::AccountingRecv;
-use crate::iteminsertqueue::BinWriteIndexV03;
+use crate::iteminsertqueue::BinWriteIndexV04;
 use crate::iteminsertqueue::InsertFut;
 use crate::iteminsertqueue::InsertItem;
 use crate::iteminsertqueue::MspItem;
@@ -20,7 +20,6 @@ use log;
 use netpod::ttl::RetentionTime;
 use smallvec::SmallVec;
 use smallvec::smallvec;
-use stats::InsertWorkerStats;
 use std::collections::VecDeque;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -53,22 +52,25 @@ autoerr::create_error_v1!(
     },
 );
 
-fn stats_inc_for_err(stats: &stats::InsertWorkerStats, err: &crate::iteminsertqueue::InsertFutError) {
+fn stats_inc_for_err(err: &crate::iteminsertqueue::InsertFutError) {
     use crate::iteminsertqueue::InsertFutError;
     match err {
         InsertFutError::Execution(e) => match e {
             scylla::errors::ExecutionError::RequestTimeout(_) => {
-                stats.db_timeout().inc();
+                // TODO
+                // stats.db_timeout().inc();
             }
             _ => {
                 if true {
                     warn!("db error {}", err);
                 }
-                stats.db_error().inc();
+                // TODO
+                // stats.db_error().inc();
             }
         },
         InsertFutError::NoFuture => {
-            stats.logic_error().inc();
+            // TODO
+            // stats.logic_error().inc();
         }
     }
 }
@@ -108,7 +110,6 @@ pub async fn spawn_scylla_insert_workers(
     insert_worker_concurrency: usize,
     item_inp: Receiver<VecDeque<QueryItem>>,
     insert_worker_opts: Arc<InsertWorkerOpts>,
-    store_stats: Arc<stats::InsertWorkerStats>,
     use_rate_limit_queue: bool,
     ignore_writes: bool,
     tx: Sender<InsertWorkerOutputItem>,
@@ -133,7 +134,6 @@ pub async fn spawn_scylla_insert_workers(
             insert_worker_opts.clone(),
             Some(data_store),
             ignore_writes,
-            store_stats.clone(),
             tx.clone(),
         ));
         jhs.push(jh);
@@ -146,7 +146,6 @@ pub async fn spawn_scylla_insert_workers_dummy(
     insert_worker_concurrency: usize,
     item_inp: Receiver<VecDeque<QueryItem>>,
     insert_worker_opts: Arc<InsertWorkerOpts>,
-    store_stats: Arc<stats::InsertWorkerStats>,
     tx: Sender<InsertWorkerOutputItem>,
 ) -> Result<Vec<JoinHandle<Result<(), Error>>>, Error> {
     let mut jhs = Vec::new();
@@ -159,7 +158,6 @@ pub async fn spawn_scylla_insert_workers_dummy(
             insert_worker_opts.clone(),
             data_store,
             true,
-            store_stats.clone(),
             tx.clone(),
         ));
         jhs.push(jh);
@@ -214,7 +212,6 @@ async fn worker_streamed(
     insert_worker_opts: Arc<InsertWorkerOpts>,
     data_store: Option<Arc<DataStore>>,
     ignore_writes: bool,
-    stats: Arc<InsertWorkerStats>,
     tx: Sender<InsertWorkerOutputItem>,
 ) -> Result<(), Error> {
     debug_setup!("worker_streamed  begin");
@@ -231,7 +228,7 @@ async fn worker_streamed(
         .map_or_else(|| format!("dummy"), |x| x.rett.debug_tag().to_string());
     let stream = inspect_items(stream, worker_name.clone());
     if let Some(data_store) = data_store {
-        let stream = transform_to_db_futures(stream, data_store, ignore_writes, stats.clone());
+        let stream = transform_to_db_futures(stream, data_store, ignore_writes);
         let stream = stream
             .map(|x| futures_util::stream::iter(x))
             .flatten_unordered(Some(1))
@@ -254,7 +251,7 @@ async fn worker_streamed(
                 }
                 Err(e) => {
                     mett.job_err().inc();
-                    stats_inc_for_err(&stats, &e);
+                    stats_inc_for_err(&e);
                 }
             }
             if mett_emit_last + metrics_ivl <= tsnow {
@@ -276,7 +273,8 @@ async fn worker_streamed(
             drop(item);
         }
     };
-    stats.worker_finish().inc();
+    // TODO
+    // stats.worker_finish().inc();
     insert_worker_opts
         .insert_workers_running
         .fetch_sub(1, atomic::Ordering::AcqRel);
@@ -293,7 +291,6 @@ fn transform_to_db_futures<S>(
     item_inp: S,
     data_store: Arc<DataStore>,
     ignore_writes: bool,
-    stats: Arc<InsertWorkerStats>,
 ) -> impl Stream<Item = Vec<FutJob>>
 where
     S: Stream<Item = VecDeque<QueryItem>>,
@@ -302,7 +299,8 @@ where
     // TODO possible without box?
     // let item_inp = Box::pin(item_inp);
     item_inp.map(move |batch| {
-        stats.item_recv.inc();
+        // TODO
+        // stats.item_recv.inc();
         trace_transform!("transform_to_db_futures  have batch  len {}", batch.len());
         let tsnow = Instant::now();
         let mut res = Vec::with_capacity(32);
@@ -329,11 +327,11 @@ where
                         prepare_timebin_v02_insert_futs(item, &data_store, tsnow)
                     }
                 }
-                QueryItem::BinWriteIndexV03(item) => {
+                QueryItem::BinWriteIndexV04(item) => {
                     if ignore_writes {
                         SmallVec::new()
                     } else {
-                        prepare_bin_write_index_v03_insert_futs(item, &data_store, tsnow)
+                        prepare_bin_write_index_v04_insert_futs(item, &data_store, tsnow)
                     }
                 }
                 QueryItem::Accounting(item) => {
@@ -377,8 +375,8 @@ fn inspect_items(
                 QueryItem::TimeBinSimpleF32V02(_) => {
                     trace_item_execute!("execute  {worker_name}  TimeBinSimpleF32V02");
                 }
-                QueryItem::BinWriteIndexV03(_) => {
-                    trace_item_execute!("execute  {worker_name}  BinWriteIndexV03");
+                QueryItem::BinWriteIndexV04(_) => {
+                    trace_item_execute!("execute  {worker_name}  BinWriteIndexV04");
                 }
                 QueryItem::Accounting(_) => {
                     trace_item_execute!("execute  {worker_name}  Accounting  {item:?}");
@@ -458,15 +456,15 @@ fn prepare_timebin_v02_insert_futs(
     futs
 }
 
-fn prepare_bin_write_index_v03_insert_futs(
-    item: BinWriteIndexV03,
+fn prepare_bin_write_index_v04_insert_futs(
+    item: BinWriteIndexV04,
     data_store: &Arc<DataStore>,
     tsnow: Instant,
 ) -> SmallVec<[FutJob; 4]> {
-    let params = (item.series, item.pbp, item.msp, item.rt, item.lsp, item.binlen);
+    let params = (item.series, item.pbp, item.msp, item.lsp, item.binlen);
     let fut = InsertFut::new(
         data_store.scy.clone(),
-        data_store.qu_insert_bin_write_index_v03.clone(),
+        data_store.qu_insert_bin_write_index_v04.clone(),
         params,
     );
     let fut = FutJob { fut, ts_net: tsnow };

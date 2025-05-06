@@ -23,9 +23,6 @@ use scywr::config::ScyllaIngestConfig;
 use scywr::insertqueues::InsertQueuesRx;
 use scywr::insertqueues::InsertQueuesTx;
 use scywr::insertworker::InsertWorkerOpts;
-use stats::DaemonStats;
-use stats::InsertWorkerStats;
-use stats::SeriesByChannelStats;
 use stats::rand_xoshiro::rand_core::RngCore;
 use std::sync::Arc;
 use std::sync::atomic;
@@ -68,9 +65,6 @@ pub struct Daemon {
     count_assigned: usize,
     last_status_print: SystemTime,
     insert_workers_jhs: Vec<JoinHandle<Result<(), scywr::insertworker::Error>>>,
-    stats: Arc<DaemonStats>,
-    insert_worker_stats: Arc<InsertWorkerStats>,
-    series_by_channel_stats: Arc<SeriesByChannelStats>,
     shutting_down: bool,
     connset_ctrl: CaConnSetCtrl,
     connset_status_last: Instant,
@@ -90,15 +84,11 @@ impl Daemon {
     pub async fn new(opts: DaemonOpts, ingest_opts: CaIngestOpts) -> Result<Self, Error> {
         let (daemon_ev_tx, daemon_ev_rx) = async_channel::bounded(32);
 
-        let series_by_channel_stats = Arc::new(SeriesByChannelStats::new());
-        let insert_worker_stats = Arc::new(InsertWorkerStats::new());
-
         // TODO keep join handles and await later
-        let (channel_info_query_tx, jhs, jh) = dbpg::seriesbychannel::start_lookup_workers::<
-            dbpg::seriesbychannel::SalterRandom,
-        >(2, &opts.pgconf, series_by_channel_stats.clone())
-        .await
-        .map_err(|e| Error::with_msg_no_trace(e.to_string()))?;
+        let (channel_info_query_tx, jhs, jh) =
+            dbpg::seriesbychannel::start_lookup_workers::<dbpg::seriesbychannel::SalterRandom>(2, &opts.pgconf)
+                .await
+                .map_err(|e| Error::with_msg_no_trace(e.to_string()))?;
 
         // TODO so far a dummy
         let (series_conf_by_id_tx, _series_conf_by_id_rx) = async_channel::bounded(16);
@@ -207,7 +197,6 @@ impl Daemon {
                 ingest_opts.insert_worker_concurrency(),
                 iqrx.st_rf1_rx,
                 insert_worker_opts.clone(),
-                insert_worker_stats.clone(),
                 insert_worker_output_tx.clone(),
             )
             .await
@@ -218,7 +207,6 @@ impl Daemon {
                 ingest_opts.insert_worker_concurrency(),
                 iqrx.st_rf3_rx,
                 insert_worker_opts.clone(),
-                insert_worker_stats.clone(),
                 insert_worker_output_tx.clone(),
             )
             .await
@@ -229,7 +217,6 @@ impl Daemon {
                 ingest_opts.insert_worker_concurrency(),
                 iqrx.mt_rf3_rx,
                 insert_worker_opts.clone(),
-                insert_worker_stats.clone(),
                 insert_worker_output_tx.clone(),
             )
             .await
@@ -240,7 +227,6 @@ impl Daemon {
                 ingest_opts.insert_worker_concurrency(),
                 iqrx.lt_rf3_rx,
                 insert_worker_opts.clone(),
-                insert_worker_stats.clone(),
                 insert_worker_output_tx.clone(),
             )
             .await
@@ -251,7 +237,6 @@ impl Daemon {
                 ingest_opts.insert_worker_concurrency(),
                 iqrx.lt_rf3_lat5_rx,
                 insert_worker_opts.clone(),
-                insert_worker_stats.clone(),
                 insert_worker_output_tx.clone(),
             )
             .await
@@ -266,7 +251,6 @@ impl Daemon {
                 ingest_opts.insert_worker_concurrency(),
                 iqrx.st_rf1_rx,
                 insert_worker_opts.clone(),
-                insert_worker_stats.clone(),
                 ingest_opts.use_rate_limit_queue(),
                 ignore_writes,
                 insert_worker_output_tx.clone(),
@@ -283,7 +267,6 @@ impl Daemon {
                 ingest_opts.insert_worker_concurrency(),
                 iqrx.st_rf3_rx,
                 insert_worker_opts.clone(),
-                insert_worker_stats.clone(),
                 ingest_opts.use_rate_limit_queue(),
                 ignore_writes,
                 insert_worker_output_tx.clone(),
@@ -300,7 +283,6 @@ impl Daemon {
                 ingest_opts.insert_worker_concurrency(),
                 iqrx.mt_rf3_rx,
                 insert_worker_opts.clone(),
-                insert_worker_stats.clone(),
                 ingest_opts.use_rate_limit_queue(),
                 ignore_writes,
                 insert_worker_output_tx.clone(),
@@ -319,7 +301,6 @@ impl Daemon {
                 ingest_opts.insert_worker_concurrency(),
                 lt_rx_combined,
                 insert_worker_opts.clone(),
-                insert_worker_stats.clone(),
                 ingest_opts.use_rate_limit_queue(),
                 ignore_writes,
                 insert_worker_output_tx.clone(),
@@ -328,7 +309,6 @@ impl Daemon {
             .map_err(Error::from_string)?;
             insert_worker_jhs.extend(jh);
         };
-        let stats = Arc::new(DaemonStats::new());
 
         #[cfg(feature = "bsread")]
         if let Some(bsaddr) = &opts.test_bsread_addr {
@@ -402,9 +382,6 @@ impl Daemon {
             count_assigned: 0,
             last_status_print: SystemTime::now(),
             insert_workers_jhs: insert_worker_jhs,
-            stats,
-            insert_worker_stats,
-            series_by_channel_stats,
             shutting_down: false,
             connset_ctrl: conn_set_ctrl,
             connset_status_last: Instant::now(),
@@ -418,10 +395,6 @@ impl Daemon {
             daemon_metrics: stats::mett::DaemonMetrics::new(),
         };
         Ok(ret)
-    }
-
-    fn stats(&self) -> &Arc<DaemonStats> {
-        &self.stats
     }
 
     async fn check_health(&mut self, ts1: Instant) -> Result<(), Error> {
@@ -862,7 +835,6 @@ impl Daemon {
 
     pub async fn spawn_metrics(&mut self) -> Result<(), Error> {
         let tx = self.tx.clone();
-        let daemon_stats = self.stats().clone();
         let connset_cmd_tx = self.connset_ctrl.sender().clone();
         let dcom = Arc::new(netfetch::metrics::DaemonComm::new(tx.clone()));
         let rres = RoutesResources::new(
@@ -880,13 +852,7 @@ impl Daemon {
         );
         let rres = Arc::new(rres);
         let metrics_jh = {
-            let stats_set = StatsSet::new(
-                daemon_stats,
-                self.insert_worker_stats.clone(),
-                self.series_by_channel_stats.clone(),
-                self.connset_ctrl.ioc_finder_stats().clone(),
-                self.opts.insert_frac.clone(),
-            );
+            let stats_set = StatsSet::new(self.opts.insert_frac.clone());
             let fut = netfetch::metrics::metrics_service(
                 self.ingest_opts.api_bind(),
                 dcom,

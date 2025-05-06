@@ -33,11 +33,6 @@ use scywr::iteminsertqueue::QueryItem;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::json;
-use stats::CaProtoStats;
-use stats::DaemonStats;
-use stats::InsertWorkerStats;
-use stats::IocFinderStats;
-use stats::SeriesByChannelStats;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -128,28 +123,12 @@ impl IntoResponse for CustomErrorResponse {
 
 #[derive(Clone)]
 pub struct StatsSet {
-    daemon: Arc<DaemonStats>,
-    insert_worker_stats: Arc<InsertWorkerStats>,
-    series_by_channel_stats: Arc<SeriesByChannelStats>,
-    ioc_finder_stats: Arc<IocFinderStats>,
     insert_frac: Arc<AtomicU64>,
 }
 
 impl StatsSet {
-    pub fn new(
-        daemon: Arc<DaemonStats>,
-        insert_worker_stats: Arc<InsertWorkerStats>,
-        series_by_channel_stats: Arc<SeriesByChannelStats>,
-        ioc_finder_stats: Arc<IocFinderStats>,
-        insert_frac: Arc<AtomicU64>,
-    ) -> Self {
-        Self {
-            daemon,
-            insert_worker_stats,
-            series_by_channel_stats,
-            ioc_finder_stats,
-            insert_frac,
-        }
+    pub fn new(insert_frac: Arc<AtomicU64>) -> Self {
+        Self { insert_frac }
     }
 }
 
@@ -340,21 +319,10 @@ impl DaemonComm {
 
 fn metricbeat(stats_set: &StatsSet) -> axum::Json<serde_json::Value> {
     let mut map = serde_json::Map::new();
-    map.insert("daemon".to_string(), stats_set.daemon.json());
-    map.insert("insert_worker_stats".to_string(), stats_set.insert_worker_stats.json());
+    // map.insert("insert_worker_stats".to_string(), stats_set.insert_worker_stats.json());
     let mut ret = serde_json::Map::new();
     ret.insert("daqingest".to_string(), serde_json::Value::Object(map));
     axum::Json(serde_json::Value::Object(ret))
-}
-
-fn metrics(stats_set: &StatsSet) -> String {
-    let ss = [
-        stats_set.daemon.prometheus(),
-        stats_set.insert_worker_stats.prometheus(),
-        stats_set.series_by_channel_stats.prometheus(),
-        stats_set.ioc_finder_stats.prometheus(),
-    ];
-    ss.join("")
 }
 
 pub struct RoutesResources {
@@ -427,10 +395,8 @@ fn make_routes(
                             let dcom = dcom.clone();
                             let stats_set = stats_set.clone();
                             || async move {
-                                let prom2 = metrics2(dcom).await.unwrap_or(String::new());
-                                let mut s = metrics(&stats_set);
-                                s.push_str(&prom2);
-                                s
+                                let prom = metrics2(dcom).await.unwrap_or(String::new());
+                                prom
                             }
                         }),
                     ),

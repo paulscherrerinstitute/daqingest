@@ -44,7 +44,6 @@ use statemap::ConnectionState;
 use statemap::ConnectionStateValue;
 use statemap::WithStatusSeriesIdState;
 use statemap::WithStatusSeriesIdStateInner;
-use stats::IocFinderStats;
 use std::collections::BTreeMap;
 use std::collections::VecDeque;
 use std::fmt;
@@ -247,7 +246,6 @@ pub enum CaConnSetItem {
 pub struct CaConnSetCtrl {
     tx: Sender<CaConnSetEvent>,
     rx: Receiver<CaConnSetItem>,
-    ioc_finder_stats: Arc<IocFinderStats>,
     jh: JoinHandle<Result<(), Error>>,
 }
 
@@ -304,10 +302,6 @@ impl CaConnSetCtrl {
     pub async fn join(self) -> Result<(), Error> {
         self.jh.await??;
         Ok(())
-    }
-
-    pub fn ioc_finder_stats(&self) -> &Arc<IocFinderStats> {
-        &self.ioc_finder_stats
     }
 }
 
@@ -432,14 +426,8 @@ impl CaConnSet {
         let (connset_inp_tx, connset_inp_rx) = async_channel::bounded(200);
         let (connset_out_tx, connset_out_rx) = async_channel::bounded(200);
         let (find_ioc_res_tx, find_ioc_res_rx) = async_channel::bounded(400);
-        let ioc_finder_stats = Arc::new(IocFinderStats::new());
-        let (find_ioc_query_tx, ioc_finder_jh) = super::finder::start_finder(
-            find_ioc_res_tx.clone(),
-            backend.clone(),
-            ingest_opts,
-            ioc_finder_stats.clone(),
-        )
-        .unwrap();
+        let (find_ioc_query_tx, ioc_finder_jh) =
+            super::finder::start_finder(find_ioc_res_tx.clone(), backend.clone(), ingest_opts).unwrap();
         let (channel_info_res_tx, channel_info_res_rx) = async_channel::bounded(400);
         let connset = Self {
             ticker: Self::new_self_ticker(),
@@ -485,7 +473,6 @@ impl CaConnSet {
         CaConnSetCtrl {
             tx: connset_inp_tx,
             rx: connset_out_rx,
-            ioc_finder_stats,
             jh,
         }
     }

@@ -13,7 +13,7 @@ use netpod::Shape;
 use netpod::TsNano;
 use netpod::ttl::RetentionTime;
 use scywr::insertqueues::InsertDeques;
-use scywr::iteminsertqueue::BinWriteIndexV03;
+use scywr::iteminsertqueue::BinWriteIndexV04;
 use scywr::iteminsertqueue::QueryItem;
 use scywr::iteminsertqueue::TimeBinSimpleF32V02;
 use serde::Serialize;
@@ -105,6 +105,28 @@ impl IndexWritten {
 }
 
 #[derive(Debug, Serialize)]
+struct BinnerStateA {
+    rt: RetentionTime,
+    binner: BinnedEventsTimeweight<f32>,
+    write_zero: WriteCntZero,
+    pbp: PrebinnedPartitioning,
+    index_written_1: IndexWritten,
+    index_written_2: Option<IndexWritten>,
+    discard_front: u8,
+}
+
+#[derive(Debug, Serialize)]
+struct BinnerStateB {
+    rt: RetentionTime,
+    binner: BinnedBinsTimeweight<f32, f32>,
+    write_zero: WriteCntZero,
+    pbp: PrebinnedPartitioning,
+    index_written_1: IndexWritten,
+    index_written_2: Option<IndexWritten>,
+    discard_front: u8,
+}
+
+#[derive(Debug, Serialize)]
 pub struct BinWriter {
     chname: String,
     cssid: ChannelStatusSeriesId,
@@ -112,22 +134,8 @@ pub struct BinWriter {
     scalar_type: ScalarType,
     shape: Shape,
     evbuf: ContainerEvents<f32>,
-    binner_1st: Option<(
-        RetentionTime,
-        BinnedEventsTimeweight<f32>,
-        WriteCntZero,
-        PrebinnedPartitioning,
-        IndexWritten,
-        Option<IndexWritten>,
-    )>,
-    binner_others: Vec<(
-        RetentionTime,
-        BinnedBinsTimeweight<f32, f32>,
-        WriteCntZero,
-        PrebinnedPartitioning,
-        IndexWritten,
-        Option<IndexWritten>,
-    )>,
+    binner_1st: Option<BinnerStateA>,
+    binner_others: Vec<BinnerStateB>,
     trd: bool,
 }
 
@@ -242,7 +250,16 @@ impl BinWriter {
                 } else {
                     None
                 };
-                binner_1st = Some((rt, binner, write_zero, pbp, IndexWritten::new(), iw2));
+                let st = BinnerStateA {
+                    rt,
+                    binner,
+                    write_zero,
+                    pbp,
+                    index_written_1: IndexWritten::new(),
+                    index_written_2: iw2,
+                    discard_front: 0,
+                };
+                binner_1st = Some(st);
             } else {
                 let range = BinnedRange::from_beg_to_inf(beg, pbp.bin_len());
                 let mut binner = BinnedBinsTimeweight::new(range);
@@ -254,7 +271,16 @@ impl BinWriter {
                 } else {
                     None
                 };
-                binner_others.push((rt, binner, write_zero, pbp, IndexWritten::new(), iw2));
+                let st = BinnerStateB {
+                    rt,
+                    binner,
+                    write_zero,
+                    pbp,
+                    index_written_1: IndexWritten::new(),
+                    index_written_2: iw2,
+                    discard_front: 0,
+                };
+                binner_others.push(st);
             }
         }
         let ret = Self {
@@ -322,17 +348,11 @@ impl BinWriter {
 
     fn tick_ingest_and_handle(&mut self, iqdqs: &mut InsertDeques) -> Result<(), Error> {
         let buf = &self.evbuf;
-        if let Some(ee) = self.binner_1st.as_mut() {
-            let rt = ee.0.clone();
-            let write_zero = ee.2.clone();
-            let binner = &mut ee.1;
-            let pbp = ee.3.clone();
-            let index_written = &mut ee.4;
-            let iw2 = &mut ee.5;
+        if let Some(st) = self.binner_1st.as_mut() {
             // TODO avoid boxing
             let bufbox = Box::new(buf);
             use items_0::timebin::IngestReport;
-            let consumed_evs = match binner.ingest(&bufbox)? {
+            let consumed_evs = match st.binner.ingest(&bufbox)? {
                 IngestReport::ConsumedAll => {
                     let n = bufbox.len();
                     self.evbuf.clear();
@@ -343,28 +363,28 @@ impl BinWriter {
                     n
                 }
             };
-            let bins = binner.output();
+            let bins = st.binner.output();
             if bins.len() > 0 {
                 trace_bin!(self.trd, "binner_1st  out len {}", bins.len());
                 Self::handle_output_ready(
                     self.trd,
                     true,
                     self.sid,
-                    rt,
+                    st.rt.clone(),
                     &bins,
-                    write_zero,
-                    index_written,
-                    iw2,
-                    pbp,
+                    st.write_zero.clone(),
+                    &mut st.index_written_1,
+                    &mut st.index_written_2,
+                    st.pbp.clone(),
+                    &mut st.discard_front,
                     iqdqs,
                 )?;
                 // TODO avoid boxing
                 let mut bins2: BinsBoxed = Box::new(bins);
                 for i in 0..self.binner_others.len() {
-                    let (rt, binner, write_zero, pbp, index_written, iw2) = &mut self.binner_others[i];
-                    let write_zero = write_zero.clone();
-                    binner.ingest(&bins2)?;
-                    let bb: Option<BinsBoxed> = binner.output()?;
+                    let st = &mut self.binner_others[i];
+                    st.binner.ingest(&bins2)?;
+                    let bb: Option<BinsBoxed> = st.binner.output()?;
                     match bb {
                         Some(bb) => {
                             if bb.len() > 0 {
@@ -374,12 +394,13 @@ impl BinWriter {
                                         self.trd,
                                         false,
                                         self.sid,
-                                        rt.clone(),
+                                        st.rt.clone(),
                                         &bb2,
-                                        write_zero,
-                                        index_written,
-                                        iw2,
-                                        pbp.clone(),
+                                        st.write_zero.clone(),
+                                        &mut st.index_written_1,
+                                        &mut st.index_written_2,
+                                        st.pbp.clone(),
+                                        &mut st.discard_front,
                                         iqdqs,
                                     )?;
                                 } else {
@@ -419,6 +440,7 @@ impl BinWriter {
         iw1: &mut IndexWritten,
         iw2: &mut Option<IndexWritten>,
         pbp: PrebinnedPartitioning,
+        discard_front: &mut u8,
         iqdqs: &mut InsertDeques,
     ) -> Result<(), Error> {
         let selfname = "handle_output_ready";
@@ -446,80 +468,81 @@ impl BinWriter {
                     let e = Error::UnexpectedBinLen(bin_len, pbp);
                     return Err(e);
                 }
-                {
-                    let (msp, lsp) = pbp.msp_lsp(ts1.to_ts_ms());
-                    let item = QueryItem::TimeBinSimpleF32V02(TimeBinSimpleF32V02 {
-                        series,
-                        binlen: bin_len.ms() as i32,
-                        msp: msp as i64,
-                        off: lsp as i32,
-                        cnt: cnt as i64,
-                        min,
-                        max,
-                        avg,
-                        dev: f32::NAN,
-                        lst,
-                    });
-                    if true || bin_len >= DtMs::from_ms_u64(1000 * 60 * 60) {
-                        debug_bin!(trd, "handle_output_ready  emit  {:?}  len {}  {:?}", rt, bins_len, item);
+                if *discard_front < 1 {
+                    *discard_front += 1;
+                } else {
+                    {
+                        let (msp, lsp) = pbp.msp_lsp(ts1.to_ts_ms());
+                        let item = QueryItem::TimeBinSimpleF32V02(TimeBinSimpleF32V02 {
+                            series,
+                            binlen: bin_len.ms() as i32,
+                            msp: msp as i64,
+                            off: lsp as i32,
+                            cnt: cnt as i64,
+                            min,
+                            max,
+                            avg,
+                            dev: f32::NAN,
+                            lst,
+                        });
+                        if true || bin_len >= DtMs::from_ms_u64(1000 * 60 * 60) {
+                            debug_bin!(trd, "handle_output_ready  emit  {:?}  len {}  {:?}", rt, bins_len, item);
+                        }
+                        let qu = iqdqs.deque(rt.clone());
+                        qu.push_back(item);
                     }
-                    let qu = iqdqs.deque(rt.clone());
-                    qu.push_back(item);
-                }
-                if pbp.uses_index_min10() {
-                    let pbp_ix = PrebinnedPartitioning::Min10;
-                    let (msp, lsp) = pbp_ix.msp_lsp(ts1.to_ts_ms());
-                    debug_bin!(
-                        trd,
-                        "handle_output_ready  index  {:?}  {:?}  {:?}  {:?}  {:?}  {:?}",
-                        series,
-                        pbp_ix,
-                        pbp,
-                        rt,
-                        msp,
-                        lsp
-                    );
-                    let iw = iw2.as_mut().unwrap();
-                    if iw.should_write(msp, lsp) {
-                        iw.mark_written(msp, lsp);
-                        let item = BinWriteIndexV03 {
-                            series: series.id() as i64,
-                            pbp: pbp_ix.db_ix() as i16,
-                            msp: msp as i32,
-                            rt: rt.to_index_db_i32() as i16,
-                            lsp: lsp as i32,
-                            binlen: pbp.bin_len().ms() as i32,
-                        };
-                        let item = QueryItem::BinWriteIndexV03(item);
-                        iqdqs.deque(rt.clone()).push_back(item);
+                    if pbp.uses_index_min10() {
+                        let pbp_ix = PrebinnedPartitioning::Min10;
+                        let (msp, lsp) = pbp_ix.msp_lsp(ts1.to_ts_ms());
+                        debug_bin!(
+                            trd,
+                            "handle_output_ready  index  {:?}  {:?}  {:?}  {:?}  {:?}  {:?}",
+                            series,
+                            pbp_ix,
+                            pbp,
+                            rt,
+                            msp,
+                            lsp
+                        );
+                        let iw = iw2.as_mut().unwrap();
+                        if iw.should_write(msp, lsp) {
+                            iw.mark_written(msp, lsp);
+                            let item = BinWriteIndexV04 {
+                                series: series.id() as i64,
+                                pbp: pbp_ix.db_ix() as i16,
+                                msp: msp as i32,
+                                lsp: lsp as i32,
+                                binlen: pbp.bin_len().ms() as i32,
+                            };
+                            let item = QueryItem::BinWriteIndexV04(item);
+                            iqdqs.deque(rt.clone()).push_back(item);
+                        }
                     }
-                }
-                if true {
-                    let pbp_ix = PrebinnedPartitioning::Day1;
-                    let (msp, lsp) = pbp_ix.msp_lsp(ts1.to_ts_ms());
-                    debug_bin!(
-                        trd,
-                        "handle_output_ready  index  {:?}  {:?}  {:?}  {:?}  {:?}  {:?}",
-                        series,
-                        pbp_ix,
-                        pbp,
-                        rt,
-                        msp,
-                        lsp
-                    );
-                    // let iw = iw1;
-                    if iw1.should_write(msp, lsp) {
-                        iw1.mark_written(msp, lsp);
-                        let item = BinWriteIndexV03 {
-                            series: series.id() as i64,
-                            pbp: pbp_ix.db_ix() as i16,
-                            msp: msp as i32,
-                            rt: rt.to_index_db_i32() as i16,
-                            lsp: lsp as i32,
-                            binlen: pbp.bin_len().ms() as i32,
-                        };
-                        let item = QueryItem::BinWriteIndexV03(item);
-                        iqdqs.deque(rt.clone()).push_back(item);
+                    if true {
+                        let pbp_ix = PrebinnedPartitioning::Day1;
+                        let (msp, lsp) = pbp_ix.msp_lsp(ts1.to_ts_ms());
+                        debug_bin!(
+                            trd,
+                            "handle_output_ready  index  {:?}  {:?}  {:?}  {:?}  {:?}  {:?}",
+                            series,
+                            pbp_ix,
+                            pbp,
+                            rt,
+                            msp,
+                            lsp
+                        );
+                        if iw1.should_write(msp, lsp) {
+                            iw1.mark_written(msp, lsp);
+                            let item = BinWriteIndexV04 {
+                                series: series.id() as i64,
+                                pbp: pbp_ix.db_ix() as i16,
+                                msp: msp as i32,
+                                lsp: lsp as i32,
+                                binlen: pbp.bin_len().ms() as i32,
+                            };
+                            let item = QueryItem::BinWriteIndexV04(item);
+                            iqdqs.deque(rt.clone()).push_back(item);
+                        }
                     }
                 }
             }

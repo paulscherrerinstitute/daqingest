@@ -2337,7 +2337,7 @@ impl CaConn {
             Self::check_ev_value_data(&value.data, &writer.scalar_type())?;
             crst.muted_before = 0;
             crst.insert_item_ivl_ema.tick(tsnow);
-            // binwriter.ingest(tsev, value.f32_for_binning(), iqdqs)?;
+            binwriter.ingest(tsev, value.f32_for_binning(), iqdqs)?;
             {
                 let wres = writer.write(CaWriterValue::new(value, crst), tscaproto, tsev, iqdqs)?;
                 crst.status_emit_count += wres.nstatus() as u64;

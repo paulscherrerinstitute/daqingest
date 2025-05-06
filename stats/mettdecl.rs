@@ -137,6 +137,29 @@ mod Metrics {
     }
 }
 
+// mod Metrics {
+//     type StructName = IocFinderMetrics;
+//     enum counters {
+//         dbsearcher_batch_recv,
+//         dbsearcher_item_recv,
+//         dbsearcher_select_res_0,
+//         dbsearcher_select_error_len_mismatch,
+//         dbsearcher_batch_send,
+//         dbsearcher_item_send,
+//         ca_udp_error,
+//         ca_udp_warn,
+//         ca_udp_unaccounted_data,
+//         ca_udp_batch_created,
+//         ca_udp_io_error,
+//         ca_udp_io_empty,
+//         ca_udp_io_recv,
+//         ca_udp_first_msg_not_version,
+//         ca_udp_recv_result,
+//         ca_udp_recv_timeout,
+//         ca_udp_logic_error,
+//     }
+// }
+
 mod Metrics {
     type StructName = DaemonMetrics;
     mod Compose {

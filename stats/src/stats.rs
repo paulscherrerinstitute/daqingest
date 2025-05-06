@@ -2,14 +2,8 @@ pub mod mett;
 
 pub use rand_xoshiro;
 
-use std::sync::atomic::AtomicU64;
-use std::sync::atomic::Ordering;
 use std::time::Duration;
 use std::time::Instant;
-
-const US: u64 = 1000;
-const MS: u64 = US * 1000;
-const SEC: u64 = MS * 1000;
 
 pub type EMA = Ema32;
 
@@ -281,126 +275,6 @@ impl XorShift32 {
         self.state = x;
         x
     }
-}
-
-stats_proc::stats_struct!((
-    stats_struct(
-        name(DaemonStats),
-        prefix(daemon),
-        counters(asdasd,),
-        values(
-            channel_unknown_address,
-            channel_search_pending,
-            channel_with_address,
-            channel_no_address,
-            connset_health_lat_ema,
-            // iqtx_len_st_rf1,
-            iqtx_len_st_rf3,
-            iqtx_len_mt_rf3,
-            iqtx_len_lt_rf3,
-            iqtx_len_lt_rf3_lat5,
-        ),
-    ),
-    agg(name(DaemonStatsAgg), parent(DaemonStats)),
-    diff(name(DaemonStatsAggDiff), input(DaemonStatsAgg)),
-    stats_struct(
-        name(CaProtoStats),
-        prefix(ca_proto),
-        counters(
-            // tcp_recv_count,
-            // tcp_recv_bytes,
-            protocol_issue,
-            payload_std_too_large,
-            payload_ext_but_small,
-            payload_ext_very_large,
-            out_msg_placed,
-            out_bytes,
-        ),
-        histolog2s(payload_size, data_count, outbuf_len,),
-    ),
-    stats_struct(
-        name(SeriesByChannelStats),
-        prefix(seriesbychannel),
-        counters(res_tx_fail, res_tx_timeout, recv_batch, recv_items,),
-        histolog2s(commit_duration_ms),
-    ),
-    stats_struct(
-        name(InsertWorkerStats),
-        prefix(insert_worker),
-        counters(
-            logic_error,
-            item_recv,
-            inserted_values,
-            inserted_connection_status,
-            inserted_channel_status,
-            fraction_drop,
-            inserted_mute,
-            inserted_interval,
-            inserted_channel_info,
-            inserted_binned,
-            db_overload,
-            db_timeout,
-            db_unavailable,
-            db_error,
-            query_error,
-            inserts_msp,
-            inserts_msp_grid,
-            inserts_value,
-            ratelimit_drop,
-            worker_start,
-            worker_finish,
-        ),
-        histolog2s(item_lat_net_worker, item_lat_net_store,),
-    ),
-    stats_struct(
-        name(IocFinderStats),
-        prefix(ioc_finder),
-        counters(
-            dbsearcher_batch_recv,
-            dbsearcher_item_recv,
-            dbsearcher_select_res_0,
-            dbsearcher_select_error_len_mismatch,
-            dbsearcher_batch_send,
-            dbsearcher_item_send,
-            ca_udp_error,
-            ca_udp_warn,
-            ca_udp_unaccounted_data,
-            ca_udp_batch_created,
-            ca_udp_io_error,
-            ca_udp_io_empty,
-            ca_udp_io_recv,
-            ca_udp_first_msg_not_version,
-            ca_udp_recv_result,
-            ca_udp_recv_timeout,
-            ca_udp_logic_error,
-        ),
-        values(db_lookup_workers,)
-    ),
-    stats_struct(
-        name(SeriesWriterEstablishStats),
-        prefix(wrest),
-        counters(job_recv, result_send_fail,),
-    ),
-));
-
-stats_proc::stats_struct!((
-    stats_struct(name(TestStats0), counters(count0,), values(val0),),
-    diff(name(TestStats0Diff), input(TestStats0)),
-    agg(name(TestStats0Agg), parent(TestStats0)),
-    diff(name(TestStats0AggDiff), input(TestStats0Agg)),
-));
-
-#[test]
-fn test0_diff() {
-    let stats_a = TestStats0::new();
-    stats_a.count0().inc();
-    stats_a.val0().set(43);
-    let stats_b = stats_a.snapshot();
-    stats_b.count0().inc();
-    stats_b.count0().inc();
-    stats_b.count0().inc();
-    let diff = TestStats0Diff::diff_from(&stats_a, &stats_b);
-    assert_eq!(diff.count0.load(), 3);
 }
 
 pub fn xoshiro_from_time() -> rand_xoshiro::Xoshiro128PlusPlus {

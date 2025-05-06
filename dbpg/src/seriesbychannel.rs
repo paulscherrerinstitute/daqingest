@@ -15,7 +15,6 @@ use netpod::SeriesKind;
 use netpod::Shape;
 use serde::Serialize;
 use series::SeriesId;
-use stats::SeriesByChannelStats;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
@@ -144,16 +143,11 @@ struct Worker {
     qu_select: PgStatement,
     qu_insert: PgStatement,
     batch_rx: Receiver<Vec<ChannelInfoQuery>>,
-    stats: Arc<SeriesByChannelStats>,
     pg_client_jh: JoinHandle<Result<(), crate::err::Error>>,
 }
 
 impl Worker {
-    async fn new(
-        db: &Database,
-        batch_rx: Receiver<Vec<ChannelInfoQuery>>,
-        stats: Arc<SeriesByChannelStats>,
-    ) -> Result<Self, Error> {
+    async fn new(db: &Database, batch_rx: Receiver<Vec<ChannelInfoQuery>>) -> Result<Self, Error> {
         use tokio_postgres::types::Type;
         debug!("Worker  make_pg_client");
         let (pg, pg_client_jh) = crate::conn::make_pg_client(db).await?;
@@ -206,7 +200,6 @@ impl Worker {
             qu_select,
             qu_insert,
             batch_rx,
-            stats,
             pg_client_jh,
         };
         Ok(ret)
@@ -215,8 +208,9 @@ impl Worker {
     async fn work<FR: HashSalter>(&mut self) -> Result<(), Error> {
         let batch_rx = self.batch_rx.clone();
         while let Ok(batch) = batch_rx.recv().await {
-            self.stats.recv_batch().inc();
-            self.stats.recv_items().add(batch.len() as _);
+            // TODO
+            // stats.recv_batch().inc();
+            // stats.recv_items().add(batch.len() as _);
             for x in &batch {
                 trace3!(
                     "search for {}  {}  {:?}  {:?}",
@@ -233,7 +227,8 @@ impl Worker {
                     match self.pg.execute("commit", &[]).await {
                         Ok(n) => {
                             let dt = ts1.elapsed();
-                            self.stats.commit_duration_ms().ingest((1e3 * dt.as_secs_f32()) as u32);
+                            // TODO
+                            // stats.commit_duration_ms().ingest((1e3 * dt.as_secs_f32()) as u32);
                             if dt > Duration::from_millis(40) {
                                 debug!("commit {} {:.0} ms", n, dt.as_secs_f32());
                             }
@@ -313,7 +308,8 @@ impl Worker {
             match e.0.tx.make_send(item).await {
                 Ok(()) => {}
                 Err(_) => {
-                    self.stats.res_tx_fail.inc();
+                    // TODO
+                    // stats.res_tx_fail.inc();
                 }
             };
         }
@@ -603,7 +599,6 @@ pub trait HashSalter {
 pub async fn start_lookup_workers<FR: HashSalter>(
     worker_count: usize,
     db: &Database,
-    stats: Arc<SeriesByChannelStats>,
 ) -> Result<
     (
         Sender<ChannelInfoQuery>,
@@ -619,7 +614,7 @@ pub async fn start_lookup_workers<FR: HashSalter>(
     let (batch_rx, bjh) = batchtools::batcher::batch(inp_cap, timeout, batch_out_cap, query_rx);
     let mut jhs = Vec::new();
     for _ in 0..worker_count {
-        let mut worker = Worker::new(db, batch_rx.clone(), stats.clone()).await?;
+        let mut worker = Worker::new(db, batch_rx.clone()).await?;
         let jh = tokio::task::spawn(async move { worker.work::<FR>().await });
         jhs.push(jh);
     }
@@ -727,7 +722,6 @@ fn test_series_by_channel_01() {
         let channel = "chn-test-00";
         let channel_01 = "chn-test-01";
         let channel_02 = "chn-test-02";
-        let series_by_channel_stats = Arc::new(SeriesByChannelStats::new());
         let pgconf = test_db_conf();
         if false {
             psql_play(&pgconf).await?;
@@ -767,8 +761,7 @@ fn test_series_by_channel_01() {
         }
         // TODO keep join handles and await later
         let (channel_info_query_tx, _jhs, _jh) =
-            dbpg::seriesbychannel::start_lookup_workers::<SalterTest>(1, &pgconf, series_by_channel_stats.clone())
-                .await?;
+            dbpg::seriesbychannel::start_lookup_workers::<SalterTest>(1, &pgconf).await?;
 
         let mut rxs = Vec::new();
         let rx = {

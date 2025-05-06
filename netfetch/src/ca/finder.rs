@@ -12,9 +12,7 @@ use dbpg::iocindex::IocSearchIndexWorker;
 use dbpg::postgres::Row as PgRow;
 use log::*;
 use netpod::Database;
-use stats::IocFinderStats;
 use std::collections::VecDeque;
-use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
 use taskrun::tokio;
@@ -75,10 +73,9 @@ pub fn start_finder(
     tx: Sender<VecDeque<FindIocRes>>,
     backend: String,
     opts: CaIngestOpts,
-    stats: Arc<IocFinderStats>,
 ) -> Result<(Sender<IocAddrQuery>, JoinHandle<Result<(), Error>>), Error> {
     let (qtx, qrx) = async_channel::bounded(CURRENT_SEARCH_PENDING_MAX);
-    let jh = taskrun::spawn(finder_full(qrx, tx, backend, opts, stats));
+    let jh = taskrun::spawn(finder_full(qrx, tx, backend, opts));
     Ok((qtx, jh))
 }
 
@@ -87,17 +84,10 @@ async fn finder_full(
     tx: Sender<VecDeque<FindIocRes>>,
     backend: String,
     opts: CaIngestOpts,
-    stats: Arc<IocFinderStats>,
 ) -> Result<(), Error> {
     let (tx1, rx1) = async_channel::bounded(20);
-    let jh1 = taskrun::spawn(finder_worker(
-        qrx,
-        tx1,
-        backend,
-        opts.postgresql_config().clone(),
-        stats.clone(),
-    ));
-    let jh2 = taskrun::spawn(finder_network_if_not_found(rx1, tx, opts.clone(), stats));
+    let jh1 = taskrun::spawn(finder_worker(qrx, tx1, backend, opts.postgresql_config().clone()));
+    let jh2 = taskrun::spawn(finder_network_if_not_found(rx1, tx, opts.clone()));
     jh1.await??;
     trace!("finder::finder_full  awaited A");
     jh2.await??;
@@ -111,7 +101,6 @@ async fn finder_worker(
     tx: Sender<VecDeque<FindIocRes>>,
     backend: String,
     db: Database,
-    stats: Arc<IocFinderStats>,
 ) -> Result<(), Error> {
     // TODO do something with join handle
     let (batch_rx, jh_batch) =
@@ -123,7 +112,6 @@ async fn finder_worker(
             tx.clone(),
             backend.clone(),
             db.clone(),
-            stats.clone(),
         ));
         jhs.push(jh);
     }
@@ -141,7 +129,6 @@ async fn finder_worker_single(
     tx: Sender<VecDeque<FindIocRes>>,
     backend: String,
     db: Database,
-    stats: Arc<IocFinderStats>,
 ) -> Result<(), Error> {
     debug!("finder_worker_single  make_pg_client");
     let (pg, jh) = make_pg_client(&db).await?;
@@ -159,8 +146,9 @@ async fn finder_worker_single(
                 for e in batch.iter().filter(|x| series::dbg::dbg_chn(x.name())) {
                     info!("searching database for  {:?}", e);
                 }
-                stats.dbsearcher_batch_recv().inc();
-                stats.dbsearcher_item_recv().add(batch.len() as _);
+                // TODO
+                // stats.dbsearcher_batch_recv().inc();
+                // stats.dbsearcher_item_recv().add(batch.len() as _);
                 let ts1 = Instant::now();
                 let (batch, pass_through) = batch.into_iter().fold((Vec::new(), Vec::new()), |(mut a, mut b), x| {
                     if x.use_cache() {
@@ -189,9 +177,9 @@ async fn finder_worker_single(
                 }
                 match qres {
                     Ok(rows) => {
-                        stats.dbsearcher_select_res_0().add(rows.len() as _);
+                        // stats.dbsearcher_select_res_0().add(rows.len() as _);
                         if rows.len() != batch.len() {
-                            stats.dbsearcher_select_error_len_mismatch().inc();
+                            // stats.dbsearcher_select_error_len_mismatch().inc();
                             error!("query result len {}  batch len {}", rows.len(), batch.len());
                             tokio::time::sleep(Duration::from_millis(1000)).await;
                             continue;
@@ -215,8 +203,9 @@ async fn finder_worker_single(
                         let items_len = items.len();
                         match tx.send(items).await {
                             Ok(_) => {
-                                stats.dbsearcher_batch_send().inc();
-                                stats.dbsearcher_item_send().add(items_len as _);
+                                // TODO
+                                // stats.dbsearcher_batch_send().inc();
+                                // stats.dbsearcher_item_send().add(items_len as _);
                             }
                             Err(e) => {
                                 error!("finder sees: {}", e);
@@ -243,10 +232,9 @@ async fn finder_network_if_not_found(
     rx: Receiver<VecDeque<FindIocRes>>,
     tx: Sender<VecDeque<FindIocRes>>,
     opts: CaIngestOpts,
-    stats: Arc<IocFinderStats>,
 ) -> Result<(), Error> {
     let self_name = "finder_network_if_not_found";
-    let (net_tx, net_rx, jh_ca_search) = ca_search_workers_start(&opts, stats.clone()).await?;
+    let (net_tx, net_rx, jh_ca_search) = ca_search_workers_start(&opts).await?;
     let jh2 = taskrun::spawn(process_net_result(net_rx, tx.clone(), opts.clone()));
     'outer: while let Ok(item) = rx.recv().await {
         let mut res = VecDeque::new();

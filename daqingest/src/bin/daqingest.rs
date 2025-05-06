@@ -162,6 +162,10 @@ async fn main_run_inner(opts: DaqIngestOpts) -> Result<(), Error> {
 async fn scylla_schema_check(opts: CaIngestOpts, do_change: bool) -> Result<(), Error> {
     let opstr = if do_change { "change" } else { "check" };
     info!("start scylla schema {}", opstr);
+    info!("{:?}", opts.scylla_config_st());
+    info!("{:?}", opts.scylla_config_mt());
+    info!("{:?}", opts.scylla_config_lt());
+    info!("{:?}", opts.scylla_config_st_rf1());
     scywr::schema::migrate_scylla_data_schema_all_rt(
         [
             &opts.scylla_config_st(),

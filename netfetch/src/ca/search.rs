@@ -4,12 +4,10 @@ use async_channel::Receiver;
 use async_channel::Sender;
 use futures_util::StreamExt;
 use log::*;
-use stats::IocFinderStats;
 use std::collections::VecDeque;
 use std::net::IpAddr;
 use std::net::SocketAddr;
 use std::net::SocketAddrV4;
-use std::sync::Arc;
 use std::time::Duration;
 use taskrun::tokio;
 use tokio::task::JoinHandle;
@@ -59,7 +57,6 @@ async fn resolve_address(addr_str: &str) -> Result<SocketAddr, Error> {
 
 pub async fn ca_search_workers_start(
     opts: &CaIngestOpts,
-    stats: Arc<IocFinderStats>,
 ) -> Result<
     (
         Sender<String>,
@@ -72,7 +69,7 @@ pub async fn ca_search_workers_start(
     let batch_run_max = Duration::from_millis(800);
     let (inp_tx, inp_rx) = async_channel::bounded(256);
     let (out_tx, out_rx) = async_channel::bounded(256);
-    let finder = FindIocStream::new(inp_rx, search_tgts, blacklist, batch_run_max, 20, 16, stats);
+    let finder = FindIocStream::new(inp_rx, search_tgts, blacklist, batch_run_max, 20, 16);
     let jh = taskrun::spawn(finder_run(finder, out_tx));
     Ok((inp_tx, out_rx, jh))
 }

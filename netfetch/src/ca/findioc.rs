@@ -9,13 +9,11 @@ use log::*;
 use proto::CaMsg;
 use proto::CaMsgTy;
 use proto::HeadInfo;
-use stats::IocFinderStats;
 use std::collections::BTreeMap;
 use std::collections::VecDeque;
 use std::net::Ipv4Addr;
 use std::net::SocketAddrV4;
 use std::pin::Pin;
-use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::task::Context;
@@ -120,7 +118,6 @@ pub struct FindIocStream {
     thr_msg_1: ThrottleTrace,
     #[allow(unused)]
     thr_msg_2: ThrottleTrace,
-    stats: Arc<IocFinderStats>,
 }
 
 impl FindIocStream {
@@ -131,7 +128,6 @@ impl FindIocStream {
         batch_run_max: Duration,
         in_flight_max: usize,
         batch_size: usize,
-        stats: Arc<IocFinderStats>,
     ) -> Self {
         let sock = unsafe { Self::create_socket() }.unwrap();
         let afd = AsyncFd::new(sock.0).unwrap();
@@ -159,7 +155,6 @@ impl FindIocStream {
             thr_msg_0: ThrottleTrace::new(Duration::from_millis(1000)),
             thr_msg_1: ThrottleTrace::new(Duration::from_millis(1000)),
             thr_msg_2: ThrottleTrace::new(Duration::from_millis(1000)),
-            stats,
         }
     }
 
@@ -284,10 +279,7 @@ impl FindIocStream {
         Poll::Ready(Ok(()))
     }
 
-    unsafe fn try_read(
-        sock: i32,
-        stats: &IocFinderStats,
-    ) -> Poll<Result<(SocketAddrV4, Vec<(SearchId, SocketAddrV4)>), Error>> {
+    unsafe fn try_read(sock: i32) -> Poll<Result<(SocketAddrV4, Vec<(SearchId, SocketAddrV4)>), Error>> {
         let tsnow = Instant::now();
         let mut saddr_mem = [0u8; std::mem::size_of::<libc::sockaddr>()];
         let mut saddr_len: libc::socklen_t = saddr_mem.len() as _;
@@ -310,14 +302,14 @@ impl FindIocStream {
                 return Poll::Ready(Err(Error::ReadFailure));
             }
         } else if ec < 0 {
-            stats.ca_udp_io_error().inc();
+            // stats.ca_udp_io_error().inc();
             error!("unexpected received {ec}");
             Poll::Ready(Err(Error::ReadFailure))
         } else if ec == 0 {
-            stats.ca_udp_io_empty().inc();
+            // stats.ca_udp_io_empty().inc();
             Poll::Ready(Err(Error::ReadEmpty))
         } else {
-            stats.ca_udp_io_recv().inc();
+            // stats.ca_udp_io_recv().inc();
             let saddr2: libc::sockaddr_in = unsafe { std::mem::transmute_copy(&saddr_mem) };
             let src_addr = Ipv4Addr::from(saddr2.sin_addr.s_addr.to_ne_bytes());
             let src_port = u16::from_be(saddr2.sin_port);
@@ -366,15 +358,15 @@ impl FindIocStream {
                 accounted += 16 + hi.payload_len();
             }
             if accounted != ec as u32 {
-                stats.ca_udp_unaccounted_data().inc();
+                // stats.ca_udp_unaccounted_data().inc();
                 debug!("unaccounted data  ec {}  accounted {}", ec, accounted);
             }
             if msgs.len() < 1 {
-                stats.ca_udp_warn().inc();
+                // stats.ca_udp_warn().inc();
                 debug!("received answer without messages");
             }
             if msgs.len() == 1 {
-                stats.ca_udp_warn().inc();
+                // stats.ca_udp_warn().inc();
                 debug!("received answer with single message: {msgs:?}");
             }
             let mut good = true;
@@ -384,7 +376,7 @@ impl FindIocStream {
                     good = false;
                 }
             } else {
-                stats.ca_udp_first_msg_not_version().inc();
+                // stats.ca_udp_first_msg_not_version().inc();
             }
             // trace2!("recv  {:?}  {:?}", src_addr, msgs);
             let mut res = Vec::new();
@@ -398,7 +390,7 @@ impl FindIocStream {
                             res.push((SearchId(k.id), addr));
                         }
                         _ => {
-                            stats.ca_udp_error().inc();
+                            // stats.ca_udp_error().inc();
                             warn!("try_read: unknown message received  {:?}", msg.ty);
                         }
                     }
@@ -449,7 +441,7 @@ impl FindIocStream {
         };
         self.in_flight.insert(bid.clone(), batch);
         self.batch_send_queue.push_back(bid);
-        self.stats.ca_udp_batch_created().inc();
+        // stats.ca_udp_batch_created().inc();
     }
 
     fn handle_result(&mut self, src: SocketAddrV4, res: Vec<(SearchId, SocketAddrV4)>) {
@@ -477,11 +469,11 @@ impl FindIocStream {
                                                 dt,
                                             };
                                             // trace!("udp search response {res:?}");
-                                            self.stats.ca_udp_recv_result().inc();
+                                            // stats.ca_udp_recv_result().inc();
                                             self.out_queue.push_back(res);
                                         }
                                         None => {
-                                            self.stats.ca_udp_logic_error().inc();
+                                            // stats.ca_udp_logic_error().inc();
                                             error!(
                                                 "logic error  batch sids / channels lens:  {} vs {}",
                                                 batch.sids.len(),
@@ -537,7 +529,7 @@ impl FindIocStream {
                         sids.push(sid.clone());
                         chns.push(batch.channels[i2].clone());
                         dts.push(dt);
-                        self.stats.ca_udp_recv_timeout().inc();
+                        // stats.ca_udp_recv_timeout().inc();
                     }
                 }
                 bids.push(bid.clone());
@@ -692,7 +684,7 @@ impl Stream for FindIocStream {
             break match self.afd.poll_read_ready(cx) {
                 Ready(Ok(mut g)) => {
                     // debug!("BLOCK AA");
-                    match unsafe { Self::try_read(self.sock.0, &self.stats) } {
+                    match unsafe { Self::try_read(self.sock.0) } {
                         Ready(Ok((src, res))) => {
                             self.handle_result(src, res);
                             if self.ready_for_end_of_stream() {
