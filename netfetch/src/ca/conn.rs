@@ -2850,14 +2850,24 @@ impl CaConn {
                                     if series::dbg::dbg_chn(&name) {
                                         info!("queue event to notice channel create fail {name}");
                                     }
+                                    let failinfo = format!("name {}  cid {}", name, cid);
                                     let item = CaConnEvent {
                                         ts: tsnow,
-                                        value: CaConnEventValue::ChannelCreateFail(name.into()),
+                                        value: CaConnEventValue::ChannelCreateFail(failinfo),
                                     };
                                     self.ca_conn_event_out_queue.push_back(item);
+                                    warn!("CreateChanFail  {}  msg {:?}", name, msg);
+                                    self.channel_remove_by_cid(cid);
+                                } else {
+                                    let failinfo = format!("unexpected cid {}", cid);
+                                    let item = CaConnEvent {
+                                        ts: tsnow,
+                                        value: CaConnEventValue::ChannelCreateFail(failinfo),
+                                    };
+                                    self.ca_conn_event_out_queue.push_back(item);
+                                    warn!("CreateChanFail  cid not known  msg {:?}", msg);
+                                    self.channel_remove_by_cid(cid);
                                 }
-                                self.channel_remove_by_cid(cid);
-                                warn!("CaConn sees: {msg:?}");
                             }
                             CaMsgTy::Error(msg) => {
                                 warn!("CaConn sees: {msg:?}");
