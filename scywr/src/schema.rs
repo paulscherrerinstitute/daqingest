@@ -706,7 +706,8 @@ async fn migrate_scylla_data_schema(
             chs.add_todo(format!("drop table {}.{}", ks, tn));
         }
     }
-    {
+    // TODO enable delete only after all old executables are replaced.
+    if false {
         let tn = format!("{}{}", rett.table_prefix(), "bin_write_index_v03");
         if has_table(&ks, &tn, scy).await? {
             chs.add_todo(format!("drop table {}.{}", ks, tn));

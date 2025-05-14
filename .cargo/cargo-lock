@@ -723,7 +723,7 @@ dependencies = [
 
 [[package]]
 name = "daqingest"
-version = "0.3.0-aa.2"
+version = "0.3.0-aa.3"
 dependencies = [
  "async-channel",
  "autoerr",
