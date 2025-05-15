@@ -31,12 +31,13 @@ pub async fn create_session_no_ks(scyconf: &ScyllaIngestConfig) -> Result<Arc<Se
         .build()
         .into_handle();
     let port_range: RangeInclusive<u16> = 32000u16..=36000u16;
-    let _port_range = ShardAwarePortRange::new(port_range).unwrap();
+    let port_range = ShardAwarePortRange::new(port_range).unwrap();
+    let _ = port_range;
     let scy = GenericSessionBuilder::new()
         // .disallow_shard_aware_port(true)
         // .shard_aware_local_port_range(port_range)
         // .pool_size(PoolSize::default())
-        .pool_size(PoolSize::PerHost(NonZero::new(1).unwrap()))
+        .pool_size(PoolSize::PerHost(NonZero::new(4).unwrap()))
         .known_nodes(scyconf.hosts())
         .default_execution_profile_handle(profile)
         .write_coalescing(true)
