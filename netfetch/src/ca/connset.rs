@@ -587,12 +587,12 @@ impl CaConnSet {
                                 ress.chst.config = cmd.ch_cfg;
                             }
                             WithAddressState::Assigned(_) => {
-                                debug!("unassign for config change  {cmd:?}  {addr}");
+                                debug!("unassign for config change  {:?}  {}", cmd, addr);
                                 let conn_ress = ress
                                     .ca_conn_ress
                                     .get_mut(&SocketAddr::V4(addr.clone()))
                                     .ok_or_else(|| Error::ChannelAssignedWithoutConnRess)?;
-                                let item = ConnCommand::channel_close(cmd.name().into());
+                                let item = ConnCommand::channel_close_reconf(cmd.name().into());
                                 conn_ress.cmd_queue.push_back(item);
                                 st3.inner = WithStatusSeriesIdStateInner::UnassigningForConfigChange(
                                     statemap::UnassigningForConfigChangeState {
