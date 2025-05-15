@@ -150,7 +150,7 @@ impl BinWriter {
         shape: Shape,
         chname: String,
     ) -> Result<Self, Error> {
-        let trd = true || series::dbg::dbg_chn(&chname);
+        let trd = series::dbg::dbg_chn(&chname);
         if trd {
             debug_bin!(trd, "enabled debug for {}", chname);
         }
