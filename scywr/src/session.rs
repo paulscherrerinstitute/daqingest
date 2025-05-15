@@ -6,7 +6,10 @@ use scylla::client::PoolSize;
 use scylla::client::execution_profile::ExecutionProfileBuilder;
 use scylla::client::session_builder::GenericSessionBuilder;
 use scylla::errors::NewSessionError;
+use scylla::routing::ShardAwarePortRange;
 use scylla::statement::Consistency;
+use std::num::NonZero;
+use std::ops::RangeInclusive;
 use std::sync::Arc;
 
 autoerr::create_error_v1!(
@@ -27,8 +30,13 @@ pub async fn create_session_no_ks(scyconf: &ScyllaIngestConfig) -> Result<Arc<Se
         .consistency(Consistency::LocalOne)
         .build()
         .into_handle();
+    let port_range: RangeInclusive<u16> = 32000u16..=36000u16;
+    let _port_range = ShardAwarePortRange::new(port_range).unwrap();
     let scy = GenericSessionBuilder::new()
-        .pool_size(PoolSize::default())
+        // .disallow_shard_aware_port(true)
+        // .shard_aware_local_port_range(port_range)
+        // .pool_size(PoolSize::default())
+        .pool_size(PoolSize::PerHost(NonZero::new(1).unwrap()))
         .known_nodes(scyconf.hosts())
         .default_execution_profile_handle(profile)
         .write_coalescing(true)

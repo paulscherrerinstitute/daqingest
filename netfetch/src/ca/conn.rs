@@ -24,7 +24,6 @@ use netpod::TsMs;
 use netpod::TsNano;
 use netpod::channelstatus::ChannelStatus;
 use netpod::channelstatus::ChannelStatusClosedReason;
-use netpod::timeunits::*;
 use netpod::ttl::RetentionTime;
 use proto::CaDataValue;
 use proto::CaEventValue;
