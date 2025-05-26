@@ -55,7 +55,7 @@ impl Changeset {
 
     fn log_statements(&self) {
         for q in &self.todo {
-            info!("would execute:\n{q}\n");
+            info!("would execute:\n{}\n", q);
         }
     }
 }
@@ -540,10 +540,10 @@ async fn migrate_scylla_data_schema(
             ),
             ks, rf, durable
         );
-        info!("scylla create keyspace  {cql}");
+        info!("scylla create keyspace  {}", cql);
         chs.add_todo(cql);
     } else {
-        info!("scylla has keyspace  {ks}");
+        info!("scylla has keyspace  {}", ks);
     }
 
     check_event_tables(ks, rett.clone(), chs, scy).await?;

@@ -743,7 +743,7 @@ impl CaConnSet {
         }
         self.mett.channel_status_series_found().inc();
         if series::dbg::dbg_chn(&name) {
-            info!("handle_add_channel_with_status_id  {cmd:?}");
+            info!("handle_add_channel_with_status_id  {:?}", cmd);
         }
         let ch = ChannelName::new(name.into());
         if let Some(chst) = self.channel_states.get_mut(&ch) {
@@ -808,7 +808,7 @@ impl CaConnSet {
             return Err(Error::ExpectIpv4);
         };
         if series::dbg::dbg_chn(&name) {
-            info!("handle_add_channel_with_addr  {cmd:?}");
+            info!("handle_add_channel_with_addr  {:?}", cmd);
         }
         let ch = ChannelName::new(name.into());
         if let Some(chst) = self.channel_states.get_mut(&ch) {
@@ -816,7 +816,7 @@ impl CaConnSet {
             chst.config = cmd.ch_cfg.clone();
             if let ChannelStateValue::Active(ast) = &mut chst.value {
                 if let ActiveChannelState::WithStatusSeriesId(st3) = ast {
-                    trace!("handle_add_channel_with_addr  INNER  {cmd:?}");
+                    trace!("handle_add_channel_with_addr  INNER  {:?}", cmd);
                     self.mett.handle_add_channel_with_addr().inc();
                     let tsnow = SystemTime::now();
                     let mut writer_status = serieswriter::writer::SeriesWriter::new(SeriesId::new(cmd.cssid.id()))?;
@@ -850,9 +850,9 @@ impl CaConnSet {
                     };
                     let addr = cmd.addr;
                     if self.ca_conn_ress.contains_key(&addr) {
-                        trace!("ca_conn_ress has already {addr:?}");
+                        trace!("ca_conn_ress has already {:?}", addr_v4);
                     } else {
-                        trace!("ca_conn_ress  NEW  {addr:?}");
+                        trace!("ca_conn_ress  NEW  {:?}", addr);
                         let c = self.create_ca_conn(cmd.clone())?;
                         self.ca_conn_ress.insert(addr, c);
                     }
@@ -927,14 +927,14 @@ impl CaConnSet {
         for res in results {
             let ch = ChannelName::new(res.channel.clone());
             if series::dbg::dbg_chn(&ch.name()) {
-                info!("handle_ioc_query_result  {res:?}");
+                info!("handle_ioc_query_result  {:?}", res);
             }
             if let Some(chst) = self.channel_states.get_mut(&ch) {
                 if let ChannelStateValue::Active(ast) = &mut chst.value {
                     if let ActiveChannelState::WithStatusSeriesId(st2) = ast {
                         if let Some(addr) = res.addr {
                             self.mett.ioc_addr_found().inc();
-                            trace!("ioc found {res:?}");
+                            trace!("ioc found {:?}", res);
                             let cmd = ChannelAddWithAddr {
                                 ch_cfg: chst.config.clone(),
                                 addr: SocketAddr::V4(addr),
@@ -943,7 +943,7 @@ impl CaConnSet {
                             self.handle_add_channel_with_addr(cmd)?;
                         } else {
                             self.mett.ioc_addr_not_found().inc();
-                            trace!("ioc not found {res:?}");
+                            trace!("ioc not found {:?}", res);
                             let since = SystemTime::now();
                             st2.inner = WithStatusSeriesIdStateInner::UnknownAddress { since };
                         }
@@ -1058,12 +1058,12 @@ impl CaConnSet {
     }
 
     fn apply_ca_conn_health_update(&mut self, addr: SocketAddr, res: ChannelStatusPartial) -> Result<(), Error> {
-        trace_health_update!("apply_ca_conn_health_update  {addr}");
+        trace_health_update!("apply_ca_conn_health_update  {}", addr);
         let tsnow = SystemTime::now();
         let mut rogue_channel_count = 0;
         for (k, v) in res.channel_statuses {
             trace_health_update!("self.rogue_channel_count {}", rogue_channel_count);
-            trace_health_update!("apply_ca_conn_health_update  {k:?}  {v:?}");
+            trace_health_update!("apply_ca_conn_health_update  {:?}  {:?}", k, v);
             let ch = if let Some(x) = self.channel_by_cssid.get(&k) {
                 x
             } else {
@@ -1146,7 +1146,7 @@ impl CaConnSet {
             self.await_ca_conn_jhs.push_back((addr, e.jh));
         } else {
             self.mett.ca_conn_eos_unexpected().inc();
-            warn!("end-of-stream received for non-existent CaConn {addr}");
+            warn!("end-of-stream received for non-existent CaConn {}", addr);
         }
         {
             use EndOfStreamReason::*;
@@ -1156,7 +1156,7 @@ impl CaConnSet {
                     self.handle_connect_fail(addr)?
                 }
                 Error(e) => {
-                    warn!("received error  {addr}  {e}");
+                    warn!("received error  {}  {}", addr, e);
                     self.handle_connect_fail(addr)?
                 }
                 ConnectRefused => self.handle_connect_fail(addr)?,
@@ -1175,7 +1175,7 @@ impl CaConnSet {
     }
 
     fn handle_ca_conn_channel_removed(&mut self, addr: SocketAddr, name: String) -> Result<(), Error> {
-        debug!("handle_ca_conn_channel_removed  {addr}  {name}");
+        debug!("handle_ca_conn_channel_removed  {}  {}", addr, name);
         let name = ChannelName::new(name);
         if let Some(st1) = self.channel_states.get_mut(&name) {
             match &mut st1.value {
@@ -1332,7 +1332,7 @@ impl CaConnSet {
                     .await?;
             }
             Err(e) => {
-                error!("ca_conn_item_merge received from inner: {e}");
+                error!("ca_conn_item_merge received from inner: {}", e);
             }
         }
         Ok(())
@@ -1351,7 +1351,7 @@ impl CaConnSet {
                 // let e = Error::with_msg_no_trace(format!("CaConn delivered already eos  {addr}  {x:?}"));
                 // error!("{e}");
                 // return Err(e);
-                warn!("CaConn {addr} EOS reason [{x:?}] after [{eos_reason:?}]");
+                warn!("CaConn {} EOS reason [{:?}] after [{:?}]", addr, x, eos_reason);
             }
             match item.value {
                 CaConnEventValue::None
@@ -1425,7 +1425,7 @@ impl CaConnSet {
                         WithStatusSeriesIdStateInner::AddrSearchPending { since } => {
                             let dt = stnow.duration_since(*since).unwrap_or(Duration::ZERO);
                             if dt > SEARCH_PENDING_TIMEOUT {
-                                info!("should receive some error indication instead of timeout for {ch:?}");
+                                info!("should receive some error indication instead of timeout for {:?}", ch);
                                 st3.inner = WithStatusSeriesIdStateInner::NoAddress { since: stnow };
                                 search_pending_count -= 1;
                             }
@@ -1455,9 +1455,9 @@ impl CaConnSet {
                                     }
                                     if st4.updated + CHANNEL_HEALTH_TIMEOUT < stnow {
                                         channel_health_timeout_reached += 1;
-                                        trace!("health timeout  channel {ch:?}  ~~~~~~~~~~~~~~~~~~~");
+                                        trace!("health timeout  channel {:?}  ~~~~~~~~~~~~~~~~~~~", ch);
                                         // TODO
-                                        error!("TODO  health timeout  channel {ch:?}  ~~~~~~~~~~~~~~~~~~~");
+                                        error!("TODO  health timeout  channel {:?}  ~~~~~~~~~~~~~~~~~~~", ch);
                                         if true {
                                             std::process::exit(1);
                                         }

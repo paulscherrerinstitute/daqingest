@@ -1551,7 +1551,7 @@ impl CaConn {
                     };
                     {
                         if dbg_chn_cid {
-                            info!("send out EventAdd for {cid:?}");
+                            info!("send out EventAdd for {:?}", cid);
                         }
                         let data_count = st2.channel.ca_dbr_count;
                         let _data_count = 0;
@@ -2881,7 +2881,7 @@ impl CaConn {
                                 if let Some(conf) = self.channels.get(&cid) {
                                     let name = conf.conf.name();
                                     if series::dbg::dbg_chn(&name) {
-                                        info!("queue event to notice channel create fail {name}");
+                                        info!("queue event to notice channel create fail {}", name);
                                     }
                                     let name2 = name.to_string();
                                     let failinfo = format!("name {}  cid {}", name, cid);

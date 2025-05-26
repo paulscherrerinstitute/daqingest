@@ -32,7 +32,7 @@ pub async fn list_pkey(scylla_conf: &ScyllaIngestConfig) -> Result<(), Error> {
             .await?
             .rows_stream::<(i64, i64)>()?;
         while let Some((pulse_a_token, pulse_a)) = it.try_next().await? {
-            info!("pulse_a_token {pulse_a_token}  pulse_a {pulse_a}");
+            info!("pulse_a_token {}  pulse_a {}", pulse_a_token, pulse_a);
             pulse_a_max = pulse_a_max.max(pulse_a);
         }
         if t2 == i64::MAX {
@@ -42,7 +42,7 @@ pub async fn list_pkey(scylla_conf: &ScyllaIngestConfig) -> Result<(), Error> {
             t1 = t2 + 1;
         }
     }
-    info!("pulse_a_max {pulse_a_max}");
+    info!("pulse_a_max {}", pulse_a_max);
     Ok(())
 }
 
@@ -62,7 +62,10 @@ pub async fn list_pulses(scylla_conf: &ScyllaIngestConfig) -> Result<(), Error> 
             .await?
             .rows_stream::<(i64, i32, i32, i64)>()?;
         while let Some((tsa_token, tsa, tsb, pulse)) = it.try_next().await? {
-            info!("tsa_token {tsa_token:21}  tsa {tsa:12}  tsb {tsb:12}  pulse {pulse:21}");
+            info!(
+                "tsa_token {:21}  tsa {:12}  tsb {:12}  pulse {:21}",
+                tsa_token, tsa, tsb, pulse
+            );
         }
         if t2 == i64::MAX {
             info!("end of token range");
@@ -92,7 +95,10 @@ pub async fn fetch_events(backend: &str, channel: &str, scylla_conf: &ScyllaInge
         .rows_stream::<(i64, i32, i32, i64)>()?;
     while let Some((tsa_token, tsa, tsb, pulse)) = it.try_next().await? {
         if false {
-            info!("tsa_token {tsa_token:21}  tsa {tsa:12}  tsb {tsb:12}  pulse {pulse:21}");
+            info!(
+                "tsa_token {:21}  tsa {:12}  tsb {:12}  pulse {:21}",
+                tsa_token, tsa, tsb, pulse
+            );
         }
         rowcnt += 1;
     }

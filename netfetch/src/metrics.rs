@@ -628,7 +628,7 @@ pub async fn metrics_service(
     shutdown_signal: Receiver<u32>,
     rres: Arc<RoutesResources>,
 ) -> Result<(), Error> {
-    info!("metrics service start  {bind_to}");
+    info!("metrics service start  {}", bind_to);
     let addr: SocketAddr = bind_to.parse().map_err(Error::from_string)?;
     let router = make_routes(rres, dcom, connset_cmd_tx, stats_set).into_make_service();
     let listener = TcpListener::bind(addr).await?;

@@ -32,6 +32,24 @@ pub struct MinQuiets {
     pub lt: Duration,
 }
 
+impl MinQuiets {
+    pub fn test_mon_1_10() -> Self {
+        Self {
+            st: Duration::from_millis(0),
+            mt: Duration::from_millis(1000 * 1),
+            lt: Duration::from_millis(1000 * 10),
+        }
+    }
+
+    pub fn test_1_10_60() -> Self {
+        Self {
+            st: Duration::from_millis(1000 * 1),
+            mt: Duration::from_millis(1000 * 10),
+            lt: Duration::from_millis(1000 * 60),
+        }
+    }
+}
+
 #[derive(Debug, Serialize)]
 struct State<ET>
 where
