@@ -1,8 +1,6 @@
-use err::thiserror;
-use err::ThisError;
-
-#[derive(Debug, ThisError)]
-#[cstm(name = "Postgres")]
-pub enum Error {
-    Postgres(#[from] tokio_postgres::Error),
-}
+autoerr::create_error_v1!(
+    name(Error, "Postgres"),
+    enum variants {
+        Postgres(#[from] tokio_postgres::Error),
+    },
+);

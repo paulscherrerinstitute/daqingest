@@ -1,14 +1,13 @@
 use crate::conn::PgClient;
-use err::thiserror;
-use err::ThisError;
 use log::*;
 
-#[derive(Debug, ThisError)]
-#[cstm(name = "PgSchema")]
-pub enum Error {
-    Postgres(#[from] tokio_postgres::Error),
-    LogicError(String),
-}
+autoerr::create_error_v1!(
+    name(Error, "PgSchema"),
+    enum variants {
+        Postgres(#[from] tokio_postgres::Error),
+        LogicError(String),
+    },
+);
 
 impl Error {
     pub fn from_logic_msg<T>(msg: T) -> Self

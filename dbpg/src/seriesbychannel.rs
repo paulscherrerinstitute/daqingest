@@ -3,8 +3,6 @@ use async_channel::Sender;
 use chrono::DateTime;
 use chrono::Utc;
 use core::fmt;
-use err::ThisError;
-use err::thiserror;
 use futures_util::Future;
 use futures_util::TryFutureExt;
 use log::*;
@@ -16,7 +14,6 @@ use netpod::Shape;
 use serde::Serialize;
 use series::SeriesId;
 use std::pin::Pin;
-use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
 use taskrun::tokio;
@@ -42,21 +39,19 @@ macro_rules! trace3 {
     };
 }
 
-#[derive(Debug, ThisError)]
-#[cstm(name = "PgSeries")]
-pub enum Error {
-    Postgres(#[from] tokio_postgres::Error),
-    CreateSeriesFail,
-    SeriesMissing,
-    ChannelError,
-    #[error("DbConsistencySeries({0})")]
-    DbConsistencySeries(String),
-    #[error("ScalarType({0})")]
-    ScalarType(i32),
-    Shape,
-    #[error("SeriesKind({0})")]
-    SeriesKind(i16),
-}
+autoerr::create_error_v1!(
+    name(Error, "PgSeries"),
+    enum variants {
+        Postgres(#[from] tokio_postgres::Error),
+        CreateSeriesFail,
+        SeriesMissing,
+        ChannelError,
+        DbConsistencySeries(String),
+        ScalarType(i32),
+        Shape,
+        SeriesKind(i16),
+    },
+);
 
 impl From<crate::err::Error> for Error {
     fn from(value: crate::err::Error) -> Self {

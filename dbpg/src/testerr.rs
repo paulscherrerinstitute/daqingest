@@ -1,5 +1,3 @@
-use err::thiserror;
-use err::ThisError;
 use std::fmt;
 
 #[derive(Debug)]
@@ -15,12 +13,13 @@ impl fmt::Display for TestError {
 
 impl std::error::Error for TestError {}
 
-#[derive(Debug, ThisError)]
-#[cstm(name = "PgTestErr")]
-enum Error {
-    Postgres(#[from] tokio_postgres::Error),
-    Dummy(#[from] TestError),
-}
+autoerr::create_error_v1!(
+    name(Error, "PgTestErr"),
+    enum variants {
+        Postgres(#[from] tokio_postgres::Error),
+        Dummy(#[from] TestError),
+    },
+);
 
 #[test]
 fn err_msg_01() {

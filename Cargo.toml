@@ -10,6 +10,3 @@ debug-assertions = false
 lto = "thin"
 codegen-units = 64
 incremental = true
-
-[patch.crates-io]
-thiserror = { git = "https://github.com/dominikwerder/thiserror.git", branch = "cstm" }

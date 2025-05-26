@@ -3,19 +3,18 @@ use async_channel::Receiver;
 use async_channel::RecvError;
 use async_channel::SendError;
 use async_channel::Sender;
-use err::thiserror;
-use err::ThisError;
 use log::*;
 use netpod::Database;
 
-#[derive(Debug, ThisError)]
-#[cstm(name = "PgPool")]
-pub enum Error {
-    Postgres(#[from] tokio_postgres::Error),
-    EndOfPool,
-    ChannelRecv(#[from] RecvError),
-    ChannelSend,
-}
+autoerr::create_error_v1!(
+    name(Error, "PgPool"),
+    enum variants {
+        Postgres(#[from] tokio_postgres::Error),
+        EndOfPool,
+        ChannelRecv(#[from] RecvError),
+        ChannelSend,
+    },
+);
 
 impl From<crate::err::Error> for Error {
     fn from(value: crate::err::Error) -> Self {
