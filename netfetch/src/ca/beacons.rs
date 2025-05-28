@@ -72,7 +72,7 @@ pub async fn listen_beacons(
             }
         }?;
         if n != 16 {
-            debug!("len recv {n}");
+            debug!("len recv {}", n);
         }
         if n >= 16 {
             let mut cur = Cursor::new(bb);
@@ -84,7 +84,7 @@ pub async fn listen_beacons(
             let addr_u32 = cur.get_u32();
             let addr = Ipv4Addr::from(addr_u32);
             if cmd == 0x0d {
-                debug!("beacon  {remote}  {ver}  {addr}  {port}");
+                debug!("beacon  {}  {}  {}  {}", remote, ver, addr, port);
                 let stnow = SystemTime::now();
                 let x = stnow.duration_since(SystemTime::UNIX_EPOCH).unwrap();
                 let ts = TsNano::from_ms(1000 * x.as_secs() + x.subsec_millis() as u64);

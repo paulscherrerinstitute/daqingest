@@ -233,7 +233,7 @@ impl FindIocStream {
             let mut addr_len = std::mem::size_of::<libc::sockaddr_in>();
             let ec = unsafe { libc::getsockname(sock.0, &mut addr as *mut _ as _, &mut addr_len as *mut _ as _) };
             if ec == -1 {
-                error!("getsockname {ec}");
+                error!("getsockname {}", ec);
                 return Err(Error::SocketConvertTokio);
             } else {
                 if true {
@@ -303,7 +303,7 @@ impl FindIocStream {
             }
         } else if ec < 0 {
             // stats.ca_udp_io_error().inc();
-            error!("unexpected received {ec}");
+            error!("unexpected received {}", ec);
             Poll::Ready(Err(Error::ReadFailure))
         } else if ec == 0 {
             // stats.ca_udp_io_empty().inc();
@@ -318,7 +318,7 @@ impl FindIocStream {
                 for i in 0..(ec as usize) {
                     s1.extend(format!(" {:02x}", buf[i]).chars());
                 }
-                debug!("received answer {s1}");
+                debug!("received answer {}", s1);
                 debug!(
                     "received answer string {}",
                     String::from_utf8_lossy(buf[..ec as usize].into())
@@ -367,12 +367,12 @@ impl FindIocStream {
             }
             if msgs.len() == 1 {
                 // stats.ca_udp_warn().inc();
-                debug!("received answer with single message: {msgs:?}");
+                debug!("received answer with single message: {:?}", msgs);
             }
             let mut good = true;
             if let CaMsgTy::VersionRes(v) = msgs[0].ty {
                 if v != 13 {
-                    warn!("bad version in search response: {v}");
+                    warn!("bad version in search response: {}", v);
                     good = false;
                 }
             } else {
@@ -484,7 +484,7 @@ impl FindIocStream {
                                 }
                             }
                             if !found_sid {
-                                error!("can not find sid {sid:?} in batch {bid:?}");
+                                error!("can not find sid {:?} in batch {:?}", sid, bid);
                             }
                             let all_done = batch.done.iter().all(|x| *x);
                             if all_done {
@@ -494,7 +494,7 @@ impl FindIocStream {
                         }
                         None => {
                             // TODO analyze reasons
-                            error!("no batch for {bid:?}");
+                            error!("no batch for {:?}", bid);
                         }
                     }
                 }
@@ -503,7 +503,7 @@ impl FindIocStream {
                     if self.sids_done.contains_key(&sid) {
                         self.result_for_done_sid_count += 1;
                     } else {
-                        error!("no bid for {sid:?}");
+                        error!("no bid for {:?}", sid);
                     }
                 }
             }
@@ -608,7 +608,7 @@ impl Stream for FindIocStream {
                             have_progress = true;
                         }
                         Ready(Err(e)) => {
-                            error!("{e}");
+                            error!("FindIocStream {}", e);
                         }
                         Pending => {
                             g.clear_ready();
@@ -617,7 +617,7 @@ impl Stream for FindIocStream {
                         }
                     },
                     Ready(Err(e)) => {
-                        error!("poll_write_ready {e}");
+                        error!("poll_write_ready {}", e);
                         // TODO should we abort?
                     }
                     Pending => {}
@@ -693,7 +693,7 @@ impl Stream for FindIocStream {
                             continue;
                         }
                         Ready(Err(e)) => {
-                            error!("Error from try_read {e:?}");
+                            error!("try_read {}", e);
                             Ready(Some(Err(e)))
                         }
                         Pending => {
@@ -706,7 +706,7 @@ impl Stream for FindIocStream {
                     }
                 }
                 Ready(Err(e)) => {
-                    error!("poll_read_ready {e:?}");
+                    error!("poll_read_ready {}", e);
                     Ready(Some(Err(e.into())))
                 }
                 Pending => {

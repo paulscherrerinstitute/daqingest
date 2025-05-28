@@ -256,7 +256,7 @@ async fn remove_older_all_series(ts_cut: TsMs, series: SeriesId, stmts: &Stmts, 
             n_keep,
             n_remove,
             frac,
-            series,
+            series
         );
     }
     Ok(())
@@ -279,7 +279,7 @@ async fn remove_older_all_series_msps(
             .buffer_unordered(32)
             .take_while(|x| {
                 if let Err(e) = &x {
-                    error!("{e}");
+                    error!("{}", e);
                 }
                 future::ready(x.is_ok())
             })

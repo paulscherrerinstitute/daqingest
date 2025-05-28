@@ -1589,7 +1589,7 @@ impl CaConn {
     }
 
     pub fn channel_add(&mut self, conf: ChannelConfig, cssid: ChannelStatusSeriesId) -> Result<(), Error> {
-        debug!("channel_add  {conf:?}  {cssid:?}");
+        debug!("channel_add  {:?}  {:?}", conf, cssid);
         if false {
             if series::dbg::dbg_chn(&conf.name()) {
                 self.trace_channel_poll = true;
@@ -1598,7 +1598,7 @@ impl CaConn {
         if self.cid_by_name(conf.name()).is_some() {
             self.mett.channel_add_exists().inc();
             if series::dbg::dbg_chn(&conf.name()) {
-                error!("logic error channel already exists {conf:?}");
+                error!("logic error channel already exists {:?}", conf);
             }
             Ok(())
         } else {
@@ -1606,7 +1606,7 @@ impl CaConn {
             if self.channels.contains_key(&cid) {
                 self.mett.channel_add_exists().inc();
                 if series::dbg::dbg_chn(&conf.name()) {
-                    error!("logic error channel already exists {conf:?}");
+                    error!("logic error channel already exists {:?}", conf);
                 }
                 Ok(())
             } else {
@@ -1688,7 +1688,7 @@ impl CaConn {
         if let Some(cid) = self.cid_by_name(&name) {
             self.channel_remove_by_cid(cid);
         } else {
-            warn!("channel_remove  does not exist  {name}");
+            warn!("channel_remove  does not exist  {}", name);
         }
     }
 
@@ -1803,7 +1803,7 @@ impl CaConn {
             // as logic error.
             // Close connection to the IOC. Cout as logic error.
             let e = Error::UnknownCid(cid);
-            error!("{e}");
+            error!("transition_to_polling {}", e);
             return Err(e);
         };
         if let ChannelState::Writable(st2) = ch_s {
@@ -1848,7 +1848,10 @@ impl CaConn {
             (&mut x.state, &mut x.wrst, &x.conf)
         } else {
             // TODO return better as error and let caller decide (with more structured errors)
-            warn!("TODO handle_event_add_res can not find channel for  {cid:?}  {subid:?}");
+            warn!(
+                "TODO handle_event_add_res can not find channel for  {:?}  {:?}",
+                cid, subid
+            );
             // TODO
             // When removing a channel, keep it in "closed" btree for some time because messages can
             // still arrive from all buffers.
@@ -1912,7 +1915,7 @@ impl CaConn {
                 match &mut st.reading {
                     ReadingState::EnableMonitoring(st2) => {
                         let dt = st2.tsbeg.elapsed().as_secs_f32();
-                        trace!("change to Monitoring after dt {dt:.0} ms");
+                        trace!("change to Monitoring after dt {:.0} ms", dt);
                         st.reading = ReadingState::Monitoring(MonitoringState {
                             tsbeg: tsnow,
                             subid: st2.subid,
@@ -2024,7 +2027,10 @@ impl CaConn {
             &mut x.state
         } else {
             // TODO return better as error and let caller decide (with more structured errors)
-            warn!("TODO handle_event_add_res can not find channel for  {cid:?}  {subid:?}");
+            warn!(
+                "TODO handle_event_add_res can not find channel for  {:?}  {:?}",
+                cid, subid
+            );
             // TODO
             // When removing a channel, keep it in "closed" btree for some time because messages can
             // still arrive from all buffers.
@@ -2050,7 +2056,7 @@ impl CaConn {
                 }
                 ReadingState::EnableMonitoring(..) => {
                     let name = self.name_by_cid(cid);
-                    warn!("received event-cancel but channel {name:?} in wrong state");
+                    warn!("received event-cancel but channel {:?} in wrong state", name);
                 }
                 ReadingState::Monitoring(st2) => {
                     match &mut st2.mon2state {
@@ -2061,16 +2067,16 @@ impl CaConn {
                         Monitoring2State::ReadPending(_) => {}
                     }
                     let name = self.name_by_cid(cid);
-                    warn!("received event-cancel but channel {name:?} in wrong state");
+                    warn!("received event-cancel but channel {:?} in wrong state", name);
                 }
                 ReadingState::Polling(..) => {
                     let name = self.name_by_cid(cid);
-                    warn!("received event-cancel but channel {name:?} in wrong state");
+                    warn!("received event-cancel but channel {:?} in wrong state", name);
                 }
             },
             _ => {
                 // TODO count instead of print
-                error!("unexpected state: EventAddRes while having {ch_s:?}");
+                error!("unexpected state: EventAddRes while having {:?}", ch_s);
             }
         }
         Ok(())
@@ -2099,7 +2105,7 @@ impl CaConn {
                 let (ch_s, ch_wrst, ch_conf) = if let Some(x) = self.channels.get_mut(cid) {
                     (&mut x.state, &mut x.wrst, &x.conf)
                 } else {
-                    warn!("handle_read_notify_res can not find channel for  {cid:?}  {ioid:?}");
+                    warn!("handle_read_notify_res can not find channel for  {:?}  {:?}", cid, ioid);
                     return Ok(());
                 };
                 match ch_s {
@@ -2254,7 +2260,7 @@ impl CaConn {
                     }
                     _ => {
                         // TODO count instead of print
-                        error!("unexpected state: ReadNotifyRes while having {ch_s:?}");
+                        error!("unexpected state: ReadNotifyRes while having {:?}", ch_s);
                     }
                 }
             } else {
@@ -2462,32 +2468,32 @@ impl CaConn {
                         CaMsgTy::VersionRes(n) => {
                             // debug!("see incoming  {:?}  {:?}", self.remote_addr_dbg, msg);
                             if n < 12 || n > 13 {
-                                error!("see some unexpected version {n}  channel search may not work.");
+                                error!("see some unexpected version {}  channel search may not work", n);
                                 Ready(Some(Ok(())))
                             } else {
                                 if n != 13 {
-                                    warn!("received peer version {n}");
+                                    warn!("received peer version {}", n);
                                 }
                                 self.state = CaConnState::PeerReady;
                                 Ready(Some(Ok(())))
                             }
                         }
                         CaMsgTy::CreateChanRes(k) => {
-                            warn!("got unexpected {k:?}",);
+                            warn!("got unexpected {:?}", k);
                             Ready(Some(Ok(())))
                         }
                         CaMsgTy::AccessRightsRes(k) => {
-                            warn!("got unexpected {k:?}",);
+                            warn!("got unexpected {:?}", k);
                             Ready(Some(Ok(())))
                         }
                         k => {
-                            warn!("got some other unhandled message: {k:?}");
+                            warn!("got some other unhandled message: {:?}", k);
                             Ready(Some(Ok(())))
                         }
                     },
                 },
                 Err(e) => {
-                    error!("got error item from CaProto {e:?}");
+                    error!("got error item from CaProto {:?}", e);
                     Ready(Some(Err(e.into())))
                 }
             },
@@ -2933,7 +2939,7 @@ impl CaConn {
                 Ready(Some(Ok(())))
             }
             Ready(Some(Err(e))) => {
-                error!("CaProto yields error: {e:?}  remote {:?}", self.remote_addr_dbg);
+                error!("CaProto yields error: {}  remote {:?}", e, self.remote_addr_dbg);
                 self.trigger_shutdown(ShutdownReason::Protocol);
                 Ready(Some(Err(e)))
             }
@@ -3108,7 +3114,7 @@ impl CaConn {
                                 }
                                 Ok(Err(e)) => {
                                     use std::io::ErrorKind;
-                                    debug!("error connect to {addr} {e}");
+                                    debug!("error connect to {} {}", addr, e);
                                     let addr = addr.clone();
                                     self.emit_connection_status_item(ConnectionStatusItem {
                                         ts: self.tmp_ts_poll,
@@ -3124,7 +3130,7 @@ impl CaConn {
                                 }
                                 Err(e) => {
                                     // TODO log with exponential backoff
-                                    debug!("timeout connect to {addr} {e}");
+                                    debug!("timeout connect to {} {}", addr, e);
                                     let addr = addr.clone();
                                     self.emit_connection_status_item(ConnectionStatusItem {
                                         ts: self.tmp_ts_poll,
@@ -3204,7 +3210,7 @@ impl CaConn {
                             continue;
                         }
                         Ready(None) => {
-                            error!("handle_conn_state yields {x:?}");
+                            error!("handle_conn_state yields {:?}", x);
                             return Err(Error::LoopInnerLogicError);
                         }
                         Pending => {
@@ -3231,7 +3237,7 @@ impl CaConn {
             Ready(()) => match self.as_mut().handle_own_ticker(cx) {
                 Ok(_) => Ok(Pending),
                 Err(e) => {
-                    error!("handle_own_ticker {e}");
+                    error!("handle_own_ticker {}", e);
                     self.trigger_shutdown(ShutdownReason::InternalError);
                     Err(e)
                 }
@@ -3267,7 +3273,7 @@ impl CaConn {
             match self.tick_writers() {
                 Ok(()) => {}
                 Err(e) => {
-                    error!("error in writers: {e}");
+                    error!("error in writers: {}", e);
                 }
             }
         }
@@ -3486,7 +3492,7 @@ impl CaConn {
         let self_name = "attempt_flush_queue";
         use Poll::*;
         if qu.len() != 0 {
-            trace_flush_queue!("{self_name}  id {:10}  len {}", id, qu.len());
+            trace_flush_queue!("{}  id {:10}  len {}", self_name, id, qu.len());
         }
         let mut have_progress = false;
         let mut i = 0;
@@ -3509,7 +3515,7 @@ impl CaConn {
             if sp.is_sending() {
                 match sp.poll_unpin(cx) {
                     Ready(Ok(())) => {
-                        trace_flush_queue!("{self_name}  id {:10}  send done", id);
+                        trace_flush_queue!("{}  id {:10}  send done", self_name, id);
                         have_progress = true;
                     }
                     Ready(Err(e)) => {
@@ -3517,7 +3523,7 @@ impl CaConn {
                         match e {
                             SpErr::NoSendInProgress => return Err(Error::NotSending),
                             SpErr::Closed(_) => {
-                                error!("{self_name}  queue closed  id {:10}", id);
+                                error!("{}  queue closed  id {:10}", self_name, id);
                                 return Err(Error::ClosedSending);
                             }
                         }
@@ -3778,7 +3784,7 @@ impl Stream for CaConn {
                     have_pending = true;
                 }
                 Err(e) => {
-                    error!("{e}");
+                    error!("{}", e);
                     self.state = CaConnState::EndOfStream;
                     break Ready(Some(CaConnEvent::err_now(e)));
                 }

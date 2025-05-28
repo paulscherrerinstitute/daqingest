@@ -526,7 +526,7 @@ impl Daemon {
                 self.count_no_address,
                 self.count_unassigned,
                 self.count_assigned,
-                self.insert_queue_counter.load(atomic::Ordering::Acquire),
+                self.insert_queue_counter.load(atomic::Ordering::Acquire)
             );
         }
         let iqtxm = self
@@ -632,7 +632,7 @@ impl Daemon {
                 self.daemon_metrics.caconnset_health_response().inc();
             }
             Error(e) => {
-                error!("error from CaConnSet: {e}");
+                error!("error from CaConnSet: {}", e);
                 self.handle_shutdown().await?;
             }
             Metrics(x) => {
@@ -723,7 +723,7 @@ impl Daemon {
                 Ok(())
             }
             Err(e) => {
-                error!("{e}");
+                error!("handle_config_reload {}", e);
                 if tx.send(127).await.is_err() {
                     self.daemon_metrics.channel_send_err().inc();
                 }
@@ -806,7 +806,7 @@ impl Daemon {
                     if SIGINT.load(atomic::Ordering::Acquire) != 0 || SIGTERM.load(atomic::Ordering::Acquire) != 0 {
                         if SHUTDOWN_SENT.load(atomic::Ordering::Acquire) == 0 {
                             if let Err(e) = tx.send(DaemonEvent::Shutdown).await {
-                                error!("can not send TimerTick {e}");
+                                error!("can not send TimerTick {}", e);
                                 break;
                             } else {
                                 SHUTDOWN_SENT.store(1, atomic::Ordering::Release);
@@ -814,7 +814,7 @@ impl Daemon {
                         }
                     }
                     if let Err(e) = tx.send(DaemonEvent::TimerTick(0, ticker_inp_tx.clone())).await {
-                        error!("can not send TimerTick {e}");
+                        error!("can not send TimerTick {}", e);
                         break;
                     }
                     let c = ticker_inp_rx.len().max(1);
@@ -878,12 +878,12 @@ impl Daemon {
                 Ok(item) => match self.handle_event(item).await {
                     Ok(()) => {}
                     Err(e) => {
-                        error!("fn daemon:  error from handle_event  {e}");
+                        error!("fn daemon:  error from handle_event  {}", e);
                         break;
                     }
                 },
                 Err(e) => {
-                    error!("{e}");
+                    error!("daemon {}", e);
                     break;
                 }
             }
@@ -900,11 +900,11 @@ impl Daemon {
                 Ok(x) => match x {
                     Ok(()) => {}
                     Err(e) => {
-                        error!("joined insert worker, error  {e}");
+                        error!("joined insert worker, error  {}", e);
                     }
                 },
                 Err(e) => {
-                    error!("insert worker join error {e}");
+                    error!("insert worker join error {}", e);
                 }
             }
         }
@@ -1007,7 +1007,7 @@ pub async fn run(opts: CaIngestOpts, channels_config: Option<ChannelsConfig>) ->
             {
                 Ok(()) => {}
                 Err(e) => {
-                    error!("{e}");
+                    error!("daemon run {}", e);
                     break;
                 }
             }
@@ -1021,6 +1021,6 @@ pub async fn run(opts: CaIngestOpts, channels_config: Option<ChannelsConfig>) ->
         );
     }
     daemon_jh.await.map_err(|e| Error::with_msg_no_trace(e.to_string()))??;
-    info!("Joined daemon");
+    info!("joined daemon");
     Ok(())
 }

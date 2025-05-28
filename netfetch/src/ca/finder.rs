@@ -240,7 +240,7 @@ async fn finder_network_if_not_found(
         let mut res = VecDeque::new();
         let mut net = VecDeque::new();
         for e in item {
-            trace!("{self_name}  sees {e:?}");
+            trace!("{}  sees {:?}", self_name, e);
             if e.addr.is_none() {
                 net.push_back(e.channel);
             } else {
@@ -248,12 +248,12 @@ async fn finder_network_if_not_found(
             }
         }
         if let Err(_) = tx.send(res).await {
-            debug!("{self_name}  res send error, break");
+            debug!("{}  res send error, break", self_name);
             break;
         }
         for ch in net {
             if let Err(_) = net_tx.send(ch).await {
-                debug!("{self_name}  net ch send error, break");
+                debug!("{}  net ch send error, break", self_name);
                 break 'outer;
             }
         }
@@ -300,7 +300,7 @@ async fn process_net_result(
                 }
             }
             Err(e) => {
-                warn!("error during network search: {e}");
+                warn!("error during network search: {}", e);
                 break;
             }
         }
@@ -310,7 +310,7 @@ async fn process_net_result(
     trace!("process_net_result  dbtx closed");
     for (i, jh) in ioc_search_index_worker_jhs.into_iter().enumerate() {
         jh.await?;
-        trace!("process_net_result  search index worker {i} awaited");
+        trace!("process_net_result  search index worker {} awaited", i);
     }
     Ok(())
 }
@@ -361,7 +361,7 @@ fn start_finder_ca(tx: Sender<DaemonEvent>, tgts: Vec<SocketAddrV4>) -> (Sender<
                         }
                         Err(e) => {
                             // TODO input is done... ignore from here on.
-                            error!("Finder input channel error {e}");
+                            error!("Finder input channel error {}",e);
                             qrx_more = false;
                         }
                     }

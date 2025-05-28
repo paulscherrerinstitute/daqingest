@@ -41,7 +41,7 @@ pub async fn active_channel_insert_hook_worker(rx: Receiver<QueryItem>, tx: Send
         match tx.send(item).await {
             Ok(_) => {}
             Err(e) => {
-                error!("insert queue hook send {e}");
+                error!("insert queue hook send {}", e);
                 break;
             }
         }

@@ -655,7 +655,7 @@ impl CaConnSet {
             }
         }
         for cmd in cmds {
-            debug!("call handle_remove_channel {cmd:?}");
+            debug!("call handle_remove_channel {:?}", cmd);
             self.handle_remove_channel(cmd)?;
         }
         if let Err(_) = cmd.restx.try_send(Ok(())) {
@@ -727,7 +727,7 @@ impl CaConnSet {
                     }
                 }
                 Err(e) => {
-                    warn!("TODO handle error {e}");
+                    warn!("TODO handle error {}", e);
                     Ok(())
                 }
             }
@@ -887,7 +887,7 @@ impl CaConnSet {
                             k.value = ChannelStateValue::ToRemove { addr: None };
                         }
                         WithStatusSeriesIdStateInner::WithAddress { addr, state: _ } => {
-                            debug!("send remove  {ch:?}  to {addr}");
+                            debug!("send remove  {:?}  to {}", ch, addr);
                             let conn_ress = self
                                 .ca_conn_ress
                                 .get_mut(&SocketAddr::V4(addr.clone()))
@@ -1140,7 +1140,7 @@ impl CaConnSet {
     }
 
     fn handle_ca_conn_eos(&mut self, addr: SocketAddr, reason: EndOfStreamReason) -> Result<(), Error> {
-        debug!("handle_ca_conn_eos  {addr}  {reason:?}");
+        debug!("handle_ca_conn_eos  {}  {:?}", addr, reason);
         if let Some(e) = self.ca_conn_ress.remove(&addr) {
             self.mett.ca_conn_eos_ok().inc();
             self.await_ca_conn_jhs.push_back((addr, e.jh));
@@ -1411,7 +1411,7 @@ impl CaConnSet {
                     ActiveChannelState::WaitForStatusSeriesId { since } => {
                         let dt = stnow.duration_since(*since).unwrap_or(Duration::ZERO);
                         if dt > Duration::from_millis(20000) {
-                            warn!("timeout can not get status series id for {ch:?}");
+                            warn!("timeout can not get status series id for {:?}", ch);
                             *st2 = ActiveChannelState::Init { since: stnow };
                         } else {
                             // TODO
@@ -1675,7 +1675,7 @@ impl CaConnSet {
                         Ready(Err(e)) => match e {
                             scywr::senderpolling::Error::NoSendInProgress => {
                                 let e = Error::PushCmdsNoSendInProgress(*addr);
-                                error!("{e}");
+                                error!("try_push_ca_conn_cmds {}", e);
                                 return Some(Ready(Err(e)));
                             }
                             scywr::senderpolling::Error::Closed(_) => {
@@ -1816,7 +1816,7 @@ where
                 Some(Ready(Ok(())))
             }
             Ready(Err(e)) => {
-                error!("sender_polling_send {e}");
+                error!("sender_polling_send {}", e);
                 Some(Ready(Err(e.into())))
             }
             Pending => Some(Pending),
@@ -1871,7 +1871,7 @@ impl Stream for CaConnSet {
                         penpro.mark_progress();
                     }
                     Err(e) => {
-                        error!("ticker {e}");
+                        error!("ticker {}", e);
                         break Ready(Some(CaConnSetItem::Error(e)));
                     }
                 },
@@ -1893,15 +1893,15 @@ impl Stream for CaConnSet {
                         match x {
                             Ok(Ok(())) => {
                                 self.mett.ca_conn_task_join_done_ok().inc();
-                                debug!("CaConn {addr} finished well  left {left}");
+                                debug!("CaConn {} finished well  left {}", addr, left);
                             }
                             Ok(Err(e)) => {
                                 self.mett.ca_conn_task_join_done_err().inc();
-                                error!("CaConn {addr} task error: {e}  left {left}");
+                                error!("CaConn {} task error: {}  left {}", addr, e, left);
                             }
                             Err(e) => {
                                 self.mett.ca_conn_task_join_err().inc();
-                                error!("CaConn {addr} join error: {e}  left {left}");
+                                error!("CaConn {} join error: {}  left {}", addr, e, left);
                             }
                         }
                         penpro.mark_progress();

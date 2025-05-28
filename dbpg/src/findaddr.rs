@@ -27,12 +27,12 @@ async fn __find_channel_addr(backend: &str, name: String, pg: &PgClient) -> Resu
                 Ok(addr) => match addr.parse::<SocketAddrV4>() {
                     Ok(addr) => return Ok(Some(addr)),
                     Err(e) => {
-                        error!("can not parse  {e:?}");
+                        error!("can not parse  {}", e);
                         return Err(Error::IocAddrNotFound);
                     }
                 },
                 Err(e) => {
-                    error!("can not find addr for {name}  {e:?}");
+                    error!("can not find addr for {:?}  {}", name, e);
                 }
             }
         }
@@ -75,7 +75,7 @@ async fn __query_addr_multiple(backend: &str, pg_client: &PgClient) -> Result<()
             let addr: SocketAddrV4 = match addr.parse() {
                 Ok(k) => k,
                 Err(e) => {
-                    error!("can not parse {addr:?} for channel {ch:?}  {e:?}");
+                    error!("can not parse {:?} for channel {:?}  {}", addr, ch, e);
                     continue;
                 }
             };

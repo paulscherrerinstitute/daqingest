@@ -229,14 +229,14 @@ impl Worker {
                             }
                         }
                         Err(e) => {
-                            warn!("commit error {e}");
+                            warn!("commit error {}", e);
                             self.pg.execute("rollback", &[]).await?;
                             tokio::time::sleep(Duration::from_millis(1000)).await;
                         }
                     };
                 }
                 Err(e) => {
-                    error!("transaction error {e}");
+                    error!("transaction error {}", e);
                     self.pg.execute("rollback", &[]).await?;
                 }
             };
@@ -551,7 +551,7 @@ impl Worker {
     }
 
     async fn update_used_before<FR: HashSalter>(&self, sid: Vec<i64>) -> Result<(), Error> {
-        debug!("update_used_before {sid:?}");
+        debug!("update_used_before {:?}", sid);
         if sid.contains(&1605348259462543621) {
             debug!("UPDATE TSC FOR 1605348259462543621");
         }
@@ -565,7 +565,7 @@ impl Worker {
             .prepare_typed(sql, &[tokio_postgres::types::Type::INT8_ARRAY])
             .await?;
         let n = self.pg.execute(&qu, &[&sid]).await?;
-        trace!("update_used_before  n {n}");
+        trace!("update_used_before  n {}", n);
         Ok(())
     }
 }
@@ -649,22 +649,22 @@ async fn psql_play(db: &Database) -> Result<(), Error> {
         // let qu = pg.prepare(sql).await?;
         let p1 = 4f64;
         let rows = pg.query(&qu, &[&p1]).await;
-        debug!("{rows:?}");
+        debug!("{:?}", rows);
         let p1 = &[12i32, 13, 14][..];
         let rows = pg.query(&qu, &[&p1]).await;
-        debug!("{rows:?}");
+        debug!("{:?}", rows);
         let p1 = vec![12i32, 13, 14];
         let rows = pg.query(&qu, &[&p1]).await;
-        debug!("{rows:?}");
+        debug!("{:?}", rows);
         let p1 = vec![12i64, 13, 14];
         let rows = pg.query(&qu, &[&p1]).await;
-        debug!("{rows:?}");
+        debug!("{:?}", rows);
         let p1 = vec![String::from("a"), String::from("b")];
         let rows = pg.query(&qu, &[&p1]).await;
-        debug!("{rows:?}");
+        debug!("{:?}", rows);
         let p1 = vec![vec![4i64, 8], vec![10, 12]];
         let rows = pg.query(&qu, &[&p1]).await;
-        debug!("{rows:?}");
+        debug!("{:?}", rows);
     }
     if false {
         let sql = concat!(
@@ -807,7 +807,7 @@ fn test_series_by_channel_01() {
         let mut series_ids = Vec::new();
         for rx in rxs {
             let res = rx.recv().await.unwrap();
-            debug!("received A: {res:?}");
+            debug!("received A: {:?}", res);
             series_ids.push(res.unwrap().series);
         }
         {
@@ -830,7 +830,7 @@ fn test_series_by_channel_01() {
         };
         channel_info_query_tx.send(item).await.unwrap();
         let res = rx.recv().await.unwrap();
-        debug!("received C: {res:?}");
+        debug!("received C: {:?}", res);
 
         {
             let rows = pg

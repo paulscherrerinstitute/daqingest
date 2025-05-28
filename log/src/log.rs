@@ -1,10 +1,12 @@
 #![allow(unused_imports)]
-pub use tracing::debug;
-pub use tracing::error;
+// pub use tracing::debug;
+// pub use tracing::error;
 // pub use tracing::info;
 pub use tracing::trace;
 pub use tracing::warn;
 
+pub use direct_debug as debug;
+pub use direct_error as error;
 pub use direct_info as info;
 
 pub mod log_macros_direct {
@@ -15,7 +17,7 @@ pub mod log_macros_direct {
             eprintln!(concat!("TRACE ", $fmt));
         };
         ($fmt:expr, $($arg:expr),*) => {
-            eprintln!(concat!("TRACE ", $fmt), $($arg)*);
+            eprintln!(concat!("TRACE ", $fmt), $($arg),*);
         };
     }
     #[allow(unused)]
@@ -25,7 +27,7 @@ pub mod log_macros_direct {
             eprintln!(concat!("DEBUG ", $fmt));
         };
         ($fmt:expr, $($arg:expr),*) => {
-            eprintln!(concat!("DEBUG ", $fmt), $($arg)*);
+            eprintln!(concat!("DEBUG ", $fmt), $($arg),*);
         };
     }
     #[allow(unused)]
@@ -34,8 +36,8 @@ pub mod log_macros_direct {
         ($fmt:expr) => {
             eprintln!(concat!("INFO  ", $fmt));
         };
-        ($fmt:expr, $($arg:tt)*) => {
-            eprintln!(concat!("INFO  ", $fmt), $($arg)*);
+        ($fmt:expr, $($arg:expr),*) => {
+            eprintln!(concat!("INFO  ", $fmt), $($arg),*);
         };
     }
     #[allow(unused)]
@@ -45,7 +47,7 @@ pub mod log_macros_direct {
             eprintln!(concat!("WARN  ", $fmt));
         };
         ($fmt:expr, $($arg:expr),*) => {
-            eprintln!(concat!("WARN  ", $fmt), $($arg)*);
+            eprintln!(concat!("WARN  ", $fmt), $($arg),*);
         };
     }
     #[allow(unused)]
@@ -55,7 +57,7 @@ pub mod log_macros_direct {
             eprintln!(concat!("ERROR ", $fmt));
         };
         ($fmt:expr, $($arg:expr),*) => {
-            eprintln!(concat!("ERROR ", $fmt), $($arg)*);
+            eprintln!(concat!("ERROR ", $fmt), $($arg),*);
         };
     }
 }

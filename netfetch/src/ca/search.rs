@@ -90,7 +90,7 @@ async fn search_tgts_from_opts(opts: &CaIngestOpts) -> Result<(Vec<SocketAddrV4>
                 }
             }
             Err(e) => {
-                error!("can not resolve {s} {e}");
+                error!("can not resolve {} {}", s, e);
             }
         }
     }
@@ -110,7 +110,7 @@ async fn search_tgts_from_opts(opts: &CaIngestOpts) -> Result<(Vec<SocketAddrV4>
                     }
                 }
                 Err(e) => {
-                    warn!("can not resolve {s} {e}");
+                    warn!("can not resolve {} {}", s, e);
                 }
             }
         }

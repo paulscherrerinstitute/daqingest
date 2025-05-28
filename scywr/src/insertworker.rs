@@ -278,7 +278,7 @@ async fn worker_streamed(
     insert_worker_opts
         .insert_workers_running
         .fetch_sub(1, atomic::Ordering::AcqRel);
-    debug_setup!("insert worker {worker_ix} done");
+    debug_setup!("insert worker {} done", worker_ix);
     Ok(())
 }
 
@@ -367,22 +367,22 @@ fn inspect_items(
         for item in batch {
             match &item {
                 QueryItem::Insert(item) => {
-                    trace_item_execute!("execute  {worker_name}  Insert  {}", item.string_short());
+                    trace_item_execute!("execute  {}  Insert  {}", worker_name, item.string_short());
                 }
                 QueryItem::Msp(item) => {
-                    trace_item_execute!("execute  {worker_name}  Msp  {}", item.string_short());
+                    trace_item_execute!("execute  {}  Msp  {}", worker_name, item.string_short());
                 }
                 QueryItem::TimeBinSimpleF32V02(_) => {
-                    trace_item_execute!("execute  {worker_name}  TimeBinSimpleF32V02");
+                    trace_item_execute!("execute  {}  TimeBinSimpleF32V02", worker_name);
                 }
                 QueryItem::BinWriteIndexV04(_) => {
-                    trace_item_execute!("execute  {worker_name}  BinWriteIndexV04");
+                    trace_item_execute!("execute  {}  BinWriteIndexV04", worker_name);
                 }
                 QueryItem::Accounting(_) => {
-                    trace_item_execute!("execute  {worker_name}  Accounting  {item:?}");
+                    trace_item_execute!("execute  {}  Accounting  {:?}", worker_name, item);
                 }
                 QueryItem::AccountingRecv(_) => {
-                    trace_item_execute!("execute  {worker_name}  Accounting  {item:?}");
+                    trace_item_execute!("execute  {}  Accounting  {:?}", worker_name, item);
                 }
             }
         }
