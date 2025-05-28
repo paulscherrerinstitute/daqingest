@@ -2,12 +2,13 @@
 // pub use tracing::debug;
 // pub use tracing::error;
 // pub use tracing::info;
-pub use tracing::trace;
+// pub use tracing::trace;
 pub use tracing::warn;
 
 pub use direct_debug as debug;
 pub use direct_error as error;
 pub use direct_info as info;
+pub use direct_trace as trace;
 
 pub mod log_macros_direct {
     #[allow(unused)]

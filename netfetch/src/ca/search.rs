@@ -25,11 +25,11 @@ async fn resolve_address(addr_str: &str) -> Result<SocketAddr, Error> {
     let ac = match addr_str.parse::<SocketAddr>() {
         Ok(k) => k,
         Err(_) => {
-            trace!("can not parse {addr_str} as SocketAddr");
+            trace!("can not parse {} as SocketAddr", addr_str);
             match addr_str.parse::<IpAddr>() {
                 Ok(k) => SocketAddr::new(k, PORT_DEFAULT),
                 Err(_e) => {
-                    trace!("can not parse {addr_str} as IpAddr");
+                    trace!("can not parse {} as IpAddr", addr_str);
                     let (hostname, port) = if addr_str.contains(":") {
                         let mut it = addr_str.split(":");
                         (
@@ -79,7 +79,7 @@ async fn search_tgts_from_opts(opts: &CaIngestOpts) -> Result<(Vec<SocketAddrV4>
     for s in opts.search() {
         match resolve_address(s).await {
             Ok(addr) => {
-                trace!("resolved {s} as {addr}");
+                trace!("resolved {} as {}", s, addr);
                 match addr {
                     SocketAddr::V4(addr) => {
                         addrs.push(addr);
@@ -99,7 +99,7 @@ async fn search_tgts_from_opts(opts: &CaIngestOpts) -> Result<(Vec<SocketAddrV4>
         for s in opts.search_blacklist() {
             match resolve_address(s).await {
                 Ok(addr) => {
-                    trace!("resolved {s} as {addr}");
+                    trace!("resolved {} as {}", s, addr);
                     match addr {
                         SocketAddr::V4(addr) => {
                             addrs.push(addr);

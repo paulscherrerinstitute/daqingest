@@ -119,7 +119,7 @@ async fn finder_worker(
     trace!("finder_worker  jh_batch awaited");
     for (i, jh) in jhs.into_iter().enumerate() {
         jh.await??;
-        trace!("finder_worker  single {i} awaited");
+        trace!("finder_worker  single {} awaited", i);
     }
     Ok(())
 }
@@ -259,11 +259,11 @@ async fn finder_network_if_not_found(
         }
     }
     drop(net_tx);
-    trace!("{self_name}  loop end");
+    trace!("{}  loop end", self_name);
     jh_ca_search.await??;
-    trace!("{self_name}  jh_ca_search  awaited");
+    trace!("{}  jh_ca_search  awaited", self_name);
     jh2.await??;
-    trace!("{self_name}  process_net_result  awaited");
+    trace!("{}  process_net_result  awaited", self_name);
     Ok(())
 }
 

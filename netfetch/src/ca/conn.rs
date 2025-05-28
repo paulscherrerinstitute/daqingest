@@ -1489,7 +1489,7 @@ impl CaConn {
     }
 
     fn handle_writer_establish_inner(&mut self, cid: Cid, writer: CaRtWriter) -> Result<(), Error> {
-        trace!("handle_writer_establish_inner  {cid:?}");
+        trace!("handle_writer_establish_inner  {:?}", cid);
         let dbg_chn_cid = dbg_chn_cid(cid, self);
         if dbg_chn_cid {
             info!("handle_writer_establish_inner  {:?}", cid);
@@ -2693,7 +2693,7 @@ impl CaConn {
                                 self.mett.caget_timeout().inc();
                                 let next = PollTickStateIdle::decide_next(st4.next_backup, st3.poll_ivl, tsnow);
                                 if self.trace_channel_poll {
-                                    trace!("make poll idle after poll timeout  {next:?}");
+                                    trace!("make poll idle after poll timeout  {:?}", next);
                                 }
                                 st3.tick = PollTickState::Idle(PollTickStateIdle { next });
                             }
@@ -2705,7 +2705,7 @@ impl CaConn {
                 ChannelState::Closing(st2) => {
                     if st2.tsbeg + TIMEOUT_CHANNEL_CLOSING < tsnow {
                         let name = conf.conf.name();
-                        warn!("timeout while closing channel {name}");
+                        warn!("timeout while closing channel {}", name);
                         do_shutdown = Some(ShutdownReason::IocTimeout);
                     }
                 }
@@ -2847,7 +2847,7 @@ impl CaConn {
                             CaMsgTy::SearchRes(k) => {
                                 let a = k.addr.to_be_bytes();
                                 let addr = format!("{}.{}.{}.{}:{}", a[0], a[1], a[2], a[3], k.tcp_port);
-                                trace!("search result indicates server address: {addr}");
+                                trace!("search result indicates server address: {}", addr);
                                 // TODO count this unexpected case.
                             }
                             CaMsgTy::CreateChanRes(k) => {
@@ -2911,11 +2911,11 @@ impl CaConn {
                                 }
                             }
                             CaMsgTy::Error(msg) => {
-                                warn!("CaConn sees: {msg:?}");
+                                warn!("CaConn sees: {:?}", msg);
                             }
                             CaMsgTy::AccessRightsRes(msg) => {
                                 if false {
-                                    warn!("CaConn sees: {msg:?}");
+                                    warn!("CaConn sees: {:?}", msg);
                                 }
                             }
                             CaMsgTy::VersionRes(_) => {

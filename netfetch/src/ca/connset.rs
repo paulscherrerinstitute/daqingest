@@ -702,7 +702,7 @@ impl CaConnSet {
     }
 
     fn handle_series_lookup_result(&mut self, res: Result<ChannelInfoResult, Error>) -> Result<(), Error> {
-        trace!("handle_series_lookup_result {res:?}");
+        trace!("handle_series_lookup_result {:?}", res);
         if self.shutdown_stopping {
             Ok(())
         } else {
@@ -920,7 +920,7 @@ impl CaConnSet {
     }
 
     fn handle_ioc_query_result(&mut self, results: VecDeque<FindIocRes>) -> Result<(), Error> {
-        trace!("handle_ioc_query_result  {results:?}");
+        trace!("handle_ioc_query_result  {:?}", results);
         if self.shutdown_stopping {
             return Ok(());
         }
