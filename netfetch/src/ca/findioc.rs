@@ -658,7 +658,7 @@ impl Stream for FindIocStream {
                                     // Already answered from another target
                                     //trace!("bid {bid:?} from batch send queue not in flight  AND  all done");
                                 } else {
-                                    warn!("bid {bid:?} from batch send queue not in flight  NOT done");
+                                    warn!("bid {:?} from batch send queue not in flight  NOT done", bid);
                                 }
                                 have_progress = true;
                             }

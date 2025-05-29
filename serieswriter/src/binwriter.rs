@@ -35,6 +35,8 @@ macro_rules! trace_tick_verbose { ($t:expr, $($arg:expr),*) => ( if false { if $
 
 macro_rules! trace_bin { ($t:expr, $($arg:expr),*) => ( if true { if $t { log::info!($($arg),*); } } ) }
 
+macro_rules! debug_rebin_ingest { ($t:expr, $($arg:expr),*) => ( if true { if $t { log::debug!($($arg),*); } } ) }
+
 autoerr::create_error_v1!(
     name(Error, "SerieswriterBinwriter"),
     enum variants {
@@ -161,7 +163,7 @@ impl BinWriter {
         const DUR_MAX: DtMs = DtMs::from_ms_u64(1000 * 60 * 60 * 24 * 123);
         let rts = [RetentionTime::Short, RetentionTime::Medium, RetentionTime::Long];
         let quiets = [min_quiets.st.clone(), min_quiets.mt.clone(), min_quiets.lt.clone()];
-        let cnt_zero_disable = WriteCntZero::Disable;
+        let cnt_zero_mode = WriteCntZero::Enable;
         let mut binner_1st = None;
         let mut binner_others = Vec::new();
         let mut has_monitor = None;
@@ -174,7 +176,7 @@ impl BinWriter {
                 }
             })
             .filter(|x| x.1 > DUR_ZERO && x.1 < DUR_MAX)
-            .map(|x| (x.0, bin_len_clamp(x.1), cnt_zero_disable.clone()))
+            .map(|x| (x.0, bin_len_clamp(x.1), cnt_zero_mode.clone()))
             .collect();
         let has_monitor = has_monitor;
         debug_init!(trd, "has_monitor {:?}  is_polled {:?}", has_monitor, is_polled);
@@ -190,39 +192,27 @@ impl BinWriter {
                     combs.push((RetentionTime::Long, PrebinnedPartitioning::Day1, WriteCntZero::Enable));
                 }
                 _ => {
-                    combs.push((
-                        RetentionTime::Long,
-                        PrebinnedPartitioning::Hour1,
-                        cnt_zero_disable.clone(),
-                    ));
+                    combs.push((RetentionTime::Long, PrebinnedPartitioning::Hour1, cnt_zero_mode.clone()));
                     combs.push((RetentionTime::Long, PrebinnedPartitioning::Day1, WriteCntZero::Enable));
                 }
             }
         } else {
             match &has_monitor {
                 Some(RetentionTime::Short) => {
-                    combs.push((
-                        RetentionTime::Short,
-                        PrebinnedPartitioning::Min1,
-                        cnt_zero_disable.clone(),
-                    ));
+                    combs.push((RetentionTime::Short, PrebinnedPartitioning::Min1, cnt_zero_mode.clone()));
                     combs.push((
                         RetentionTime::Medium,
                         PrebinnedPartitioning::Hour1,
-                        cnt_zero_disable.clone(),
+                        cnt_zero_mode.clone(),
                     ));
                     combs.push((RetentionTime::Long, PrebinnedPartitioning::Day1, WriteCntZero::Enable));
                 }
                 Some(RetentionTime::Medium) => {
-                    combs.push((
-                        RetentionTime::Short,
-                        PrebinnedPartitioning::Min1,
-                        cnt_zero_disable.clone(),
-                    ));
+                    combs.push((RetentionTime::Short, PrebinnedPartitioning::Min1, cnt_zero_mode.clone()));
                     combs.push((
                         RetentionTime::Medium,
                         PrebinnedPartitioning::Hour1,
-                        cnt_zero_disable.clone(),
+                        cnt_zero_mode.clone(),
                     ));
                     combs.push((RetentionTime::Long, PrebinnedPartitioning::Day1, WriteCntZero::Enable));
                 }
@@ -230,13 +220,9 @@ impl BinWriter {
                     combs.push((
                         RetentionTime::Medium,
                         PrebinnedPartitioning::Min1,
-                        cnt_zero_disable.clone(),
+                        cnt_zero_mode.clone(),
                     ));
-                    combs.push((
-                        RetentionTime::Long,
-                        PrebinnedPartitioning::Hour1,
-                        cnt_zero_disable.clone(),
-                    ));
+                    combs.push((RetentionTime::Long, PrebinnedPartitioning::Hour1, cnt_zero_mode.clone()));
                     combs.push((RetentionTime::Long, PrebinnedPartitioning::Day1, WriteCntZero::Enable));
                 }
                 None => {
@@ -407,6 +393,7 @@ impl BinWriter {
                 let mut bins2: BinsBoxed = Box::new(bins);
                 for i in 0..self.binner_others.len() {
                     let st = &mut self.binner_others[i];
+                    debug_rebin_ingest!(self.trd, "rt {:?}  len {}", st.rt, bins2.len());
                     st.binner.ingest(&bins2)?;
                     let bb: Option<BinsBoxed> = st.binner.output()?;
                     match bb {
@@ -478,7 +465,6 @@ impl BinWriter {
         }
         let bins_len = bins.len();
         for (ts1, ts2, cnt, min, max, avg, lst, fnl) in bins.zip_iter_2() {
-            eprintln!("cnt {}", cnt);
             info!("cnt {}", cnt);
             let bin_len = DtMs::from_ms_u64(ts2.delta(ts1).ms_u64());
             if fnl == false {
@@ -494,7 +480,7 @@ impl BinWriter {
                     let e = Error::UnexpectedBinLen(bin_len, pbp);
                     return Err(e);
                 }
-                if *discard_front < 1 {
+                if false && *discard_front < 1 {
                     *discard_front += 1;
                     debug_bin!(trd, "handle_output_ready  discard_front  {:?}", rt);
                 } else {
