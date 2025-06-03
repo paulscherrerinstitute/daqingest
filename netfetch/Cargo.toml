@@ -37,7 +37,7 @@ slidebuf = "0.0.1"
 dashmap = "6.0.1"
 hashbrown = "0.15.2"
 smallvec = "1.13.2"
-autoerr = "0.0.3"
+autoerr = "0.0"
 log = { path = "../log" }
 series = { path = "../../daqbuf-series", package = "daqbuf-series" }
 serieswriter = { path = "../serieswriter" }

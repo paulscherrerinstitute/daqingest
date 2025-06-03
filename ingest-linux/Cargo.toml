@@ -6,6 +6,6 @@ edition = "2024"
 
 [dependencies]
 libc = "0.2"
-autoerr = "0.0.3"
+autoerr = "0.0"
 log = { path = "../log" }
 taskrun = { path = "../../daqbuffer/crates/taskrun" }

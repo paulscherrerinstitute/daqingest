@@ -5,22 +5,20 @@ use crate::zmtp::zmtpproto;
 use crate::zmtp::zmtpproto::SocketType;
 use crate::zmtp::zmtpproto::Zmtp;
 use crate::zmtp::ZmtpEvent;
-use err::thiserror;
 use futures_util::StreamExt;
 use netpod::log::*;
 use netpod::timeunits::SEC;
 use std::io;
 use taskrun::tokio;
 
-#[derive(Debug, thiserror::Error)]
-pub enum Error {
-    #[error("IO({0})")]
-    IO(#[from] io::Error),
-    #[error("Msg({0})")]
-    Msg(String),
-    #[error("ZmtpProto({0})")]
-    ZmtpProto(#[from] zmtpproto::Error),
-}
+autoerr::create_error_v1!(
+    name(Error, "BsreadDumpError"),
+    enum variants {
+        IO(#[from] io::Error),
+        Msg(String),
+        ZmtpProto(#[from] zmtpproto::Error),
+    },
+);
 
 impl From<err::Error> for Error {
     fn from(value: err::Error) -> Self {

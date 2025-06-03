@@ -126,12 +126,17 @@ fn binwriter_nest01_00() {
         let msp_exp = T0.ms() / pbp.bin_len().ms() / pbp.patch_len() as u64;
         assert_eq!(x.0 as u64, msp_exp);
         let x = pbp.msp_lsp(sec(39.9).to_ts_ms());
-        assert_eq!(binscol[0].msp as u32, x.0);
-        assert_eq!(binscol[0].off as u32, x.1);
+        let i = 0;
+        assert_eq!(binscol[i].msp as u32, x.0);
+        assert_eq!(binscol[i].off as u32, x.1);
+        assert_eq!(binscol[i].min, 2.2);
+        assert_eq!(binscol[i].max, 2.2);
         let x = pbp.msp_lsp(sec(40.0).to_ts_ms());
-        assert_eq!(binscol[1].msp as u32, x.0);
-        assert_eq!(binscol[1].off as u32, x.1);
-        assert_eq!(binscol[1].max, 2.0);
+        let i = 1;
+        assert_eq!(binscol[i].msp as u32, x.0);
+        assert_eq!(binscol[i].off as u32, x.1);
+        assert_eq!(binscol[i].min, 2.0);
+        assert_eq!(binscol[i].max, 2.0);
     }
     {
         let rt = "MT";

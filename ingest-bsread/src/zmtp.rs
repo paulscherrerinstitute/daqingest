@@ -10,8 +10,6 @@ use crate::zmtp::zmtpproto::SocketType;
 use crate::zmtp::zmtpproto::Zmtp;
 #[allow(unused)]
 use bytes::BufMut;
-use err::thiserror;
-use err::ThisError;
 use futures_util::Future;
 use futures_util::FutureExt;
 use futures_util::StreamExt;
@@ -25,17 +23,15 @@ use std::task::Context;
 use std::task::Poll;
 use taskrun::tokio;
 
-#[derive(Debug, ThisError)]
-pub enum Error {
-    #[error("Msg({0})")]
-    Msg(String),
-    #[error("TaskJoin")]
-    TaskJoin,
-    #[error("BsreadClient({0})")]
-    BsreadClient(#[from] bsreadclient::Error),
-    #[error("IO({0})")]
-    IO(#[from] io::Error),
-}
+autoerr::create_error_v1!(
+    name(Error, "ZmtpError"),
+    enum variants {
+        Msg(String),
+        TaskJoin,
+        BsreadClient(#[from] bsreadclient::Error),
+        IO(#[from] io::Error),
+    },
+);
 
 #[allow(unused)]
 fn test_listen() -> Result<(), Error> {

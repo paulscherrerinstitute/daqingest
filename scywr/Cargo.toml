@@ -11,7 +11,7 @@ scylla = "1.1"
 smallvec = "1.11.0"
 pin-project = "1.1.5"
 bytes = "1.10.0"
-autoerr = "0.0.3"
+autoerr = "0.0"
 serde = { version = "1", features = ["derive"] }
 log = { path = "../log" }
 stats = { path = "../stats" }

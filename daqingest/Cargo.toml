@@ -1,6 +1,6 @@
 [package]
 name = "daqingest"
-version = "0.3.0-aa.4"
+version = "0.3.0-aa.5"
 authors = ["Dominik Werder <dominik.werder@gmail.com>"]
 edition = "2024"
 
@@ -20,7 +20,7 @@ futures-util = "0.3"
 chrono = "0.4.38"
 bytes = "1.10.0"
 libc = "0.2"
-autoerr = "0.0.3"
+autoerr = "0.0"
 err = { path = "../../daqbuf-err", package = "daqbuf-err" }
 netpod = { path = "../../daqbuf-netpod", package = "daqbuf-netpod" }
 taskrun = { path = "../../daqbuffer/crates/taskrun" }

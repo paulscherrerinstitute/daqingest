@@ -5,8 +5,6 @@ use crate::bsread::HeadB;
 use crate::zmtp::ZmtpEvent;
 use async_channel::Receiver;
 use async_channel::Sender;
-use err::thiserror;
-use err::ThisError;
 use futures_util::pin_mut;
 use futures_util::Stream;
 use netpod::log::*;
@@ -26,27 +24,20 @@ use tokio::io::AsyncWrite;
 use tokio::io::ReadBuf;
 use tokio::net::TcpStream;
 
-#[derive(Debug, ThisError)]
-pub enum Error {
-    #[error("bad")]
-    Bad,
-    #[error("NetBuf({0})")]
-    NetBuf(#[from] slidebuf::Error),
-    #[error("zmtp peer is not v3.x")]
-    ZmtpInitPeerNot3x,
-    #[error("zmtp peer is not v3.0 or v3.1")]
-    ZmtpInitPeerUnsupportedVersion,
-    #[error("zmtp bad mechanism")]
-    BadPeerMechanism,
-    #[error("zmtp message too large {0}")]
-    MsgTooLarge(usize),
-    #[error("buffer too small, need-min {0} cap {1}")]
-    BufferTooSmallForNeedMin(usize, usize),
-    #[error("FromUtf8Error")]
-    FromUtf8Error(#[from] FromUtf8Error),
-    #[error("IO")]
-    IO(#[from] io::Error),
-}
+autoerr::create_error_v1!(
+    name(Error, "ZmtpProtocolError"),
+    enum variants {
+        Bad,
+        NetBuf(#[from] slidebuf::Error),
+        ZmtpInitPeerNot3x,
+        ZmtpInitPeerUnsupportedVersion,
+        BadPeerMechanism,
+        MsgTooLarge(usize),
+        BufferTooSmallForNeedMin(usize, usize),
+        FromUtf8Error(#[from] FromUtf8Error),
+        IO(#[from] io::Error),
+    },
+);
 
 #[derive(Clone, Debug)]
 enum ConnState {

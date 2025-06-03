@@ -11,8 +11,6 @@ use crate::zmtp::ZmtpClientOpts;
 use crate::zmtp::ZmtpEvent;
 use async_channel::Sender;
 use dbpg::seriesbychannel::ChannelInfoQuery;
-use err::thiserror;
-use err::ThisError;
 use futures_util::StreamExt;
 use netpod::log::*;
 use netpod::timeunits::HOUR;
@@ -34,22 +32,18 @@ use std::time::Duration;
 use std::time::Instant;
 use taskrun::tokio;
 
-#[derive(Debug, ThisError)]
-pub enum Error {
-    #[error("InsertQueueSenderMissing")]
-    InsertQueueSenderMissing,
-    #[error("AsyncChannelSend")]
-    AsyncChannelSend,
-    #[error("IO({0})")]
-    IO(#[from] io::Error),
-    #[error("Msg({0})")]
-    Msg(String),
-    #[error("ZmtpProto({0})")]
-    ZmtpProto(#[from] zmtpproto::Error),
-    #[error("BadSlice")]
-    BadSlice,
-    SystemNet(#[from] ingest_linux::net::Error),
-}
+autoerr::create_error_v1!(
+    name(Error, "BsreadClientError"),
+    enum variants {
+        InsertQueueSenderMissing,
+        AsyncChannelSend,
+        IO(#[from] io::Error),
+        Msg(String),
+        ZmtpProto(#[from] zmtpproto::Error),
+        BadSlice,
+        SystemNet(#[from] ingest_linux::net::Error),
+    },
+);
 
 impl<T> From<async_channel::SendError<T>> for Error {
     fn from(_value: async_channel::SendError<T>) -> Self {

@@ -167,18 +167,18 @@ checksum = "ace50bade8e6234aa140d9a2f552bbee1db4d353f69b8217bc503490fc1a9f26"
 
 [[package]]
 name = "autoerr"
-version = "0.0.3"
+version = "0.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "980f0fd954ab9bdb2440aac932951f01455dff9cae664bdaca4d98aeb75b1116"
+checksum = "be8cd7d4dbe9d1f58cb80acbda5d1dccd35701f4ef5cfa37492b153e49dedc51"
 dependencies = [
  "autoerr-impl",
 ]
 
 [[package]]
 name = "autoerr-impl"
-version = "0.0.3"
+version = "0.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "745e965b2d8ddc2d25707087e42b550f67f9391366802185b0a3d8ac4a4511f7"
+checksum = "7166e8bc0a13b079544c28a8144e006c560b52ff836b453240ae1b251b8cb57d"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -266,7 +266,7 @@ version = "0.0.2"
 dependencies = [
  "async-channel",
  "daqbuf-err",
- "log 0.0.1",
+ "log 0.0.2",
  "taskrun",
 ]
 
@@ -314,9 +314,9 @@ checksum = "d71b6127be86fdcfddb610f7182ac57211d4b18a3e9c82eb2d17662f2227ad6a"
 
 [[package]]
 name = "cc"
-version = "1.2.24"
+version = "1.2.25"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "16595d3be041c03b09d08d0858631facccee9221e579704070e6e9e4915d3bc7"
+checksum = "d0fc897dc1e865cc67c0e05a836d9d3f1df3cbe442aa4a9473b18e12624a4951"
 dependencies = [
  "shlex",
 ]
@@ -371,9 +371,9 @@ dependencies = [
 
 [[package]]
 name = "clap"
-version = "4.5.38"
+version = "4.5.39"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ed93b9805f8ba930df42c2590f05453d5ec36cbb85d018868a5b24d31f6ac000"
+checksum = "fd60e63e9be68e5fb56422e397cf9baddded06dae1d2e523401542383bc72a9f"
 dependencies = [
  "clap_builder",
  "clap_derive",
@@ -381,9 +381,9 @@ dependencies = [
 
 [[package]]
 name = "clap_builder"
-version = "4.5.38"
+version = "4.5.39"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "379026ff283facf611b0ea629334361c4211d1b12ee01024eec1591133b04120"
+checksum = "89cc6392a1f72bbeb820d71f32108f61fdaf18bc526e1d23954168a67759ef51"
 dependencies = [
  "anstream",
  "anstyle",
@@ -723,7 +723,7 @@ dependencies = [
 
 [[package]]
 name = "daqingest"
-version = "0.3.0-aa.4"
+version = "0.3.0-aa.5"
 dependencies = [
  "async-channel",
  "autoerr",
@@ -738,7 +738,7 @@ dependencies = [
  "futures-util",
  "ingest-linux",
  "libc",
- "log 0.0.1",
+ "log 0.0.2",
  "netfetch",
  "scywr",
  "serde",
@@ -823,7 +823,7 @@ dependencies = [
  "daqbuf-netpod",
  "daqbuf-series",
  "futures-util",
- "log 0.0.1",
+ "log 0.0.2",
  "md-5",
  "serde",
  "serde_json",
@@ -1244,12 +1244,12 @@ dependencies = [
 
 [[package]]
 name = "hyper-util"
-version = "0.1.12"
+version = "0.1.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cf9f1e950e0d9d1d3c47184416723cf29c0d1f93bd8cccf37e4beb6b44f31710"
+checksum = "b1c293b6b3d21eca78250dc7dbebd6b9210ec5530e038cbfe0661b5c47ab06e8"
 dependencies = [
  "bytes",
- "futures-util",
+ "futures-core",
  "http",
  "http-body",
  "hyper",
@@ -1411,7 +1411,7 @@ version = "0.0.1"
 dependencies = [
  "autoerr",
  "libc",
- "log 0.0.1",
+ "log 0.0.2",
  "taskrun",
 ]
 
@@ -1484,9 +1484,9 @@ checksum = "241eaef5fd12c88705a01fc1066c48c4b36e0dd4377dcdc7ec3942cea7a69956"
 
 [[package]]
 name = "lock_api"
-version = "0.4.12"
+version = "0.4.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "07af8b9cdd281b7915f413fa73f29ebd5d55d0d3f0155584dade1ff18cea1b17"
+checksum = "96936507f153605bddfcda068dd804796c84324ed2510809e5b2a624c81da765"
 dependencies = [
  "autocfg",
  "scopeguard",
@@ -1494,7 +1494,7 @@ dependencies = [
 
 [[package]]
 name = "log"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "tracing",
 ]
@@ -1594,7 +1594,7 @@ name = "mrucache"
 version = "0.0.1"
 dependencies = [
  "hashbrown 0.15.3",
- "log 0.0.1",
+ "log 0.0.2",
 ]
 
 [[package]]
@@ -1630,7 +1630,7 @@ dependencies = [
  "ingest-linux",
  "lazy_static",
  "libc",
- "log 0.0.1",
+ "log 0.0.2",
  "md-5",
  "mrucache",
  "pin-project",
@@ -1721,9 +1721,9 @@ checksum = "f38d5652c16fde515bb1ecef450ab0f6a219d619a7274976324d5e377f7dceba"
 
 [[package]]
 name = "parking_lot"
-version = "0.12.3"
+version = "0.12.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f1bf18183cf54e8d6059647fc3063646a1801cf30896933ec2311622cc4b9a27"
+checksum = "70d58bf43669b5795d1576d0641cfb6fbb2057bf629506267a92807158584a13"
 dependencies = [
  "lock_api",
  "parking_lot_core",
@@ -1731,9 +1731,9 @@ dependencies = [
 
 [[package]]
 name = "parking_lot_core"
-version = "0.9.10"
+version = "0.9.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1e401f977ab385c9e4e3ab30627d6f26d00e2c73eef317493c4ec6d468726cf8"
+checksum = "bc838d2a56b5b1a6c25f55575dfc605fabb63bb2365f6c2353ef9159aa69e4a5"
 dependencies = [
  "cfg-if",
  "libc",
@@ -1875,9 +1875,9 @@ dependencies = [
 
 [[package]]
 name = "prettyplease"
-version = "0.2.32"
+version = "0.2.33"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "664ec5419c51e34154eec046ebcba56312d5a2fc3b09a06da188e1ad21afadf6"
+checksum = "9dee91521343f4c5c6a63edd65e54f31f5c92fe8978c40a4282f8372194c6a7d"
 dependencies = [
  "proc-macro2",
  "syn",
@@ -2128,26 +2128,22 @@ dependencies = [
 
 [[package]]
 name = "scylla"
-version = "1.1.0"
+version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bd81aa1c6de67ed43f78a64aa233c547c569979922ab2e6c6d58730f0d53b651"
+checksum = "1f4d5b7fe3cb3e140d374238f5f916eb810053562287a01d66ac685e305c166f"
 dependencies = [
  "arc-swap",
  "async-trait",
- "byteorder",
  "bytes",
  "chrono",
  "dashmap 5.5.3",
  "futures",
  "hashbrown 0.14.5",
  "itertools 0.14.0",
- "lazy_static",
- "lz4_flex",
  "rand 0.9.1",
  "rand_pcg 0.9.0",
- "scylla-cql 1.1.0",
+ "scylla-cql 1.2.0",
  "smallvec",
- "snap",
  "socket2",
  "thiserror",
  "tokio",
@@ -2176,17 +2172,16 @@ dependencies = [
 
 [[package]]
 name = "scylla-cql"
-version = "1.1.0"
+version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ae84054fed47b0a7e757d66aeb4574a4ca9696bf68c25ed6325b0f198c15795b"
+checksum = "507db4914c625c86d32c5c00ed1add75eaf966a2d4ba9772b601b2563701df58"
 dependencies = [
- "async-trait",
  "byteorder",
  "bytes",
  "chrono",
  "itertools 0.14.0",
  "lz4_flex",
- "scylla-macros 1.1.0",
+ "scylla-macros 1.2.0",
  "snap",
  "stable_deref_trait",
  "thiserror",
@@ -2209,9 +2204,9 @@ dependencies = [
 
 [[package]]
 name = "scylla-macros"
-version = "1.1.0"
+version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e67d343ebea5cc079bfa89ca4b231b432207c3748baaa3b00e5c238e7644e838"
+checksum = "8efb4b519ab70556c8d3adfd4f192c635d0c7c72d4f125d2b79713742c98f39d"
 dependencies = [
  "darling",
  "proc-macro2",
@@ -2230,9 +2225,9 @@ dependencies = [
  "daqbuf-scydb",
  "daqbuf-series",
  "futures-util",
- "log 0.0.1",
+ "log 0.0.2",
  "pin-project",
- "scylla 1.1.0",
+ "scylla 1.2.0",
  "serde",
  "smallvec",
  "stats",
@@ -2335,7 +2330,7 @@ dependencies = [
  "dbpg",
  "futures-util",
  "itertools 0.14.0",
- "log 0.0.1",
+ "log 0.0.2",
  "scywr",
  "serde",
  "smallvec",
@@ -2416,9 +2411,9 @@ checksum = "1b6b67fb9a61334225b5b790716f609cd58395f895b3fe8b328786812a40bc3b"
 
 [[package]]
 name = "socket2"
-version = "0.5.9"
+version = "0.5.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4f5fd57c80058a56cf5c777ab8a126398ece8e442983605d280a44ce79d0edef"
+checksum = "e22376abed350d73dd1cd119b57ffccad95b4e585a7cda43e286245ce23c0678"
 dependencies = [
  "libc",
  "windows-sys 0.52.0",
@@ -2450,7 +2445,7 @@ name = "stats"
 version = "0.0.1-a.0"
 dependencies = [
  "daqbuf-ca-proto",
- "log 0.0.1",
+ "log 0.0.2",
  "mettrics",
  "rand_xoshiro 0.7.0",
  "serde",

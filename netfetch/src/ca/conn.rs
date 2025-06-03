@@ -92,7 +92,7 @@ const POLL_READ_TIMEOUT: Duration = Duration::from_millis(1000 * 10);
 const DO_RATE_CHECK: bool = false;
 const CHANNEL_STATUS_PONG_QUIET: Duration = Duration::from_millis(1000 * 60 * 60);
 const METRICS_EMIT_IVL: Duration = Duration::from_millis(1000 * 1);
-const USE_BIN_WRITER: bool = true;
+const USE_BIN_WRITER: bool = false;
 
 macro_rules! trace3 { ($($arg:expr),*) => ( if false { trace!($($arg),*); } ); }
 

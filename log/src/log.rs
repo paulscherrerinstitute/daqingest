@@ -1,17 +1,31 @@
 #![allow(unused_imports)]
-// pub use tracing::debug;
-// pub use tracing::error;
-// pub use tracing::info;
-// pub use tracing::trace;
-// pub use tracing::warn;
 
-pub use direct_debug as debug;
-pub use direct_error as error;
-pub use direct_info as info;
-pub use direct_trace as trace;
-pub use direct_warn as warn;
+pub use branch_debug as debug;
+pub use branch_error as error;
+pub use branch_info as info;
+pub use branch_trace as trace;
+pub use branch_warn as warn;
 
-pub mod log_macros_direct {
+use std::sync::LazyLock;
+
+#[allow(unused)]
+#[inline(always)]
+pub fn is_log_direct() -> bool {
+    static ONCE: LazyLock<bool> =
+        LazyLock::new(|| std::env::var("LOG_DIRECT").map_or(false, |x| x.parse().unwrap_or(false)));
+    *ONCE
+}
+
+pub mod log_tracing {
+    pub use tracing::debug;
+    pub use tracing::error;
+    pub use tracing::info;
+    pub use tracing::trace;
+    pub use tracing::warn;
+    // pub use tracing::{self, event, span, Level};
+}
+
+pub mod log_direct {
     #[allow(unused)]
     #[macro_export]
     macro_rules! direct_trace {
@@ -66,6 +80,11 @@ pub mod log_macros_direct {
             eprintln!(concat!("ERROR ", $fmt), $($arg),*);
         };
     }
+    pub use crate::direct_debug as debug;
+    pub use crate::direct_error as error;
+    pub use crate::direct_info as info;
+    pub use crate::direct_trace as trace;
+    pub use crate::direct_warn as warn;
 }
 
 #[allow(unused)]
@@ -81,4 +100,68 @@ macro_rules! log_v2_trace {
         // let h = format_args!($fmt, $($arg),*);
         // eprintln!("h: {:?}", h);
     };
+}
+
+pub mod log_macros_branch {
+    #[allow(unused)]
+    #[macro_export]
+    macro_rules! branch_trace {
+        ($($arg:expr),*) => {
+            if $crate::is_log_direct() {
+                $crate::log_direct::trace!($($arg),*);
+            } else {
+                $crate::log_tracing::trace!($($arg),*);
+            }
+        };
+    }
+    #[allow(unused)]
+    #[macro_export]
+    macro_rules! branch_debug {
+        ($($arg:tt)*) => {
+            if $crate::is_log_direct() {
+                $crate::log_direct::debug!($($arg)*);
+            } else {
+                $crate::log_tracing::debug!($($arg)*);
+            }
+        };
+    }
+    #[allow(unused)]
+    #[macro_export]
+    macro_rules! branch_info {
+        ($($arg:tt)*) => {
+            if $crate::is_log_direct() {
+                $crate::log_direct::info!($($arg)*);
+            } else {
+                $crate::log_tracing::info!($($arg)*);
+            }
+        };
+    }
+    #[allow(unused)]
+    #[macro_export]
+    macro_rules! branch_warn {
+        ($($arg:tt)*) => {
+            if $crate::is_log_direct() {
+                $crate::log_direct::warn!($($arg)*);
+            } else {
+                $crate::log_tracing::warn!($($arg)*);
+            }
+        };
+    }
+    #[allow(unused)]
+    #[macro_export]
+    macro_rules! branch_error {
+        ($($arg:tt)*) => {
+            if $crate::is_log_direct() {
+                $crate::log_direct::error!($($arg)*);
+            } else {
+                $crate::log_tracing::error!($($arg)*);
+            }
+        };
+    }
+    pub use branch_debug as debug;
+    pub use branch_error as error;
+    pub use branch_info as info;
+    pub use branch_trace as trace;
+    pub use branch_warn as warn;
+    pub use tracing::{self, event, span, Level};
 }
