@@ -54,6 +54,8 @@ autoerr::create_error_v1!(
     },
 );
 
+const DO_DISCARD_FRONT: bool = true;
+
 fn bin_len_clamp(dur: DtMs) -> PrebinnedPartitioning {
     if dur < DtMs::from_ms_u64(1000 * 2) {
         PrebinnedPartitioning::Sec1
@@ -480,7 +482,7 @@ impl BinWriter {
                     let e = Error::UnexpectedBinLen(bin_len, pbp);
                     return Err(e);
                 }
-                if false && *discard_front < 1 {
+                if DO_DISCARD_FRONT && *discard_front < 1 {
                     *discard_front += 1;
                     debug_bin!(trd, "handle_output_ready  discard_front  {:?}", rt);
                 } else {
