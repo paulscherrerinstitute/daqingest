@@ -1,6 +1,8 @@
 use super::BinWriter;
+use crate::binwriter::DiscardFirstOutput;
+use crate::binwriter::WriteCntZero;
 use crate::rtwriter::MinQuiets;
-use log::*;
+use log;
 use netpod::DtMs;
 use netpod::ScalarType;
 use netpod::Shape;
@@ -34,10 +36,27 @@ macro_rules! debug_item {
     };
 }
 
+macro_rules! trace_binscol {
+    ($($arg:tt)*) => { if false { log::trace!($($arg)*); } };
+}
+
+macro_rules! trace_iqdqs {
+    ($($arg:tt)*) => { if false { log::trace!($($arg)*); } };
+}
+
+macro_rules! error_cmp {
+    ($($arg:tt)*) => { if false { log::error!($($arg)*); } };
+}
+
+macro_rules! take_par {
+    ($fmt:expr, $($args:expr),*) => {};
+}
+
 struct BinsExp {
     pbp: PrebinnedPartitioning,
     curmsp: MspU32,
     curlsp: LspU32,
+    cnt_zero_default: WriteCntZero,
     msp: VecDeque<u32>,
     lsp: VecDeque<u32>,
     cnt: VecDeque<Option<u32>>,
@@ -46,11 +65,12 @@ struct BinsExp {
 }
 
 impl BinsExp {
-    fn new(pbp: PrebinnedPartitioning, msp: MspU32, lsp: LspU32) -> Self {
+    fn new(pbp: PrebinnedPartitioning, msp: MspU32, lsp: LspU32, cnt_zero_default: WriteCntZero) -> Self {
         Self {
             pbp,
             curmsp: msp,
             curlsp: lsp,
+            cnt_zero_default,
             msp: def(),
             lsp: def(),
             cnt: def(),
@@ -67,6 +87,12 @@ impl BinsExp {
         let (m2, l2) = self.pbp.lsp_inc(self.curmsp, self.curlsp);
         self.curmsp = m2;
         self.curlsp = l2;
+    }
+
+    fn skip_lsp(&mut self, n: u32) {
+        for _ in 0..n {
+            self.inc_lsp();
+        }
     }
 
     fn push_back_dont_care(&mut self) {
@@ -96,6 +122,16 @@ impl BinsExp {
         self.inc_lsp();
     }
 
+    fn push_cnt_zero(&mut self, n: u32) {
+        if self.cnt_zero_default.enabled() {
+            for _ in 0..n {
+                self.push_back_dont_care();
+            }
+        } else {
+            self.skip_lsp(n);
+        }
+    }
+
     fn cmp(&self, bins: &VecDeque<TimeBinSimpleF32V02>) -> Result<(), ()> {
         let mut bad = false;
         for i in 0..self.msp.len() {
@@ -111,38 +147,38 @@ impl BinsExp {
             let max = self.max[i];
             if bin.msp as u32 != msp {
                 bad = true;
-                info!("bad msp  {}  vs  {}", bin.msp, msp);
+                error_cmp!("i {i:3}  bad msp  {}  vs  {}", bin.msp, msp);
             }
             if bin.off as u32 != lsp {
                 bad = true;
-                info!("bad lsp  {}  vs  {}", bin.off, lsp);
+                error_cmp!("i {i:3}  bad lsp  {}  vs  {}", bin.off, lsp);
             }
             if let Some(cnt) = cnt {
                 if bin.cnt as u32 != cnt {
                     bad = true;
-                    info!("bad cnt  {}  vs  {}", bin.cnt, cnt);
+                    error_cmp!("i {i:3}  bad cnt  {}  vs  {}", bin.cnt, cnt);
                 }
             }
             if let Some(min) = min {
                 if !f32_close(bin.min, min) {
                     bad = true;
-                    info!("bad min  {:.5e}  vs  {:.5e}", bin.min, min);
+                    error_cmp!("i {i:3}  bad min  {:.5e}  vs  {:.5e}", bin.min, min);
                 }
             }
             if let Some(max) = max {
                 if !f32_close(bin.max, max) {
                     bad = true;
-                    info!("bad max  {:.5e}  vs  {:.5e}", bin.max, max);
+                    error_cmp!("i {i:3}  bad max  {:.5e}  vs  {:.5e}", bin.max, max);
                 }
             }
         }
         if self.len() > bins.len() {
             bad = true;
-            info!("expect more bins  {} vs {}", self.len(), bins.len());
+            error_cmp!("less bins than expected  {} vs {}", bins.len(), self.len());
         }
         if self.len() < bins.len() {
             bad = true;
-            info!("expect less bins  {} vs {}", self.len(), bins.len());
+            error_cmp!("more bins than expected  {} vs {}", bins.len(), self.len());
         }
         if bad { Err(()) } else { Ok(()) }
     }
@@ -176,7 +212,7 @@ fn collect_bin_write_only(qu: &VecDeque<QueryItem>) -> VecDeque<TimeBinSimpleF32
 
 fn print_binscol(rt: &str, binscol: &VecDeque<TimeBinSimpleF32V02>) {
     for bin in binscol {
-        debug!(
+        trace_binscol!(
             "{}  bl {:5}  msp {:4}  off {:4}  cnt {:3}  min {:7.2}  max {:7.2}  lst {:7.2}",
             rt,
             // min = bin.min,
@@ -191,9 +227,8 @@ fn print_binscol(rt: &str, binscol: &VecDeque<TimeBinSimpleF32V02>) {
     }
 }
 
-#[test]
-fn binwriter_nest01_00() {
-    let _ = PrebinnedPartitioning::Day1;
+#[allow(unused)]
+fn format_check() {
     let _ = format_args!("");
     let _ = format_args!(concat!("", ""));
     debug_item!("plain fmt string");
@@ -202,7 +237,17 @@ fn binwriter_nest01_00() {
     let some_string = "some--string123";
     debug_item!("param interpolated: {some_string:?}");
     debug_item!("param interpolated: {some_string}");
-    let beg = TsNano::from_ms(1000 * 40);
+    take_par!("fmtstring {par}", par = 123);
+    log::direct_trace!("fmtstring {par}", par = 123);
+    log::trace!("fmtstring {par}", par = 123);
+    log::trace!("fmtstring {par}", par = 123,);
+    log::trace!("fmtstring {}", 123);
+    log::trace!("fmtstring {}", 123,);
+}
+
+fn binwriter_nest01_00_case(cnt_zero_default: WriteCntZero, do_discard_front: DiscardFirstOutput) {
+    let _ = PrebinnedPartitioning::Day1;
+    let beg = TsNano::from_ms(1000 * 20);
     let min_quiets = MinQuiets::test_1_10_60();
     let is_polled = false;
     let cssid = ChannelStatusSeriesId::new(50);
@@ -211,7 +256,19 @@ fn binwriter_nest01_00() {
     let shape = Shape::Scalar;
     let chname2 = String::from("daqbuftest");
     let mut iqdqs = InsertDeques::new();
-    let mut binwriter = BinWriter::new(beg, min_quiets, is_polled, cssid, sid, scalar_type, shape, chname2).unwrap();
+    let mut binwriter = BinWriter::new(
+        beg,
+        min_quiets,
+        is_polled,
+        cnt_zero_default.clone(),
+        do_discard_front,
+        cssid,
+        sid,
+        scalar_type,
+        shape,
+        chname2,
+    )
+    .unwrap();
     binwriter.ingest(sec(39.9), 2.2, &mut iqdqs).unwrap();
     binwriter.ingest(sec(40.0), 2., &mut iqdqs).unwrap();
     binwriter.ingest(sec(40.1), 2., &mut iqdqs).unwrap();
@@ -223,16 +280,19 @@ fn binwriter_nest01_00() {
     // binwriter.ingest(sec(70.0), 2., &mut iqdqs).unwrap();
     // binwriter.ingest(sec(70.1), 2., &mut iqdqs).unwrap();
     binwriter.ingest(sec(80.0), 2., &mut iqdqs).unwrap();
+    // TODO signal input done range final
+    binwriter.ingest(sec(120.0), 0., &mut iqdqs).unwrap();
+    binwriter.ingest(sec(121.0), 0., &mut iqdqs).unwrap();
     binwriter.tick(&mut iqdqs).unwrap();
-    debug!("iqdqs summary {}", iqdqs.summary());
+    trace_iqdqs!("iqdqs summary {}", iqdqs.summary());
     for x in &iqdqs.st_rf3_qu {
-        debug!("ST  {:?}", x);
+        trace_iqdqs!("ST  {:?}", x);
     }
     for x in &iqdqs.mt_rf3_qu {
-        debug!("MT  {:?}", x);
+        trace_iqdqs!("MT  {:?}", x);
     }
     for x in &iqdqs.lt_rf3_qu {
-        debug!("LT  {:?}", x);
+        trace_iqdqs!("LT  {:?}", x);
     }
     {
         let rt = "ST";
@@ -243,20 +303,53 @@ fn binwriter_nest01_00() {
         let msp_exp = T0.ms() / pbp.bin_len().ms() / pbp.patch_len() as u64;
         assert_eq!(x.0 as u64, msp_exp);
         {
-            let (msp, lsp) = pbp.msp_lsp(sec(40.0).to_ts_ms());
-            let mut exp = BinsExp::new(pbp.clone(), MspU32(msp), LspU32(lsp));
+            let (msp, lsp) = if do_discard_front.enabled() {
+                pbp.msp_lsp(sec(40.0).to_ts_ms())
+            } else {
+                pbp.msp_lsp(sec(39.0).to_ts_ms())
+            };
+            let mut exp = BinsExp::new(pbp.clone(), MspU32(msp), LspU32(lsp), cnt_zero_default);
             // exp.push_back_cnt(2);
-            exp.push_back_cmm(2, 2.0, 2.0);
-            for _ in 0..9 {
-                exp.push_back_dont_care();
+            if do_discard_front.enabled() {
+            } else {
+                exp.push_back_cnt(1);
             }
             exp.push_back_cmm(2, 2.0, 2.0);
-            for _ in 0..9 {
-                exp.push_back_dont_care();
+            if cnt_zero_default.enabled() {
+                for _ in 0..9 {
+                    exp.push_back_dont_care();
+                }
+            } else {
+                exp.skip_lsp(9);
             }
-            for _ in 0..20 {
-                exp.push_back_dont_care();
+            exp.push_back_cmm(2, 2.0, 2.0);
+            exp.push_back_cmm(2, 2.0, 2.0);
+            // if cnt_zero_default.enabled() {
+            //     for _ in 0..8 {
+            //         exp.push_back_dont_care();
+            //     }
+            // } else {
+            //     exp.skip_lsp(8);
+            // }
+            exp.push_cnt_zero(8);
+            exp.push_back_cmm(1, 2.0, 2.0);
+            if cnt_zero_default.enabled() {
+                for _ in 0..19 {
+                    exp.push_back_dont_care();
+                }
+            } else {
+                exp.skip_lsp(19);
             }
+            exp.push_back_cmm(1, 2.0, 2.0);
+            if cnt_zero_default.enabled() {
+                for _ in 0..39 {
+                    exp.push_back_dont_care();
+                }
+            } else {
+                exp.skip_lsp(39);
+            }
+            assert_eq!(exp.curlsp.0, 120);
+            exp.push_back_cmm(1, 0., 0.);
             exp.cmp(&binscol).unwrap();
         }
     }
@@ -268,6 +361,38 @@ fn binwriter_nest01_00() {
         let x = pbp.msp_lsp(T0);
         let msp_exp = T0.ms() / pbp.bin_len().ms() / pbp.patch_len() as u64;
         assert_eq!(x.0 as u64, msp_exp);
+        {
+            let (msp, lsp) = if do_discard_front.enabled() {
+                pbp.msp_lsp(sec(40.0).to_ts_ms())
+            } else {
+                pbp.msp_lsp(sec(30.0).to_ts_ms())
+            };
+            let mut exp = BinsExp::new(pbp.clone(), MspU32(msp), LspU32(lsp), cnt_zero_default);
+            if do_discard_front.enabled() {
+            } else {
+                exp.push_back_cmm(1, 2.2, 2.2);
+            }
+            exp.push_back_cmm(2, 2.0, 2.0);
+            exp.push_back_cmm(4, 2.0, 2.0);
+            // assert 60s
+            assert_eq!(exp.curlsp.0, 6);
+            exp.push_back_cmm(1, 2.0, 2.0);
+            if cnt_zero_default.enabled() {
+                exp.push_back_cmm(0, 2.0, 2.0);
+            } else {
+                exp.skip_lsp(1);
+            }
+            assert_eq!(exp.curlsp.0, 8);
+            exp.push_back_cmm(1, 2.0, 2.0);
+            if cnt_zero_default.enabled() {
+                exp.push_back_cmm(0, 2.0, 2.0);
+                exp.push_back_cmm(0, 2.0, 2.0);
+                exp.push_back_cmm(0, 2.0, 2.0);
+            } else {
+                exp.skip_lsp(3);
+            }
+            exp.cmp(&binscol).unwrap();
+        }
     }
     {
         let rt = "LT";
@@ -278,12 +403,24 @@ fn binwriter_nest01_00() {
         let msp_exp = T0.ms() / pbp.bin_len().ms() / pbp.patch_len() as u64;
         assert_eq!(x.0 as u64, msp_exp);
     }
-    {
-        let pbp = PrebinnedPartitioning::Sec10;
-        debug!(
-            "expect MT msp at T0 {}",
-            T0.ms() / pbp.bin_len().ms() / pbp.patch_len() as u64
-        );
-    }
-    log_v2_trace!("ARG-1 {}", 42);
+}
+
+#[test]
+fn binwriter_nest01_00_ed() {
+    binwriter_nest01_00_case(WriteCntZero::Enable, DiscardFirstOutput::Disable);
+}
+
+#[test]
+fn binwriter_nest01_00_ee() {
+    binwriter_nest01_00_case(WriteCntZero::Enable, DiscardFirstOutput::Enable);
+}
+
+#[test]
+fn binwriter_nest01_00_dd() {
+    binwriter_nest01_00_case(WriteCntZero::Disable, DiscardFirstOutput::Disable);
+}
+
+#[test]
+fn binwriter_nest01_00_de() {
+    binwriter_nest01_00_case(WriteCntZero::Disable, DiscardFirstOutput::Enable);
 }

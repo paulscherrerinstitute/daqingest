@@ -54,6 +54,7 @@ use serde_helper::serde_instant::serde_Instant_elapsed_ms;
 use series::ChannelStatusSeriesId;
 use series::SeriesId;
 use serieswriter::binwriter::BinWriter;
+use serieswriter::binwriter::DiscardFirstOutput;
 use serieswriter::fixgridwriter::ChannelStatusSeriesWriter;
 use serieswriter::fixgridwriter::ChannelStatusWriteState;
 use serieswriter::msptool::MspSplit;
@@ -1504,6 +1505,8 @@ impl CaConn {
                     beg,
                     conf.conf.min_quiets(),
                     conf.conf.is_polled(),
+                    serieswriter::binwriter::WriteCntZero::default_for_on_the_fly(),
+                    DiscardFirstOutput::default_for_on_the_fly(),
                     st2.channel.cssid,
                     writer.series(),
                     st2.channel.scalar_type.clone(),

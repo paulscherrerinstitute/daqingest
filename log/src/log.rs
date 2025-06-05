@@ -30,10 +30,10 @@ pub mod log_direct {
     #[macro_export]
     macro_rules! direct_trace {
         ($fmt:expr) => {
-            eprintln!(concat!("TRACE ", $fmt));
+            eprintln!("TRACE {}", format_args!($fmt));
         };
-        ($fmt:expr, $($arg:expr),*) => {
-            eprintln!(concat!("TRACE ", $fmt), $($arg),*);
+        ($fmt:expr, $($arg:tt)*) => {
+            eprintln!("TRACE {}", format_args!($fmt, $($arg)*));
         };
     }
     #[allow(unused)]
@@ -41,13 +41,13 @@ pub mod log_direct {
     macro_rules! direct_debug {
         ($fmt:expr) => {
             // eprintln!(concat!("DEBUG ", $fmt));
-            // eprintln!("DEBUG {}", format_args!($fmt));
-            eprintln!("{}", format_args!(concat!("DEBUG ", $fmt)));
+            // eprintln!("{}", format_args!(concat!("DEBUG ", $fmt)));
+            eprintln!("DEBUG {}", format_args!($fmt));
         };
         ($fmt:expr, $($arg:expr),*) => {
             // eprintln!(concat!("DEBUG ", $fmt), $($arg),*);
-            // eprintln!("DEBUG {}", format_args!($fmt, $($arg),*));
-            eprintln!("{}", format_args!(concat!("DEBUG ", $fmt), $($arg),*));
+            // eprintln!("{}", format_args!(concat!("DEBUG ", $fmt), $($arg),*));
+            eprintln!("DEBUG {}", format_args!($fmt, $($arg),*));
         };
     }
     #[allow(unused)]
@@ -64,20 +64,20 @@ pub mod log_direct {
     #[macro_export]
     macro_rules! direct_warn {
         ($fmt:expr) => {
-            eprintln!(concat!("WARN  ", $fmt));
+            eprintln!("WARN  {}", format_args!($fmt));
         };
         ($fmt:expr, $($arg:expr),*) => {
-            eprintln!(concat!("WARN  ", $fmt), $($arg),*);
+            eprintln!("WARN  {}", format_args!($fmt, $($arg),*));
         };
     }
     #[allow(unused)]
     #[macro_export]
     macro_rules! direct_error {
         ($fmt:expr) => {
-            eprintln!(concat!("ERROR ", $fmt));
+            eprintln!("ERROR {}", format_args!($fmt));
         };
         ($fmt:expr, $($arg:expr),*) => {
-            eprintln!(concat!("ERROR ", $fmt), $($arg),*);
+            eprintln!("ERROR {}", format_args!($fmt, $($arg),*));
         };
     }
     pub use crate::direct_debug as debug;
@@ -106,11 +106,11 @@ pub mod log_macros_branch {
     #[allow(unused)]
     #[macro_export]
     macro_rules! branch_trace {
-        ($($arg:expr),*) => {
+        ($($arg:tt)*) => {
             if $crate::is_log_direct() {
-                $crate::log_direct::trace!($($arg),*);
+                $crate::log_direct::trace!($($arg)*);
             } else {
-                $crate::log_tracing::trace!($($arg),*);
+                $crate::log_tracing::trace!($($arg)*);
             }
         };
     }
@@ -163,5 +163,5 @@ pub mod log_macros_branch {
     pub use branch_info as info;
     pub use branch_trace as trace;
     pub use branch_warn as warn;
-    pub use tracing::{self, event, span, Level};
+    pub use tracing::{self, Level, event, span};
 }
