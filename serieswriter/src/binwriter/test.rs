@@ -122,10 +122,10 @@ impl BinsExp {
         self.inc_lsp();
     }
 
-    fn push_cnt_zero(&mut self, n: u32) {
+    fn push_cnt_zero(&mut self, n: u32, lst: f32) {
         if self.cnt_zero_default.enabled() {
             for _ in 0..n {
-                self.push_back_dont_care();
+                self.push_back_cmm(0, lst, lst);
             }
         } else {
             self.skip_lsp(n);
@@ -324,30 +324,11 @@ fn binwriter_nest01_00_case(cnt_zero_default: WriteCntZero, do_discard_front: Di
             }
             exp.push_back_cmm(2, 2.0, 2.0);
             exp.push_back_cmm(2, 2.0, 2.0);
-            // if cnt_zero_default.enabled() {
-            //     for _ in 0..8 {
-            //         exp.push_back_dont_care();
-            //     }
-            // } else {
-            //     exp.skip_lsp(8);
-            // }
-            exp.push_cnt_zero(8);
+            exp.push_cnt_zero(8, 2.0);
             exp.push_back_cmm(1, 2.0, 2.0);
-            if cnt_zero_default.enabled() {
-                for _ in 0..19 {
-                    exp.push_back_dont_care();
-                }
-            } else {
-                exp.skip_lsp(19);
-            }
+            exp.push_cnt_zero(19, 2.0);
             exp.push_back_cmm(1, 2.0, 2.0);
-            if cnt_zero_default.enabled() {
-                for _ in 0..39 {
-                    exp.push_back_dont_care();
-                }
-            } else {
-                exp.skip_lsp(39);
-            }
+            exp.push_cnt_zero(39, 2.0);
             assert_eq!(exp.curlsp.0, 120);
             exp.push_back_cmm(1, 0., 0.);
             exp.cmp(&binscol).unwrap();
@@ -377,20 +358,10 @@ fn binwriter_nest01_00_case(cnt_zero_default: WriteCntZero, do_discard_front: Di
             // assert 60s
             assert_eq!(exp.curlsp.0, 6);
             exp.push_back_cmm(1, 2.0, 2.0);
-            if cnt_zero_default.enabled() {
-                exp.push_back_cmm(0, 2.0, 2.0);
-            } else {
-                exp.skip_lsp(1);
-            }
+            exp.push_cnt_zero(1, 2.0);
             assert_eq!(exp.curlsp.0, 8);
             exp.push_back_cmm(1, 2.0, 2.0);
-            if cnt_zero_default.enabled() {
-                exp.push_back_cmm(0, 2.0, 2.0);
-                exp.push_back_cmm(0, 2.0, 2.0);
-                exp.push_back_cmm(0, 2.0, 2.0);
-            } else {
-                exp.skip_lsp(3);
-            }
+            exp.push_cnt_zero(3, 2.0);
             exp.cmp(&binscol).unwrap();
         }
     }

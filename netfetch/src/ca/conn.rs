@@ -93,17 +93,17 @@ const POLL_READ_TIMEOUT: Duration = Duration::from_millis(1000 * 10);
 const DO_RATE_CHECK: bool = false;
 const CHANNEL_STATUS_PONG_QUIET: Duration = Duration::from_millis(1000 * 60 * 60);
 const METRICS_EMIT_IVL: Duration = Duration::from_millis(1000 * 1);
-const USE_BIN_WRITER: bool = false;
+const USE_BIN_WRITER: bool = true;
 
-macro_rules! trace3 { ($($arg:expr),*) => ( if false { trace!($($arg),*); } ); }
+macro_rules! trace3 { ($($arg:tt)*) => ( if false { log::trace!($($arg)*); } ); }
 
-macro_rules! trace4 { ($($arg:expr),*) => ( if false { trace!($($arg),*); } ); }
+macro_rules! trace4 { ($($arg:tt)*) => ( if false { log::trace!($($arg)*); } ); }
 
-macro_rules! trace_flush_queue { ($($arg:expr),*) => ( if false { trace3!($($arg),*); } ); }
+macro_rules! trace_flush_queue { ($($arg:tt)*) => ( if false { trace3!($($arg)*); } ); }
 
-macro_rules! trace_event_incoming { ($($arg:expr),*) => ( if false { trace!($($arg),*); } ); }
+macro_rules! trace_event_incoming { ($($arg:tt)*) => ( if false { log::trace!($($arg)*); } ); }
 
-macro_rules! trace_monitor_stale { ($($arg:expr),*) => ( if false { trace!($($arg),*); } ); }
+macro_rules! trace_monitor_stale { ($($arg:tt)*) => ( if false { log::trace!($($arg)*); } ); }
 
 fn dbg_chn_cid(cid: Cid, conn: &CaConn) -> bool {
     if let Some(name) = conn.name_by_cid(cid) {
