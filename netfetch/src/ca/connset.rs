@@ -408,6 +408,7 @@ pub struct CaConnSet {
     thr_msg_storage_len: ThrottleTrace,
     cssid_latency_max: Duration,
     mett: stats::mett::CaConnSetMetrics,
+    use_binwriter: bool,
 }
 
 impl CaConnSet {
@@ -422,6 +423,7 @@ impl CaConnSet {
         channel_info_query_tx: Sender<ChannelInfoQuery>,
         ingest_opts: CaIngestOpts,
     ) -> CaConnSetCtrl {
+        let use_binwriter = ingest_opts.binwriter_enable();
         let (ca_conn_res_tx, ca_conn_res_rx) = async_channel::bounded(200);
         let (connset_inp_tx, connset_inp_rx) = async_channel::bounded(200);
         let (connset_out_tx, connset_out_rx) = async_channel::bounded(200);
@@ -467,6 +469,7 @@ impl CaConnSet {
             thr_msg_storage_len: ThrottleTrace::new(Duration::from_millis(1000)),
             cssid_latency_max: Duration::from_millis(2000),
             mett: stats::mett::CaConnSetMetrics::new(),
+            use_binwriter,
         };
         // TODO await on jh
         let jh = tokio::spawn(CaConnSet::run(connset));
@@ -1276,7 +1279,7 @@ impl CaConnSet {
 
     fn create_ca_conn(&mut self, add: ChannelAddWithAddr) -> Result<CaConnRes, Error> {
         // TODO should we save this as event?
-        let opts = CaConnOpts::default();
+        let opts = CaConnOpts::default().binwriter_use(self.use_binwriter);
         let addr = add.addr;
         let addr_v4 = if let SocketAddr::V4(x) = add.addr {
             x

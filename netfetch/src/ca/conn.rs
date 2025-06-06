@@ -93,7 +93,6 @@ const POLL_READ_TIMEOUT: Duration = Duration::from_millis(1000 * 10);
 const DO_RATE_CHECK: bool = false;
 const CHANNEL_STATUS_PONG_QUIET: Duration = Duration::from_millis(1000 * 60 * 60);
 const METRICS_EMIT_IVL: Duration = Duration::from_millis(1000 * 1);
-const USE_BIN_WRITER: bool = true;
 
 macro_rules! trace3 { ($($arg:tt)*) => ( if false { log::trace!($($arg)*); } ); }
 
@@ -1052,12 +1051,19 @@ pub struct CaConnOpts {
     // TODO make private when we don't share it anymore
     pub(super) insert_queue_max: usize,
     pub(super) array_truncate: usize,
+    binwriter_enable: bool,
 }
 
 impl CaConnOpts {
     pub fn with_insert_queue_max(mut self, val: usize) -> Self {
         self.insert_queue_max = val;
         self
+    }
+
+    pub fn binwriter_use(self, v: bool) -> Self {
+        let mut ret = self;
+        ret.binwriter_enable = v;
+        ret
     }
 }
 
@@ -1066,6 +1072,7 @@ impl Default for CaConnOpts {
         Self {
             insert_queue_max: 20000,
             array_truncate: 2000000,
+            binwriter_enable: false,
         }
     }
 }
@@ -1946,6 +1953,7 @@ impl CaConn {
                             stnow,
                             tscaproto,
                             ch_conf.use_ioc_time(),
+                            self.opts.binwriter_enable,
                             mett,
                             &mut self.rng,
                         )?;
@@ -1979,6 +1987,7 @@ impl CaConn {
                             stnow,
                             tscaproto,
                             ch_conf.use_ioc_time(),
+                            self.opts.binwriter_enable,
                             mett,
                             &mut self.rng,
                         )?;
@@ -2157,6 +2166,7 @@ impl CaConn {
                                         tsnow,
                                         tscaproto,
                                         ch_conf.use_ioc_time(),
+                                        self.opts.binwriter_enable,
                                         mett,
                                         &mut self.rng,
                                     )?;
@@ -2250,6 +2260,7 @@ impl CaConn {
                                             tsnow,
                                             tscaproto,
                                             ch_conf.use_ioc_time(),
+                                            self.opts.binwriter_enable,
                                             mett,
                                             &mut self.rng,
                                         )?;
@@ -2283,6 +2294,7 @@ impl CaConn {
         tsnow: Instant,
         tscaproto: Instant,
         use_ioc_time: bool,
+        binwriter_enable: bool,
         mett: &mut CaConnMetrics,
         rng: &mut Xoshiro128PlusPlus,
     ) -> Result<(), Error> {
@@ -2301,6 +2313,7 @@ impl CaConn {
             stnow,
             tscaproto,
             use_ioc_time,
+            binwriter_enable,
             mett,
             rng,
         )?;
@@ -2319,6 +2332,7 @@ impl CaConn {
         stnow: SystemTime,
         tscaproto: Instant,
         use_ioc_time: bool,
+        binwriter_enable: bool,
         mett: &mut CaConnMetrics,
         rng: &mut Xoshiro128PlusPlus,
     ) -> Result<(), Error> {
@@ -2380,7 +2394,7 @@ impl CaConn {
             Self::check_ev_value_data(&value.data, &writer.scalar_type())?;
             crst.muted_before = 0;
             crst.insert_item_ivl_ema.tick(tsnow);
-            if USE_BIN_WRITER {
+            if binwriter_enable {
                 binwriter.ingest(tsev, value.f32_for_binning(), iqdqs)?;
             }
             {
@@ -3458,7 +3472,7 @@ impl CaConn {
             if let ChannelState::Writable(st2) = chst {
                 let iqdqs = &mut self.iqdqs;
                 st2.writer.tick(iqdqs)?;
-                if USE_BIN_WRITER {
+                if self.opts.binwriter_enable {
                     st2.binwriter.tick(iqdqs)?;
                 }
             }

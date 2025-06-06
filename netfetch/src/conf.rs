@@ -45,6 +45,8 @@ pub struct CaIngestOpts {
     scylla_disable: bool,
     #[serde(default)]
     scylla_ignore_writes: bool,
+    #[serde(default)]
+    binwriter_enable: bool,
 }
 
 impl CaIngestOpts {
@@ -158,6 +160,10 @@ impl CaIngestOpts {
 
     pub fn scylla_ignore_writes(&self) -> bool {
         self.scylla_ignore_writes
+    }
+
+    pub fn binwriter_enable(&self) -> bool {
+        self.binwriter_enable
     }
 
     pub fn is_valid(&self) -> bool {
