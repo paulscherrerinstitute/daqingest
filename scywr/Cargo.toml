@@ -13,7 +13,7 @@ pin-project = "1.1.5"
 bytes = "1.10.0"
 autoerr = "0.0"
 serde = { version = "1", features = ["derive"] }
-log = { path = "../../daqbuf-log", package = "log" }
+log = { path = "../../daqbuf-log", package = "daqbuf-log" }
 stats = { path = "../stats" }
 series = { path = "../../daqbuf-series", package = "daqbuf-series" }
 netpod = { path = "../../daqbuf-netpod", package = "daqbuf-netpod" }

@@ -1,6 +1,6 @@
 [package]
 name = "daqingest"
-version = "0.3.0-aa.7"
+version = "0.3.0-aa.8"
 authors = ["Dominik Werder <dominik.werder@gmail.com>"]
 edition = "2024"
 
@@ -26,7 +26,7 @@ netpod = { path = "../../daqbuf-netpod", package = "daqbuf-netpod" }
 taskrun = { path = "../../daqbuffer/crates/taskrun" }
 series = { path = "../../daqbuf-series", package = "daqbuf-series" }
 channeltools = { path = "../../daqbuf-channeltools", package = "daqbuf-channeltools" }
-log = { path = "../../daqbuf-log", package = "log" }
+log = { path = "../../daqbuf-log", package = "daqbuf-log" }
 stats = { path = "../stats" }
 scywr = { path = "../scywr" }
 dbpg = { path = "../dbpg" }

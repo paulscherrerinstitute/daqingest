@@ -7,5 +7,5 @@ edition = "2024"
 [dependencies]
 libc = "0.2"
 autoerr = "0.0"
-log = { path = "../../daqbuf-log", package = "log" }
+log = { path = "../../daqbuf-log", package = "daqbuf-log" }
 taskrun = { path = "../../daqbuffer/crates/taskrun" }

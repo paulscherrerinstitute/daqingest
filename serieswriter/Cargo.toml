@@ -11,7 +11,7 @@ futures-util = "0.3.30"
 smallvec = "1.13.2"
 autoerr = "0.0"
 itertools = "0.14"
-log = { path = "../../daqbuf-log", package = "log" }
+log = { path = "../../daqbuf-log", package = "daqbuf-log" }
 netpod = { path = "../../daqbuf-netpod", package = "daqbuf-netpod" }
 items_0 = { path = "../../daqbuf-items-0", package = "daqbuf-items-0" }
 items_2 = { path = "../../daqbuf-items-2", package = "daqbuf-items-2" }
