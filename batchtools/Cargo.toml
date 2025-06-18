@@ -8,7 +8,7 @@ edition = "2021"
 doctest = false
 
 [dependencies]
-log = { path = "../log" }
+log = { path = "../../daqbuf-log", package = "log" }
 err = { path = "../../daqbuf-err", package = "daqbuf-err" }
 taskrun = { path = "../../daqbuffer/crates/taskrun" }
 async-channel = "2.1.0"

@@ -1,5 +1,5 @@
 [workspace]
-members = ["log", "netfetch", "daqingest"]
+members = ["netfetch", "daqingest"]
 resolver = "2"
 
 [profile.release]

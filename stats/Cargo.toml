@@ -12,6 +12,6 @@ serde = { version = "1", features = ["derive"] }
 rand_xoshiro = "0.7.0"
 stats_types = { path = "../stats_types" }
 stats_proc = { path = "../stats_proc" }
-log = { path = "../log" }
+log = { path = "../../daqbuf-log", package = "log" }
 mettrics = { version = "0.0.7", path = "../../mettrics" }
 ca_proto = { path = "../../daqbuf-ca-proto", package = "daqbuf-ca-proto" }

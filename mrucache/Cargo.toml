@@ -6,4 +6,4 @@ authors = ["Dominik Werder <dominik.werder@gmail.com>"]
 
 [dependencies]
 hashbrown = "0.15.2"
-log = { path = "../log" }
+log = { path = "../../daqbuf-log", package = "log" }

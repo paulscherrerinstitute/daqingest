@@ -2394,23 +2394,24 @@ impl CaConn {
             Self::check_ev_value_data(&value.data, &writer.scalar_type())?;
             crst.muted_before = 0;
             crst.insert_item_ivl_ema.tick(tsnow);
-            if binwriter_enable {
-                binwriter.ingest(tsev, value.f32_for_binning(), iqdqs)?;
+            let val_for_agg = value.f32_for_binning();
+            let wres = writer.write(CaWriterValue::new(value, crst), tscaproto, tsev, iqdqs)?;
+            crst.status_emit_count += wres.nstatus() as u64;
+            if wres.st.accept {
+                crst.dw_st_last = stnow;
+                crst.acc_st.push_written(payload_len);
             }
-            {
-                let wres = writer.write(CaWriterValue::new(value, crst), tscaproto, tsev, iqdqs)?;
-                crst.status_emit_count += wres.nstatus() as u64;
-                if wres.st.accept {
-                    crst.dw_st_last = stnow;
-                    crst.acc_st.push_written(payload_len);
-                }
-                if wres.mt.accept {
-                    crst.dw_mt_last = stnow;
-                    crst.acc_mt.push_written(payload_len);
-                }
-                if wres.lt.accept {
-                    crst.dw_lt_last = stnow;
-                    crst.acc_lt.push_written(payload_len);
+            if wres.mt.accept {
+                crst.dw_mt_last = stnow;
+                crst.acc_mt.push_written(payload_len);
+            }
+            if wres.lt.accept {
+                crst.dw_lt_last = stnow;
+                crst.acc_lt.push_written(payload_len);
+            }
+            if binwriter_enable {
+                if true || wres.accept_any() {
+                    binwriter.ingest(tsev, val_for_agg, iqdqs)?;
                 }
             }
         }
