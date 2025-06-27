@@ -48,6 +48,14 @@ impl MinQuiets {
             lt: Duration::from_millis(1000 * 60),
         }
     }
+
+    pub fn http_ingest_default() -> Self {
+        Self {
+            st: Duration::from_millis(0),
+            mt: Duration::from_millis(0),
+            lt: Duration::from_millis(1000 * 60 * 60),
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]

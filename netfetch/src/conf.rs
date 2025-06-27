@@ -45,7 +45,7 @@ pub struct CaIngestOpts {
     scylla_disable: bool,
     #[serde(default)]
     scylla_ignore_writes: bool,
-    #[serde(default)]
+    #[serde(default = "bool_true")]
     binwriter_enable: bool,
 }
 

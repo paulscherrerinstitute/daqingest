@@ -429,12 +429,12 @@ fn make_routes(
                     make_routes_channel(rres.clone(), dcom.clone(), connset_cmd_tx.clone(), stats_set.clone()),
                 )
                 .nest(
-                    "/ingest",
-                    make_routes_ingest(rres.clone(), dcom.clone(), connset_cmd_tx.clone(), stats_set.clone()),
-                )
-                .nest(
                     "/private",
                     Router::new()
+                        .nest(
+                            "/ingest",
+                            make_routes_ingest(rres.clone(), dcom.clone(), connset_cmd_tx.clone(), stats_set.clone()),
+                        )
                         .nest(
                             "/channel",
                             make_routes_private_channel(
@@ -563,15 +563,14 @@ fn make_routes_ingest(
     connset_cmd_tx: Sender<CaConnSetEvent>,
     stats_set: StatsSet,
 ) -> axum::Router {
-    use axum::Router;
-    use axum::extract;
     use axum::routing::{get, post, put};
+    use axum::{Router, extract};
     use http::StatusCode;
     Router::new()
         .nest(
-            "/private",
+            "/write",
             Router::new().route(
-                "/write",
+                "/v1",
                 put({
                     let rres = rres.clone();
                     move |(headers, params, body): (HeaderMap, Query<HashMap<String, String>>, axum::body::Body)| {
@@ -597,9 +596,8 @@ fn make_routes_private_channel(
     connset_cmd_tx: Sender<CaConnSetEvent>,
     stats_set: StatsSet,
 ) -> axum::Router {
-    use axum::Router;
-    use axum::extract;
     use axum::routing::{get, post, put};
+    use axum::{Router, extract};
     use http::StatusCode;
     Router::new()
         .route(
