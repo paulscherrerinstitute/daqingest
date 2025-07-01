@@ -1,4 +1,4 @@
-use log::*;
+use log;
 use netpod::TsNano;
 use scywr::iteminsertqueue::QueryItem;
 use serde::Serialize;
@@ -8,9 +8,11 @@ use std::fmt;
 use std::marker::PhantomData;
 use std::time::Instant;
 
+use netpod::ByteSize;
+use scywr::iteminsertqueue::MspItem;
 pub use smallvec::SmallVec;
 
-macro_rules! trace_emit { ($det:expr, $($arg:tt)*) => ( if $det { trace!($($arg)*); } ) }
+macro_rules! trace_emit { ($det:expr, $($arg:tt)*) => ( if $det { log::trace!($($arg)*); } ) }
 
 autoerr::create_error_v1!(
     name(Error, "SerieswriterWriter"),
@@ -28,9 +30,8 @@ autoerr::create_error_v1!(
 
 #[derive(Debug)]
 pub struct EmitRes {
-    pub items: SmallVec<[QueryItem; 4]>,
-    pub bytes: u32,
-    pub status: u8,
+    pub data_item: scywr::iteminsertqueue::DataValue,
+    pub bytes: ByteSize,
 }
 
 pub trait EmittableType: fmt::Debug + Clone {
@@ -56,12 +57,12 @@ impl From<async_channel::RecvError> for Error {
 #[derive(Debug)]
 pub struct WriteRes {
     pub bytes: u32,
-    pub status: u8,
 }
 
 #[derive(Debug, Serialize)]
 pub struct SeriesWriter<ET> {
     series: SeriesId,
+    msp_split: crate::msptool::MspSplit,
     do_trace_detail: bool,
     _t1: PhantomData<ET>,
 }
@@ -73,6 +74,7 @@ where
     pub fn new(series: SeriesId) -> Result<Self, Error> {
         let res = Self {
             series,
+            msp_split: crate::msptool::MspSplit::new(1024 * 64, 1024 * 1024 * 10),
             do_trace_detail: series::dbg::dbg_series(series),
             _t1: PhantomData,
         };
@@ -92,20 +94,37 @@ where
         deque: &mut VecDeque<QueryItem>,
     ) -> Result<WriteRes, Error> {
         let det = self.do_trace_detail;
-        let ts_main = item.ts();
+        // let ts_main = item.ts();
         let res = item.into_query_item(ts_net, tsev, state);
-        trace_emit!(det, "emit value for ts {}  items len {}", ts_main, res.items.len());
-        for item in res.items {
-            deque.push_back(item);
+        trace_emit!(det, "emit value for ts {tsev}");
+        // TODO adapt, taken from trait impl
+        let (ts_msp, ts_lsp, ts_msp_chg) = self.msp_split.split(tsev, res.bytes.bytes());
+        if ts_msp_chg {
+            deque.push_back(QueryItem::Msp(MspItem::new(
+                self.series.clone(),
+                ts_msp.to_ts_ms(),
+                ts_net,
+            )));
         }
+        let item = scywr::iteminsertqueue::InsertItem {
+            series: self.series.clone(),
+            ts_msp: ts_msp.to_ts_ms(),
+            ts_lsp,
+            ts_net,
+            val: res.data_item,
+        };
+        deque.push_back(QueryItem::Insert(item));
         let res = WriteRes {
-            bytes: res.bytes,
-            status: res.status,
+            bytes: res.bytes.bytes(),
         };
         Ok(res)
     }
 
     pub fn tick(&mut self, _deque: &mut VecDeque<QueryItem>) -> Result<(), Error> {
+        Ok(())
+    }
+
+    pub fn on_close(&mut self, _deque: &mut VecDeque<QueryItem>) -> Result<(), Error> {
         Ok(())
     }
 }

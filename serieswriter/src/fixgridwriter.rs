@@ -2,6 +2,7 @@ use crate as serieswriter;
 use crate::msptool::fixgrid::MspSplitFixGrid;
 use crate::writer::EmittableType;
 use crate::writer::SeriesWriter;
+use netpod::ByteSize;
 use netpod::DtMs;
 use netpod::TsNano;
 use scywr::iteminsertqueue::DataValue;
@@ -47,33 +48,32 @@ impl EmittableType for ChannelStatusWriteValue {
         tsev: TsNano,
         state: &mut <Self as EmittableType>::State,
     ) -> serieswriter::writer::EmitRes {
-        let mut items = serieswriter::writer::SmallVec::new();
-        let ts = tsev;
-        state.last_accepted_ts = ts;
-        state.last_accepted_val = Some(self.1);
         let byte_size = self.byte_size();
+        let data_item = DataValue::Scalar(ScalarValue::U64(self.1));
+        // let ts = tsev;
+        // state.last_accepted_ts = ts;
+        // state.last_accepted_val = Some(self.1);
         {
-            let (ts_msp, ts_lsp, ts_msp_chg) = state.msp_split.split(ts, self.byte_size());
-            if ts_msp_chg {
-                items.push(QueryItem::Msp(MspItem::new(
-                    state.series.clone(),
-                    ts_msp.to_ts_ms(),
-                    ts_net,
-                )));
-            }
-            let item = scywr::iteminsertqueue::InsertItem {
-                series: state.series.clone(),
-                ts_msp: ts_msp.to_ts_ms(),
-                ts_lsp,
-                ts_net,
-                val: DataValue::Scalar(ScalarValue::U64(self.1)),
-            };
-            items.push(QueryItem::Insert(item));
+            // let (ts_msp, ts_lsp, ts_msp_chg) = state.msp_split.split(ts, self.byte_size());
+            // if ts_msp_chg {
+            //     items.push(QueryItem::Msp(MspItem::new(
+            //         state.series.clone(),
+            //         ts_msp.to_ts_ms(),
+            //         ts_net,
+            //     )));
+            // }
+            // let item = scywr::iteminsertqueue::InsertItem {
+            //     series: state.series.clone(),
+            //     ts_msp: ts_msp.to_ts_ms(),
+            //     ts_lsp,
+            //     ts_net,
+            //     val: DataValue::Scalar(ScalarValue::U64(self.1)),
+            // };
+            // items.push(QueryItem::Insert(item));
         }
         let ret = serieswriter::writer::EmitRes {
-            items,
-            bytes: byte_size,
-            status: 0,
+            data_item,
+            bytes: ByteSize(byte_size),
         };
         ret
     }

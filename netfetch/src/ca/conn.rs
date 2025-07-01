@@ -16,6 +16,7 @@ use futures_util::Stream;
 use futures_util::StreamExt;
 use hashbrown::HashMap;
 use log::*;
+use netpod::ByteSize;
 use netpod::EMIT_ACCOUNTING_SNAP;
 use netpod::ScalarType;
 use netpod::SeriesKind;
@@ -478,7 +479,6 @@ struct CreatedState {
     shape: Shape,
     name: String,
     enum_str_table: Option<Vec<String>>,
-    status_emit_count: u64,
     #[serde(with = "serde_Instant_elapsed_ms")]
     ts_recv_value_status_emit_next: Instant,
 }
@@ -518,7 +518,6 @@ impl CreatedState {
             shape: Shape::Scalar,
             name: String::new(),
             enum_str_table: None,
-            status_emit_count: 0,
             ts_recv_value_status_emit_next: Instant::now(),
         }
     }
@@ -647,7 +646,8 @@ impl ChannelState {
         };
         let interest_score = 1. / item_recv_ivl_ema.unwrap_or(1e10).max(1e-6).min(1e10);
         let status_emit_count = match self {
-            ChannelState::Writable(s) => s.channel.status_emit_count,
+            // TODO
+            // ChannelState::Writable(s) => s.channel.status_emit_count,
             _ => 0,
         };
         let last_comparisons = match self {
@@ -1318,6 +1318,17 @@ impl CaConn {
         if self.emit_connection_status_item(item).is_err() {
             self.mett.logic_error().inc();
         }
+        let cids: Vec<_> = self.channels.keys().map(Clone::clone).collect();
+        for cid in cids {
+            match self.channel_close_by_cid(cid) {
+                Err(e) => {
+                    // TODO
+                    self.mett.logic_error().inc();
+                }
+                Ok(()) => {}
+            }
+        }
+        // TODO should let protocol shut down properly
         self.proto = None;
     }
 
@@ -1328,7 +1339,7 @@ impl CaConn {
     }
 
     fn cmd_channel_close(&mut self, name: String) {
-        self.channel_close(name);
+        self.channel_close_by_name(name);
         // TODO return the result
     }
 
@@ -1629,18 +1640,32 @@ impl CaConn {
         }
     }
 
-    pub fn channel_close(&mut self, name: String) {
-        debug!("channel_close  {}", name);
+    fn channel_close_by_name(&mut self, name: String) -> Result<(), Error> {
+        let selfname = "channel_close_by_name";
+        debug!("{selfname}  {}", name);
+        if let Some(x) = self.cid_by_name.get(&name).map(Clone::clone) {
+            self.cid_by_name.remove(&name);
+            self.channel_close_by_cid(x.clone())
+        } else {
+            warn!("{selfname}  {}   can not find channel", name);
+            // TODO should return error?
+            Ok(())
+        }
+    }
+
+    fn channel_close_by_cid(&mut self, cid: Cid) -> Result<(), Error> {
+        let selfname = "channel_close_by_cid";
         let tsnow = Instant::now();
         let stnow = SystemTime::now();
-        let cid = if let Some(x) = self.cid_by_name.get(&name) {
-            x.clone()
-        } else {
-            debug!("channel_close  {}   can not find channel", name);
-            return;
-        };
-        self.cid_by_name.remove(&name);
         if let Some(conf) = self.channels.get_mut(&cid) {
+            let name = conf.conf.name();
+            {
+                // TODO emit CaConn item to let CaConnSet know that we have closed the channel.
+                // TODO may be too full
+                let value = CaConnEventValue::ChannelRemoved(name.into());
+                let item = CaConnEvent::new_now(value);
+                self.ca_conn_event_out_queue.push_back(item);
+            }
             let item = ChannelStatusItem {
                 ts: stnow,
                 cssid: conf.state.cssid(),
@@ -1651,6 +1676,14 @@ impl CaConn {
                 self.mett.logic_error().inc();
             }
             // TODO shutdown the internal writer structures.
+            match &mut conf.state {
+                ChannelState::Writable(st2) => {
+                    if st2.writer.on_close(&mut self.iqdqs).is_err() {
+                        self.mett.logic_error().inc();
+                    }
+                }
+                _ => {}
+            }
             if let Some(cst) = conf.state.created_state() {
                 if let Some(proto) = self.proto.as_mut() {
                     let ty = CaMsgTy::ChannelClose(ChannelClose {
@@ -1680,25 +1713,22 @@ impl CaConn {
                 };
             }
         } else {
-            debug!("channel_close  {}   no channel block", name);
-        };
+            debug!("{selfname}  {}   not found", cid);
+        }
         {
             let it = self.cid_by_sid.extract_if(|_, v| *v == cid);
             it.count();
         }
         self.channels.remove(&cid);
-        // TODO emit CaConn item to let CaConnSet know that we have closed the channel.
-        // TODO may be too full
-        let value = CaConnEventValue::ChannelRemoved(name);
-        let item = CaConnEvent::new_now(value);
-        self.ca_conn_event_out_queue.push_back(item);
+        Ok(())
     }
 
     fn channel_remove_by_name(&mut self, name: String) {
+        let selfname = "channel_remove_by_name";
         if let Some(cid) = self.cid_by_name(&name) {
             self.channel_remove_by_cid(cid);
         } else {
-            warn!("channel_remove  does not exist  {}", name);
+            warn!("{selfname}  does not exist  {}", name);
         }
     }
 
@@ -2396,7 +2426,6 @@ impl CaConn {
             crst.insert_item_ivl_ema.tick(tsnow);
             let val_for_agg = value.f32_for_binning();
             let wres = writer.write(CaWriterValue::new(value, crst), tscaproto, tsev, iqdqs)?;
-            crst.status_emit_count += wres.nstatus() as u64;
             if wres.st.accept {
                 crst.dw_st_last = stnow;
                 crst.acc_st.push_written(payload_len);
@@ -3036,7 +3065,6 @@ impl CaConn {
             shape: shape.clone(),
             name: conf.conf.name().into(),
             enum_str_table: None,
-            status_emit_count: 0,
             ts_recv_value_status_emit_next: Instant::now(),
         };
         if series::dbg::dbg_chn(created_state.name()) {
@@ -3977,118 +4005,92 @@ impl EmittableType for CaWriterValue {
         tsev: TsNano,
         state: &mut <Self as EmittableType>::State,
     ) -> serieswriter::writer::EmitRes {
-        let mut items = serieswriter::writer::SmallVec::new();
-        let diff_data = match state.last_accepted_val.as_ref() {
-            Some(last) => self.0.data != last.0.data,
-            None => true,
-        };
-        let diff_status = match state.last_accepted_val.as_ref() {
-            Some(last) => match &last.0.meta {
-                proto::CaMetaValue::CaMetaTime(last_meta) => match &self.0.meta {
-                    proto::CaMetaValue::CaMetaTime(meta) => meta.status != last_meta.status,
-                    _ => false,
-                },
-                _ => false,
-            },
-            None => true,
-        };
-        let ts = tsev;
-        state.last_accepted_val = Some(self.clone());
         let byte_size = self.byte_size();
-        if diff_data {
-            // debug!("diff_data    emit {:?}", state.series_data);
-            let (ts_msp, ts_lsp, ts_msp_chg) = state.msp_split_data.split(ts, self.byte_size());
-            let data_value = {
-                use ca_proto::ca::proto::CaDataValue;
-                use scywr::iteminsertqueue::DataValue;
-                let ret = match self.0.data {
-                    CaDataValue::Scalar(val) => DataValue::Scalar({
-                        use ca_proto::ca::proto::CaDataScalarValue;
-                        use scywr::iteminsertqueue::ScalarValue;
-                        match val {
-                            CaDataScalarValue::I8(x) => ScalarValue::I8(x),
-                            CaDataScalarValue::I16(x) => ScalarValue::I16(x),
-                            CaDataScalarValue::I32(x) => ScalarValue::I32(x),
-                            CaDataScalarValue::F32(x) => ScalarValue::F32(x),
-                            CaDataScalarValue::F64(x) => ScalarValue::F64(x),
-                            CaDataScalarValue::Enum(x) => ScalarValue::Enum(
-                                x,
-                                self.1.take().unwrap_or_else(|| {
-                                    warn!("NoEnumStr");
-                                    String::from("NoEnumStr")
-                                }),
-                            ),
-                            CaDataScalarValue::String(x) => ScalarValue::String(x),
-                            CaDataScalarValue::Bool(x) => ScalarValue::Bool(x),
-                        }
-                    }),
-                    CaDataValue::Array(val) => DataValue::Array({
-                        use ca_proto::ca::proto::CaDataArrayValue;
-                        use scywr::iteminsertqueue::ArrayValue;
-                        match val {
-                            CaDataArrayValue::I8(x) => ArrayValue::I8(x),
-                            CaDataArrayValue::I16(x) => ArrayValue::I16(x),
-                            CaDataArrayValue::I32(x) => ArrayValue::I32(x),
-                            CaDataArrayValue::F32(x) => ArrayValue::F32(x),
-                            CaDataArrayValue::F64(x) => ArrayValue::F64(x),
-                            CaDataArrayValue::Bool(x) => ArrayValue::Bool(x),
-                        }
-                    }),
-                };
-                ret
-            };
-            if ts_msp_chg {
-                items.push(QueryItem::Msp(MspItem::new(
-                    state.series_data.clone(),
-                    ts_msp.to_ts_ms(),
-                    ts_net,
-                )));
-            }
-            let item = scywriiq::InsertItem {
-                series: state.series_data.clone(),
-                ts_msp: ts_msp.to_ts_ms(),
-                ts_lsp,
-                ts_net,
-                val: data_value,
-            };
-            items.push(QueryItem::Insert(item));
-        }
-        let mut n_status = 0;
-        if diff_status {
+        let data_item = {
+            use ca_proto::ca::proto::CaDataValue;
             use scywr::iteminsertqueue::DataValue;
-            use scywr::iteminsertqueue::ScalarValue;
-            match self.0.meta {
-                proto::CaMetaValue::CaMetaTime(meta) => {
-                    let (ts_msp, ts_lsp, ts_msp_chg) = state.msp_split_status.split(ts, 2);
-                    if ts_msp_chg {
-                        items.push(QueryItem::Msp(MspItem::new(
-                            state.series_status.clone(),
-                            ts_msp.to_ts_ms(),
-                            ts_net,
-                        )));
+            match self.0.data {
+                CaDataValue::Scalar(val) => DataValue::Scalar({
+                    use ca_proto::ca::proto::CaDataScalarValue;
+                    use scywr::iteminsertqueue::ScalarValue;
+                    match val {
+                        CaDataScalarValue::I8(x) => ScalarValue::I8(x),
+                        CaDataScalarValue::I16(x) => ScalarValue::I16(x),
+                        CaDataScalarValue::I32(x) => ScalarValue::I32(x),
+                        CaDataScalarValue::F32(x) => ScalarValue::F32(x),
+                        CaDataScalarValue::F64(x) => ScalarValue::F64(x),
+                        CaDataScalarValue::Enum(x) => ScalarValue::Enum(
+                            x,
+                            self.1.take().unwrap_or_else(|| {
+                                warn!("NoEnumStr");
+                                String::from("NoEnumStr")
+                            }),
+                        ),
+                        CaDataScalarValue::String(x) => ScalarValue::String(x),
+                        CaDataScalarValue::Bool(x) => ScalarValue::Bool(x),
                     }
-                    let data_value = DataValue::Scalar(ScalarValue::I16(meta.status as i16));
-                    let item = scywriiq::InsertItem {
-                        series: state.series_status.clone(),
-                        ts_msp: ts_msp.to_ts_ms(),
-                        ts_lsp,
-                        ts_net,
-                        val: data_value,
-                    };
-                    items.push(QueryItem::Insert(item));
-                    n_status += 1;
-                    // info!("diff_status  emit {:?}", state.series_status);
-                }
-                _ => {
-                    // TODO must be able to return error here
-                    warn!("diff_status logic error");
-                }
-            };
-        }
+                }),
+                CaDataValue::Array(val) => DataValue::Array({
+                    use ca_proto::ca::proto::CaDataArrayValue;
+                    use scywr::iteminsertqueue::ArrayValue;
+                    match val {
+                        CaDataArrayValue::I8(x) => ArrayValue::I8(x),
+                        CaDataArrayValue::I16(x) => ArrayValue::I16(x),
+                        CaDataArrayValue::I32(x) => ArrayValue::I32(x),
+                        CaDataArrayValue::F32(x) => ArrayValue::F32(x),
+                        CaDataArrayValue::F64(x) => ArrayValue::F64(x),
+                        CaDataArrayValue::Bool(x) => ArrayValue::Bool(x),
+                    }
+                }),
+            }
+        };
+
+        // TODO move to separate impl
+        // let diff_status = match state.last_accepted_val.as_ref() {
+        //     Some(last) => match &last.0.meta {
+        //         proto::CaMetaValue::CaMetaTime(last_meta) => match &self.0.meta {
+        //             proto::CaMetaValue::CaMetaTime(meta) => meta.status != last_meta.status,
+        //             _ => false,
+        //         },
+        //         _ => false,
+        //     },
+        //     None => true,
+        // };
+        // let mut n_status = 0;
+        // if diff_status {
+        //     use scywr::iteminsertqueue::DataValue;
+        //     use scywr::iteminsertqueue::ScalarValue;
+        //     match self.0.meta {
+        //         proto::CaMetaValue::CaMetaTime(meta) => {
+        //             let (ts_msp, ts_lsp, ts_msp_chg) = state.msp_split_status.split(ts, 2);
+        //             if ts_msp_chg {
+        //                 items.push(QueryItem::Msp(MspItem::new(
+        //                     state.series_status.clone(),
+        //                     ts_msp.to_ts_ms(),
+        //                     ts_net,
+        //                 )));
+        //             }
+        //             let data_value = DataValue::Scalar(ScalarValue::I16(meta.status as i16));
+        //             let item = scywriiq::InsertItem {
+        //                 series: state.series_status.clone(),
+        //                 ts_msp: ts_msp.to_ts_ms(),
+        //                 ts_lsp,
+        //                 ts_net,
+        //                 val: data_value,
+        //             };
+        //             items.push(QueryItem::Insert(item));
+        //             n_status += 1;
+        //             // info!("diff_status  emit {:?}", state.series_status);
+        //         }
+        //         _ => {
+        //             // TODO must be able to return error here
+        //             warn!("diff_status logic error");
+        //         }
+        //     };
+        // }
         let ret = serieswriter::writer::EmitRes {
-            items,
-            bytes: byte_size,
-            status: n_status,
+            data_item,
+            bytes: ByteSize(byte_size),
         };
         ret
     }

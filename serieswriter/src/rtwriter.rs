@@ -74,10 +74,6 @@ pub struct WriteRes {
 }
 
 impl WriteRes {
-    pub fn nstatus(&self) -> u8 {
-        self.st.status + self.mt.status + self.lt.status
-    }
-
     pub fn accept_any(&self) -> bool {
         self.lt.accept || self.mt.accept || self.st.accept
     }
@@ -87,7 +83,6 @@ impl WriteRes {
 pub struct WriteRtRes {
     pub accept: bool,
     pub bytes: u32,
-    pub status: u8,
 }
 
 impl Default for WriteRtRes {
@@ -95,7 +90,6 @@ impl Default for WriteRtRes {
         Self {
             accept: false,
             bytes: 0,
-            status: 0,
         }
     }
 }
@@ -252,7 +246,6 @@ where
         let ret = WriteRtRes {
             accept: x.accept,
             bytes: x.bytes,
-            status: x.status,
         };
         Ok(ret)
     }
@@ -265,6 +258,18 @@ where
         }
         self.state_mt.writer.tick(&mut iqdqs.mt_rf3_qu)?;
         self.state_lt.writer.tick(&mut iqdqs.lt_rf3_qu)?;
+        Ok(())
+    }
+
+    pub fn on_close(&mut self, iqdqs: &mut InsertDeques) -> Result<(), Error> {
+        self.tick(iqdqs)?;
+        if self.do_st_rf1 {
+            self.state_st.writer.on_close(&mut iqdqs.st_rf1_qu)?;
+        } else {
+            self.state_st.writer.on_close(&mut iqdqs.st_rf3_qu)?;
+        }
+        self.state_mt.writer.on_close(&mut iqdqs.mt_rf3_qu)?;
+        self.state_lt.writer.on_close(&mut iqdqs.lt_rf3_qu)?;
         Ok(())
     }
 }

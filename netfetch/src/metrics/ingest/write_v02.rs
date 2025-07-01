@@ -11,6 +11,7 @@ use futures_util::TryStreamExt;
 use items_2::binning::container_events::ContainerEvents;
 use items_2::binning::container_events::EventValueType;
 use netpod::APP_CBOR_FRAMED;
+use netpod::ByteSize;
 use netpod::DaqbufChannelConfig;
 use netpod::EnumVariant;
 use netpod::ScalarType;
@@ -121,28 +122,24 @@ impl EmittableType for WritableType {
         tsev: TsNano,
         state: &mut <Self as EmittableType>::State,
     ) -> serieswriter::writer::EmitRes {
-        let (ts_msp, ts_lsp, ts_msp_chg) = state.msp_split_data.split(self.0.clone(), self.byte_size());
-        let item = QueryItem::Insert(scywr::iteminsertqueue::InsertItem {
-            series: state.series.clone(),
-            ts_msp: ts_msp.to_ts_ms(),
-            ts_lsp,
-            val: self.1.clone(),
-            ts_net,
-        });
-        let mut items = smallvec::SmallVec::new();
-        items.push(item);
-        if ts_msp_chg {
-            items.push(QueryItem::Msp(scywr::iteminsertqueue::MspItem::new(
-                state.series.clone(),
-                ts_msp.to_ts_ms(),
-                ts_net,
-            )));
-        }
-        serieswriter::writer::EmitRes {
-            items,
-            bytes: self.byte_size(),
-            status: 0,
-        }
+        let bytes = ByteSize(self.byte_size());
+        let data_item = self.1;
+        // let (ts_msp, ts_lsp, ts_msp_chg) = state.msp_split_data.split(self.0.clone(), self.byte_size());
+        // let item = QueryItem::Insert(scywr::iteminsertqueue::InsertItem {
+        //     series: state.series.clone(),
+        //     ts_msp: ts_msp.to_ts_ms(),
+        //     ts_lsp,
+        //     val: self.1.clone(),
+        //     ts_net,
+        // });
+        // if ts_msp_chg {
+        //     items.push(QueryItem::Msp(scywr::iteminsertqueue::MspItem::new(
+        //         state.series.clone(),
+        //         ts_msp.to_ts_ms(),
+        //         ts_net,
+        //     )));
+        // }
+        serieswriter::writer::EmitRes { data_item, bytes }
     }
 }
 

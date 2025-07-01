@@ -13,12 +13,13 @@ use futures_util::TryStreamExt;
 use items_2::binning::container_events::ContainerEvents;
 use items_2::binning::container_events::EventValueType;
 use netpod::APP_CBOR_FRAMED;
+use netpod::ByteSize;
 use netpod::EnumVariant;
 use netpod::ScalarType;
 use netpod::SeriesKind;
 use netpod::Shape;
 use netpod::TsNano;
-use netpod::log::*;
+use netpod::log;
 use netpod::ttl::RetentionTime;
 use scywr::insertqueues::InsertDeques;
 use scywr::iteminsertqueue::ArrayValue;
@@ -40,34 +41,12 @@ use std::time::Instant;
 use std::time::SystemTime;
 use streams::framed_bytes::FramedBytesStream;
 use taskrun::tokio::time::timeout;
-// use core::io::BorrowedBuf;
 
-#[allow(unused)]
-macro_rules! debug_setup {
-    ($($arg:tt)*) => {
-        if true {
-            debug!($($arg)*);
-        }
-    };
-}
+macro_rules! debug_setup { ($($arg:tt)*) => { if true { log::debug!($($arg)*); } }; }
 
-#[allow(unused)]
-macro_rules! trace_input {
-    ($($arg:tt)*) => {
-        if true {
-            trace!($($arg)*);
-        }
-    };
-}
+macro_rules! trace_input { ($($arg:tt)*) => { if true { log::trace!($($arg)*); } }; }
 
-#[allow(unused)]
-macro_rules! trace_queues {
-    ($($arg:tt)*) => {
-        if true {
-            trace!($($arg)*);
-        }
-    };
-}
+macro_rules! trace_queues { ($($arg:tt)*) => { if true { log::trace!($($arg)*); } }; }
 
 type ValueSeriesWriter = SeriesWriter<WritableType>;
 
@@ -110,28 +89,26 @@ impl EmittableType for WritableType {
         tsev: TsNano,
         state: &mut <Self as EmittableType>::State,
     ) -> serieswriter::writer::EmitRes {
-        let (ts_msp, ts_lsp, ts_msp_chg) = state.msp_split_data.split(self.0.clone(), self.byte_size());
-        let item = QueryItem::Insert(scywr::iteminsertqueue::InsertItem {
-            series: state.series.clone(),
-            ts_msp: ts_msp.to_ts_ms(),
-            ts_lsp,
-            val: self.1.clone(),
-            ts_net,
-        });
-        let mut items = smallvec::SmallVec::new();
-        items.push(item);
-        if ts_msp_chg {
-            items.push(QueryItem::Msp(scywr::iteminsertqueue::MspItem::new(
-                state.series.clone(),
-                ts_msp.to_ts_ms(),
-                ts_net,
-            )));
-        }
-        serieswriter::writer::EmitRes {
-            items,
-            bytes: self.byte_size(),
-            status: 0,
-        }
+        let bytes = ByteSize(self.byte_size());
+        let data_item = self.1;
+        // let (ts_msp, ts_lsp, ts_msp_chg) = state.msp_split_data.split(self.0.clone(), self.byte_size());
+        // let item = QueryItem::Insert(scywr::iteminsertqueue::InsertItem {
+        //     series: state.series.clone(),
+        //     ts_msp: ts_msp.to_ts_ms(),
+        //     ts_lsp,
+        //     val: self.1.clone(),
+        //     ts_net,
+        // });
+        // let mut items = smallvec::SmallVec::new();
+        // items.push(item);
+        // if ts_msp_chg {
+        //     items.push(QueryItem::Msp(scywr::iteminsertqueue::MspItem::new(
+        //         state.series.clone(),
+        //         ts_msp.to_ts_ms(),
+        //         ts_net,
+        //     )));
+        // }
+        serieswriter::writer::EmitRes { data_item, bytes }
     }
 }
 
@@ -234,7 +211,7 @@ async fn post_v01_try(
         let frame = match x? {
             Some(x) => x,
             None => {
-                trace!("input stream done");
+                log::trace!("input stream done");
                 break;
             }
         };
@@ -358,7 +335,7 @@ where
 {
     let evs: ContainerEvents<T> = ciborium::de::from_reader(Cursor::new(frame))
         .map_err(|e| {
-            error!("cbor decode error {e}");
+            log::error!("cbor decode error {e}");
         })
         .map_err(|_| Error::Decode)?;
     // trace_input!("see events {:?}", evs);
@@ -383,7 +360,7 @@ fn evpush_dim0_enum(
 ) -> Result<(), Error> {
     let evs: ContainerEvents<EnumVariant> = ciborium::de::from_reader(Cursor::new(frame))
         .map_err(|e| {
-            error!("cbor decode error {e}");
+            log::error!("cbor decode error {e}");
         })
         .map_err(|_| Error::Decode)?;
     // trace_input!("see events {:?}", evs);
@@ -412,11 +389,11 @@ where
 {
     let evs: ContainerEvents<Vec<T>> = ciborium::de::from_reader(Cursor::new(frame))
         .map_err(|e| {
-            error!("cbor decode error {e}");
+            log::error!("cbor decode error {e}");
         })
         .map_err(|_| Error::Decode)?;
     trace_input!("see events {:?}", evs);
-    warn!("TODO require timestamp in input format");
+    log::warn!("TODO require timestamp in input format");
     let stnow = SystemTime::now();
     let tsev = TsNano::from_system_time(stnow);
     let tsnow = Instant::now();

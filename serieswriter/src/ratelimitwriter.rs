@@ -12,9 +12,9 @@ use std::marker::PhantomData;
 use std::time::Duration;
 use std::time::Instant;
 
-macro_rules! debug { ($($arg:expr),*) => ( if true { log::debug!($($arg),*); } ); }
-macro_rules! trace { ($($arg:expr),*) => ( if true { log::trace!($($arg),*); } ); }
-macro_rules! trace_rt_decision { ($dtd:expr, $($arg:expr),*) => ( if $dtd { log::trace!($($arg),*); } ); }
+macro_rules! debug { ($($arg:tt)*) => ( if true { log::debug!($($arg)*); } ); }
+macro_rules! trace { ($($arg:tt)*) => ( if true { log::trace!($($arg)*); } ); }
+macro_rules! trace_rt_decision { ($dtd:expr, $($arg:tt)*) => ( if $dtd { log::trace!($($arg)*); } ); }
 
 autoerr::create_error_v1!(
     name(Error, "RateLimitWriter"),
@@ -27,7 +27,6 @@ autoerr::create_error_v1!(
 pub struct WriteRes {
     pub accept: bool,
     pub bytes: u32,
-    pub status: u8,
 }
 
 #[derive(Serialize)]
@@ -145,14 +144,12 @@ where
             let ret = WriteRes {
                 accept: true,
                 bytes: res.bytes,
-                status: res.status,
             };
             Ok(ret)
         } else {
             let ret = WriteRes {
                 accept: false,
                 bytes: 0,
-                status: 0,
             };
             Ok(ret)
         }
@@ -161,6 +158,12 @@ where
     pub fn tick(&mut self, iqdqs: &mut VecDeque<QueryItem>) -> Result<(), Error> {
         let ret = self.writer.tick(iqdqs)?;
         Ok(ret)
+    }
+
+    pub fn on_close(&mut self, iqdqs: &mut VecDeque<QueryItem>) -> Result<(), Error> {
+        self.tick(iqdqs)?;
+        self.writer.on_close(iqdqs)?;
+        Ok(())
     }
 }
 
