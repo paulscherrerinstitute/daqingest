@@ -64,6 +64,9 @@ mod Metrics {
         unknown_subid,
         get_series_id_ok,
         channel_add_exists,
+        ts_msp_reput_onevent,
+        ts_msp_reput_periodic,
+        series_writer_on_close,
     }
     enum histolog2s {
         clock_ioc_diff_abs,

@@ -70,7 +70,6 @@ use stats::rand_xoshiro::rand_core::SeedableRng;
 use std::collections::BTreeMap;
 use std::collections::VecDeque;
 use std::fmt;
-use std::marker::PhantomData;
 use std::net::SocketAddrV4;
 use std::pin::Pin;
 use std::sync::atomic;
@@ -106,6 +105,10 @@ macro_rules! trace_flush_queue { ($($arg:tt)*) => ( if false { trace3!($($arg)*)
 macro_rules! trace_event_incoming { ($($arg:tt)*) => ( if false { log::trace!($($arg)*); } ); }
 
 macro_rules! trace_monitor_stale { ($($arg:tt)*) => ( if false { log::trace!($($arg)*); } ); }
+
+macro_rules! trace_channel_remove { ($($arg:tt)*) => ( if true { log::trace!($($arg)*); } ); }
+
+macro_rules! debug_shutdown { ($($arg:tt)*) => ( if true { log::debug!($($arg)*); } ); }
 
 fn dbg_chn_cid(cid: Cid, conn: &CaConn) -> bool {
     if let Some(name) = conn.name_by_cid(cid) {
@@ -1084,6 +1087,7 @@ impl<'a> EventAddIngestRefobj<'a> {
             if let Some(binwriter) = self.binwriter.as_mut() {
                 binwriter.ingest(tsev, val_for_agg, self.iqdqs)?;
             }
+            self.mett.ts_msp_reput_onevent().add(wres.msp_rewrite() as u32);
         }
         if false {
             // TODO record stats on drop with the new filter
@@ -1498,6 +1502,8 @@ impl CaConn {
     }
 
     fn trigger_shutdown(&mut self, reason: ShutdownReason) {
+        let selfname = "trigger_shutdown";
+        debug_shutdown!("{selfname}  {addr}", addr = self.remote_addr_dbg);
         let channel_reason = match &reason {
             ShutdownReason::ConnectRefused => {
                 self.state = CaConnState::Shutdown(EndOfStreamReason::ConnectRefused);
@@ -1870,7 +1876,6 @@ impl CaConn {
         let selfname = "channel_close_by_name";
         debug!("{selfname}  {}", name);
         if let Some(x) = self.cid_by_name.get(&name).map(Clone::clone) {
-            self.cid_by_name.remove(&name);
             self.channel_close_by_cid(x.clone())
         } else {
             warn!("{selfname}  {}   can not find channel", name);
@@ -1885,6 +1890,8 @@ impl CaConn {
         let stnow = SystemTime::now();
         if let Some(conf) = self.channels.get_mut(&cid) {
             let name = conf.conf.name();
+            trace_channel_remove!("{selfname}  channel_close_by_cid  {cid}  {name}");
+            self.cid_by_name.remove(name);
             {
                 // TODO emit CaConn item to let CaConnSet know that we have closed the channel.
                 // TODO may be too full
@@ -1904,8 +1911,14 @@ impl CaConn {
             // TODO shutdown the internal writer structures.
             match &mut conf.state {
                 ChannelState::Writable(st2) => {
+                    if st2.writer.tick(&mut self.iqdqs).is_err() {
+                        self.mett.logic_error().inc();
+                    }
                     if st2.writer.on_close(&mut self.iqdqs).is_err() {
                         self.mett.logic_error().inc();
+                    } else {
+                        trace_channel_remove!("writer on_close done Ok  {}", conf.conf.name());
+                        self.mett.series_writer_on_close().inc();
                     }
                 }
                 _ => {}
@@ -3366,6 +3379,27 @@ impl CaConn {
             CaConnState::Shutdown(..) => {}
             CaConnState::EndOfStream => {}
             CaConnState::MetricsEmitted => {}
+        }
+        {
+            let self2 = self.as_mut().get_mut();
+            let mut ts_msp_reput = 0;
+            let mut logic_error = 0;
+            for (_, conf) in &mut self2.channels {
+                let st1 = &mut conf.state;
+                match st1 {
+                    ChannelState::Writable(st2) => match st2.writer.housekeeping(&mut self2.iqdqs) {
+                        Ok(res) => {
+                            ts_msp_reput += res.ts_msp_reput as u32;
+                        }
+                        Err(_) => {
+                            logic_error += 1;
+                        }
+                    },
+                    _ => {}
+                }
+            }
+            self.mett.ts_msp_reput_periodic().add(ts_msp_reput);
+            self.mett.logic_error().add(logic_error);
         }
         self.iqdqs.housekeeping();
         if self.metrics_emit_last + METRICS_EMIT_IVL <= tsnow {

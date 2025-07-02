@@ -643,10 +643,11 @@ impl Daemon {
     }
 
     async fn handle_shutdown(&mut self) -> Result<(), Error> {
+        let selfname = "handle_shutdown";
         if self.shutting_down {
-            warn!("already shutting down");
+            warn!("{selfname}  already shutting down");
         } else {
-            info!("handle_shutdown");
+            info!("{selfname}  handle_shutdown");
             self.shutting_down = true;
             // TODO make sure we:
             // set a flag so that we don't attempt to use resources any longer (why could that happen?)
@@ -656,10 +657,10 @@ impl Daemon {
             // await the connection sets.
             // await other workers that we've spawned.
             if let Some(iqtx) = &self.iqtx {
-                info!("scylla output channels, closing all");
-                iqtx.close_all();
+                info!("{selfname}  scylla output channels  {iqtx}", iqtx = iqtx.summary());
+                // iqtx.close_all();
             } else {
-                info!("scylla output channels, not set");
+                info!("{selfname}  scylla output channels, not set");
             }
             drop(self.iqtx.take());
             self.connset_ctrl.shutdown().await?;

@@ -77,12 +77,17 @@ impl WriteRes {
     pub fn accept_any(&self) -> bool {
         self.lt.accept || self.mt.accept || self.st.accept
     }
+
+    pub fn msp_rewrite(&self) -> u8 {
+        self.st.msp_rewrite + self.mt.msp_rewrite + self.lt.msp_rewrite
+    }
 }
 
 #[derive(Debug)]
 pub struct WriteRtRes {
     pub accept: bool,
     pub bytes: u32,
+    pub msp_rewrite: u8,
 }
 
 impl Default for WriteRtRes {
@@ -90,8 +95,14 @@ impl Default for WriteRtRes {
         Self {
             accept: false,
             bytes: 0,
+            msp_rewrite: 0,
         }
     }
+}
+
+#[derive(Debug)]
+pub struct HousekeepingRes {
+    pub ts_msp_reput: u8,
 }
 
 #[derive(Debug, Serialize)]
@@ -246,6 +257,7 @@ where
         let ret = WriteRtRes {
             accept: x.accept,
             bytes: x.bytes,
+            msp_rewrite: x.msp_rewrite,
         };
         Ok(ret)
     }
@@ -262,7 +274,6 @@ where
     }
 
     pub fn on_close(&mut self, iqdqs: &mut InsertDeques) -> Result<(), Error> {
-        self.tick(iqdqs)?;
         if self.do_st_rf1 {
             self.state_st.writer.on_close(&mut iqdqs.st_rf1_qu)?;
         } else {
@@ -271,5 +282,19 @@ where
         self.state_mt.writer.on_close(&mut iqdqs.mt_rf3_qu)?;
         self.state_lt.writer.on_close(&mut iqdqs.lt_rf3_qu)?;
         Ok(())
+    }
+
+    pub fn housekeeping(&mut self, iqdqs: &mut InsertDeques) -> Result<HousekeepingRes, Error> {
+        let res_st = if self.do_st_rf1 {
+            self.state_st.writer.housekeeping(&mut iqdqs.st_rf1_qu)?
+        } else {
+            self.state_st.writer.housekeeping(&mut iqdqs.st_rf3_qu)?
+        };
+        let res_mt = self.state_mt.writer.housekeeping(&mut iqdqs.mt_rf3_qu)?;
+        let res_lt = self.state_lt.writer.housekeeping(&mut iqdqs.lt_rf3_qu)?;
+        let ret = HousekeepingRes {
+            ts_msp_reput: res_st.ts_msp_reput + res_mt.ts_msp_reput + res_lt.ts_msp_reput,
+        };
+        Ok(ret)
     }
 }

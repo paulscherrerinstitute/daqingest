@@ -27,6 +27,12 @@ autoerr::create_error_v1!(
 pub struct WriteRes {
     pub accept: bool,
     pub bytes: u32,
+    pub msp_rewrite: u8,
+}
+
+#[derive(Debug)]
+pub struct HousekeepingRes {
+    pub ts_msp_reput: u8,
 }
 
 #[derive(Serialize)]
@@ -144,12 +150,14 @@ where
             let ret = WriteRes {
                 accept: true,
                 bytes: res.bytes,
+                msp_rewrite: res.msp_rewrite,
             };
             Ok(ret)
         } else {
             let ret = WriteRes {
                 accept: false,
                 bytes: 0,
+                msp_rewrite: 0,
             };
             Ok(ret)
         }
@@ -161,9 +169,16 @@ where
     }
 
     pub fn on_close(&mut self, iqdqs: &mut VecDeque<QueryItem>) -> Result<(), Error> {
-        self.tick(iqdqs)?;
         self.writer.on_close(iqdqs)?;
         Ok(())
+    }
+
+    pub fn housekeeping(&mut self, deque: &mut VecDeque<QueryItem>) -> Result<HousekeepingRes, Error> {
+        let res = self.writer.housekeeping(deque)?;
+        let ret = HousekeepingRes {
+            ts_msp_reput: res.ts_msp_reput,
+        };
+        Ok(ret)
     }
 }
 
