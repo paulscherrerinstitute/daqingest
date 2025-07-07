@@ -218,7 +218,7 @@ async fn worker_streamed(
     let tsnow = Instant::now();
     let mut mett = stats::mett::ScyllaInsertWorker::new();
     let mut mett_emit_last = tsnow;
-    let metrics_ivl = Duration::from_millis(1000);
+    let metrics_ivl = Duration::from_millis(500);
     insert_worker_opts
         .insert_workers_running
         .fetch_add(1, atomic::Ordering::AcqRel);

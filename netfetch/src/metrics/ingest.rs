@@ -29,7 +29,7 @@ use scywr::iteminsertqueue::ScalarValue;
 use serde::Deserialize;
 use serde::Serialize;
 use series::SeriesId;
-use serieswriter::msptool::MspSplit;
+use serieswriter::msptool::dyngrid::MspSplitDyn;
 use serieswriter::writer::EmittableType;
 use serieswriter::writer::SeriesWriter;
 use std::collections::HashMap;
@@ -48,20 +48,16 @@ macro_rules! trace_input { ($($arg:tt)*) => { if true { log::trace!($($arg)*); }
 
 macro_rules! trace_queues { ($($arg:tt)*) => { if true { log::trace!($($arg)*); } }; }
 
-type ValueSeriesWriter = SeriesWriter<WritableType>;
+type ValueSeriesWriter = SeriesWriter<WritableType, MspSplitDyn>;
 
 #[derive(Debug, Serialize)]
 struct WritableTypeState {
     series: SeriesId,
-    msp_split_data: MspSplit,
 }
 
 impl WritableTypeState {
-    fn new(series: SeriesId) -> Self {
-        Self {
-            series,
-            msp_split_data: MspSplit::new(10000, 1024 * 256),
-        }
+    fn new(series: SeriesId, rt: RetentionTime) -> Self {
+        Self { series }
     }
 }
 
@@ -91,23 +87,6 @@ impl EmittableType for WritableType {
     ) -> serieswriter::writer::EmitRes {
         let bytes = ByteSize(self.byte_size());
         let data_item = self.1;
-        // let (ts_msp, ts_lsp, ts_msp_chg) = state.msp_split_data.split(self.0.clone(), self.byte_size());
-        // let item = QueryItem::Insert(scywr::iteminsertqueue::InsertItem {
-        //     series: state.series.clone(),
-        //     ts_msp: ts_msp.to_ts_ms(),
-        //     ts_lsp,
-        //     val: self.1.clone(),
-        //     ts_net,
-        // });
-        // let mut items = smallvec::SmallVec::new();
-        // items.push(item);
-        // if ts_msp_chg {
-        //     items.push(QueryItem::Msp(scywr::iteminsertqueue::MspItem::new(
-        //         state.series.clone(),
-        //         ts_msp.to_ts_ms(),
-        //         ts_net,
-        //     )));
-        // }
         serieswriter::writer::EmitRes { data_item, bytes }
     }
 }
@@ -191,7 +170,8 @@ async fn post_v01_try(
     };
     rres.worker_tx.send(qu).await.unwrap();
     let chinfo = rx.recv().await.unwrap().unwrap();
-    let mut writer = SeriesWriter::new(chinfo.series.to_series())?;
+    let msp_split = MspSplitDyn::new(1024 * 64, 1024 * 1024 * 10, rt.clone());
+    let mut writer = SeriesWriter::new(chinfo.series.to_series(), msp_split)?;
     debug_setup!("series writer established");
     let mut iqdqs = InsertDeques::new();
     let mut iqtx = rres.iqtx.clone();
@@ -342,7 +322,7 @@ where
     let stnow = SystemTime::now();
     let tsev = TsNano::from_system_time(stnow);
     let tsnow = Instant::now();
-    let mut emit_state = WritableTypeState::new(writer.sid());
+    let mut emit_state = WritableTypeState::new(writer.sid(), writer.rt());
     for (i, (ts, val)) in evs.iter_zip().enumerate() {
         let val = val.clone();
         trace_input!("ev  {:6}  {:20}  {:20?}", i, ts, val);
@@ -367,7 +347,7 @@ fn evpush_dim0_enum(
     let stnow = SystemTime::now();
     let tsev = TsNano::from_system_time(stnow);
     let tsnow = Instant::now();
-    let mut emit_state = WritableTypeState::new(writer.sid());
+    let mut emit_state = WritableTypeState::new(writer.sid(), writer.rt());
     for (i, (ts, val)) in evs.iter_zip().enumerate() {
         let val = val.clone();
         trace_input!("ev  {:6}  {:20}  {:20?}", i, ts, val);
@@ -397,7 +377,7 @@ where
     let stnow = SystemTime::now();
     let tsev = TsNano::from_system_time(stnow);
     let tsnow = Instant::now();
-    let mut emit_state = WritableTypeState::new(writer.sid());
+    let mut emit_state = WritableTypeState::new(writer.sid(), writer.rt());
     for (i, (ts, val)) in evs.iter_zip().enumerate() {
         let val = val.clone();
         trace_input!("ev  {:6}  {:20}  {:20?}", i, ts, val);

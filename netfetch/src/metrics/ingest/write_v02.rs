@@ -32,7 +32,7 @@ use series::SeriesId;
 use serieswriter::binwriter::BinWriter;
 use serieswriter::binwriter::DiscardFirstOutput;
 use serieswriter::binwriter::WriteCntZero;
-use serieswriter::msptool::MspSplit;
+use serieswriter::msptool::dyngrid::MspSplitDyn;
 use serieswriter::rtwriter::MinQuiets;
 use serieswriter::writer::EmittableType;
 use serieswriter::writer::SeriesWriter;
@@ -81,20 +81,16 @@ autoerr::create_error_v1!(
     },
 );
 
-type ValueSeriesWriter = SeriesWriter<WritableType>;
+type ValueSeriesWriter = SeriesWriter<WritableType, MspSplitDyn>;
 
 #[derive(Debug, Serialize)]
 struct WritableTypeState {
     series: SeriesId,
-    msp_split_data: MspSplit,
 }
 
 impl WritableTypeState {
-    fn new(series: SeriesId) -> Self {
-        Self {
-            series,
-            msp_split_data: MspSplit::new(10000, 1024 * 256),
-        }
+    fn new(series: SeriesId, rt: RetentionTime) -> Self {
+        Self { series }
     }
 }
 
@@ -124,21 +120,6 @@ impl EmittableType for WritableType {
     ) -> serieswriter::writer::EmitRes {
         let bytes = ByteSize(self.byte_size());
         let data_item = self.1;
-        // let (ts_msp, ts_lsp, ts_msp_chg) = state.msp_split_data.split(self.0.clone(), self.byte_size());
-        // let item = QueryItem::Insert(scywr::iteminsertqueue::InsertItem {
-        //     series: state.series.clone(),
-        //     ts_msp: ts_msp.to_ts_ms(),
-        //     ts_lsp,
-        //     val: self.1.clone(),
-        //     ts_net,
-        // });
-        // if ts_msp_chg {
-        //     items.push(QueryItem::Msp(scywr::iteminsertqueue::MspItem::new(
-        //         state.series.clone(),
-        //         ts_msp.to_ts_ms(),
-        //         ts_net,
-        //     )));
-        // }
         serieswriter::writer::EmitRes { data_item, bytes }
     }
 }
@@ -168,7 +149,7 @@ where
     let stnow = SystemTime::now();
     let tsev = TsNano::from_system_time(stnow);
     let tsnow = Instant::now();
-    let mut emit_state = WritableTypeState::new(params.writer.sid());
+    let mut emit_state = WritableTypeState::new(params.writer.sid(), params.rt.clone());
     if evs.len() != 0 {
         if params.binwriter.is_none() {
             for (i, (ts, val)) in evs.iter_zip().enumerate() {
@@ -226,7 +207,7 @@ fn evpush_dim0_enum(mut params: EvPushParams) -> Result<(), Error> {
     let stnow = SystemTime::now();
     let tsev = TsNano::from_system_time(stnow);
     let tsnow = Instant::now();
-    let mut emit_state = WritableTypeState::new(params.writer.sid());
+    let mut emit_state = WritableTypeState::new(params.writer.sid(), params.rt.clone());
     let deque = params.iqdqs.deque(params.rt.clone());
     for (i, (ts, val)) in evs.iter_zip().enumerate() {
         let val = val.clone();
@@ -254,7 +235,7 @@ where
     let stnow = SystemTime::now();
     let tsev = TsNano::from_system_time(stnow);
     let tsnow = Instant::now();
-    let mut emit_state = WritableTypeState::new(params.writer.sid());
+    let mut emit_state = WritableTypeState::new(params.writer.sid(), params.rt.clone());
     let deque = params.iqdqs.deque(params.rt.clone());
     for (i, (ts, val)) in evs.iter_zip().enumerate() {
         let val = val.clone();
@@ -273,7 +254,7 @@ fn frame_write(
     rt: RetentionTime,
     scalar_type: ScalarType,
     shape: Shape,
-    writer: &mut SeriesWriter<WritableType>,
+    writer: &mut SeriesWriter<WritableType, MspSplitDyn>,
     binwriter: &mut Option<BinWriter>,
     iqdqs: &mut InsertDeques,
 ) -> Result<(), Error> {
@@ -421,7 +402,8 @@ async fn write_with_fresh_msps_inner(
         .await
         .map_err(|_| Error::ConfigLookup)?
         .map_err(|_| Error::ConfigLookup)?;
-    let mut writer = SeriesWriter::new(chinfo.series.to_series())?;
+    let msp_split = MspSplitDyn::new(1024 * 64, 1024 * 1024 * 10, rt.clone());
+    let mut writer = SeriesWriter::new(chinfo.series.to_series(), msp_split)?;
     let mut binwriter = None;
     debug_setup!("series writer established");
     let mut iqdqs = InsertDeques::new();
@@ -616,7 +598,8 @@ async fn write_events_exact_2(
 ) -> Result<Json<serde_json::Value>, Error> {
     debug_setup!("write_events_exact  {:?}  {:?}", conf, rt);
     let series = SeriesId::new(conf.series);
-    let mut writer = SeriesWriter::new(series)?;
+    let msp_split = MspSplitDyn::new(1024 * 64, 1024 * 1024 * 10, rt.clone());
+    let mut writer = SeriesWriter::new(series, msp_split)?;
     let mut binwriter = None;
     debug_setup!("series writer established");
     let mut iqdqs = InsertDeques::new();

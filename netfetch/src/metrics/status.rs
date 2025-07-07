@@ -22,8 +22,6 @@ autoerr::create_error_v1!(
 #[derive(Debug, Serialize)]
 pub struct ChannelStates {
     running_since: DateTime<Utc>,
-    // #[serde(with = "humantime_serde")]
-    // running_since_2: SystemTime,
     channels: BTreeMap<String, ChannelState>,
 }
 
@@ -289,4 +287,57 @@ async fn channel_states_try(
         }
     }
     Ok(axum::Json(states))
+}
+
+pub async fn channel_states_private(
+    params: HashMap<String, String>,
+    tx: Sender<CaConnSetEvent>,
+) -> Result<axum::Json<serde_json::Value>, axum::Json<String>> {
+    match channel_states_private_try(params, tx).await {
+        Ok(x) => Ok(x),
+        Err(e) => Err(axum::Json(e.to_string())),
+    }
+}
+
+async fn channel_states_private_try(
+    params: HashMap<String, String>,
+    tx: Sender<CaConnSetEvent>,
+) -> Result<axum::Json<serde_json::Value>, Error> {
+    let name = params.get("name").map_or(String::new(), |x| x.clone()).to_string();
+    let limit = params.get("limit").and_then(|x| x.parse().ok()).unwrap_or(40);
+    let (tx2, rx2) = async_channel::bounded(1);
+    let req = ChannelStatusesRequest { name, limit, tx: tx2 };
+    let item = CaConnSetEvent::ConnSetCmd(ConnSetCmd::ChannelStatuses(req));
+    // TODO handle error
+    tx.send(item).await.unwrap();
+    let res = rx2.recv().await.unwrap();
+    Ok(axum::Json(serde_json::Value::Null))
+}
+
+#[derive(Debug, Serialize)]
+pub struct ChannelStatesPrivate {
+    running_since: DateTime<Utc>,
+    channels: BTreeMap<String, ChannelStatePrivate>,
+}
+
+#[derive(Debug, Serialize)]
+struct ChannelStatePrivate {
+    ioc_address: Option<SocketAddr>,
+    // connection: ConnectionState,
+    // archiving_configuration: ChannelConfigForStatesApi,
+    // recv_count: u64,
+    // recv_bytes: u64,
+    // #[serde(with = "humantime_serde", skip_serializing_if = "system_time_epoch")]
+    // recv_last: SystemTime,
+    // #[serde(with = "humantime_serde", skip_serializing_if = "system_time_epoch")]
+    // write_st_last: SystemTime,
+    // #[serde(with = "humantime_serde", skip_serializing_if = "system_time_epoch")]
+    // write_mt_last: SystemTime,
+    // #[serde(with = "humantime_serde", skip_serializing_if = "system_time_epoch")]
+    // write_lt_last: SystemTime,
+    // #[serde(with = "humantime_serde", skip_serializing_if = "system_time_epoch")]
+    // updated: SystemTime,
+    // #[serde(with = "humantime_serde")]
+    // pong_last: Option<SystemTime>,
+    // private: StatePrivate,
 }

@@ -1,9 +1,11 @@
 use crate::log;
+use crate::msptool::dyngrid::MspSplitDyn;
 use crate::ratelimitwriter::RateLimitWriter;
 use crate::writer::EmittableType;
 use netpod::ScalarType;
 use netpod::Shape;
 use netpod::TsNano;
+use netpod::ttl::RetentionTime;
 use scywr::insertqueues::InsertDeques;
 use scywr::iteminsertqueue::QueryItem;
 use serde::Serialize;
@@ -59,11 +61,11 @@ impl MinQuiets {
 }
 
 #[derive(Debug, Serialize)]
-struct State<ET>
+struct State<ET, SPL>
 where
     ET: EmittableType,
 {
-    writer: RateLimitWriter<ET>,
+    writer: RateLimitWriter<ET, SPL>,
 }
 
 #[derive(Debug)]
@@ -113,9 +115,9 @@ where
     series: SeriesId,
     scalar_type: ScalarType,
     shape: Shape,
-    state_st: State<ET>,
-    state_mt: State<ET>,
-    state_lt: State<ET>,
+    state_st: State<ET, MspSplitDyn>,
+    state_mt: State<ET, MspSplitDyn>,
+    state_lt: State<ET, MspSplitDyn>,
     min_quiets: MinQuiets,
     do_trace_detail: bool,
     do_st_rf1: bool,
@@ -139,15 +141,36 @@ where
         let dtd = series::dbg::dbg_series(series);
         debug_init!(dtd, "new  {:?}  is_polled {}", min_quiets, is_polled);
         let state_st = {
-            let writer = RateLimitWriter::new(series, min_quiets.st, is_polled, emit_state_new(), "st".into())?;
+            let writer = RateLimitWriter::new(
+                series,
+                min_quiets.st,
+                is_polled,
+                emit_state_new(),
+                "st".into(),
+                MspSplitDyn::new(1024 * 64, 1024 * 1024 * 10, RetentionTime::Short),
+            )?;
             State { writer }
         };
         let state_mt = {
-            let writer = RateLimitWriter::new(series, min_quiets.mt, is_polled, emit_state_new(), "mt".into())?;
+            let writer = RateLimitWriter::new(
+                series,
+                min_quiets.mt,
+                is_polled,
+                emit_state_new(),
+                "mt".into(),
+                MspSplitDyn::new(1024 * 64, 1024 * 1024 * 10, RetentionTime::Medium),
+            )?;
             State { writer }
         };
         let state_lt = {
-            let writer = RateLimitWriter::new(series, min_quiets.lt, is_polled, emit_state_new(), "lt".into())?;
+            let writer = RateLimitWriter::new(
+                series,
+                min_quiets.lt,
+                is_polled,
+                emit_state_new(),
+                "lt".into(),
+                MspSplitDyn::new(1024 * 64, 1024 * 1024 * 10, RetentionTime::Long),
+            )?;
             State { writer }
         };
         let ret = Self {
@@ -247,7 +270,7 @@ where
     }
 
     fn write_inner(
-        state: &mut State<ET>,
+        state: &mut State<ET, MspSplitDyn>,
         item: ET,
         ts_net: Instant,
         tsev: TsNano,

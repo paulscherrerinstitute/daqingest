@@ -1,6 +1,6 @@
 use err::Error;
 use netpod::Database;
-use netpod::log::*;
+use netpod::log;
 use regex::Regex;
 use scywr::config::ScyllaIngestConfig;
 use serde::Deserialize;
@@ -171,7 +171,7 @@ impl CaIngestOpts {
         let has_default_hosts = self.scylla.is_some();
         for c in confs.iter() {
             if c.hosts.is_none() && !has_default_hosts {
-                warn!("scylla config is missing hosts");
+                log::warn!("scylla config is missing hosts");
                 return false;
             }
         }
@@ -334,7 +334,7 @@ async fn parse_channel_config_txt(fname: &Path) -> Result<ChannelsConfig, Error>
             conf.channels.push(item);
         }
     }
-    info!("Parsed {} channels", conf.channels.len());
+    log::info!("Parsed {} channels", conf.channels.len());
     Ok(conf)
 }
 
@@ -392,10 +392,10 @@ async fn parse_config_dir(dir: &Path) -> Result<ChannelsConfig, Error> {
             let buf = tokio::fs::read(e.path()).await?;
             let conf: BTreeMap<String, ChannelConfigParse> =
                 serde_yaml::from_slice(&buf).map_err(Error::from_string)?;
-            info!("parsed {} channels from {}", conf.len(), fns);
+            log::info!("parsed {} channels from {}", conf.len(), fns);
             ret.push_from_parsed(&conf, basename);
         } else {
-            debug!("ignore channel config file {:?}", e.path());
+            log::debug!("ignore channel config file {:?}", e.path());
         }
     }
     Ok(ret)

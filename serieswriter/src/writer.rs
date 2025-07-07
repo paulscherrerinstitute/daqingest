@@ -8,7 +8,9 @@ use std::fmt;
 use std::marker::PhantomData;
 use std::time::Instant;
 
+use crate::msptool::MspSplit;
 use netpod::ByteSize;
+use netpod::ttl::RetentionTime;
 use scywr::iteminsertqueue::MspItem;
 pub use smallvec::SmallVec;
 use std::time::Duration;
@@ -72,9 +74,9 @@ pub struct OnCloseRes {
 }
 
 #[derive(Debug, Serialize)]
-pub struct SeriesWriter<ET> {
+pub struct SeriesWriter<ET, SPL> {
     series: SeriesId,
-    msp_split: crate::msptool::MspSplit,
+    msp_split: SPL,
     evts_on_msp_write: TsNano,
     evts_latest: TsNano,
     do_trace_detail: bool,
@@ -85,14 +87,15 @@ pub struct SeriesWriter<ET> {
     _t1: PhantomData<ET>,
 }
 
-impl<ET> SeriesWriter<ET>
+impl<ET, SPL> SeriesWriter<ET, SPL>
 where
     ET: EmittableType,
+    SPL: MspSplit,
 {
-    pub fn new(series: SeriesId) -> Result<Self, Error> {
+    pub fn new(series: SeriesId, spl: SPL) -> Result<Self, Error> {
         let res = Self {
             series,
-            msp_split: crate::msptool::MspSplit::new(1024 * 64, 1024 * 1024 * 10),
+            msp_split: spl,
             evts_on_msp_write: TsNano::from_ns(0),
             evts_latest: TsNano::from_ns(0),
             do_trace_detail: series::dbg::dbg_series(series),
@@ -105,6 +108,10 @@ where
 
     pub fn sid(&self) -> SeriesId {
         self.series.clone()
+    }
+
+    pub fn rt(&self) -> RetentionTime {
+        self.msp_split.rt()
     }
 
     pub fn write(

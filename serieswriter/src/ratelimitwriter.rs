@@ -1,3 +1,4 @@
+use crate::msptool::MspSplit;
 use crate::writer::EmittableType;
 use crate::writer::SeriesWriter;
 use core::fmt;
@@ -8,7 +9,6 @@ use scywr::iteminsertqueue::QueryItem;
 use serde::Serialize;
 use series::SeriesId;
 use std::collections::VecDeque;
-use std::marker::PhantomData;
 use std::time::Duration;
 use std::time::Instant;
 
@@ -36,7 +36,7 @@ pub struct HousekeepingRes {
 }
 
 #[derive(Serialize)]
-pub struct RateLimitWriter<ET>
+pub struct RateLimitWriter<ET, SPL>
 where
     ET: EmittableType,
 {
@@ -47,14 +47,14 @@ where
     last_insert_ts: TsNano,
     last_insert_val: Option<ET>,
     dbgname: String,
-    writer: SeriesWriter<ET>,
+    writer: SeriesWriter<ET, SPL>,
     do_trace_detail: bool,
-    _t1: PhantomData<ET>,
 }
 
-impl<ET> RateLimitWriter<ET>
+impl<ET, SPL> RateLimitWriter<ET, SPL>
 where
     ET: EmittableType,
+    SPL: MspSplit,
 {
     pub fn new(
         series: SeriesId,
@@ -62,8 +62,9 @@ where
         is_polled: bool,
         emit_state: <ET as EmittableType>::State,
         dbgname: String,
+        spl: SPL,
     ) -> Result<Self, Error> {
-        let writer = SeriesWriter::new(series)?;
+        let writer = SeriesWriter::new(series, spl)?;
         let ret = Self {
             series,
             min_quiet,
@@ -74,7 +75,6 @@ where
             dbgname,
             writer,
             do_trace_detail: series::dbg::dbg_series(series),
-            _t1: PhantomData,
         };
         if ret.do_trace_detail {
             debug!("debug test for detail series");
@@ -182,7 +182,7 @@ where
     }
 }
 
-impl<ET> fmt::Debug for RateLimitWriter<ET>
+impl<ET, SPL> fmt::Debug for RateLimitWriter<ET, SPL>
 where
     ET: EmittableType,
 {

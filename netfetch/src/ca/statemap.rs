@@ -6,7 +6,6 @@ use serde::Serialize;
 use serde_helper::serde_instant::serde_Instant_elapsed_ms;
 use series::ChannelStatusSeriesId;
 use serieswriter::fixgridwriter::ChannelStatusSeriesWriter;
-use serieswriter::fixgridwriter::ChannelStatusWriteState;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::btree_map::RangeMut;
@@ -124,12 +123,8 @@ pub struct WithStatusSeriesIdState {
     pub inner: WithStatusSeriesIdStateInner,
     #[serde(serialize_with = "serde_ser_channel_status_writer")]
     pub writer_status: Option<ChannelStatusSeriesWriter>,
-    #[serde(skip)]
-    pub writer_status_state: Option<ChannelStatusWriteState>,
 }
 
-// Need Clone because we use the state tree for metrics output
-// TODO use a new info struct
 impl Clone for WithStatusSeriesIdState {
     fn clone(&self) -> Self {
         Self {
@@ -137,7 +132,6 @@ impl Clone for WithStatusSeriesIdState {
             addr_find_backoff: self.addr_find_backoff.clone(),
             inner: self.inner.clone(),
             writer_status: None,
-            writer_status_state: None,
         }
     }
 }

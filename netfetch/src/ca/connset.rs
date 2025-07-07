@@ -56,6 +56,7 @@ use netpod::OnDrop;
 use netpod::TsNano;
 use scywr::insertqueues::InsertQueuesTx;
 use series::SeriesId;
+use serieswriter::msptool::fixgrid::MspSplitFixGrid;
 use stats::mett::CaConnSetMetrics;
 use std::sync::Arc;
 use std::task::Context;
@@ -198,15 +199,32 @@ pub struct ChannelStatusesRequest {
     pub tx: Sender<ChannelStatusesResponse>,
 }
 
+impl fmt::Debug for ChannelStatusesRequest {
+    fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+        fmt.debug_struct("ChannelStatusesRequest").finish()
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub struct ChannelStatusesResponse {
     pub channels_ca_conn_set: BTreeMap<String, ChannelState>,
 }
 
-impl fmt::Debug for ChannelStatusesRequest {
+pub struct ChannelStatusesPrivateRequest {
+    pub name: String,
+    pub limit: u64,
+    pub tx: Sender<ChannelStatusesPrivateResponse>,
+}
+
+impl fmt::Debug for ChannelStatusesPrivateRequest {
     fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
-        fmt.debug_struct("ChannelStatusesRequest").finish()
+        fmt.debug_struct("ChannelStatusesPrivateRequest").finish()
     }
+}
+
+#[derive(Debug, Serialize)]
+pub struct ChannelStatusesPrivateResponse {
+    pub channels_ca_conn_set: BTreeMap<String, serde_json::Value>,
 }
 
 #[derive(Debug)]
@@ -223,6 +241,7 @@ pub enum ConnSetCmd {
     ChannelRemove(ChannelRemove),
     Shutdown,
     ChannelStatuses(ChannelStatusesRequest),
+    ChannelStatusesPrivate(ChannelStatusesPrivateRequest),
     // TODO rename to ConnCommand because it must be handled by some specific Conn
     ChannelCommand(ChannelCommand),
 }
@@ -532,6 +551,7 @@ impl CaConnSet {
                 ConnSetCmd::ChannelRemove(x) => self.handle_remove_channel(x),
                 ConnSetCmd::Shutdown => self.handle_shutdown(),
                 ConnSetCmd::ChannelStatuses(x) => self.handle_channel_statuses_req(x),
+                ConnSetCmd::ChannelStatusesPrivate(x) => self.handle_channel_statuses_private_req(x),
                 ConnSetCmd::ChannelCommand(x) => self.handle_channel_command(x),
             },
         }
@@ -757,20 +777,18 @@ impl CaConnSet {
                         self.cssid_latency_max = dt + Duration::from_millis(2000);
                         debug!("slow cssid fetch  dt {:.0} ms  {:?}", 1e3 * dt.as_secs_f32(), cmd);
                     }
-                    let mut writer_status = serieswriter::writer::SeriesWriter::new(SeriesId::new(cmd.cssid.id()))?;
-                    let mut writer_status_state = serieswriter::fixgridwriter::ChannelStatusWriteState::new(
+                    let mut writer_status = serieswriter::writer::SeriesWriter::new(
                         SeriesId::new(cmd.cssid.id()),
-                        serieswriter::fixgridwriter::CHANNEL_STATUS_GRID,
-                    );
+                        MspSplitFixGrid::for_channel_status(),
+                    )?;
                     {
                         let status = netpod::channelstatus::ChannelStatus::HaveStatusId;
                         let stnow = SystemTime::now();
                         let ts = TsNano::from_system_time(stnow);
                         let item = serieswriter::fixgridwriter::ChannelStatusWriteValue::new(ts, status.to_u64());
-                        let state = &mut writer_status_state;
                         let ts_net = Instant::now();
                         let deque = &mut self.storage_insert_lt_qu_l1;
-                        writer_status.write(item, state, ts_net, ts, deque)?;
+                        writer_status.write(item, &mut (), ts_net, ts, deque)?;
                     }
                     *chst2 = ActiveChannelState::WithStatusSeriesId(WithStatusSeriesIdState {
                         cssid: cmd.cssid,
@@ -779,7 +797,6 @@ impl CaConnSet {
                             since: SystemTime::now(),
                         },
                         writer_status: Some(writer_status),
-                        writer_status_state: Some(writer_status_state),
                     });
                     let qu = IocAddrQuery::cached(name.into());
                     self.find_ioc_query_queue.push_back(qu);
@@ -822,35 +839,36 @@ impl CaConnSet {
                     trace!("handle_add_channel_with_addr  INNER  {:?}", cmd);
                     self.mett.handle_add_channel_with_addr().inc();
                     let tsnow = SystemTime::now();
-                    let mut writer_status = serieswriter::writer::SeriesWriter::new(SeriesId::new(cmd.cssid.id()))?;
-                    let mut writer_status_state = serieswriter::fixgridwriter::ChannelStatusWriteState::new(
-                        SeriesId::new(cmd.cssid.id()),
-                        serieswriter::fixgridwriter::CHANNEL_STATUS_GRID,
-                    );
                     {
                         let status = netpod::channelstatus::ChannelStatus::HaveAddress;
                         let stnow = SystemTime::now();
                         let ts = TsNano::from_system_time(stnow);
                         let item = serieswriter::fixgridwriter::ChannelStatusWriteValue::new(ts, status.to_u64());
-                        let state = &mut writer_status_state;
                         let ts_net = Instant::now();
                         let deque = &mut self.storage_insert_lt_qu_l1;
-                        writer_status.write(item, state, ts_net, ts, deque)?;
+                        st3.writer_status
+                            .as_mut()
+                            .unwrap()
+                            .write(item, &mut (), ts_net, ts, deque)?;
                     }
-                    *st3 = WithStatusSeriesIdState {
-                        cssid: cmd.cssid.clone(),
-                        addr_find_backoff: 0,
-                        inner: WithStatusSeriesIdStateInner::WithAddress {
-                            addr: addr_v4,
-                            state: WithAddressState::Assigned(ConnectionState {
-                                updated: tsnow,
-                                health_update_count: 0,
-                                value: ConnectionStateValue::Unknown,
-                            }),
-                        },
-                        writer_status: Some(writer_status),
-                        writer_status_state: Some(writer_status_state),
+                    st3.cssid = cmd.cssid.clone();
+                    st3.addr_find_backoff = 0;
+                    st3.inner = WithStatusSeriesIdStateInner::WithAddress {
+                        addr: addr_v4,
+                        state: WithAddressState::Assigned(ConnectionState {
+                            updated: tsnow,
+                            health_update_count: 0,
+                            value: ConnectionStateValue::Unknown,
+                        }),
                     };
+                    if false {
+                        let _ = WithStatusSeriesIdState {
+                            cssid: todo!(),
+                            addr_find_backoff: todo!(),
+                            inner: todo!(),
+                            writer_status: todo!(),
+                        };
+                    }
                     let addr = cmd.addr;
                     if self.ca_conn_ress.contains_key(&addr) {
                         trace!("ca_conn_ress has already {:?}", addr_v4);
@@ -1001,6 +1019,18 @@ impl CaConnSet {
         if req.tx.try_send(item).is_err() {
             self.mett.chan_send_err().inc();
         }
+        Ok(())
+    }
+
+    fn handle_channel_statuses_private_req(&mut self, req: ChannelStatusesPrivateRequest) -> Result<(), Error> {
+        if self.shutdown_stopping {
+            return Ok(());
+        }
+        for (addr, ca_conn) in self.ca_conn_ress.iter() {
+            // let item = ConnCommand::status_private();
+            // ca_conn.cmd_queue.push_back(item);
+        }
+        let reg1 = regex::Regex::new(&req.name)?;
         Ok(())
     }
 
@@ -1480,7 +1510,7 @@ impl CaConnSet {
                                         let deque = &mut lt_qu_2;
                                         st3.writer_status.as_mut().unwrap().write(
                                             serieswriter::fixgridwriter::ChannelStatusWriteValue::new(tsev, val),
-                                            st3.writer_status_state.as_mut().unwrap(),
+                                            &mut (),
                                             tsnow,
                                             tsev,
                                             deque,

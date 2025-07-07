@@ -58,8 +58,7 @@ use series::SeriesId;
 use serieswriter::binwriter::BinWriter;
 use serieswriter::binwriter::DiscardFirstOutput;
 use serieswriter::fixgridwriter::ChannelStatusSeriesWriter;
-use serieswriter::fixgridwriter::ChannelStatusWriteState;
-use serieswriter::msptool::MspSplit;
+use serieswriter::msptool::fixgrid::MspSplitFixGrid;
 use serieswriter::rtwriter::RtWriter;
 use serieswriter::writer::EmittableType;
 use stats::IntervalEma;
@@ -151,6 +150,10 @@ autoerr::create_error_v1!(
         Netpod(#[from] netpod::Error),
     },
 );
+
+pub const fn channel_status_retention_time() -> RetentionTime {
+    RetentionTime::Long
+}
 
 impl err::ToErr for Error {
     fn to_err(self) -> err::Error {
@@ -567,11 +570,11 @@ impl ChannelConf {
             conf,
             state: ChannelState::Init(cssid),
             wrst: WriterStatus {
-                writer_status: serieswriter::writer::SeriesWriter::new(SeriesId::new(cssid.id())).unwrap(),
-                writer_status_state: serieswriter::fixgridwriter::ChannelStatusWriteState::new(
+                writer_status: serieswriter::writer::SeriesWriter::new(
                     SeriesId::new(cssid.id()),
-                    serieswriter::fixgridwriter::CHANNEL_STATUS_GRID,
-                ),
+                    MspSplitFixGrid::for_channel_status(),
+                )
+                .unwrap(),
             },
         }
     }
@@ -750,7 +753,6 @@ impl ChannelState {
 #[derive(Debug)]
 struct WriterStatus {
     writer_status: ChannelStatusSeriesWriter,
-    writer_status_state: ChannelStatusWriteState,
 }
 
 impl WriterStatus {
@@ -763,7 +765,7 @@ impl WriterStatus {
         let (ts, val) = item.to_ts_val();
         self.writer_status.write(
             serieswriter::fixgridwriter::ChannelStatusWriteValue::new(ts, val),
-            &mut self.writer_status_state,
+            &mut (),
             Instant::now(),
             tsev,
             deque,
@@ -1107,10 +1109,25 @@ impl<'a> EventAddIngestRefobj<'a> {
 
 pub type CmdResTx = Sender<Result<(), Error>>;
 
-#[derive(Debug)]
 pub struct CmdChannelInspectFull {
     name: String,
     tx: Sender<serde_json::Value>,
+}
+
+impl fmt::Debug for CmdChannelInspectFull {
+    fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+        fmt.debug_struct("CmdChannelInspectFull").finish()
+    }
+}
+
+struct StatusPrivate {
+    tx: Sender<serde_json::Value>,
+}
+
+impl fmt::Debug for StatusPrivate {
+    fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+        fmt.debug_struct("StatusPrivate").finish()
+    }
 }
 
 #[derive(Debug)]
@@ -1120,6 +1137,7 @@ pub enum ConnCommandKind {
     ChannelCloseReconf(String),
     Shutdown,
     ChannelInspectFull(CmdChannelInspectFull),
+    StatusPrivate(StatusPrivate),
 }
 
 #[derive(Debug)]
@@ -1162,6 +1180,15 @@ impl ConnCommand {
             id: Self::make_id(),
             kind: ConnCommandKind::Shutdown,
         }
+    }
+
+    pub async fn status_private() -> Self {
+        let (tx, rx) = async_channel::bounded(16);
+        let cmd = ConnCommand {
+            id: Self::make_id(),
+            kind: ConnCommandKind::StatusPrivate(StatusPrivate { tx }),
+        };
+        cmd
     }
 
     fn make_id() -> usize {
@@ -1639,6 +1666,7 @@ impl CaConn {
                                 }
                             }
                         }
+                        ConnCommandKind::StatusPrivate(cmd) => todo!(),
                     }
                 }
                 Ready(None) => {
@@ -1703,7 +1731,13 @@ impl CaConn {
                                         ch.conf.min_quiets(),
                                         ch.conf.is_polled(),
                                         ch.conf.replication(),
-                                        &|| CaWriterValueState::new(st.series_status, chinfo.series.to_series()),
+                                        &|| {
+                                            CaWriterValueState::new(
+                                                st.series_status,
+                                                chinfo.series.to_series(),
+                                                channel_status_retention_time(),
+                                            )
+                                        },
                                     )?;
                                     self.handle_writer_establish_inner(cid, writer)?;
                                     have_progress = true;
@@ -2140,18 +2174,8 @@ impl CaConn {
             // return Err(Error::with_msg_no_trace());
             return Ok(());
         };
-        if false && dbg_chn {
-            trace!("handle_event_add_res  {:?}  {:?}", cid, ev);
-        }
         match ch_s {
             ChannelState::Writable(st) => {
-                if false && dbg_chn {
-                    trace!("handle_event_add_res  Writable  {:?}  {:?}", cid, ev);
-                }
-                // debug!(
-                //     "CaConn sees  data_count {}  payload_len {}",
-                //     ev.data_count, ev.payload_len
-                // );
                 let stnow = self.tmp_ts_poll;
                 let crst = &mut st.channel;
                 let stwin_ts = stnow.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() / 4;
@@ -2205,11 +2229,6 @@ impl CaConn {
                             monitoring_event_last: Some(ev.clone()),
                             last_comparisons: VecDeque::new(),
                         });
-                        let binwriter = if self.opts.binwriter_enable {
-                            Some(&mut st.binwriter)
-                        } else {
-                            None
-                        };
                         let mut robj = EventAddIngestRefobj::from_writable_state(
                             &self.opts,
                             &mut self.iqdqs,
@@ -2233,11 +2252,6 @@ impl CaConn {
                             }
                         }
                         st2.monitoring_event_last = Some(ev.clone());
-                        let binwriter = if self.opts.binwriter_enable {
-                            Some(&mut st.binwriter)
-                        } else {
-                            None
-                        };
                         let mut robj = EventAddIngestRefobj::from_writable_state(
                             &self.opts,
                             &mut self.iqdqs,
@@ -2309,7 +2323,6 @@ impl CaConn {
             // return Err(Error::with_msg_no_trace());
             return Ok(());
         };
-        // debug!("handle_event_add_res {ev:?}");
         match ch_s {
             ChannelState::Writable(st) => match &mut st.reading {
                 ReadingState::StopMonitoringForPolling(..) => {
@@ -2412,11 +2425,6 @@ impl CaConn {
                                         trace!("make next poll idle at {:?}   tsnow {:?}", next, tsnow);
                                     }
                                     st2.tick = PollTickState::Idle(PollTickStateIdle { next });
-                                    let binwriter = if self.opts.binwriter_enable {
-                                        Some(&mut st.binwriter)
-                                    } else {
-                                        None
-                                    };
                                     let mut robj = EventAddIngestRefobj::from_writable_state(
                                         &self.opts,
                                         &mut self.iqdqs,
@@ -2463,6 +2471,7 @@ impl CaConn {
                                         ts_silence_read_next: tsnow + Self::silence_read_next_ivl_rng(&mut self.rng),
                                     });
                                     if read_expected {
+                                        self.mett.monitoring_read_expected().inc();
                                         let item = ChannelStatusItem {
                                             ts: self.tmp_ts_poll,
                                             cssid: st.channel.cssid.clone(),
@@ -2471,6 +2480,7 @@ impl CaConn {
                                         ch_wrst
                                             .emit_channel_status_item(item, Self::channel_status_qu(&mut self.iqdqs))?;
                                     } else {
+                                        self.mett.monitoring_read_unexpected().inc();
                                         let item = ChannelStatusItem {
                                             ts: self.tmp_ts_poll,
                                             cssid: st.channel.cssid.clone(),
@@ -2479,26 +2489,50 @@ impl CaConn {
                                         ch_wrst
                                             .emit_channel_status_item(item, Self::channel_status_qu(&mut self.iqdqs))?;
                                     }
-                                    let iqdqs = &mut self.iqdqs;
-                                    let mett = &mut self.mett;
                                     // NOTE we do not update the last value in this ev handler.
                                     {
                                         if let Some(lst) = st2.monitoring_event_last.as_ref() {
                                             // TODO compare with last monitoring value
-                                            if ev.value.data == lst.value.data {
-                                                if ev.value.meta == lst.value.meta {
-                                                    st2.last_comparisons
-                                                        .push_back((UtcDateTime::now(), MonitorReadCmp::Equal));
-                                                } else {
-                                                    st2.last_comparisons
-                                                        .push_back((UtcDateTime::now(), MonitorReadCmp::DiffTime));
-                                                }
+                                            if ev.value.meta == lst.value.meta {
+                                                st2.last_comparisons
+                                                    .push_back((UtcDateTime::now(), MonitorReadCmp::Equal));
                                             } else {
+                                                self.mett.monitoring_read_diff_time().inc();
+                                                st2.last_comparisons
+                                                    .push_back((UtcDateTime::now(), MonitorReadCmp::DiffTime));
+                                                {
+                                                    let item = ChannelStatusItem {
+                                                        ts: self.tmp_ts_poll,
+                                                        cssid: st.channel.cssid.clone(),
+                                                        status: ChannelStatus::MonitoringReadDiffTime,
+                                                    };
+                                                    ch_wrst.emit_channel_status_item(
+                                                        item,
+                                                        Self::channel_status_qu(&mut self.iqdqs),
+                                                    )?;
+                                                }
+                                            }
+                                            if ev.value.data == lst.value.data {
+                                                st2.last_comparisons
+                                                    .push_back((UtcDateTime::now(), MonitorReadCmp::Equal));
+                                            } else {
+                                                self.mett.monitoring_read_diff_value().inc();
                                                 st2.last_comparisons
                                                     .push_back((UtcDateTime::now(), MonitorReadCmp::DiffValue));
+                                                {
+                                                    let item = ChannelStatusItem {
+                                                        ts: self.tmp_ts_poll,
+                                                        cssid: st.channel.cssid.clone(),
+                                                        status: ChannelStatus::MonitoringReadDiffValue,
+                                                    };
+                                                    ch_wrst.emit_channel_status_item(
+                                                        item,
+                                                        Self::channel_status_qu(&mut self.iqdqs),
+                                                    )?;
+                                                }
                                             }
                                         }
-                                        while st2.last_comparisons.len() > 6 {
+                                        while st2.last_comparisons.len() > 12 {
                                             st2.last_comparisons.pop_front();
                                         }
                                     }
@@ -3994,19 +4028,15 @@ struct CaWriterValueState {
     series_status: SeriesId,
     last_accepted_ts: TsNano,
     last_accepted_val: Option<CaWriterValue>,
-    msp_split_status: MspSplit,
-    msp_split_data: MspSplit,
 }
 
 impl CaWriterValueState {
-    fn new(series_status: SeriesId, series_data: SeriesId) -> Self {
+    fn new(series_status: SeriesId, series_data: SeriesId, rt: RetentionTime) -> Self {
         Self {
             series_data,
             series_status,
             last_accepted_ts: TsNano::from_ns(0),
             last_accepted_val: None,
-            msp_split_status: MspSplit::new(1024 * 64, 1024 * 1024 * 10),
-            msp_split_data: MspSplit::new(1024 * 64, 1024 * 1024 * 10),
         }
     }
 }
