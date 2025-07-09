@@ -1,6 +1,5 @@
 mod enumfetch;
 
-use crate::ca::connset::CaConnSet;
 use crate::conf::ChannelConfig;
 use crate::metrics::status::StorageUsage;
 use crate::throttletrace::ThrottleTrace;
@@ -48,7 +47,6 @@ use scywriiq::AccountingRecv;
 use scywriiq::ChannelStatusItem;
 use scywriiq::ConnectionStatus;
 use scywriiq::ConnectionStatusItem;
-use scywriiq::MspItem;
 use scywriiq::QueryItem;
 use scywriiq::ShutdownReason;
 use serde::Serialize;
@@ -318,6 +316,27 @@ struct Monitoring2PassiveState {
     tsbeg: Instant,
     #[serde(with = "serde_Instant_elapsed_ms")]
     ts_silence_read_next: Instant,
+    manual_poll_on_quiet_after_sec: u16,
+}
+
+impl Monitoring2PassiveState {
+    fn new(tsnow: Instant, rng: &mut Xoshiro128PlusPlus) -> Self {
+        let mut ret = Self {
+            tsbeg: tsnow,
+            ts_silence_read_next: tsnow + CaConn::silence_read_next_ivl_rng(rng),
+            manual_poll_on_quiet_after_sec: 300,
+        };
+        ret.manual_poll_on_quiet_after_reset_next(rng);
+        ret
+    }
+
+    fn manual_poll_on_quiet_after(&self) -> Duration {
+        Duration::from_secs(self.manual_poll_on_quiet_after_sec as u64)
+    }
+
+    fn manual_poll_on_quiet_after_reset_next(&mut self, rng: &mut Xoshiro128PlusPlus) {
+        self.manual_poll_on_quiet_after_sec = 250 + 0x3f & rng.next_u32() as u16;
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -336,7 +355,6 @@ enum Monitoring2State {
 pub enum MonitorReadCmp {
     Equal,
     DiffTime,
-    DiffTimeValue,
     DiffValue,
 }
 
@@ -408,6 +426,7 @@ struct WritableState {
     writer: CaRtWriter,
     binwriter: BinWriter,
     reading: ReadingState,
+    manual_poll_on_quiet_after_sec: u16,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1089,7 +1108,19 @@ impl<'a> EventAddIngestRefobj<'a> {
             if let Some(binwriter) = self.binwriter.as_mut() {
                 binwriter.ingest(tsev, val_for_agg, self.iqdqs)?;
             }
-            self.mett.ts_msp_reput_onevent().add(wres.msp_rewrite() as u32);
+            self.mett.ts_msp_reput_onevent().add(wres.msp_rewrite() as _);
+            self.mett
+                .writer_ignore_rewind_time()
+                .add(wres.ignore_rewind_time() as _);
+            self.mett.writer_ignore_same_time().add(wres.ignore_same_time() as _);
+            self.mett.writer_ignore_same_value().add(wres.ignore_same_value() as _);
+            self.mett
+                .writer_ignore_monitor_not_min_quiet()
+                .add(wres.ignore_monitor_not_min_quiet() as _);
+            self.mett
+                .writer_ignore_poll_not_min_quiet()
+                .add(wres.ignore_poll_not_min_quiet() as _);
+            self.mett.writer_ignore_rate_cap().add(wres.ignore_rate_cap() as _);
         }
         if false {
             // TODO record stats on drop with the new filter
@@ -1823,6 +1854,7 @@ impl CaConn {
                             poll_ivl: ivl,
                             tick: PollTickState::Idle(PollTickStateIdle { next }),
                         }),
+                        manual_poll_on_quiet_after_sec: 300,
                     };
                     conf.state = ChannelState::Writable(created_state);
                     Ok(())
@@ -1861,6 +1893,7 @@ impl CaConn {
                             tsbeg: self.poll_tsnow,
                             subid,
                         }),
+                        manual_poll_on_quiet_after_sec: 300,
                     };
                     conf.state = ChannelState::Writable(created_state);
                     Ok(())
@@ -2222,10 +2255,7 @@ impl CaConn {
                         st.reading = ReadingState::Monitoring(MonitoringState {
                             tsbeg: tsnow,
                             subid: st2.subid,
-                            mon2state: Monitoring2State::Passive(Monitoring2PassiveState {
-                                tsbeg: tsnow,
-                                ts_silence_read_next: tsnow + Self::silence_read_next_ivl_rng(&mut self.rng),
-                            }),
+                            mon2state: Monitoring2State::Passive(Monitoring2PassiveState::new(tsnow, &mut self.rng)),
                             monitoring_event_last: Some(ev.clone()),
                             last_comparisons: VecDeque::new(),
                         });
@@ -2383,165 +2413,38 @@ impl CaConn {
                 Err(Error::FutLogic)
             }
         } else {
-            if let Some(cid) = self.read_ioids.get(&ioid) {
-                let (ch_s, ch_wrst, ch_conf) = if let Some(x) = self.channels.get_mut(cid) {
-                    (&mut x.state, &mut x.wrst, &x.conf)
-                } else {
-                    warn!("handle_read_notify_res can not find channel for  {:?}  {:?}", cid, ioid);
-                    return Ok(());
-                };
-                match ch_s {
-                    ChannelState::Writable(st) => {
-                        if st.channel.sid != sid_ev {
-                            // TODO count for metrics
-                            // warn!("mismatch in ReadNotifyRes {:?} {:?}", st.channel.sid, sid_ev);
-                        }
-                        let stnow = self.tmp_ts_poll;
-                        let crst = &mut st.channel;
-                        let stwin_ts = stnow.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() / 1;
-                        if crst.stwin_ts != stwin_ts {
-                            crst.stwin_ts = stwin_ts;
-                            crst.stwin_count = 0;
-                        }
-                        {
-                            crst.stwin_count += 1;
-                            crst.stwin_bytes += ev.payload_len;
-                        }
-                        match &mut st.reading {
-                            ReadingState::Polling(st2) => match &mut st2.tick {
-                                PollTickState::Idle(_) => {
-                                    self.mett.recv_read_notify_while_polling_idle().inc();
-                                }
-                                PollTickState::Wait(st3) => {
-                                    if self.read_ioids.remove(&st3.ioid).is_some() {
-                                        self.mett.ioid_read_done().inc();
-                                    } else {
-                                        self.mett.ioid_read_error_not_found().inc();
-                                    }
-                                    let dt = tsnow.saturating_duration_since(st3.since);
-                                    self.mett.caget_lat().push_dur_100us(dt);
-                                    let next = PollTickStateIdle::decide_next(st3.next_backup, st2.poll_ivl, tsnow);
-                                    if self.trace_channel_poll {
-                                        trace!("make next poll idle at {:?}   tsnow {:?}", next, tsnow);
-                                    }
-                                    st2.tick = PollTickState::Idle(PollTickStateIdle { next });
-                                    let mut robj = EventAddIngestRefobj::from_writable_state(
-                                        &self.opts,
-                                        &mut self.iqdqs,
-                                        st,
-                                        &mut self.mett,
-                                        &mut self.rng,
-                                    )
-                                    .and_channel_status_writer(ch_wrst)
-                                    .and_with_use_ioc_time(ch_conf.use_ioc_time());
-                                    robj.event_add_ingest(ev.payload_len, ev.value, tsnow, stnow, tscaproto)?;
-                                }
-                            },
-                            ReadingState::EnableMonitoring(_) => {
-                                self.mett.recv_read_notify_while_enabling_monitoring().inc();
+            if let Some(cid) = self.read_ioids.remove(&ioid) {
+                if let Some(x) = self.channels.get_mut(&cid) {
+                    let ch_s = &mut x.state;
+                    let ch_wrst = &mut x.wrst;
+                    let ch_conf = &x.conf;
+                    match ch_s {
+                        ChannelState::Writable(st) => {
+                            if st.channel.sid != sid_ev {
+                                self.mett.recv_read_notify_channel_sid_mismatch().inc();
                             }
-                            ReadingState::Monitoring(st2) => match &mut st2.mon2state {
-                                Monitoring2State::Passive(st3) => {
-                                    if self.read_ioids.remove(&ioid).is_some() {
-                                        self.mett.ioid_read_done().inc();
-                                        self.mett.recv_read_notify_state_passive_found_ioid().inc();
-                                    } else {
-                                        self.mett.ioid_read_error_not_found().inc();
-                                    }
-                                    st3.tsbeg = tsnow;
-                                }
-                                Monitoring2State::ReadPending(st3) => {
-                                    // We don't check again for `since` here. That's done in timeout checking.
-                                    // So we could be here a little beyond timeout but we don't care about that.
-                                    if ioid != st3.ioid {
-                                        // warn!("IOID mismatch ReadNotifyRes on Monitor Read Pending  {ioid:?}  {ioid2:?}");
-                                        self.mett.recv_read_notify_state_read_pending_bad_ioid().inc();
-                                    } else {
-                                        self.mett.recv_read_notify_state_read_pending().inc();
-                                    }
-                                    let read_expected = if let Some(_cid) = self.read_ioids.remove(&ioid) {
-                                        self.mett.ioid_read_done().inc();
-                                        true
-                                    } else {
-                                        self.mett.ioid_read_error_not_found().inc();
-                                        false
-                                    };
-                                    st2.mon2state = Monitoring2State::Passive(Monitoring2PassiveState {
-                                        tsbeg: tsnow,
-                                        ts_silence_read_next: tsnow + Self::silence_read_next_ivl_rng(&mut self.rng),
-                                    });
-                                    if read_expected {
-                                        self.mett.monitoring_read_expected().inc();
-                                        let item = ChannelStatusItem {
-                                            ts: self.tmp_ts_poll,
-                                            cssid: st.channel.cssid.clone(),
-                                            status: ChannelStatus::MonitoringReadResultExpected,
-                                        };
-                                        ch_wrst
-                                            .emit_channel_status_item(item, Self::channel_status_qu(&mut self.iqdqs))?;
-                                    } else {
-                                        self.mett.monitoring_read_unexpected().inc();
-                                        let item = ChannelStatusItem {
-                                            ts: self.tmp_ts_poll,
-                                            cssid: st.channel.cssid.clone(),
-                                            status: ChannelStatus::MonitoringReadResultUnexpected,
-                                        };
-                                        ch_wrst
-                                            .emit_channel_status_item(item, Self::channel_status_qu(&mut self.iqdqs))?;
-                                    }
-                                    // NOTE we do not update the last value in this ev handler.
-                                    {
-                                        if let Some(lst) = st2.monitoring_event_last.as_ref() {
-                                            // TODO compare with last monitoring value
-                                            if ev.value.meta == lst.value.meta {
-                                                st2.last_comparisons
-                                                    .push_back((UtcDateTime::now(), MonitorReadCmp::Equal));
-                                            } else {
-                                                self.mett.monitoring_read_diff_time().inc();
-                                                st2.last_comparisons
-                                                    .push_back((UtcDateTime::now(), MonitorReadCmp::DiffTime));
-                                                {
-                                                    let item = ChannelStatusItem {
-                                                        ts: self.tmp_ts_poll,
-                                                        cssid: st.channel.cssid.clone(),
-                                                        status: ChannelStatus::MonitoringReadDiffTime,
-                                                    };
-                                                    ch_wrst.emit_channel_status_item(
-                                                        item,
-                                                        Self::channel_status_qu(&mut self.iqdqs),
-                                                    )?;
-                                                }
-                                            }
-                                            if ev.value.data == lst.value.data {
-                                                st2.last_comparisons
-                                                    .push_back((UtcDateTime::now(), MonitorReadCmp::Equal));
-                                            } else {
-                                                self.mett.monitoring_read_diff_value().inc();
-                                                st2.last_comparisons
-                                                    .push_back((UtcDateTime::now(), MonitorReadCmp::DiffValue));
-                                                {
-                                                    let item = ChannelStatusItem {
-                                                        ts: self.tmp_ts_poll,
-                                                        cssid: st.channel.cssid.clone(),
-                                                        status: ChannelStatus::MonitoringReadDiffValue,
-                                                    };
-                                                    ch_wrst.emit_channel_status_item(
-                                                        item,
-                                                        Self::channel_status_qu(&mut self.iqdqs),
-                                                    )?;
-                                                }
-                                            }
+                            let stnow = self.tmp_ts_poll;
+                            let crst = &mut st.channel;
+                            let stwin_ts = stnow.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() / 1;
+                            if crst.stwin_ts != stwin_ts {
+                                crst.stwin_ts = stwin_ts;
+                                crst.stwin_count = 0;
+                            }
+                            {
+                                crst.stwin_count += 1;
+                                crst.stwin_bytes += ev.payload_len;
+                            }
+                            match &mut st.reading {
+                                ReadingState::Polling(st2) => match &mut st2.tick {
+                                    PollTickState::Wait(st3) => {
+                                        self.mett.recv_read_notify_poll_wait().inc();
+                                        let dt = tsnow.saturating_duration_since(st3.since);
+                                        self.mett.caget_lat().push_dur_100us(dt);
+                                        let next = PollTickStateIdle::decide_next(st3.next_backup, st2.poll_ivl, tsnow);
+                                        if self.trace_channel_poll {
+                                            trace!("make next poll idle at {:?}   tsnow {:?}", next, tsnow);
                                         }
-                                        while st2.last_comparisons.len() > 12 {
-                                            st2.last_comparisons.pop_front();
-                                        }
-                                    }
-                                    // TODO check ADEL to see if monitor should have fired.
-                                    // But there is still a small chance that the monitor will just received slightly later.
-                                    // More involved check would be to raise a flag, wait for the expected monitor for some
-                                    // timeout, and if we get nothing error out.
-                                    // TODO read-result-after-monitor-silence
-                                    if false {
+                                        st2.tick = PollTickState::Idle(PollTickStateIdle { next });
                                         let mut robj = EventAddIngestRefobj::from_writable_state(
                                             &self.opts,
                                             &mut self.iqdqs,
@@ -2552,24 +2455,149 @@ impl CaConn {
                                         .and_channel_status_writer(ch_wrst)
                                         .and_with_use_ioc_time(ch_conf.use_ioc_time());
                                         robj.event_add_ingest(ev.payload_len, ev.value, tsnow, stnow, tscaproto)?;
+                                        Ok(())
                                     }
+                                    PollTickState::Idle(_) => {
+                                        self.mett.recv_read_notify_poll_idle().inc();
+                                        Ok(())
+                                    }
+                                },
+                                ReadingState::EnableMonitoring(_) => {
+                                    self.mett.recv_read_notify_channel_transition().inc();
+                                    Ok(())
                                 }
-                            },
-                            ReadingState::StopMonitoringForPolling(..) => {
-                                error!("TODO  handle_read_notify_res  handle StopMonitoringForPolling");
+                                ReadingState::Monitoring(st2) => match &mut st2.mon2state {
+                                    Monitoring2State::Passive(st3) => {
+                                        self.mett.recv_read_notify_monitor_passive().inc();
+                                        st3.tsbeg = tsnow;
+                                        Ok(())
+                                    }
+                                    Monitoring2State::ReadPending(st3) => {
+                                        // We don't check again for `since` here. That's done in timeout checking.
+                                        // So we could be here a little beyond timeout but we don't care about that.
+                                        if ioid != st3.ioid {
+                                            // warn!("IOID mismatch ReadNotifyRes on Monitor Read Pending  {ioid:?}  {ioid2:?}");
+                                            self.mett.recv_read_notify_state_read_pending_bad_ioid().inc();
+                                            Ok(())
+                                        } else {
+                                            st2.mon2state = Monitoring2State::Passive(Monitoring2PassiveState::new(
+                                                tsnow,
+                                                &mut self.rng,
+                                            ));
+                                            {
+                                                self.mett.monitoring_read_expected().inc();
+                                                let item = ChannelStatusItem {
+                                                    ts: self.tmp_ts_poll,
+                                                    cssid: st.channel.cssid.clone(),
+                                                    status: ChannelStatus::MonitoringReadResultExpected,
+                                                };
+                                                ch_wrst.emit_channel_status_item(
+                                                    item,
+                                                    Self::channel_status_qu(&mut self.iqdqs),
+                                                )?;
+                                            }
+                                            // NOTE we do not update the last value in this ev handler.
+                                            {
+                                                if let Some(lst) = st2.monitoring_event_last.as_ref() {
+                                                    // TODO compare with last monitoring value
+                                                    if ev.value.meta == lst.value.meta {
+                                                        st2.last_comparisons
+                                                            .push_back((UtcDateTime::now(), MonitorReadCmp::Equal));
+                                                    } else {
+                                                        self.mett.monitoring_read_diff_time().inc();
+                                                        st2.last_comparisons
+                                                            .push_back((UtcDateTime::now(), MonitorReadCmp::DiffTime));
+                                                        {
+                                                            let item = ChannelStatusItem {
+                                                                ts: self.tmp_ts_poll,
+                                                                cssid: st.channel.cssid.clone(),
+                                                                status: ChannelStatus::MonitoringReadDiffTime,
+                                                            };
+                                                            ch_wrst.emit_channel_status_item(
+                                                                item,
+                                                                Self::channel_status_qu(&mut self.iqdqs),
+                                                            )?;
+                                                        }
+                                                    }
+                                                    if ev.value.data == lst.value.data {
+                                                        st2.last_comparisons
+                                                            .push_back((UtcDateTime::now(), MonitorReadCmp::Equal));
+                                                    } else {
+                                                        self.mett.monitoring_read_diff_value().inc();
+                                                        st2.last_comparisons
+                                                            .push_back((UtcDateTime::now(), MonitorReadCmp::DiffValue));
+                                                        {
+                                                            let item = ChannelStatusItem {
+                                                                ts: self.tmp_ts_poll,
+                                                                cssid: st.channel.cssid.clone(),
+                                                                status: ChannelStatus::MonitoringReadDiffValue,
+                                                            };
+                                                            ch_wrst.emit_channel_status_item(
+                                                                item,
+                                                                Self::channel_status_qu(&mut self.iqdqs),
+                                                            )?;
+                                                        }
+                                                    }
+                                                }
+                                                while st2.last_comparisons.len() > 12 {
+                                                    st2.last_comparisons.pop_front();
+                                                }
+                                            }
+                                            // TODO check ADEL to see if monitor should have fired.
+                                            // But there is still a small chance that the monitor will just received slightly later.
+                                            // More involved check would be to raise a flag, wait for the expected monitor for some
+                                            // timeout, and if we get nothing error out.
+                                            // TODO read-result-after-monitor-silence
+                                            if false {
+                                                let mut robj = EventAddIngestRefobj::from_writable_state(
+                                                    &self.opts,
+                                                    &mut self.iqdqs,
+                                                    st,
+                                                    &mut self.mett,
+                                                    &mut self.rng,
+                                                )
+                                                .and_channel_status_writer(ch_wrst)
+                                                .and_with_use_ioc_time(ch_conf.use_ioc_time());
+                                                robj.event_add_ingest(
+                                                    ev.payload_len,
+                                                    ev.value,
+                                                    tsnow,
+                                                    stnow,
+                                                    tscaproto,
+                                                )?;
+                                            }
+                                            Ok(())
+                                        }
+                                    }
+                                },
+                                ReadingState::StopMonitoringForPolling(..) => {
+                                    self.mett.recv_read_notify_channel_transition().inc();
+                                    Ok(())
+                                }
                             }
                         }
+                        _ => {
+                            self.mett.recv_read_notify_channel_unexpected_state().inc();
+                            Ok(())
+                        }
                     }
-                    _ => {
-                        // TODO count instead of print
-                        error!("unexpected state: ReadNotifyRes while having {:?}", ch_s);
-                    }
+                } else {
+                    self.mett.recv_read_notify_channel_not_found().inc();
+                    Ok(())
                 }
             } else {
-                // warn!("unknown {ioid:?}");
-                self.mett.unknown_ioid().inc();
+                self.mett.recv_read_notify_ioid_not_found().inc();
+                // {
+                //     self.mett.monitoring_read_unexpected().inc();
+                //     let item = ChannelStatusItem {
+                //         ts: self.tmp_ts_poll,
+                //         cssid: st.channel.cssid.clone(),
+                //         status: ChannelStatus::MonitoringReadResultUnexpected,
+                //     };
+                //     ch_wrst.emit_channel_status_item(item, Self::channel_status_qu(&mut self.iqdqs))?;
+                // }
+                Ok(())
             }
-            Ok(())
         }
     }
 
@@ -2688,9 +2716,10 @@ impl CaConn {
                 ChannelState::MakingSeriesWriter(_) => {}
                 ChannelState::Writable(st2) => match &mut st2.reading {
                     ReadingState::EnableMonitoring(_) => {}
-                    ReadingState::Monitoring(st3) => match &st3.mon2state {
+                    ReadingState::Monitoring(st3) => match &mut st3.mon2state {
                         Monitoring2State::Passive(st4) => {
-                            if st4.tsbeg + conf.conf.manual_poll_on_quiet_after() < tsnow {
+                            if st4.tsbeg + st4.manual_poll_on_quiet_after() < tsnow {
+                                st4.manual_poll_on_quiet_after_reset_next(&mut self.rng);
                                 trace_monitor_stale!("check_channels_state_poll  Monitoring2State::Passive  timeout");
                                 self.mett.monitor_stale_read_begin().inc();
                                 // TODO encapsulate and unify with Polling handler
@@ -2812,7 +2841,7 @@ impl CaConn {
                         PollTickState::Wait(st4) => {
                             if st4.since + POLL_READ_TIMEOUT <= tsnow {
                                 if self.read_ioids.remove(&st4.ioid).is_some() {
-                                    self.mett.ioid_read_timeout().inc();
+                                    self.mett.polling_read_timeout().inc();
                                 }
                                 self.mett.caget_timeout().inc();
                                 let next = PollTickStateIdle::decide_next(st4.next_backup, st3.poll_ivl, tsnow);
@@ -2820,6 +2849,15 @@ impl CaConn {
                                     trace!("make poll idle after poll timeout  {:?}", next);
                                 }
                                 st3.tick = PollTickState::Idle(PollTickStateIdle { next });
+                                {
+                                    let item = ChannelStatusItem {
+                                        ts: self.tmp_ts_poll,
+                                        cssid: st2.channel.cssid.clone(),
+                                        status: ChannelStatus::PollingReadTimeout,
+                                    };
+                                    conf.wrst
+                                        .emit_channel_status_item(item, Self::channel_status_qu(&mut self.iqdqs))?;
+                                }
                             }
                         }
                     },
@@ -2898,7 +2936,9 @@ impl CaConn {
                             // TODO should unify.
                         }
                     }
-                    if st2.channel.ts_activity_last + conf.conf.expect_activity_within() < tsnow {
+                    // TODO sync with Monitoring2PassiveState::manual_poll_on_quiet_after plus margin.
+                    let timeout = Duration::from_millis(1000 * 800);
+                    if st2.channel.ts_activity_last + conf.conf.expect_activity_within(timeout) < tsnow {
                         not_alive_count += 1;
                     } else {
                         alive_count += 1;
@@ -2907,10 +2947,9 @@ impl CaConn {
                 _ => {}
             }
         }
-        // TODO STATS
-        // self.stats.channel_all_count.__set(self.channels.len() as _);
-        // self.stats.channel_alive_count.__set(alive_count as _);
-        // self.stats.channel_not_alive_count.__set(not_alive_count as _);
+        self.mett.channel_all_count().set(self.channels.len() as _);
+        self.mett.channel_alive_count().set(alive_count as _);
+        self.mett.channel_not_alive_count().set(not_alive_count as _);
         Ok(())
     }
 

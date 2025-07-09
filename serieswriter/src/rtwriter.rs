@@ -83,6 +83,32 @@ impl WriteRes {
     pub fn msp_rewrite(&self) -> u8 {
         self.st.msp_rewrite + self.mt.msp_rewrite + self.lt.msp_rewrite
     }
+
+    pub fn ignore_rewind_time(&self) -> u8 {
+        self.st.ignore_rewind_time + self.mt.ignore_rewind_time + self.lt.ignore_rewind_time
+    }
+
+    pub fn ignore_same_time(&self) -> u8 {
+        self.st.ignore_same_time + self.mt.ignore_same_time + self.lt.ignore_same_time
+    }
+
+    pub fn ignore_same_value(&self) -> u8 {
+        self.st.ignore_same_value + self.mt.ignore_same_value + self.lt.ignore_same_value
+    }
+
+    pub fn ignore_monitor_not_min_quiet(&self) -> u8 {
+        self.st.ignore_monitor_not_min_quiet
+            + self.mt.ignore_monitor_not_min_quiet
+            + self.lt.ignore_monitor_not_min_quiet
+    }
+
+    pub fn ignore_poll_not_min_quiet(&self) -> u8 {
+        self.st.ignore_poll_not_min_quiet + self.mt.ignore_poll_not_min_quiet + self.lt.ignore_poll_not_min_quiet
+    }
+
+    pub fn ignore_rate_cap(&self) -> u8 {
+        self.st.ignore_rate_cap + self.mt.ignore_rate_cap + self.lt.ignore_rate_cap
+    }
 }
 
 #[derive(Debug)]
@@ -90,6 +116,56 @@ pub struct WriteRtRes {
     pub accept: bool,
     pub bytes: u32,
     pub msp_rewrite: u8,
+    pub ignore_rewind_time: u8,
+    pub ignore_same_time: u8,
+    pub ignore_same_value: u8,
+    pub ignore_monitor_not_min_quiet: u8,
+    pub ignore_poll_not_min_quiet: u8,
+    pub ignore_rate_cap: u8,
+}
+
+impl WriteRtRes {
+    fn ignore_rewind_time() -> Self {
+        Self {
+            accept: false,
+            bytes: 0,
+            msp_rewrite: 0,
+            ignore_rewind_time: 1,
+            ignore_same_time: 0,
+            ignore_same_value: 0,
+            ignore_monitor_not_min_quiet: 0,
+            ignore_poll_not_min_quiet: 0,
+            ignore_rate_cap: 0,
+        }
+    }
+
+    fn ignore_same_time() -> Self {
+        Self {
+            accept: false,
+            bytes: 0,
+            msp_rewrite: 0,
+            ignore_rewind_time: 0,
+            ignore_same_time: 1,
+            ignore_same_value: 0,
+            ignore_monitor_not_min_quiet: 0,
+            ignore_poll_not_min_quiet: 0,
+            ignore_rate_cap: 0,
+        }
+    }
+
+    fn ignore_same_value() -> Self {
+        Self {
+            accept: false,
+            bytes: 0,
+            msp_rewrite: 0,
+            ignore_rewind_time: 0,
+            ignore_same_time: 0,
+            ignore_same_value: 1,
+            ignore_monitor_not_min_quiet: 0,
+            ignore_poll_not_min_quiet: 0,
+            ignore_rate_cap: 0,
+        }
+    }
 }
 
 impl Default for WriteRtRes {
@@ -98,6 +174,12 @@ impl Default for WriteRtRes {
             accept: false,
             bytes: 0,
             msp_rewrite: 0,
+            ignore_rewind_time: 0,
+            ignore_same_time: 0,
+            ignore_same_value: 0,
+            ignore_monitor_not_min_quiet: 0,
+            ignore_poll_not_min_quiet: 0,
+            ignore_rate_cap: 0,
         }
     }
 }
@@ -229,14 +311,14 @@ where
                 tsev,
                 tsl
             );
-            res_lt = WriteRtRes::default();
-            res_mt = WriteRtRes::default();
-            res_st = WriteRtRes::default();
+            res_lt = WriteRtRes::ignore_rewind_time();
+            res_mt = WriteRtRes::ignore_rewind_time();
+            res_st = WriteRtRes::ignore_rewind_time();
         } else if tsev == tsl {
             trace_rt_decision!(det, "{}  ignore, because same time  {:?}  {:?}", self.series, tsev, tsl);
-            res_lt = WriteRtRes::default();
-            res_mt = WriteRtRes::default();
-            res_st = WriteRtRes::default();
+            res_lt = WriteRtRes::ignore_same_time();
+            res_mt = WriteRtRes::ignore_same_time();
+            res_st = WriteRtRes::ignore_same_time();
         } else if self
             .last_insert_val
             .as_ref()
@@ -245,9 +327,9 @@ where
             == false
         {
             trace_rt_decision!(det, "{}  ignore, because value did not change", self.series);
-            res_lt = WriteRtRes::default();
-            res_mt = WriteRtRes::default();
-            res_st = WriteRtRes::default();
+            res_lt = WriteRtRes::ignore_same_value();
+            res_mt = WriteRtRes::ignore_same_value();
+            res_st = WriteRtRes::ignore_same_value();
         } else {
             res_lt = Self::write_inner(&mut self.state_lt, item.clone(), ts_net, tsev, &mut iqdqs.lt_rf3_qu)?;
             res_mt = Self::write_inner(&mut self.state_mt, item.clone(), ts_net, tsev, &mut iqdqs.mt_rf3_qu)?;
@@ -281,6 +363,12 @@ where
             accept: x.accept,
             bytes: x.bytes,
             msp_rewrite: x.msp_rewrite,
+            ignore_rewind_time: 0,
+            ignore_same_time: 0,
+            ignore_same_value: 0,
+            ignore_monitor_not_min_quiet: x.ignore_monitor_not_min_quiet,
+            ignore_poll_not_min_quiet: x.ignore_poll_not_min_quiet,
+            ignore_rate_cap: x.ignore_rate_cap,
         };
         Ok(ret)
     }

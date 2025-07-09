@@ -28,6 +28,9 @@ pub struct WriteRes {
     pub accept: bool,
     pub bytes: u32,
     pub msp_rewrite: u8,
+    pub ignore_monitor_not_min_quiet: u8,
+    pub ignore_poll_not_min_quiet: u8,
+    pub ignore_rate_cap: u8,
 }
 
 #[derive(Debug)]
@@ -96,38 +99,31 @@ where
         let min_quiet = 1000 * self.min_quiet.as_secs() + self.min_quiet.subsec_millis() as u64;
         let tsl = self.last_insert_ts.clone();
         let ts = tsev;
-        if false {
-            trace_rt_decision!(
-                dtd,
-                "{}  {}  min_quiet {:?}  ts1 {:?}  ts2 {:?}  item {:?}",
-                dbgname,
-                sid,
-                min_quiet,
-                ts.ms(),
-                tsl.ms(),
-                item
-            );
-        }
+        let mut ignore_monitor_not_min_quiet: u8 = 0;
+        let mut ignore_poll_not_min_quiet: u8 = 0;
+        let mut ignore_rate_cap: u8 = 0;
         let do_write = {
             if !self.is_polled && ts.ms() < tsl.ms() + min_quiet {
                 trace_rt_decision!(
                     dtd,
-                    "{}  {}  ignore, because not min quiet  {}  {}",
+                    "{}  {}  ignore, because monitor not min quiet  {}  {}",
                     dbgname,
                     sid,
                     ts,
                     tsl
                 );
+                ignore_monitor_not_min_quiet += 1;
                 false
             } else if self.is_polled && ts.ms() + 800 < tsl.ms() + min_quiet {
                 trace_rt_decision!(
                     dtd,
-                    "{}  {}  ignore, because not is-polled min quiet  {}  {}",
+                    "{}  {}  ignore, because poll not min quiet  {}  {}",
                     dbgname,
                     sid,
                     ts,
                     tsl
                 );
+                ignore_poll_not_min_quiet += 1;
                 false
             } else if ts < tsl.add_dt_nano(DtNano::from_ms(1)) {
                 trace_rt_decision!(
@@ -138,6 +134,7 @@ where
                     ts,
                     tsl
                 );
+                ignore_rate_cap += 1;
                 false
             } else {
                 trace_rt_decision!(dtd, "{}  {}  accept  {}  {}", dbgname, sid, ts, tsl);
@@ -151,6 +148,9 @@ where
                 accept: true,
                 bytes: res.bytes,
                 msp_rewrite: res.msp_rewrite,
+                ignore_monitor_not_min_quiet,
+                ignore_poll_not_min_quiet,
+                ignore_rate_cap,
             };
             Ok(ret)
         } else {
@@ -158,6 +158,9 @@ where
                 accept: false,
                 bytes: 0,
                 msp_rewrite: 0,
+                ignore_monitor_not_min_quiet,
+                ignore_poll_not_min_quiet,
+                ignore_rate_cap,
             };
             Ok(ret)
         }

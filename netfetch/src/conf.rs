@@ -816,37 +816,6 @@ impl ChannelConfig {
         }
     }
 
-    /// Only used when in monitoring mode. If we do not see activity for this Duration then
-    /// we issue a manual read to see if the channel is alive.
-    pub fn manual_poll_on_quiet_after(&self) -> Duration {
-        Duration::from_secs(300)
-    }
-
-    pub fn expect_activity_within(&self) -> Duration {
-        let dur = if self.is_polled() {
-            // It would be anyway invalid to be polled and specify a monitor record policy.
-            match self.arch.short_term {
-                Some(ChannelReadConfig::Poll(x)) => x,
-                Some(ChannelReadConfig::Monitor) => self.manual_poll_on_quiet_after(),
-                None => match self.arch.medium_term {
-                    Some(ChannelReadConfig::Poll(x)) => x,
-                    Some(ChannelReadConfig::Monitor) => self.manual_poll_on_quiet_after(),
-                    None => match self.arch.long_term {
-                        Some(ChannelReadConfig::Poll(x)) => x,
-                        Some(ChannelReadConfig::Monitor) => self.manual_poll_on_quiet_after(),
-                        None => {
-                            // This is an invalid configuration, so just a fallback
-                            self.manual_poll_on_quiet_after()
-                        }
-                    },
-                },
-            }
-        } else {
-            self.manual_poll_on_quiet_after()
-        };
-        dur + Duration::from_millis(1000 * 10)
-    }
-
     pub fn min_quiets(&self) -> MinQuiets {
         MinQuiets {
             st: match self.arch.short_term {
@@ -881,6 +850,33 @@ impl ChannelConfig {
             arch: IngestConfigArchiving::dummy(),
             config_file_basename: String::new(),
         }
+    }
+
+    pub fn expect_activity_within(&self, manual_poll_on_quiet_after: Duration) -> Duration {
+        use crate::conf::ChannelReadConfig;
+        let conf = self;
+        let dur = if conf.is_polled() {
+            // It would be anyway invalid to be polled and specify a monitor record policy.
+            match conf.arch.short_term {
+                Some(ChannelReadConfig::Poll(x)) => x,
+                Some(ChannelReadConfig::Monitor) => manual_poll_on_quiet_after,
+                None => match conf.arch.medium_term {
+                    Some(ChannelReadConfig::Poll(x)) => x,
+                    Some(ChannelReadConfig::Monitor) => manual_poll_on_quiet_after,
+                    None => match conf.arch.long_term {
+                        Some(ChannelReadConfig::Poll(x)) => x,
+                        Some(ChannelReadConfig::Monitor) => manual_poll_on_quiet_after,
+                        None => {
+                            // This is an invalid configuration, so just a fallback
+                            manual_poll_on_quiet_after
+                        }
+                    },
+                },
+            }
+        } else {
+            manual_poll_on_quiet_after
+        };
+        dur + Duration::from_millis(1000 * 10)
     }
 }
 
