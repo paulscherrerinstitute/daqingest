@@ -70,6 +70,20 @@ impl CaIngestOpts {
         &self.postgresql
     }
 
+    pub fn scylla_insert_set_conf(&self, n: usize) -> Option<ScyllaInsertsetConf> {
+        if n == 0 {
+            let ret = ScyllaInsertsetConf {
+                st_rf1: self.scylla_config_st_rf1(),
+                st_rf3: self.scylla_config_st(),
+                mt_rf3: self.scylla_config_mt(),
+                lt_rf3: self.scylla_config_lt(),
+            };
+            Some(ret)
+        } else {
+            None
+        }
+    }
+
     pub fn scylla_config_st(&self) -> ScyllaIngestConfig {
         let d = &self.scylla;
         let c = &self.scylla_st;
@@ -139,7 +153,7 @@ impl CaIngestOpts {
     }
 
     pub fn insert_item_queue_cap(&self) -> usize {
-        self.insert_item_queue_cap.unwrap_or(1000 * 1000) * 2
+        self.insert_item_queue_cap.unwrap_or(1000 * 100)
     }
 
     pub fn store_workers_rate(&self) -> u64 {
@@ -264,6 +278,61 @@ scylla_lt:
   hosts:
     - node3:19042
     - node4:19042
+"###;
+    let res: Result<CaIngestOpts, _> = serde_yaml::from_slice(conf.as_bytes());
+    let conf = res.unwrap();
+    assert_eq!(conf.is_valid(), true);
+    assert_eq!(conf.channels, Some(PathBuf::from("/some/path/file.txt")));
+    assert_eq!(&conf.api_bind, "0.0.0.0:3011");
+    assert_eq!(conf.search.get(0), Some(&"172.26.0.255".to_string()));
+    assert_eq!(conf.scylla_config_st().hosts().get(1), Some(&"node2:19042".to_string()));
+    assert_eq!(conf.scylla_config_lt().hosts().get(1), Some(&"node4:19042".to_string()));
+    assert_eq!(conf.timeout, Some(Duration::from_millis(1000 * (60 * 10 + 3) + 45)));
+}
+
+#[test]
+fn parse_config_with_scylla_double_ingest() {
+    let conf = r###"
+backend: test_backend
+timeout: 10m 3s 45ms
+api_bind: "0.0.0.0:3011"
+channels: /some/path/file.txt
+search:
+- 172.26.0.255
+- 172.26.2.255
+postgresql:
+  host: host.example.com
+  port: 5432
+  user: USER
+  pass: PASS
+  name: NAME
+scylla:
+  hosts:
+    - node1:19042
+    - node2:19042
+scylla_st:
+  keyspace: ks_st
+scylla_mt:
+  keyspace: ks_mt
+scylla_st_rf1:
+  keyspace: ks_st_rf1
+scylla_lt:
+  keyspace: ks_lt
+  hosts:
+  - node3:19042
+  - node4:19042
+scylla_2nd:
+  scylla:
+    hosts:
+    - node1:19042
+  scylla_st:
+    keyspace: ks_2nd_st
+  scylla_mt:
+    keyspace: ks_2nd_mt
+  scylla_lt:
+    keyspace: ks_2nd_lt
+  scylla_st_rf1:
+    keyspace: ks_2nd_st_rf1
 "###;
     let res: Result<CaIngestOpts, _> = serde_yaml::from_slice(conf.as_bytes());
     let conf = res.unwrap();
@@ -888,5 +957,30 @@ pub struct ChannelConfigForStatesApi {
 impl From<ChannelConfig> for ChannelConfigForStatesApi {
     fn from(value: ChannelConfig) -> Self {
         Self { arch: value.arch }
+    }
+}
+
+pub struct ScyllaInsertsetConf {
+    st_rf1: ScyllaIngestConfig,
+    st_rf3: ScyllaIngestConfig,
+    mt_rf3: ScyllaIngestConfig,
+    lt_rf3: ScyllaIngestConfig,
+}
+
+impl ScyllaInsertsetConf {
+    pub fn st_rf1(&self) -> &ScyllaIngestConfig {
+        &self.st_rf1
+    }
+
+    pub fn st_rf3(&self) -> &ScyllaIngestConfig {
+        &self.st_rf3
+    }
+
+    pub fn mt_rf3(&self) -> &ScyllaIngestConfig {
+        &self.mt_rf3
+    }
+
+    pub fn lt_rf3(&self) -> &ScyllaIngestConfig {
+        &self.lt_rf3
     }
 }

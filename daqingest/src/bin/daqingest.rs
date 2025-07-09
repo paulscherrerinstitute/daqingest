@@ -160,6 +160,8 @@ async fn main_run_inner(opts: DaqIngestOpts) -> Result<(), Error> {
 }
 
 async fn scylla_schema_check(opts: CaIngestOpts, do_change: bool) -> Result<(), Error> {
+    todo!("scylla_schema_check config");
+    let scy_confs = opts.scylla_insert_set_conf(0);
     let opstr = if do_change { "change" } else { "check" };
     info!("start scylla schema {}", opstr);
     info!("{:?}", opts.scylla_config_st());

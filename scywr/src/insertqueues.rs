@@ -4,10 +4,10 @@ use crate::iteminsertqueue::QueryItem;
 use crate::senderpolling::SenderPolling;
 use async_channel::Receiver;
 use async_channel::Sender;
-use core::fmt;
 use netpod::ttl::RetentionTime;
 use pin_project::pin_project;
 use std::collections::VecDeque;
+use std::fmt;
 use std::pin::Pin;
 
 autoerr::create_error_v1!(
@@ -149,6 +149,65 @@ pub struct InsertQueuesRx {
     pub mt_rf3_rx: Receiver<VecDeque<QueryItem>>,
     pub lt_rf3_rx: Receiver<VecDeque<QueryItem>>,
     pub lt_rf3_lat5_rx: Receiver<VecDeque<QueryItem>>,
+}
+
+impl InsertQueuesRx {
+    pub fn clone_2(self) -> (Self, Self) {
+        async fn feed(
+            rx: Receiver<VecDeque<QueryItem>>,
+            tx1: Sender<VecDeque<QueryItem>>,
+            tx2: Sender<VecDeque<QueryItem>>,
+        ) {
+            loop {
+                match rx.recv().await {
+                    Ok(item1) => {
+                        let item2 = item1.clone();
+                        match tx1.send(item1).await {
+                            Ok(()) => {}
+                            Err(_) => {
+                                break;
+                            }
+                        }
+                        match tx2.send(item2).await {
+                            Ok(()) => {}
+                            Err(_) => {
+                                break;
+                            }
+                        }
+                    }
+                    Err(_) => {
+                        break;
+                    }
+                }
+            }
+        }
+        fn dupl(rx: Receiver<VecDeque<QueryItem>>) -> (Receiver<VecDeque<QueryItem>>, Receiver<VecDeque<QueryItem>>) {
+            let (tx1, rx1) = async_channel::bounded(128);
+            let (tx2, rx2) = async_channel::bounded(128);
+            taskrun::tokio::spawn(feed(rx, tx1, tx2));
+            (rx1, rx2)
+        }
+        let st_rf1_rx = dupl(self.st_rf1_rx);
+        let st_rf3_rx = dupl(self.st_rf3_rx);
+        let mt_rf3_rx = dupl(self.mt_rf3_rx);
+        let lt_rf3_rx = dupl(self.lt_rf3_rx);
+        let lt_rf3_lat5_rx = dupl(self.lt_rf3_lat5_rx);
+        let ret1 = InsertQueuesRx {
+            st_rf1_rx: st_rf1_rx.0,
+            st_rf3_rx: st_rf3_rx.0,
+            mt_rf3_rx: mt_rf3_rx.0,
+            lt_rf3_rx: lt_rf3_rx.0,
+            lt_rf3_lat5_rx: lt_rf3_lat5_rx.0,
+        };
+        let ret2 = InsertQueuesRx {
+            st_rf1_rx: st_rf1_rx.1,
+            st_rf3_rx: st_rf3_rx.1,
+            mt_rf3_rx: mt_rf3_rx.1,
+            lt_rf3_rx: lt_rf3_rx.1,
+            lt_rf3_lat5_rx: lt_rf3_lat5_rx.1,
+        };
+        (ret1, ret2)
+    }
 }
 
 pub struct InsertDeques {
@@ -328,5 +387,25 @@ impl<'a> fmt::Display for InsertSenderPollingSummary<'a> {
             obj.lt_rf3_lat5_sp.is_idle(),
             obj.lt_rf3_lat5_sp.len(),
         )
+    }
+}
+
+pub struct InsertQueuesTxMetrics {
+    pub st_rf1_len: usize,
+    pub st_rf3_len: usize,
+    pub mt_rf3_len: usize,
+    pub lt_rf3_len: usize,
+    pub lt_rf3_lat5_len: usize,
+}
+
+impl From<&InsertQueuesTx> for InsertQueuesTxMetrics {
+    fn from(value: &InsertQueuesTx) -> Self {
+        Self {
+            st_rf1_len: value.st_rf1_tx.len(),
+            st_rf3_len: value.st_rf3_tx.len(),
+            mt_rf3_len: value.mt_rf3_tx.len(),
+            lt_rf3_len: value.lt_rf3_tx.len(),
+            lt_rf3_lat5_len: value.lt_rf3_lat5_tx.len(),
+        }
     }
 }
