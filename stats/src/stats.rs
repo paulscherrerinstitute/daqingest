@@ -1,5 +1,6 @@
 pub mod mett;
 
+pub use mettrics;
 pub use rand_xoshiro;
 
 use std::time::Duration;

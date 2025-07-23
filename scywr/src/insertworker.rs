@@ -31,19 +31,19 @@ use std::time::Instant;
 use taskrun::tokio;
 use tokio::task::JoinHandle;
 
-macro_rules! error { ($($arg:expr),*) => ( if true { log::error!($($arg),*); } ); }
+macro_rules! error { ($($arg:tt)*) => ( if true { log::error!($($arg)*); } ); }
 
-macro_rules! warn { ($($arg:expr),*) => ( if true { log::warn!($($arg),*); } ); }
+macro_rules! warn { ($($arg:tt)*) => ( if true { log::warn!($($arg)*); } ); }
 
-macro_rules! trace2 { ($($arg:expr),*) => ( if false { log::trace!($($arg),*); } ); }
+macro_rules! trace2 { ($($arg:tt)*) => ( if false { log::trace!($($arg)*); } ); }
 
-macro_rules! trace_transform { ($($arg:expr),*) => ( if false { log::trace!($($arg),*); } ); }
+macro_rules! trace_transform { ($($arg:tt)*) => ( if false { log::trace!($($arg)*); } ); }
 
-macro_rules! trace_inspect { ($($arg:expr),*) => ( if false { log::trace!($($arg),*); } ); }
+macro_rules! trace_inspect { ($($arg:tt)*) => ( if false { log::trace!($($arg)*); } ); }
 
-macro_rules! trace_item_execute { ($($arg:expr),*) => ( if false { log::trace!($($arg),*); } ); }
+macro_rules! trace_item_execute { ($($arg:tt)*) => ( if false { log::trace!($($arg)*); } ); }
 
-macro_rules! debug_setup { ($($arg:expr),*) => ( if false { log::debug!($($arg),*); } ); }
+macro_rules! debug_setup { ($($arg:tt)*) => ( if false { log::debug!($($arg)*); } ); }
 
 autoerr::create_error_v1!(
     name(Error, "ScyllaInsertWorker"),
@@ -169,8 +169,9 @@ struct FutTrackDt<F> {
     ts1: Instant,
     ts2: Instant,
     ts_net: Instant,
-    poll1: bool,
+    npoll: u16,
     fut: F,
+    jobkind: FutJobKind,
 }
 
 impl FutTrackDt<InsertFut> {
@@ -180,8 +181,9 @@ impl FutTrackDt<InsertFut> {
             ts1: tsnow,
             ts2: tsnow,
             ts_net: job.ts_net,
-            poll1: false,
+            npoll: 0,
             fut: job.fut,
+            jobkind: job.jobkind,
         }
     }
 }
@@ -190,16 +192,16 @@ impl<F> Future for FutTrackDt<F>
 where
     F: Future + Unpin,
 {
-    type Output = (Instant, Instant, Instant, F::Output);
+    type Output = (Instant, Instant, Instant, F::Output, FutJobKind);
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
         use Poll::*;
-        if self.poll1 == false {
-            self.poll1 = true;
+        if self.npoll == 0 {
             self.ts2 = Instant::now();
         }
+        self.npoll = self.npoll.saturating_add(1);
         match self.as_mut().fut.poll_unpin(cx) {
-            Ready(x) => Ready((self.ts_net, self.ts1, self.ts2, x)),
+            Ready(x) => Ready((self.ts_net, self.ts1, self.ts2, x, self.jobkind.clone())),
             Pending => Pending,
         }
     }
@@ -236,9 +238,29 @@ async fn worker_streamed(
             .buffer_unordered(concurrency);
         let mut stream = Box::pin(stream);
         debug_setup!("waiting for item");
-        while let Some((ts_net, ts1, ts2, item)) = stream.next().await {
+        while let Some((ts_net, ts1, ts2, item, jobkind)) = stream.next().await {
             trace_item_execute!("see item");
             let tsnow = Instant::now();
+            match jobkind {
+                FutJobKind::SeriesData => {
+                    mett.jobtrans().SeriesData().inc();
+                }
+                FutJobKind::SeriesMsp => {
+                    mett.jobtrans().SeriesMsp().inc();
+                }
+                FutJobKind::TimeBinSimpleF32V02 => {
+                    mett.jobtrans().TimeBinSimpleF32V02().inc();
+                }
+                FutJobKind::BinWriteIndexV04 => {
+                    mett.jobtrans().BinWriteIndexV04().inc();
+                }
+                FutJobKind::Accounting => {
+                    mett.jobtrans().Accounting().inc();
+                }
+                FutJobKind::AccountingRecv => {
+                    mett.jobtrans().AccountingRecv().inc();
+                }
+            }
             match item {
                 Ok(_) => {
                     mett.job_ok().inc();
@@ -282,9 +304,20 @@ async fn worker_streamed(
     Ok(())
 }
 
+#[derive(Debug, Clone)]
+enum FutJobKind {
+    SeriesData,
+    SeriesMsp,
+    TimeBinSimpleF32V02,
+    BinWriteIndexV04,
+    Accounting,
+    AccountingRecv,
+}
+
 struct FutJob {
     fut: InsertFut,
     ts_net: Instant,
+    jobkind: FutJobKind,
 }
 
 fn transform_to_db_futures<S>(
@@ -296,11 +329,7 @@ where
     S: Stream<Item = VecDeque<QueryItem>>,
 {
     trace_transform!("transform_to_db_futures  begin");
-    // TODO possible without box?
-    // let item_inp = Box::pin(item_inp);
     item_inp.map(move |batch| {
-        // TODO
-        // stats.item_recv.inc();
         trace_transform!("transform_to_db_futures  have batch  len {}", batch.len());
         let tsnow = Instant::now();
         let mut res = Vec::with_capacity(32);
@@ -400,6 +429,7 @@ fn prepare_msp_insert_futs(item: MspItem, data_store: &Arc<DataStore>) -> SmallV
     let fut = FutJob {
         fut,
         ts_net: item.ts_net(),
+        jobkind: FutJobKind::SeriesMsp,
     };
     let futs = smallvec![fut];
     futs
@@ -412,6 +442,7 @@ fn prepare_query_insert_futs(item: InsertItem, data_store: &Arc<DataStore>) -> S
     let fut = FutJob {
         fut,
         ts_net: item_ts_net,
+        jobkind: FutJobKind::SeriesData,
     };
     let futs = smallvec![fut];
     futs
@@ -439,7 +470,11 @@ fn prepare_timebin_v02_insert_futs(
         data_store.qu_insert_binned_scalar_f32_v02.clone(),
         params,
     );
-    let fut = FutJob { fut, ts_net: tsnow };
+    let fut = FutJob {
+        fut,
+        ts_net: tsnow,
+        jobkind: FutJobKind::TimeBinSimpleF32V02,
+    };
     let futs = smallvec![fut];
 
     // TODO match on the query result:
@@ -467,7 +502,11 @@ fn prepare_bin_write_index_v04_insert_futs(
         data_store.qu_insert_bin_write_index_v04.clone(),
         params,
     );
-    let fut = FutJob { fut, ts_net: tsnow };
+    let fut = FutJob {
+        fut,
+        ts_net: tsnow,
+        jobkind: FutJobKind::BinWriteIndexV04,
+    };
     let futs = smallvec![fut];
 
     // TODO match on the query result:
@@ -497,7 +536,11 @@ fn prepare_accounting_insert_futs(
         item.bytes,
     );
     let fut = InsertFut::new(data_store.scy.clone(), data_store.qu_account_00.clone(), params);
-    let fut = FutJob { fut, ts_net: tsnow };
+    let fut = FutJob {
+        fut,
+        ts_net: tsnow,
+        jobkind: FutJobKind::Accounting,
+    };
     let futs = smallvec![fut];
     futs
 }
@@ -515,7 +558,11 @@ fn prepare_accounting_recv_insert_futs(
         item.bytes,
     );
     let fut = InsertFut::new(data_store.scy.clone(), data_store.qu_account_recv_00.clone(), params);
-    let fut = FutJob { fut, ts_net: tsnow };
+    let fut = FutJob {
+        fut,
+        ts_net: tsnow,
+        jobkind: FutJobKind::AccountingRecv,
+    };
     let futs = smallvec![fut];
     futs
 }

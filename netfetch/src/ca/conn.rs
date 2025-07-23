@@ -82,7 +82,7 @@ use tokio::net::TcpStream;
 
 const CONNECTING_TIMEOUT: Duration = Duration::from_millis(1000 * 6);
 const CHANNEL_STATUS_EMIT_IVL: Duration = Duration::from_millis(1000 * 8);
-const IOC_PING_IVL: Duration = Duration::from_millis(1000 * 180);
+const IOC_PING_IVL: Duration = Duration::from_millis(1000 * 60 * 10);
 const MONITOR_POLL_TIMEOUT: Duration = Duration::from_millis(1000 * 6);
 const TIMEOUT_CHANNEL_CLOSING: Duration = Duration::from_millis(1000 * 8);
 const TIMEOUT_PONG_WAIT: Duration = Duration::from_millis(1000 * 10);
@@ -90,7 +90,7 @@ const READ_CHANNEL_VALUE_STATUS_EMIT_QUIET_MIN: Duration = Duration::from_millis
 const SILENCE_READ_NEXT_IVL: Duration = Duration::from_millis(1000 * 200);
 const POLL_READ_TIMEOUT: Duration = Duration::from_millis(1000 * 10);
 const DO_RATE_CHECK: bool = false;
-const CHANNEL_STATUS_PONG_QUIET: Duration = Duration::from_millis(1000 * 60 * 60);
+const CHANNEL_STATUS_PONG_QUIET: Duration = Duration::from_millis(1000 * 60 * 5);
 const METRICS_EMIT_IVL: Duration = Duration::from_millis(1000 * 1);
 
 macro_rules! trace3 { ($($arg:tt)*) => ( if false { log::trace!($($arg)*); } ); }
@@ -779,6 +779,7 @@ impl WriterStatus {
         &mut self,
         item: ChannelStatusItem,
         deque: &mut VecDeque<QueryItem>,
+        mett: &mut stats::mett::CaConnMetrics,
     ) -> Result<(), Error> {
         let tsev = TsNano::from_system_time(SystemTime::now());
         let (ts, val) = item.to_ts_val();
@@ -789,6 +790,7 @@ impl WriterStatus {
             tsev,
             deque,
         )?;
+        mett.emit_channel_status_item().inc();
         Ok(())
     }
 }
@@ -1064,7 +1066,7 @@ impl<'a> EventAddIngestRefobj<'a> {
                     status: ChannelStatus::MonitoringSilenceReadUnchanged,
                 };
                 if wrst
-                    .emit_channel_status_item(item, CaConn::channel_status_qu(self.iqdqs))
+                    .emit_channel_status_item(item, CaConn::channel_status_qu(self.iqdqs), mett)
                     .is_err()
                 {
                     mett.logic_error().inc();
@@ -1527,10 +1529,6 @@ impl CaConn {
         &mut iqdqs.lt_rf3_qu
     }
 
-    fn channel_status_pong_qu(iqdqs: &mut InsertDeques) -> &mut VecDeque<QueryItem> {
-        &mut iqdqs.st_rf3_qu
-    }
-
     pub fn conn_command_tx(&self) -> Sender<ConnCommand> {
         self.conn_command_tx.as_ref().get_ref().clone()
     }
@@ -1835,8 +1833,11 @@ impl CaConn {
                         cssid: st2.channel.cssid.clone(),
                         status: ChannelStatus::Opened,
                     };
-                    conf.wrst
-                        .emit_channel_status_item(item, Self::channel_status_qu(&mut self.iqdqs))?;
+                    conf.wrst.emit_channel_status_item(
+                        item,
+                        Self::channel_status_qu(&mut self.iqdqs),
+                        &mut self.mett,
+                    )?;
                 }
                 if let Some((ivl,)) = conf_poll_conf {
                     let ivl = Duration::from_millis(ivl);
@@ -1972,7 +1973,7 @@ impl CaConn {
                 status: ChannelStatus::Closed(ChannelStatusClosedReason::ChannelRemove),
             };
             let qu = Self::channel_status_qu(&mut self.iqdqs);
-            if conf.wrst.emit_channel_status_item(item, qu).is_err() {
+            if conf.wrst.emit_channel_status_item(item, qu, &mut self.mett).is_err() {
                 self.mett.logic_error().inc();
             }
             // TODO shutdown the internal writer structures.
@@ -2089,7 +2090,11 @@ impl CaConn {
                 cssid: conf.state.cssid(),
                 status: ChannelStatus::Closed(channel_reason.clone()),
             };
-            if conf.wrst.emit_channel_status_item(item, status_qu).is_err() {
+            if conf
+                .wrst
+                .emit_channel_status_item(item, status_qu, &mut self.mett)
+                .is_err()
+            {
                 self.mett.logic_error().inc();
             }
         }
@@ -2177,6 +2182,7 @@ impl CaConn {
         tsnow: Instant,
         tscaproto: Instant,
     ) -> Result<(), Error> {
+        self.mett.fn_handle_event_add_res().inc();
         let subid = Subid(ev.subid);
         // TODO handle subid-not-found which can also be peer error:
         let cid = if let Some(x) = self.cid_by_subid.get(&subid) {
@@ -2400,6 +2406,7 @@ impl CaConn {
         tsnow: Instant,
         tscaproto: Instant,
     ) -> Result<(), Error> {
+        self.mett.fn_handle_read_notify_res().inc();
         // trace!("handle_read_notify_res  {ev:?}");
         // TODO can not rely on the SID in the response.
         let sid_ev = Sid(ev.sid);
@@ -2494,6 +2501,7 @@ impl CaConn {
                                                 ch_wrst.emit_channel_status_item(
                                                     item,
                                                     Self::channel_status_qu(&mut self.iqdqs),
+                                                    &mut self.mett,
                                                 )?;
                                             }
                                             // NOTE we do not update the last value in this ev handler.
@@ -2516,6 +2524,7 @@ impl CaConn {
                                                             ch_wrst.emit_channel_status_item(
                                                                 item,
                                                                 Self::channel_status_qu(&mut self.iqdqs),
+                                                                &mut self.mett,
                                                             )?;
                                                         }
                                                     }
@@ -2535,6 +2544,7 @@ impl CaConn {
                                                             ch_wrst.emit_channel_status_item(
                                                                 item,
                                                                 Self::channel_status_qu(&mut self.iqdqs),
+                                                                &mut self.mett,
                                                             )?;
                                                         }
                                                     }
@@ -2754,8 +2764,11 @@ impl CaConn {
                                         cssid: st2.channel.cssid.clone(),
                                         status: ChannelStatus::MonitoringSilenceReadStart,
                                     };
-                                    conf.wrst
-                                        .emit_channel_status_item(item, Self::channel_status_qu(&mut self.iqdqs))?;
+                                    conf.wrst.emit_channel_status_item(
+                                        item,
+                                        Self::channel_status_qu(&mut self.iqdqs),
+                                        &mut self.mett,
+                                    )?;
                                 }
                             }
                         }
@@ -2777,8 +2790,11 @@ impl CaConn {
                                         cssid: st2.channel.cssid.clone(),
                                         status: ChannelStatus::MonitoringSilenceReadTimeout,
                                     };
-                                    conf.wrst
-                                        .emit_channel_status_item(item, Self::channel_status_qu(&mut self.iqdqs))?;
+                                    conf.wrst.emit_channel_status_item(
+                                        item,
+                                        Self::channel_status_qu(&mut self.iqdqs),
+                                        &mut self.mett,
+                                    )?;
                                 }
                                 if false {
                                     // Here we try to close the channel at hand.
@@ -2855,8 +2871,11 @@ impl CaConn {
                                         cssid: st2.channel.cssid.clone(),
                                         status: ChannelStatus::PollingReadTimeout,
                                     };
-                                    conf.wrst
-                                        .emit_channel_status_item(item, Self::channel_status_qu(&mut self.iqdqs))?;
+                                    conf.wrst.emit_channel_status_item(
+                                        item,
+                                        Self::channel_status_qu(&mut self.iqdqs),
+                                        &mut self.mett,
+                                    )?;
                                 }
                             }
                         }
@@ -2894,6 +2913,25 @@ impl CaConn {
                     value: CaConnEventValue::EchoTimeout,
                 };
                 self.ca_conn_event_out_queue.push_back(item);
+                for (_cid, ch_conf) in &mut self.channels {
+                    match &mut ch_conf.state {
+                        ChannelState::Writable(st2) => {
+                            let item = ChannelStatusItem {
+                                ts: self.tmp_ts_poll,
+                                cssid: st2.channel.cssid.clone(),
+                                status: ChannelStatus::PongTimeout,
+                            };
+                            ch_conf.wrst.emit_channel_status_item(
+                                item,
+                                Self::channel_status_qu(&mut self.iqdqs),
+                                &mut self.mett,
+                            )?;
+                        }
+                        _ => {
+                            // TODO count metrics
+                        }
+                    }
+                }
                 self.trigger_shutdown(ShutdownReason::IocTimeout);
             }
         } else {
@@ -2904,6 +2942,25 @@ impl CaConn {
                     self.ioc_ping_last = Some(self.tmp_ts_poll);
                     let msg = CaMsg::from_ty_ts(CaMsgTy::Echo, tsnow);
                     proto.push_out(msg);
+                    for (_cid, ch_conf) in &mut self.channels {
+                        match &mut ch_conf.state {
+                            ChannelState::Writable(st2) => {
+                                let item = ChannelStatusItem {
+                                    ts: self.tmp_ts_poll,
+                                    cssid: st2.channel.cssid.clone(),
+                                    status: ChannelStatus::Ping,
+                                };
+                                ch_conf.wrst.emit_channel_status_item(
+                                    item,
+                                    Self::channel_status_qu(&mut self.iqdqs),
+                                    &mut self.mett,
+                                )?;
+                            }
+                            _ => {
+                                // TODO count metrics
+                            }
+                        }
+                    }
                 } else {
                     self.mett.ping_no_proto().inc();
                     info!("can not ping {}  no proto", self.remote_addr_dbg);
@@ -3619,9 +3676,9 @@ impl CaConn {
                         self.ts_channel_status_pong_last = self.poll_tsnow;
                         Self::channel_status_qu(&mut self.iqdqs)
                     } else {
-                        Self::channel_status_pong_qu(&mut self.iqdqs)
+                        Self::channel_status_qu(&mut self.iqdqs)
                     };
-                    if ch.wrst.emit_channel_status_item(item, qu).is_err() {
+                    if ch.wrst.emit_channel_status_item(item, qu, &mut self.mett).is_err() {
                         self.mett.logic_error().inc();
                     }
                 }

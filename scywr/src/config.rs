@@ -1,3 +1,4 @@
+use netpod::ttl::RetentionTime;
 use serde::Deserialize;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -25,5 +26,9 @@ impl ScyllaIngestConfig {
 
     pub fn hosts(&self) -> &Vec<String> {
         &self.hosts
+    }
+
+    pub fn short_name(&self, rt: RetentionTime) -> String {
+        format!("Scyconf {{ {:?}, {:?}, {:?} }}", self.hosts.get(0), self.keyspace, rt)
     }
 }

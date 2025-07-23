@@ -1,4 +1,16 @@
 mod Metrics {
+    type StructName = ScyllaJobTransform;
+    enum counters {
+        SeriesData,
+        SeriesMsp,
+        TimeBinSimpleF32V02,
+        BinWriteIndexV04,
+        Accounting,
+        AccountingRecv,
+    }
+}
+
+mod Metrics {
     type StructName = ScyllaInsertWorker;
     enum counters {
         metrics_emit,
@@ -9,6 +21,10 @@ mod Metrics {
         job_dt1,
         job_dt2,
         job_dt_net,
+    }
+    mod Compose {
+        type Input = ScyllaJobTransform;
+        type Name = jobtrans;
     }
 }
 
@@ -41,6 +57,8 @@ mod Metrics {
         pong_timeout,
         caget_timeout,
         caget_issued,
+        fn_handle_event_add_res,
+        fn_handle_read_notify_res,
         unknown_ioid,
         monitor_stale_read_begin,
         monitor_stale_read_timeout,
@@ -81,6 +99,7 @@ mod Metrics {
         writer_ignore_monitor_not_min_quiet,
         writer_ignore_poll_not_min_quiet,
         writer_ignore_rate_cap,
+        emit_channel_status_item,
     }
     enum values {
         channel_all_count,

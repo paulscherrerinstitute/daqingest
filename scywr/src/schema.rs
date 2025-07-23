@@ -37,12 +37,20 @@ impl From<crate::session::Error> for Error {
 }
 
 struct Changeset {
+    name: String,
     todo: Vec<String>,
 }
 
 impl Changeset {
     fn new() -> Self {
-        Self { todo: Vec::new() }
+        Self {
+            name: String::new(),
+            todo: Vec::new(),
+        }
+    }
+
+    fn set_name(&mut self, x: String) {
+        self.name = x;
     }
 
     fn add_todo(&mut self, cql: String) {
@@ -55,7 +63,7 @@ impl Changeset {
 
     fn log_statements(&self) {
         for q in &self.todo {
-            info!("would execute:\n{}\n", q);
+            info!("would execute:\n{}\n{}\n", self.name, q);
         }
     }
 }
@@ -717,16 +725,11 @@ async fn migrate_scylla_data_schema(
 }
 
 pub async fn migrate_scylla_data_schema_all_rt(
+    rts: [RetentionTime; 4],
     scyconfs: [&ScyllaIngestConfig; 4],
     do_change: bool,
 ) -> Result<(), Error> {
     let mut chsa = [Changeset::new(), Changeset::new(), Changeset::new(), Changeset::new()];
-    let rts = [
-        RetentionTime::Short,
-        RetentionTime::Medium,
-        RetentionTime::Long,
-        RetentionTime::Short,
-    ];
     let rfs = [3, 3, 3, 1];
     for (((rt, scyconf), chs), rf) in rts
         .clone()
@@ -735,12 +738,13 @@ pub async fn migrate_scylla_data_schema_all_rt(
         .zip(chsa.iter_mut())
         .zip(rfs.iter().map(|&x| x))
     {
+        chs.set_name(scyconf.short_name(rt.clone()));
         migrate_scylla_data_schema(scyconf, rt, rf, chs).await?;
     }
     let todo = chsa.iter().any(|x| x.has_to_do());
     if do_change {
         if todo {
-            for ((_rt, scyconf), chs) in rts.into_iter().zip(scyconfs.iter()).zip(chsa.iter_mut()) {
+            for ((_rt, scyconf), chs) in rts.clone().into_iter().zip(scyconfs.iter()).zip(chsa.iter_mut()) {
                 if chs.has_to_do() {
                     let scy2 = create_session_no_ks(scyconf).await?;
                     let scy = &scy2;
@@ -755,7 +759,7 @@ pub async fn migrate_scylla_data_schema_all_rt(
                     }
                 }
             }
-            let fut = migrate_scylla_data_schema_all_rt(scyconfs, false);
+            let fut = migrate_scylla_data_schema_all_rt(rts, scyconfs, false);
             Box::pin(fut).await?;
             Ok(())
         } else {

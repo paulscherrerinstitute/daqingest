@@ -32,6 +32,7 @@ pub struct CaIngestOpts {
     scylla_mt: ScyllaRtConf,
     scylla_lt: ScyllaRtConf,
     scylla_st_rf1: ScyllaRtConf,
+    scylla_2nd: Option<ScyllaConfigBlockV2>,
     array_truncate: Option<u64>,
     insert_worker_count: Option<usize>,
     insert_worker_concurrency: Option<usize>,
@@ -70,13 +71,23 @@ impl CaIngestOpts {
         &self.postgresql
     }
 
-    pub fn scylla_insert_set_conf(&self, n: usize) -> Option<ScyllaInsertsetConf> {
-        if n == 0 {
+    pub fn scylla_insert_set_conf_main(&self) -> ScyllaInsertsetConf {
+        let ret = ScyllaInsertsetConf {
+            st_rf1: self.scylla_config_st_rf1(),
+            st_rf3: self.scylla_config_st(),
+            mt_rf3: self.scylla_config_mt(),
+            lt_rf3: self.scylla_config_lt(),
+        };
+        ret
+    }
+
+    pub fn scylla_insert_set_conf_2nd(&self) -> Option<ScyllaInsertsetConf> {
+        if let Some(cc) = self.scylla_2nd.as_ref() {
             let ret = ScyllaInsertsetConf {
-                st_rf1: self.scylla_config_st_rf1(),
-                st_rf3: self.scylla_config_st(),
-                mt_rf3: self.scylla_config_mt(),
-                lt_rf3: self.scylla_config_lt(),
+                st_rf1: cc.scylla_config_st_rf1(),
+                st_rf3: cc.scylla_config_st(),
+                mt_rf3: cc.scylla_config_mt(),
+                lt_rf3: cc.scylla_config_lt(),
             };
             Some(ret)
         } else {
@@ -191,6 +202,52 @@ impl CaIngestOpts {
         }
         return true;
     }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct ScyllaConfigBlockV2 {
+    scylla: ScyllaConfigBlockV2MainHosts,
+    scylla_st: ScyllaRtConf,
+    scylla_mt: ScyllaRtConf,
+    scylla_lt: ScyllaRtConf,
+    scylla_st_rf1: ScyllaRtConf,
+}
+
+impl ScyllaConfigBlockV2 {
+    pub fn scylla_config_st(&self) -> ScyllaIngestConfig {
+        let c = &self.scylla_st;
+        let hosts = self.fill_hosts_if_empty(c);
+        ScyllaIngestConfig::new(hosts, c.keyspace.clone())
+    }
+
+    pub fn scylla_config_mt(&self) -> ScyllaIngestConfig {
+        let c = &self.scylla_mt;
+        let hosts = self.fill_hosts_if_empty(c);
+        ScyllaIngestConfig::new(hosts, c.keyspace.clone())
+    }
+
+    pub fn scylla_config_lt(&self) -> ScyllaIngestConfig {
+        let c = &self.scylla_lt;
+        let hosts = self.fill_hosts_if_empty(c);
+        ScyllaIngestConfig::new(hosts, c.keyspace.clone())
+    }
+
+    pub fn scylla_config_st_rf1(&self) -> ScyllaIngestConfig {
+        let c = &self.scylla_st_rf1;
+        let hosts = self.fill_hosts_if_empty(c);
+        ScyllaIngestConfig::new(hosts, c.keyspace.clone())
+    }
+
+    fn fill_hosts_if_empty(&self, c: &ScyllaRtConf) -> Vec<String> {
+        c.hosts
+            .as_ref()
+            .map_or_else(|| self.scylla.hosts.clone(), |x| x.clone())
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct ScyllaConfigBlockV2MainHosts {
+    hosts: Vec<String>,
 }
 
 #[test]
@@ -342,6 +399,11 @@ scylla_2nd:
     assert_eq!(conf.search.get(0), Some(&"172.26.0.255".to_string()));
     assert_eq!(conf.scylla_config_st().hosts().get(1), Some(&"node2:19042".to_string()));
     assert_eq!(conf.scylla_config_lt().hosts().get(1), Some(&"node4:19042".to_string()));
+    assert_eq!(conf.scylla_2nd.is_some(), true);
+    {
+        let scy = conf.scylla_2nd.as_ref().unwrap();
+        assert_eq!(scy.scylla.hosts.len(), 1);
+    }
     assert_eq!(conf.timeout, Some(Duration::from_millis(1000 * (60 * 10 + 3) + 45)));
 }
 

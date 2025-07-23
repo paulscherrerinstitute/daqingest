@@ -259,8 +259,8 @@ impl Daemon {
             .map_err(Error::from_string)?;
             insert_workers_jhs.extend(jh);
         } else {
-            let scyset1 = ingest_opts.scylla_insert_set_conf(0).unwrap();
-            if let Some(scyset2) = ingest_opts.scylla_insert_set_conf(1) {
+            let scyset1 = ingest_opts.scylla_insert_set_conf_main();
+            if let Some(scyset2) = ingest_opts.scylla_insert_set_conf_2nd() {
                 let (iqrx1, iqrx2) = iqrx.clone_2();
                 let jhs = spawn_scylla_insert_workers(
                     &scyset1,
@@ -911,7 +911,14 @@ pub async fn run(opts: CaIngestOpts, channels_config: Option<ChannelsConfig>) ->
         warn!("scylla_disable config flag enabled");
     } else {
         info!("start scylla schema check");
+        let rts = [
+            RetentionTime::Short,
+            RetentionTime::Medium,
+            RetentionTime::Long,
+            RetentionTime::Short,
+        ];
         scywr::schema::migrate_scylla_data_schema_all_rt(
+            rts,
             [
                 &opts.scylla_config_st(),
                 &opts.scylla_config_mt(),

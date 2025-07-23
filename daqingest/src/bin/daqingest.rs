@@ -5,6 +5,7 @@ use log::*;
 use netfetch::conf::CaIngestOpts;
 use netfetch::conf::parse_config;
 use netpod::Database;
+use netpod::ttl::RetentionTime;
 use scywr::config::ScyllaIngestConfig;
 use taskrun::TracingMode;
 
@@ -160,25 +161,33 @@ async fn main_run_inner(opts: DaqIngestOpts) -> Result<(), Error> {
 }
 
 async fn scylla_schema_check(opts: CaIngestOpts, do_change: bool) -> Result<(), Error> {
-    todo!("scylla_schema_check config");
-    let scy_confs = opts.scylla_insert_set_conf(0);
+    let mut confs = Vec::new();
+    confs.push(opts.scylla_insert_set_conf_main());
+    if let Some(x) = opts.scylla_insert_set_conf_2nd() {
+        confs.push(x);
+    }
     let opstr = if do_change { "change" } else { "check" };
     info!("start scylla schema {}", opstr);
-    info!("{:?}", opts.scylla_config_st());
-    info!("{:?}", opts.scylla_config_mt());
-    info!("{:?}", opts.scylla_config_lt());
-    info!("{:?}", opts.scylla_config_st_rf1());
-    scywr::schema::migrate_scylla_data_schema_all_rt(
-        [
-            &opts.scylla_config_st(),
-            &opts.scylla_config_mt(),
-            &opts.scylla_config_lt(),
-            &opts.scylla_config_st_rf1(),
-        ],
-        do_change,
-    )
-    .await
-    .map_err(Error::from_string)?;
+    for conf in confs {
+        info!("{:?}", conf.st_rf3());
+        info!("{:?}", conf.mt_rf3());
+        info!("{:?}", conf.lt_rf3());
+        info!("{:?}", conf.st_rf1());
+        // TODO attach RetentionTime to the config struct
+        let rts = [
+            RetentionTime::Short,
+            RetentionTime::Medium,
+            RetentionTime::Long,
+            RetentionTime::Short,
+        ];
+        scywr::schema::migrate_scylla_data_schema_all_rt(
+            rts,
+            [&conf.st_rf3(), &conf.mt_rf3(), &conf.lt_rf3(), &conf.st_rf1()],
+            do_change,
+        )
+        .await
+        .map_err(Error::from_string)?;
+    }
     info!("stop scylla schema {}", opstr);
     Ok(())
 }
